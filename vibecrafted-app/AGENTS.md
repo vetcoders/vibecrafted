@@ -42,138 +42,99 @@ lepszy blast radius, szybsze recovery i uczciwsze decyzje runtime.
 
 <!-- /loctree-advise -->
 
-# Vibecrafted Operator Workspace — Vetcoders GUIDELINES
+# Vibecrafted App Workspace — Vetcoders Guidelines
 
-> Per-workspace, agent-agnostic instructions for `operator/`. Same rules for
-> Claude, Codex, Gemini, Junie, and Qwen. Global doctrine still applies; this
-> file only extends it for the consolidated operator workspace.
+This directory is the application workspace inside `vetcoders/vibecrafted`.
+Root `../AGENTS.md` applies. It is not a standalone `vetcoders/vc-operator`
+checkout. Paths and crate names describe implementation locations, not additional
+owners of shared runtime truth.
 
-## Identity
+## Ownership
 
-- **Workspace:** standalone `vetcoders/vc-operator` checkout.
-- **Role:** consolidated operator platform workspace for `mux-agent`,
-  `tui-agent`, `tray-agent`, and `shell-agent`.
-- **Crate names:** keep existing distribution names stable. `mux-agent/`
-  publishes as `rust-mux`; `tui-agent/` publishes as
-  `vibecrafted-operator`.
-- **Current split:** `mux-agent` owns lifecycle and MCP process supervision;
-  `tui-agent` owns the terminal cockpit; `tray-agent` owns the menu bar
-  control surface; `shell-agent` owns the macOS `.app` wrapper and UniFFI
-  bridge.
+The canonical ownership contract is
+[`../docs/adr/ownership-matrix.json`](../docs/adr/ownership-matrix.json).
+Code-care allocations do not grant runtime state ownership.
 
-## Quality Gates
+| Surface                                | Responsibility                                              | Canonical owner to consume                                                   |
+| -------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `mux-agent` (`rust-mux`)               | MCP transport, process supervision and client config wizard | Own mux processes/config; delegate agent run lifecycle to core control-plane |
+| `tui-agent` (`vibecrafted-operator`)   | Terminal cockpit and launch declarations                    | Core capability catalog, launcher and control-plane receipts                 |
+| `tray-agent`                           | Mux menu-bar presentation                                   | Mux daemon status; no independent run reducer                                |
+| `shell-agent`                          | macOS App, native UI and UniFFI bridge                      | Verified installed runtime resolution and shared supervisor service controls |
+| Shared run lifecycle                   | Durable run state and settlement                            | `vibecrafted-core/vibecrafted_core/control_plane.py`                         |
+| Frame composition                      | PTYs, tabs, panes, session sockets and client attachment    | VC Frame; terminal/App closure must preserve its server and guest sessions   |
+| Installation and source runtime Update | Generation build, validation and atomic publication         | Repository installer/runtime-manifest contract                               |
+| macOS App Update                       | Signed feed/candidate admission and Runtime Pack install    | Existing `ProductUpdate*` coordinator and installer                          |
+| App bundle replacement                 | Journaled bundle mutation and matching recovery             | `../scripts/vc-app-update.sh`; no second Swift replacement engine            |
 
-Use the top-level `Makefile` from this directory:
+Configuration resolves through the canonical `server_config.py` and
+`runtime_paths.py` contracts: active configuration under `~/.config/vibecrafted`,
+immutable runtime under `~/.local/share/vibecrafted`, durable runs/artifacts under
+`~/.vibecrafted`. Client configuration remains its own truth; running processes
+can enrich status but must not independently discover or rewrite it.
+
+## Quality gates
+
+From this directory:
 
 ```bash
 make gates
-cargo check --workspace --all-features
+cargo clippy --workspace --all-features -- -D warnings
 cargo check --workspace --no-default-features
 ```
 
-`make gates` means `fmt-check + clippy -D warnings + test --workspace`.
-Do not add `#[allow(...)]`, `nosemgrep`, `// noqa`, `--no-verify`, or other
-silencers to get through a gate. Fix the cause or report the blocker.
+`make gates` runs formatting, clippy over all targets and workspace tests.
+Default `cargo test` excludes ignored tests. The two exact-source VOC tests in
+`tui-agent/tests/launch_contract.rs` require a prepared `VC_TEST_REAL_DECK` and
+separate `--ignored` execution; default green tests do not prove those paths.
 
-## Living Tree Convention
+Do not silence a new diagnostic to make a gate pass. Record the actual
+technical constraint and acceptance gap, and fix the owning boundary.
 
-This workspace is a shared live tree. Concurrent edits are expected.
+## Checkout and handoff
 
-- Re-read files before editing if time has passed.
-- Run Loctree mapping before changing hub files.
-- Do not revert another agent's work unless the operator explicitly asks.
-- If a concurrent edit conflicts with the T0 contract, preserve evidence,
-  reconcile the file, and report exactly what happened.
-- `.vibecrafted/{plans,reports}` are daily symlinks into
-  `$VIBECRAFTED_HOME/artifacts/vetcoders/vibecrafted-operator/<YYYY_MMDD>/`.
-  Date-rotation drift is not product code.
+The User or runtime contract selects Living Tree, Fleet Worktree or VM. Do not
+infer the selected mode from old directories. Re-read before editing, stage
+only authored changes, and leave destination integration to its designated
+integrator. A worker commit and report do not prove integration or installation.
 
-## Wizard / Config Doctrine
+The private repository journal is `../.vibecrafted/THE_JOURNAL.md`, ignored by
+Git; Workers do not write it. Run artifacts use the assigned launcher paths.
+Do not create a second canonical journal or date-partitioned authority.
 
-The wizard/config truth lives in `mux-agent`, inherited from `rust-mux`.
-Client config files remain the source of truth; running processes can enrich
-status but must not drive discovery by themselves.
+## Wizard and configuration
 
-Keep the strategy split intact:
+Keep the existing strategy split:
 
-- **Unified:** generate mux outputs without rewriting host configs.
-- **Per-client:** generate client-shaped mux configs while preserving the
-  merged daemon config.
-- **Auto-rewire:** backup-first, preview-first, explicit-confirm rewrite path.
+- Unified generates mux outputs without rewriting host configs.
+- Per-client generates client-shaped outputs while preserving merged daemon config.
+- Auto-rewire remains backup-first, preview-first and explicitly confirmed.
 
-Never silently rewrite host AI-client configs from a non-danger strategy.
-Never collapse `mux_gen.rs` and `danger.rs` into one writer; that split is part
-of the security model.
+Do not collapse `mux_gen.rs` and `danger.rs` into one writer. Do not silently
+rewrite host AI-client configuration from a non-danger strategy.
 
-## Shell-Agent Build Shape
+## Build, release and install
 
-`shell-agent/ffi` is the Rust/UniFFI bridge.
-`shell-agent/uniffi-bindgen` is the binding generator wrapper.
-`shell-agent/app/Vibecrafted` is the macOS app target. Build it from the root
-with `make app`; create local or signed DMGs with `make dmg` and
-`make dmg-signed`.
+`shell-agent/ffi` is the Rust/UniFFI bridge; `shell-agent/uniffi-bindgen` generates
+bindings; `shell-agent/app/Vibecrafted` is the macOS target. The root repository
+owns the unified release and installer contracts. App workspace release targets
+delegate to it. Use the root idle-safe install contract for an authorized major
+App cut, and verify the installed artifact and launch separately from a build.
+Workers do not sign, notarize, publish or replace a live Founder App.
 
-## Commit Convention
+Preserve crate distribution names; do not add a second TUI, run reducer,
+supervisor, runtime selector or replacement engine. Historical audits belong in
+`tui-agent/audits/historical/` rather than being deleted as dead code.
 
-- Subject: `[<agent>/<runtime>] <type>(<scope>): <description>`.
-- For workspace extraction/stabilization:
-  `[codex/vc-operator] feat: <description>`.
-- Multi-file commits need an explanatory body; bullets are preferred when the
-  commit touches unrelated surfaces.
-- Required trailers:
+## Commits and doctrine
 
-```text
-[codex/interactive] chore: Polish Makefile help output formatting
+Follow the root `[agent/runtime] type(scope): description` convention and its
+Authored-By, session_id, time and runtime trailers. Use the actual selected
+runtime rather than the retired workspace extraction label.
 
-Refactors the help target to use structured printf output with aligned command
-descriptions.
-
-Authored-By: codex <agents@vetcoders.io>
-session_id: 019e93be-379d-7303-9ad4-ffae468db99f
-time: 2026-06-05T12:52:47-06:00
-runtime: iterm2
-```
-
-Forbidden: vendor footers, personal signatures, and
-`Co-Authored-By: Claude ...`.
-
-Use the canonical brand line only when a sigblock is needed:
-
-```text
-𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
-```
-
-## Anti-Patterns Repo-Specific
-
-- Renaming `rust-mux` or `vibecrafted-operator` just because their paths moved.
-- Reintroducing a root-level TUI crate after the extraction; `tui-agent/` is the
-  single source of truth.
-- Reintroducing deleted rust-mux monoliths such as `src/runtime.rs`.
-- Treating green `cargo check` as shipping readiness without install,
-  discoverability, and first-user proof.
-- Deleting historical audit Markdown instead of preserving it under
-  `tui-agent/audits/historical/`.
-
----
-
-## Agent-Operator doctrine (cross-repo)
-
-This product workspace ships the **operator-runtime** (mux + tui + tray +
-shell). The **agent-side doctrine** for the Agent-Operator role —
-how an agent orchestrates wave-shaped multi-dispatch fleets, the
-"wystarczy wcisnąć guzik" hard-stop schedule, the Iter-3 prompt body
-shape, AGENT FAIRNESS + MODEL PARITY rules, the `docs/plans/HOWTO`
-convention — lives in the `vibecrafted` skill kit:
-
-- Charter: [`../vibecrafted/skills/vc-operator/SKILL.md`](../vibecrafted/skills/vc-operator/SKILL.md)
-- Plan shape (`[ ]` → `[x]`): [`../vibecrafted/skills/vc-operator/EMIL.md`](../vibecrafted/skills/vc-operator/EMIL.md)
-- Dashboard doctrine (the product surface this repo will host): [`../vibecrafted/skills/vc-operator/DASHBOARD.md`](../vibecrafted/skills/vc-operator/DASHBOARD.md)
-- Build plan for the dashboard (Wave-shaped dispatch chain): [`docs/plans/PLAN_23_AGENT_OPERATOR_DASHBOARD.md`](docs/plans/PLAN_23_AGENT_OPERATOR_DASHBOARD.md)
-
-Agents working inside this repo should read `vc-operator/SKILL.md` +
-`EMIL.md` before authoring any plan, dispatch body, or backlog entry.
-The doctrine is repo-agnostic; this repo is the first product surface
-to consume it.
+Agent-Operator doctrine lives in
+[`../vibecrafted-core/vibecrafted_core/skills/vc-operator/SKILL.md`](../vibecrafted-core/vibecrafted_core/skills/vc-operator/SKILL.md).
+It governs orchestration; it does not make the App, mux or tray a run-state owner.
 
 ---
 

@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
+import tomllib
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 THEME_COMMAND = REPO_ROOT / "bin/vc-theme"
+
+
+def test_local_path_hint_stops_before_terminal_padding() -> None:
+    config = tomllib.loads(
+        (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text()
+    )
+    hint = next(hint for hint in config["hints"]["enabled"] if not hint["hyperlinks"])
+    pattern = re.compile(hint["regex"])
+    for path in ("/tmp/report.md", "~/My Project/report.md:12:3", "./My Report.md"):
+        for suffix in (" " * 120, " " * 120 + "status"):
+            match = pattern.search(path + suffix)
+            assert match is not None
+            assert match.group() == path
 
 
 def _run_theme(

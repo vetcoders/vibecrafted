@@ -114,7 +114,7 @@ work the same.
 ```
 $HOME/.claude/projects/<project>/<session-id>/tool-results/<hash>.txt     # Agent result (most common)
 $HOME/.claude/projects/<project>/<session-id>/subagents/agent-<id>.jsonl  # Subagent session
-/private/tmp/claude-501/.../tasks/<task-id>.output                    # Background task
+/private/tmp/claude-<uid>/<project>/tasks/<task-id>.output               # Background task
 $HOME/.claude/projects/<project>/<uuid>.jsonl                             # Full session
 ```
 

@@ -86,6 +86,48 @@ rejected and must be reinstalled. W4 binds this manifest into the signed release
 receipt; the adjacent manifest alone is the immutable-generation corruption
 boundary, not a substitute for the release signature.
 
+## Runtime recognition and recovery history
+
+The installer owns `runtime-resolve`. A read takes the existing publication
+lease in shared, nonblocking mode, captures one bounded, unique receipt, and
+checks the active pointer, selected generation integrity, native entries,
+configuration and launcher lineage. It rechecks the captured identity before
+returning. Publication in progress refuses recognition and is retried; reads
+never publish, repair, migrate or reconcile a service.
+
+`backups` holds original collisions; `drift_backups` holds the latest divergent
+snapshot; `drift_backup_history` preserves historical recovery destinations.
+Legacy retirement can record many distinct leaves sharing content-addressed
+archives. That destination history is recovery lineage, not a list of installs.
+It is preserved intact and validated in full by install, uninstall, rescue and
+retirement. Ordinary recognition checks the live backup maps without walking
+historical archive leaves. A successful resolution therefore certifies the
+selected installation, not the recoverability of every historical snapshot.
+
+Full recovery validation shares physical ancestor and archive observations only
+within one call and rechecks their identities before accepting. No positive
+filesystem observation persists across calls. Identical file, directory and
+opaque-pointer drift snapshots reuse verified content-addressed copies; a
+changed archive refuses reuse. Temporary publication preimages belong to the
+config transaction and retirement owner, which releases their history references
+after disposal; one healthy upgrade rollback remains pinned. Existing history
+and archive paths stay valid, so this change needs no destructive data migration.
+
+The App coalesces concurrent resolver requests. Its cache expires after 30
+seconds for a usable generation and five seconds for absence. Refused or timed
+out inspections retry after 5, 10, 20, 40 and at most 60 seconds. Manual retry
+can force a fresh inspection. Pointer, receipt or selector identity changes
+invalidate immediately, including inode replacement and metadata changes.
+Inspection failure means server availability is unknown; service liveness is
+reported separately by the caretaker. Repeating the same refusal does not emit
+the same lifecycle error every five seconds.
+
+The App decodes Runtime Pack installation stdout as one JSON result. Xcode channel
+information and post-install
+service reconciliation keeps all diagnostics, including its success message, on
+stderr. Publishing a generation and reconciling its service therefore cannot turn
+a valid install result into an invalid native response.
+
 ## Host shell boundary
 
 The default installer does not source Vibecrafted helpers into the host shell.

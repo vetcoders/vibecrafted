@@ -41,17 +41,20 @@ dogfooding: "required for repo-impacting work"
 
 ### Living Tree / Worktree Rule
 
-This workflow runs in the operator's current checkout and current branch. Do not create, switch to, or move execution into a git worktree unless the operator explicitly asks for a worktree in this prompt. Generic words like "isolate", "parallel", or "clean branch" are not enough. The one sanctioned second mode is a Fleet Worktree dispatch (written plan, pre-committed verifiers, disjoint domains, single-thread integrator — see Living Tree Rule, Mode B); outside that formation, stay in the shared tree. Re-read files before editing, adapt to concurrent changes, and report a substrate failure if the current tree is too poisoned to continue safely.
-
-See [Living Tree Rule](../LIVING_TREE_RULE.md).
+Run in the operator's current checkout and branch; no worktree unless the
+operator explicitly asks (the one sanctioned second mode is a Fleet Worktree
+dispatch — plan, pre-committed verifiers, disjoint domains, single-thread
+integrator). Re-read before editing; report substrate failure if the tree is
+poisoned. Full rule: [../LIVING_TREE_RULE.md](../LIVING_TREE_RULE.md).
 
 ## Canonical Orientation Gate
 
-Before this workflow performs repo-specific analysis, planning, implementation, review, release, or delegation, it MUST run or consume the `vc-init` procedure for the assigned repo. If fresh `vc-init` evidence is absent, perform the init pass first and treat workflow-specific work as blocked until repo truth exists.
-
-`Loctree:loctree` is the default structural perception skill for that pass. Use Loctree before grep or docs-driven claims to produce or refresh the Code-Derived Application Map: repo-view, focus, slice, impact, find, and follow as relevant. Search for existing symbols and contracts before creating new ones; run impact before delete or major refactor; run slice before editing.
-
-The point is to find the hooks: load-bearing hubs, twins, dead code, drift, runtime entrypoints, and blast-radius traps. If the task is explicitly non-repo or no-code, state the no-repo exception in the report. Otherwise, missing `vc-init`/Loctree evidence is a process failure.
+Before repo-specific analysis, planning, implementation, review, release, or
+delegation, run or consume `vc-init` for the assigned repo — fresh evidence or
+the work is blocked. `Loctree:loctree` builds the Code-Derived Application Map
+(repo-view/focus/slice/impact/find/follow; search before creating, impact
+before deleting, slice before editing). Missing evidence is a process failure;
+full gate: [../vc-init/SKILL.md](../vc-init/SKILL.md).
 
 Operator enters the framework session through:
 
@@ -105,39 +108,18 @@ This skill is only for external workers. Native in-process delegation belongs to
 
 ## Repository Work Doctrine
 
-For repository work, start with Loctree as the map: use `loct context`,
-`loct occurrences`, `loct body`, and `loct find --literal` before broad manual
-search. Use AICX for intent and session context. Use rg/grep as fallback or
-local magnifier, not as a replacement for structural mapping. If Loctree fails
-or misses a surface, append feedback to `~/.vibecrafted/loctree/loctree-fail.md`.
+Loctree first (`loct context/occurrences/body/find --literal`), AICX for
+intent history, rg/grep as local magnifier only; Loctree gaps go to
+`~/.vibecrafted/loctree/loctree-fail.md`.
 
 ## The `vc-why-matrix`
 
 You do not spawn agents blindly. You pick the cognitive profile required for the cut.
 
-```mermaid
-  graph TD
-    subgraph Codex
-        CodexDesc[Precision & Surgery]
-        CodexBest[Best for:\n\n– Critical implementations\n– Exact refactors\n– Contract-gated execution]
-        Codex --> CodexDesc
-        Codex --> CodexBest
-    end
-
-    subgraph Claude
-        ClaudeDesc[Forensics & Research]
-        ClaudeBest[Best for:\n\n– Bug hunts across deep layers\n– Architecture audits\n– Assessing unknown paths]
-        Claude --> ClaudeDesc
-        Claude --> ClaudeBest
-    end
-
-    subgraph Gemini
-        GeminiDesc[Radical Reframing]
-        GeminiBest[Best for:\n\n– Architecture leaps\n– Fearless simplification\n– Stripping dead scaffolding\n\nText default:\n– Prose, docs, narrative\n– Human-facing copy & translation]
-        Gemini --> GeminiDesc
-        Gemini --> GeminiBest
-    end
-```
+Historical core trio (diagram in [references/why-matrix.md](references/why-matrix.md)):
+Codex = precision & surgery · Claude = forensics & research · Gemini/agy =
+radical reframing + text default. Current roster is EIGHT agents; pick per the
+Founder's declared economics for the day, never by habit.
 
 **Words are their own cognitive profile.** Prose, docs, narrative, skill / marketing copy, translation, and
 human-facing wording → **Gemini** (the text default) or **Claude**. Codex's edge is precision surgery on code
@@ -179,151 +161,65 @@ Instead it must:
 A fleet worker may reveal orchestration pressure.
 It may not act on it.
 
+**This prohibition covers the EXTERNAL fleet only.** A worker's native
+in-process subagents (Claude's Task tool via
+[`vc-delegate`](../vc-delegate/SKILL.md), Kimi's swarm, a runtime's own
+sub-session lane) are its right and — when the plan parallelizes — its duty.
+Workerhood constrains run scope and lifecycle, not native delegation rights
+(Delegation Matrix → Native vs external). Do not read "execution unit" as
+"serial unit": a plan with disjoint subcuts executed one-by-one on a frontier
+model is the most expensive possible way to be slow.
+
+## Snap-dispatch integrator loop (wzorzec Foundera, 2026-10-03)
+
+Highest-throughput operator pattern (full text:
+[references/runbook.md](references/runbook.md)): (1) integrator authors a
+dense plan carrying MEASURED evidence — paths, record shapes, control
+numbers, line-pinned anchors — so the worker rediscovers nothing; (2) Founder
+canon recovered from AICX is marked "implement exactly, never reinterpret";
+(3) one launcher snap per cut, text prefix before the plan body, env scrub,
+await armed immediately; (4) integrator gate on return: re-run tests in the
+worktree, live-probe the surface, settle every red by BASELINE-DIFF on clean
+HEAD before attributing; merge `--no-ff`, push, report provider cost per
+settle; (5) model/effort are the Founder's cost buttons — a provider 400
+means STOP and ask, never substitute.
+
 ## Plan template
 
-```markdown
----
-run_id: <generated-unique-id>
-agent: <claude|codex|gemini|agy|junie|grok>
-skill: vc-agents
-project: <repo-name>
-status: <pending|in-progress|completed|failed>
-loops_completed: <number>
----
+Use the canonical template in [references/plan-template.md](references/plan-template.md) —
+frontmatter (`run_id`, `agent`, `skill`, `project`, `status`), then `Goal`,
+`Scope`, `Constraints`, `Acceptance`, `Test gate`, `Context`, and the living
+tree note (concurrent changes expected; one commit per round is an
+obligation; native in-process fan-out is exempt from the no-orchestration
+rule — tiers per `vc-delegate` → Native Delegation Policy).
 
-# Task: <short title>
+## Runbook — current launcher grammar
 
-Goal:
-
-- <1-3 bullets>
-
-Scope:
-
-- In scope: <files/areas> as high-level suggestions
-- Out of scope: <explicit>
-
-Constraints:
-
-- No --no-verify
-- Follow repo conventions
-
-Acceptance:
-
-- [ ] <objective outcome>
-- [ ] <objective outcome>
-
-Test gate:
-
-- <command(s)>
-
-Context:
-
-- <very short summary>
-
-Living tree note:
-
-- You work on a living tree with 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚜𝚖𝚊𝚗𝚜𝚑𝚒𝚙 methodology, so concurrent changes are expected.
-- Adapt proactively and continue, but this is never permission to skip quality, security, or test gates.
-- Run required checks. If something is blocked, report the exact blocker and run the closest safe equivalent.
-- Coordination mode: <solo on this stage / parallel with other agents on this stage>
-- You do not need to inspect other agents' plans unless this plan explicitly tells you to.
-- **Commit is an obligation, not a checkpoint option: ONE commit per round** (marbles — one round = one commit), well-formed per the commit-msg hook, on the current branch. Do NOT leave delivered work uncommitted. Non-destructive remote push of the current feature branch (`git push -u origin HEAD`, not force, not trunk) is a duty after that commit. Force-push, trunk push, merge, and deploy stay operator buttons. When the mission spans multiple rounds/units, multi-commit per dispatch is expected.
-- You are an execution unit, not orchestration authority: do not invoke `vc-agents`, do not reopen frontier selection, and do not reinterpret the `vc-why-matrix`.
-- If the mission reveals a wider unresolved surface, report that boundary clearly and leave orchestration changes to the operator.
-```
-
-## Spawn commands
-
-The operator-facing launch path for out-of-process delegation goes through the
-`vibecrafted` command deck or the `vc-<launcher>` helper. The repo-owned spawn
-scripts remain the internal engine behind that path.
-
-### Codex
+Agents: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+Full grammar, composed-prompt idioms (plan-from-file with a text prefix,
+injecting a live CLI's `--help` into the mission), the Claude-session env
+scrub, and companion verbs (`await`/`observe`/`stop`/`usage`) live in
+[references/runbook.md](references/runbook.md). The shape to remember:
 
 ```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan-slug>.md"
-vibecrafted implement codex "$PLAN"
+vibecrafted <launcher> <agent> --repo "$(pwd)" --model <founder's cost pick> \
+  [--effort <tier>] --worktree true --prompt "Plan follows.\n\n$(cat "$PLAN")"
 ```
 
-### Claude
+Arm `vibecrafted await <agent> --run-id <id>` immediately after dispatch and
+quote `vibecrafted usage --run-id <id>` (provider-reported cost) in every
+settle. If these tools are unavailable, stop pretending spawn is correctly
+configured and say so explicitly.
 
-```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan>.md"
-vibecrafted implement claude "$PLAN"
-```
+## Output convention & observation
 
-### Gemini
-
-```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan>.md"
-vibecrafted implement gemini "$PLAN"
-```
-
-If these tools are unavailable, stop pretending spawn is correctly configured and say so explicitly.
-
-## Output convention
-
-- Plans: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<timestamp>_<slug>.md` or another stable per-task
-  filename
-- Reports: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.md`
-- Transcripts: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.transcript.log`
-- Metadata: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.meta.json`
-
-Every spawn should surface a launch card immediately after dispatch.
-That card should expose at least:
-
-- `run_id`
-- chosen agent / model family
-- plan path
-- report path
-- transcript path
-- metadata path
-- exact await command
-
-If the operator cannot see those paths, observability is incomplete even if the
-agent is technically running.
-
-## Observation
-
-Canonical supervisor contract (see `docs/runtime/AGENT_OPS.md`): After
-dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
-supervisor-side. Control-plane JSON, report files, transcripts, panes, and
-scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`,
-do not normalize the hedge.
-
-3-signal liveness: await verdict, terminal run meta, worker pid dead, plus
-promised report presence. Two agreeing signals are enough to act, three to
-declare done; any disagreement means treat as live and re-arm await. Known skew:
-rc=0-on-live and meta stuck `active`/`stalled` after real completion.
-
-Observe progress through durable artifacts in
-`$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/`, but let the
-dedicated runtime helper own waiting and final summary:
-
-```bash
-vibecrafted await codex --run-id <run_id>
-```
-
-For the most recent run of a given agent:
-
-```bash
-vibecrafted await codex --last
-```
-
-For multiple spawned workers, pass their launcher or metadata paths directly to
-the helper and let it wait on all of them together.
-
-If your environment exposes the observer helper, use it for transcript-level
-inspection or debugging:
-
-```bash
-vibecrafted observe codex --last
-```
-
-Use the equivalent agent observer when needed, but do not rely on `observe` as
-the only status surface. `vc-agents` should remain operable from durable
-artifacts even when the operator is not staring at the live panes.
+Artifact paths (plans/reports/transcripts/meta under
+`$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`), the launch-card
+contract, and the full await/3-signal liveness doctrine are in
+[references/runbook.md](references/runbook.md). Non-negotiables: every spawn
+surfaces a launch card; await is armed supervisor-side immediately; hedging
+await with ad-hoc pollers is a Class 3 violation; two agreeing liveness
+signals act, three declare done.
 
 ## Quality gate expectations
 
@@ -339,7 +235,9 @@ Keep the standard 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. quality bar:
 ## Safety rules
 
 - Do not log secrets or commit `.env` files.
-- Never use `--no-verify` for `commit` or `push`.
+- Use `--no-verify` only for a declared Founder-authorized compile-embargo
+  local checkpoint whose receipt names skipped hooks and gates. Workers never
+  push with it; a push using `--no-verify` is Founder-only.
 - Do not rewrite git history unless the user explicitly asks.
 - Treat concurrent edits as normal, but still verify before overwriting.
 - If a repo has a strict command such as `make check`, run it or explain why not.

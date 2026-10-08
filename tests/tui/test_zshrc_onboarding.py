@@ -41,3 +41,19 @@ def test_existing_zshrc_gets_fenced_append_idempotent(tmp_path: Path) -> None:
 
 def test_template_nonempty() -> None:
     assert "PATH" in zshrc_template_text()
+    assert "vc-skills" not in zshrc_template_text()
+    assert len(zshrc_template_text().strip("\n").splitlines()) <= 3
+
+
+def test_fenced_onboarding_is_at_most_three_lines(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    home.mkdir()
+    zshrc = home / ".zshrc"
+    zshrc.write_text("# operator content\n", encoding="utf-8")
+    ensure_zshrc(home)
+    text = zshrc.read_text(encoding="utf-8")
+    start = text.index("# >>> vibecrafted >>>")
+    end = text.index("# <<< vibecrafted <<<") + len("# <<< vibecrafted <<<")
+    assert len(text[start:end].splitlines()) <= 3
+    assert "starship init" not in text
+    assert "source " not in text[start:end]

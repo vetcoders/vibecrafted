@@ -11,7 +11,7 @@ Short definitions of the terms used across this documentation, in
 alphabetical order.
 
 **Agent** — one of the supported coding CLIs the framework can dispatch:
-`claude`, `codex`, `agy`, `junie`, `grok`. Agents are peers; any of them
+`claude`, `codex`, `agy`, `junie`, `grok`, `cursor`. Agents are peers; any of them
 can execute any skill.
 
 **Artifact store** — the durable home for plans, reports, transcripts, and

@@ -24,20 +24,20 @@ Enter z karty. Urodził się panel. Talia 3/5. Poprzedni grok jedno `[‹]` wste
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
  Vibecrafted. | L  ○ Start  ◉ Agents  ○ shell  ○ voc                                                      Composer · cmd
 SESSIONS 5          ┌ claude · resume · vibecrafted ───────────────────────────────────────────── [‹3/5›] [Voc] [Nowy] ┐
- ● Live 3           │ claude · resume · vibecrafted                                                                    │
+ ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
-02 ○ lbrx-svc       │ Wlasnie sie urodzil. Interaktywny TTY. Talia 3/5.                                                │
-   · Shell          │ Poprzedni grok zyje jedno [‹] wstecz.                                                            │
-03 ○ w-c207         │ Nie powstala sesja muxa. Nie Tab #7. Nie resume-*.                                               │
-   · resume-grok    │ Headless to nie ten przycisk — to Layout-5 albo Quick cmd.                                       │
-   · resume-codex   │                                                                                                  │
+02 ○ lbrx-svc       │ Właśnie się urodził. Interaktywny TTY. Talia 3/5.                                                │
+   · Shell          │ Poprzedni grok żyje jedno [‹] wstecz.                                                            │
+03 ○ codescribe     │ Bez nowej sesji muxa. Ta sama karta, nowa twarz.                                                 │
+   · grok           │ Headless to inne drzwi — [Nowy dispatch] albo Quick cmd.                                         │
+   · codex          │                                                                                                  │
 04 ◉ vc-release     │                                                                                                  │
    · Start here     │                                                                                                  │
    ◉ Agents         │                                                                                                  │
    · shell          │                                                                                                  │
    · voc            │                                                                                                  │
-05 ○ vibecrafted-vc_│                                                                                                  │
-   · resume-grok    │                                                                                                  │
+05 ○ vibecrafted    │                                                                                                  │
+   · grok           │                                                                                                  │
    · Shell          │                                                                                                  │
    · grok           │                                                                                                  │
                     │                                                                                                  │
@@ -55,7 +55,7 @@ SESSIONS 5          ┌ claude · resume · vibecrafted ────────
                     │                                                                                                  │
                     │ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
                     │ │ ❯                                                                                            │ │
-                    │ ╰─ Claude · interactive pane ──────────────────────────────────────────────────────────────────╯ │
+                    │ ╰─ Claude · always-approve ────────────────────────────────────────────────────────────────────╯ │
                     └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  LOCK  PANE  TAB  MOVE                                                                                   LIVE 3 | HEALTH
 ```

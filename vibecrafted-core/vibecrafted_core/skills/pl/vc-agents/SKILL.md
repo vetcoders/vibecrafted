@@ -3,7 +3,7 @@ name: vc-agents
 version: 3.1.0
 description: >
   Spawn external specialized AI agents from the user's fleet (Codex, Claude, Gemini).
-  Use this when you need parallel execution, deep isolation, or task-specific cognitive 
+  Use this when you need parallel execution, deep isolation, or task-specific cognitive
   strengths that surpass generic in-thread delegation.
   Trigger: "vc-agents", "/vc-agents", "delegate to agents", "spawn".
 loctree_value: "primary repo map for structural/literal repository work"
@@ -13,45 +13,48 @@ dogfooding: "required for repo-impacting work"
 
 <!-- fleet-imperative: v3 -->
 
-> **Wywołanie dla `vc-agents` (launcher `agents`)**
+> **Wywołanie `vc-agents` (launcher `agents`)**
 >
-> Ten sam _kształt_ trzech ścieżek floty, z **literałami tego** skilla — zobacz
-> kanoniczną [Matrycę Delegacji](../DELEGATION_MATRIX.md):
+> Trzy ścieżki zachowują tożsamość skilla według
+> [Matrycy Delegacji](../DELEGATION_MATRIX.md):
+> [wspólne ścieżki](../DELEGATION_MATRIX.md#wspólne-trzy-ścieżki),
+> [katalog launcherów](../DELEGATION_MATRIX.md#katalog-launcherów-core-runtime),
+> [reguła per-launcher](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna),
+> [native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy).
 >
-> - [Wspólne trzy ścieżki](../DELEGATION_MATRIX.md#wspólne-trzy-ścieżki)
-> - [Katalog launcherów](../DELEGATION_MATRIX.md#katalog-launcherów-core-runtime)
-> - [Reguła per-launcher](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna)
-> - [Native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy)
+> | Ścieżka            | Wywołanie                                                                                                                                           |
+> | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | Worker użytkownika | kontrakt floty — tryby zewnętrzne przez udokumentowane ścieżki spawnu                                                                               |
+> | Interactive        | załaduj `vc-agents` jako doktrynę i wykonaj w tej sesji; używaj natywnych subagentów, gdy trzeba; sam launcher nie uzasadnia zewnętrznego dispatchu |
+> | Agent-Operator     | może dispatchować workera przez `vc-dispatch` lub linie Operatora, zachowując tożsamość skilla                                                      |
 >
-> | Ścieżka               | Literał tego skilla                                                                                                                                |
-> | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-> | 1. Worker użytkownika | (kontrakt floty — tryby external wg udokumentowanych spawn path)                                                                                   |
-> | 2. Interactive        | załaduj `vc-agents` jako doktrynę — wykonaj **w tej sesji**; native subagenty gdy trzeba; **nie** zewnętrzniaj tylko dlatego, że launcher istnieje |
-> | 3. Agent-operator     | może odpalić formę workera powyżej przez `vc-dispatch` / linie operatora, zachowując tożsamość tego skilla                                         |
->
-> **Uwaga:** External fleet **contract**; interactive skills still execute in-session.
-
-> Swobodniejszy native na niektórych biegach ≠ porzucenie floty external. `vc-dispatch` i `vc-ship` zachowują własne tożsamości.
+> To kontrakt floty zewnętrznej; skille interaktywne nadal działają w sesji.
+> Swobodniejszy native nie zastępuje floty external. `vc-dispatch` i `vc-ship`
+> zachowują własne tożsamości.
 
 <!-- /fleet-imperative -->
 
-# vc-agents — Zewnętrzna flota wykonawcza
+# vc-agents — zewnętrzna flota wykonawcza
 
-## Wejście operatora
+## Wejście Operatora
 
-### Reguła Living Tree / Worktree
+### Living Tree / Worktree
 
-Ten workflow działa w bieżącym checkoucie i na bieżącej gałęzi operatora. Nie twórz worktree gita, nie przełączaj się na niego ani nie przenoś do niego wykonania, chyba że operator wprost poprosi o worktree w tym prompcie. Ogólne słowa w stylu „isolate", „parallel" czy „clean branch" to za mało. Jedyny usankcjonowany drugi tryb to dispatch Fleet Worktrees (pisany plan, zacommitowane wcześniej verifiery, rozłączne domeny plików, jednowątkowy integrator — patrz Reguła Living Tree, Tryb B); poza tą formacją zostań we wspólnym drzewie. Czytaj pliki ponownie przed edycją, dostosowuj się do równoległych zmian i zgłoś awarię podłoża (substrate failure), jeśli bieżące drzewo jest zbyt zatrute, by bezpiecznie kontynuować.
-
-Zobacz [Reguła Living Tree](../LIVING_TREE_RULE.md).
+Pracuj w bieżącym checkoucie i na bieżącej gałęzi Operatora. Nie twórz worktree
+bez jawnego wyboru; drugim usankcjonowanym trybem jest dispatch Fleet Worktrees:
+plan, wcześniej zacommitowane verifiery, rozłączne domeny, jednowątkowy integrator.
+Czytaj ponownie przed edycją; zgłoś substrate failure, jeśli drzewo jest zatrute.
+Pełna reguła: [Living Tree](../LIVING_TREE_RULE.md).
 
 ## Checkpoint orientacji
 
-Zanim ten workflow wykona analizę specyficzną dla repo, planowanie, implementację, przegląd, release lub delegowanie, MUSI uruchomić lub skonsumować procedurę `vc-init` dla przypisanego repo. Jeśli brakuje świeżych dowodów z `vc-init`, najpierw wykonaj przebieg init i traktuj pracę specyficzną dla workflow jako zablokowaną, dopóki nie ma aktualnej prawdy repo.
-
-`Loctree:loctree` to domyślny skill do mapowania struktury repo dla tego przebiegu. Używaj Loctree przed grepem lub twierdzeniami opartymi na dokumentacji, aby wygenerować lub odświeżyć Mapę Aplikacji Wyprowadzoną z Kodu (Code-Derived Application Map): repo-view, focus, slice, impact, find i follow w odpowiednim zakresie. Szukaj istniejących symboli i kontraktów, zanim utworzysz nowe; uruchom impact przed usunięciem lub dużym refactorem; uruchom slice przed edycją.
-
-Chodzi o znalezienie zaczepów: węzłów nośnych, twins (duplikaty), martwego kodu, dryfu, entrypointów runtime'u oraz pułapek o dużym zasięgu zmiany. Jeśli zadanie jawnie nie dotyczy repo lub nie dotyczy kodu, odnotuj w raporcie wyjątek „bez repo". W przeciwnym razie brak dowodów z `vc-init`/Loctree to błąd procesu.
+Przed analizą repo, planowaniem, implementacją, review, release lub delegacją
+uruchom albo skonsumuj `vc-init`. Brak świeżych dowodów blokuje pracę.
+`Loctree:loctree` buduje Mapę Aplikacji Wyprowadzoną z Kodu
+(Code-Derived Application Map): repo-view/focus/slice/impact/find/follow.
+Szukaj przed tworzeniem, sprawdzaj impact przed usuwaniem i slice przed edycją.
+Brak dowodów jest błędem procesu. Pełny checkpoint: [vc-init](../vc-init/SKILL.md).
+Mapę trzeba przeczytać; sama obecność atlasu nie dowodzi przeczytania.
 
 Operator wchodzi do sesji frameworka przez:
 
@@ -62,8 +65,8 @@ vc-start
 # same default board as: vc-start operator
 ```
 
-`vc-agents` to kontrakt delegacji stojący za aktywnymi workflow, a nie podstawowa komenda
-operatora, którą founder wpisuje jako pierwszą. Entrypoint dla operatora pozostaje:
+`vc-agents` to kontrakt delegacji za aktywnymi workflow, nie pierwsza komenda
+Foundera. Wejście dla Operatora:
 
 ```bash
 vibecrafted <launcher> <agent> \
@@ -81,10 +84,9 @@ vc-<launcher> <agent> \
 
 `vc-<launcher> <agent>` uruchamia odłączonego workera headless niezależnie od
 tego, czy vc-frame działa. User Session może wyświetlać jego transkrypt i stan,
-ale nie hostuje procesu. `vc-agents` definiuje, jak ten run launchera rozkłada
-się na zewnętrznych workerów.
+ale nie jest hostem procesu. `vc-agents` określa fan-out na zewnętrznych workerów.
 
-### Konkretne przykłady dispatchu
+### Przykłady dispatchu
 
 ```bash
 vibecrafted implement codex /path/to/plan.md
@@ -92,243 +94,123 @@ vibecrafted implement claude /path/to/plan.md
 vibecrafted implement gemini /path/to/plan.md
 ```
 
-> Nie outsourcujemy myślenia. Wdrażamy równie zdolne umysły na równoległych ścieżkach wykonania, aby chronić główny bufor kontekstu.
+Nie zlecamy myślenia na zewnątrz: rozdzielamy równie zdolne umysły na równoległe
+ścieżki wykonania, aby chronić główny bufor kontekstu. Każdy drobny rewrite,
+śledztwo lub skok strukturalny wykonywany w jednym wątku powiększa prompt
+i rozmywa skupienie. Rozpoznaj lukę, wybierz profil z `vc-why-matrix`, uruchom
+zewnętrznego workera i wróć do orkiestracji. Ten skill dotyczy wyłącznie floty
+zewnętrznej; delegacja natywna w procesie należy do `vc-delegate`.
 
-Pojedyncza sesja agenta niesie ogromny kontekst. Próba wykonania każdego małego rewrite'u, forensycznego deep-dive'u czy radykalnej zmiany strukturalnej in-thread powoduje rozdęcie promptu i rozcieńcza twój fokus.
+## Doktryna pracy z repo
 
-`vc-agents` to warstwa delegacji zewnętrznej. Identyfikujesz lukę strukturalną, dobierasz
-właściwy umysł do zadania z **`vc-why-matrix`**, spawnu­jesz autonomicznego zewnętrznego
-workera i wracasz do swojej głównej orkiestracji.
+Najpierw Loctree (`loct context/occurrences/body/find --literal`), AICX dla
+historii intencji, rg/grep jako lokalna lupa. Braki Loctree zgłaszaj przez append
+w `~/.vibecrafted/loctree/loctree-fail.md`.
 
-Ten skill służy wyłącznie do zewnętrznych workerów. Natywna delegacja in-process należy do
-`vc-delegate`, nie tutaj.
+## vc-why-matrix
 
-## Doktryna pracy z repozytorium
+Wybieraj profil poznawczy potrzebny do cutu, nie losowego agenta.
+Historyczna trójka ([diagram](references/why-matrix.md)): Codex — precyzja
+i chirurgia; Claude — forensics i research; Gemini/agy — radykalne
+przeformułowanie i domyślnie tekst. Bieżący skład to OŚMIU agentów: wybór wynika
+z ekonomii zadeklarowanej przez Foundera na dany dzień, nie z przyzwyczajenia.
 
-W pracy z repozytorium zacznij od Loctree jako mapy: użyj `loct context`,
-`loct occurrences`, `loct body` i `loct find --literal` przed szerokim ręcznym
-przeszukiwaniem. Używaj AICX do kontekstu intencji i sesji. Używaj rg/grep jako
-fallbacku lub lokalnej lupy, nie jako zamiennika mapowania strukturalnego. Jeśli Loctree
-zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted/loctree/loctree-fail.md`.
-
-## `vc-why-matrix`
-
-Nie spawnu­jesz agentów na ślepo. Dobierasz profil poznawczy wymagany do danego cięcia.
-
-```mermaid
-  graph TD
-    subgraph Codex
-        CodexDesc[Precision & Surgery]
-        CodexBest[Best for:\n\n– Critical implementations\n– Exact refactors\n– Contract-gated execution]
-        Codex --> CodexDesc
-        Codex --> CodexBest
-    end
-
-    subgraph Claude
-        ClaudeDesc[Forensics & Research]
-        ClaudeBest[Best for:\n\n– Bug hunts across deep layers\n– Architecture audits\n– Assessing unknown paths]
-        Claude --> ClaudeDesc
-        Claude --> ClaudeBest
-    end
-
-    subgraph Gemini
-        GeminiDesc[Radical Reframing]
-        GeminiBest[Best for:\n\n– Architecture leaps\n– Fearless simplification\n– Stripping dead scaffolding]
-        Gemini --> GeminiDesc
-        Gemini --> GeminiBest
-    end
-```
+Słowa mają własny profil poznawczy. Proza, dokumentacja, narracja, copy skilli
+lub marketingu, tłumaczenia i tekst dla ludzi trafiają domyślnie do Gemini
+lub Claude. Atut Codexa to precyzyjna praca nad kodem i kontraktami. W zadaniu
+mieszanym rozdziel mechanikę/kod od tekstu; to dopasowanie do pracy, nie ocena agenta.
 
 ## Doktryna delegacji
 
-- **Deleguj, nie mikrozarządzaj:** Nie produkuj 15-punktowych biurokratycznych checklist dla zespawnowanego agenta. Napisz wysokopoziomowy plan z `Goal`, `Scope` i `Acceptance Criteria`. Pozwól mu samemu rozkminić _jak_.
-- **Żywe Drzewo (Living Tree):** Agenci muszą wiedzieć, że działają w żywym systemie. Zadbaj, by twój plan spawnu stwierdzał: _„Pracujesz na żywym drzewie. Równoległe zmiany są spodziewane. Dostosowuj się proaktywnie."_
-- **Pełna wymiana ponad tkankę bliznowatą:** Powiedz swoim agentom, że mają mandat do przepisywania zepsutych abstrakcji. Czasem pełna wymiana jest czystsza niż łatanie kiepskiego kodu prototypu.
+- Deleguj zamiast mikrozarządzać. Plan określa Goal, Scope i Acceptance Criteria;
+  agent sam ustala sposób realizacji. Nie pisz 15-punktowej biurokracji.
+- Plan podaje, że drzewo żyje, równoległe zmiany są oczekiwane i trzeba się dostosować.
+- Daj prawo zastąpienia zepsutej abstrakcji: pełna wymiana bywa czystsza niż łaty prototypu.
 
-## Autorytet eskalacji
+## Prawo do eskalacji
 
-`vc-agents` to warstwa orkiestracji na poziomie operatora.
+`vc-agents` jest warstwą orkiestracji Operatora. Wybrany model i profil poznawczy
+kodują intencję `vc-why-matrix`. Workerzy floty nie wywołują ponownie `vc-agents`,
+nie otwierają wyboru modeli, nie uruchamiają drugiej floty zewnętrznej i nie
+reinterpretują macierzy. Eskalacja należy wyłącznie do Operatora.
 
-Decyzja o użyciu `vc-agents` już koduje intencję `vc-why-matrix`:
-operator wybrał konkretną rodzinę modeli i profil poznawczy do tej
-misji.
+Gdy misja okaże się szersza lub mniej ograniczona, worker wykonuje ją tak daleko,
+jak uczciwie może, zapisuje granicę, nazywa nierozstrzygniętą powierzchnię
+w raporcie i pozostawia zmianę orkiestracji Operatorowi. Może ujawnić presję,
+ale nie może sam eskalować.
 
-Z tego powodu:
+Zakaz dotyczy WYŁĄCZNIE floty zewnętrznej. Natywne subagenty w procesie
+(Claude Task przez [vc-delegate](../vc-delegate/SKILL.md), swarm Kimi,
+natywne podsesje runtime'u) są prawem workera, a przy równoległym planie — jego
+obowiązkiem. Rola workera ogranicza zakres i lifecycle, nie native fan-out
+(Matryca Delegacji → Native vs external). Jednostka wykonawcza nie oznacza
+jednostki szeregowej: rozłączne subcuty wykonywane kolejno na modelu frontier
+są kosztownym sposobem na wolne wykonanie.
 
-- zespawnowani agenci floty nie mogą sami wywołać `vc-agents` ponownie
-- zespawnowani agenci floty nie mogą ponownie otwierać selekcji modelu ani uruchamiać drugiej zewnętrznej floty
-- zespawnowani agenci floty nie mogą reinterpretować `vc-why-matrix`
-- eskalacja do `vc-agents` należy wyłącznie do agenta-operatora
+## Pętla integratora snap-dispatch (wzorzec Foundera, 2026-10-03)
 
-Jeśli zespawnowany worker odkryje, że powierzchnia misji jest szersza, bardziej równoległa
-lub mniej bounded, niż się spodziewano, nie powinien eskalować sam na zewnątrz.
-
-Zamiast tego musi:
-
-- ukończyć przydzieloną misję na tyle, na ile to uczciwie możliwe
-- zarejestrować napotkaną granicę
-- jasno nazwać nierozwiązaną powierzchnię w swoim raporcie
-- pozostawić wszelkie zmiany orkiestracji operatorowi
-
-Worker floty może ujawnić presję orkiestracyjną.
-Nie może na nią działać.
+Pełny [runbook](references/runbook.md): (1) gęsty plan zawiera ZMIERZONE ścieżki,
+kształty rekordów, liczby kontrolne i kotwice z liniami; (2) kanon Foundera
+odzyskany z AICX oznacz jako „implement exactly, never reinterpret”;
+(3) jeden snap launchera na cut, prefiks tekstowy przed planem, czyste env,
+await uzbrojony od razu; (4) integrator powtarza testy w worktree, bada żywą
+powierzchnię, przypisuje każdy czerwony wynik dopiero po BASELINE-DIFF na czystym
+HEAD, integruje przez `--no-ff`, push i raportuje koszt providera;
+(5) model i effort są guzikami kosztowymi Foundera — provider 400 oznacza STOP
+i pytanie, nigdy podmianę.
 
 ## Szablon planu
 
-```markdown
----
-run_id: <generated-unique-id>
-agent: <claude|codex|gemini|agy|junie|grok>
-skill: vc-agents
-project: <repo-name>
-status: <pending|in-progress|completed|failed>
-loops_completed: <number>
----
+Użyj [szablonu](references/plan-template.md): frontmatter run_id/agent/skill/project/status,
+Goal, Scope, Constraints, Acceptance, Test gate, Context i reguła żywego drzewa.
+Równoległe zmiany są oczekiwane, jeden commit na rundę jest obowiązkiem,
+native fan-out jest wyjątkiem od zakazu orkiestracji; tiery dobieraj według
+vc-delegate → Native Delegation Policy.
 
-# Task: <short title>
+## Runbook — bieżąca gramatyka launchera
 
-Goal:
-
-- <1-3 bullets>
-
-Scope:
-
-- In scope: <files/areas> as high-level suggestions
-- Out of scope: <explicit>
-
-Constraints:
-
-- No --no-verify
-- Follow repo conventions
-
-Acceptance:
-
-- [ ] <objective outcome>
-- [ ] <objective outcome>
-
-Test gate:
-
-- <command(s)>
-
-Context:
-
-- <very short summary>
-
-Living tree note:
-
-- You work on a living tree with 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚜𝚖𝚊𝚗𝚜𝚑𝚒𝚙 methodology, so concurrent changes are expected.
-- Adapt proactively and continue, but this is never permission to skip quality, security, or test gates.
-- Run required checks. If something is blocked, report the exact blocker and run the closest safe equivalent.
-- Coordination mode: <solo on this stage / parallel with other agents on this stage>
-- You do not need to inspect other agents' plans unless this plan explicitly tells you to.
-- **Commit is an obligation, not a checkpoint option: ONE commit per round** (marbles — one round = one commit), well-formed per the commit-msg hook, on the current branch. Do NOT leave delivered work uncommitted. Non-destructive remote push of the current feature branch (`git push -u origin HEAD`, not force, not trunk) is a duty after that commit. Force-push, trunk push, merge, and deploy stay operator buttons. When the mission spans multiple rounds/units, multi-commit per dispatch is expected.
-- You are an execution unit, not orchestration authority: do not invoke `vc-agents`, do not reopen frontier selection, and do not reinterpret the `vc-why-matrix`.
-- If the mission reveals a wider unresolved surface, report that boundary clearly and leave orchestration changes to the operator.
-```
-
-## Komendy spawnu
-
-Ścieżka launchu dla operatora przy delegacji out-of-process prowadzi przez
-command deck `vibecrafted` lub helper `vc-<launcher>`. Skrypty spawnu należące do
-repo pozostają wewnętrznym silnikiem stojącym za tą ścieżką.
-
-### Codex
+Agenci: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+Pełna gramatyka, prefiks przed planem z pliku, wstrzyknięcie CLI `--help`,
+usuwanie zmiennych sesji Claude oraz await/observe/stop/usage są w
+[runbooku](references/runbook.md). Zapamiętaj kształt:
 
 ```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan-slug>.md"
-vibecrafted implement codex "$PLAN"
+vibecrafted <launcher> <agent> --repo "$(pwd)" --model <founder's cost pick> \
+  [--effort <tier>] --worktree true --prompt "Plan follows.\n\n$(cat "$PLAN")"
 ```
 
-### Claude
+Natychmiast po dispatchu uzbrój `vibecrafted await <agent> --run-id <id>`.
+Każde rozliczenie podaje `vibecrafted usage --run-id <id>` i koszt providera.
+Jeśli narzędzia są niedostępne, jawnie zgłoś brak poprawnej konfiguracji spawnu.
 
-```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan>.md"
-vibecrafted implement claude "$PLAN"
-```
+## Artefakty i obserwacja
 
-### Gemini
+Ścieżki pod `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`, karta launchera
+i pełna doktryna await/trzech sygnałów żywotności są w runbooku.
+Każdy spawn pokazuje kartę; supervisor od razu uzbraja await. Doraźny poller
+obok await jest naruszeniem klasy 3. Dwa zgodne sygnały wystarczą do działania,
+trzy do uznania zakończenia.
 
-```bash
-PLAN="$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<plan>.md"
-vibecrafted implement gemini "$PLAN"
-```
+## Bramki jakości
 
-Jeśli te narzędzia są niedostępne, przestań udawać, że spawn jest poprawnie skonfigurowany, i powiedz to wprost.
+- loctree-mcp jako pierwsze narzędzie odkrywania i wyszukiwania; fail-fast przy braku dostępu
+- Semgrep jako pierwszy guard bezpieczeństwa, gdy dostępny
+- Rust: `cargo clippy -- -D warnings`; poza Rust najbliższy lint/type/test
+- Uruchamiaj testy przy review, dodawaj dla nowego zachowania; preferuj e2e rzeczywistego pipeline'u
+- Zablokowana bramka wymaga dokładnej przyczyny i najbliższego bezpiecznego odpowiednika
 
-## Konwencja outputu
+## Bezpieczeństwo
 
-- Plany: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<timestamp>_<slug>.md` lub inna stabilna
-  nazwa pliku per task
-- Raporty: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.md`
-- Transkrypty: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.transcript.log`
-- Metadane: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/<timestamp>_<slug>_<agent>.meta.json`
-
-Każdy spawn powinien wystawić launch card od razu po dispatchu.
-Ta karta powinna ujawniać co najmniej:
-
-- `run_id`
-- wybranego agenta / rodzinę modeli
-- ścieżkę planu
-- ścieżkę raportu
-- ścieżkę transkryptu
-- ścieżkę metadanych
-
-Jeśli operator nie widzi tych ścieżek, obserwowalność jest niekompletna, nawet jeśli
-agent technicznie działa.
-
-## Obserwacja
-
-Obserwuj postęp przez trwałe artefakty w `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/reports/`.
-
-Domyślne sprawdzenie jest metadata-first, nie pane-first.
-Użyj dedykowanego helpera runtime'u, aby poczekać na ukończenie metadanych i wypisać
-finalne podsumowanie:
-
-```bash
-vibecrafted await codex --run-id <run_id>
-```
-
-Dla najnowszego runu danego agenta:
-
-```bash
-vibecrafted await codex --last
-```
-
-Przy wielu zespawnowanych workerach przekaż ich ścieżki launchera lub metadanych wprost do
-helpera i pozwól mu poczekać na wszystkie naraz.
-
-Jeśli twoje środowisko udostępnia helper obserwatora, użyj go do inspekcji na poziomie
-transkryptu lub do debugowania:
-
-```bash
-vibecrafted observe codex --last
-```
-
-Użyj odpowiedniego obserwatora agenta, gdy trzeba, ale nie polegaj na `observe` jako
-jedynej powierzchni statusu. `vc-agents` powinien pozostać operowalny z trwałych
-artefaktów nawet wtedy, gdy operator nie wpatruje się w żywe pane'y.
-
-## Oczekiwania bramki jakości
-
-Trzymaj standardowy poziom jakości 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.:
-
-- loctree-mcp jako narzędzie odkrywania i wyszukiwania pierwszego wyboru, z fail-fast, gdy niedostępne
-- semgrep jako strażnik bezpieczeństwa pierwszego wyboru, gdy dostępny
-- repozytoria Rust: `cargo clippy -- -D warnings`
-- repozytoria nie-Rust: wybierz najbliższy równoważny gate lint/typów/testów
-- Testy: uruchom, jeśli robisz review; napisz, jeśli implementujesz nowe zachowanie; preferuj realne pokrycie e2e dla rzeczywistego pipeline'u
-- Jeśli bramka jest zablokowana, zgłoś dokładny blocker i uruchom najbliższy bezpieczny odpowiednik
-
-## Reguły bezpieczeństwa
-
-- Nie loguj sekretów ani nie commituj plików `.env`.
-- Nigdy nie używaj `--no-verify` przy `commit` ani `push`.
-- Nie przepisuj historii gita, chyba że użytkownik wprost o to poprosi.
-- Traktuj równoległe edycje jako normalne, ale i tak weryfikuj przed nadpisaniem.
-- Jeśli repo ma ścisłą komendę w stylu `make check`, uruchom ją albo wyjaśnij, dlaczego nie.
+- Nie loguj sekretów ani nie commituj `.env`.
+- `--no-verify` wyłącznie dla jawnego, autoryzowanego przez Foundera lokalnego
+  checkpointu compile-embargo, z receiptem pominiętych hooków/bramek.
+  Worker nigdy z tym nie pushuje; taki push należy wyłącznie do Foundera.
+- Nie przepisuj historii Git bez jawnego żądania użytkownika.
+- Równoległe edycje są normalne, ale przed nadpisaniem weryfikuj stan.
+- Uruchom ścisłą bramkę repo, np. make check, albo wyjaśnij blokadę.
 
 ## Zasada końcowa
 
-Flota nie służy do outsourcingu myślenia.
-Flota służy do wdrażania równie zdolnych agentów pierwszej linii przez ścisłą, domyślną ścieżkę launchu.
-Używaj ich, żeby implementować, a nie tylko komentować implementację.
+Flota służy wdrażaniu równie zdolnych agentów przez ścisłą domyślną ścieżkę
+launchera, nie outsourcingowi myślenia. Używaj jej do implementacji,
+nie tylko komentowania implementacji.

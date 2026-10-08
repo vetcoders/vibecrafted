@@ -1,278 +1,280 @@
 ---
 name: vc-intents
-version: 1.0.1
+version: 2.0.0
 description: >
-  Operator-side intention-to-runtime truth audit. Use when the team needs to
-  know which planned implementations actually landed in code, which are only
-  partially present, which never materialized, and what the highest remaining
-  truth is. This skill pulls intentions from aicx, reduces them to a bounded
-  implementation checklist, then verifies each item against the live repo.
-  Trigger phrases: "intents", "co z planu siedzi", "which planned items exist",
-  "what from the plan is in code", "check intent coverage", "planned vs code",
-  "highest truth", "checklist from intents".
-loctree_value: "primary repo map for structural/literal repository work"
-aicx_value: "intent, session, and decision-context retrieval"
-dogfooding: "required for repo-impacting work"
+  Hunt the Founder's intents for one repository inside a chosen window, settle
+  every one of them against the live code with two independent fleets, and hand
+  back a stable, dependency-ordered plan of cuts for vc-dispatch. Use whenever
+  the team asks "zbierz intencje", "rozlicz intencje", "czego chciał Founder",
+  "co obiecaliśmy i nie dowieźliśmy", "co z planu siedzi w kodzie", "what did we
+  agree to build", "what is still owed", "intent coverage", "planned vs code",
+  "highest truth", "checklist from intents" — or when scattered decisions from
+  transcripts and sessions must become an implementation queue that survives
+  compactions and machines. Reach for this instead of a bare `aicx search`
+  whenever the Founder's own words must be separated from agent proposals and
+  agent completion claims, and the answer must end in a plan, not a catalogue.
+loctree_value: "structural questions decide whether a promise has a runtime shape"
+aicx_value: "indexed intents, session context; one source among several"
+dogfooding: "required — this skill is the join between corpus, aicx, Loctree and dispatch"
 ---
 
 <!-- fleet-imperative: v3 -->
 
-> **Wywołanie dla `vc-intents` (launcher `intents`)**
+> **Wywołanie dla `vc-intents` (launcher `intents`)** — zobacz
+> [Matrycę Delegacji](../DELEGATION_MATRIX.md).
 >
-> Ten sam _kształt_ trzech ścieżek floty, z **literałami tego** skilla — zobacz
-> kanoniczną [Matrycę Delegacji](../DELEGATION_MATRIX.md):
+> | Ścieżka           | Literał tego skilla                                                                                    |
+> | ----------------- | ------------------------------------------------------------------------------------------------------ |
+> | 1. Worker z ręki  | `vibecrafted intents <agent>` — jeden tor ekstrakcji albo konfrontacji, READ, zapisuje tylko swój JSON |
+> | 2. Interaktywnie  | `/vc-intents` — samo polowanie, **w tej sesji**: sweep, tory, plany, merge, kolejka, render            |
+> | 3. Agent-operator | wysyła formę workera przez `vc-dispatch` z planem napisanym przez `scripts/intents_cli.py plan`        |
 >
-> - [Wspólne trzy ścieżki](../DELEGATION_MATRIX.md#wspólne-trzy-ścieżki)
-> - [Katalog launcherów](../DELEGATION_MATRIX.md#katalog-launcherów-core-runtime)
-> - [Reguła per-launcher](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna)
-> - [Native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy)
->
-> | Ścieżka               | Literał tego skilla                                                                                                            |
-> | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-> | 1. Worker użytkownika | `vibecrafted intents <agent>`                                                                                                  |
-> | 2. Interactive        | `/vc-intents` — wykonaj **w tej sesji**; native subagenty gdy trzeba; **nie** zewnętrzniaj tylko dlatego, że launcher istnieje |
-> | 3. Agent-operator     | może odpalić formę workera powyżej przez `vc-dispatch` / linie operatora, zachowując tożsamość tego skilla                     |
-
-> Swobodniejszy native na niektórych biegach ≠ porzucenie floty external. `vc-dispatch` i `vc-ship` zachowują własne tożsamości.
+> Kadencja pozostaje **read**: ten skill nigdy nie edytuje repo. Dostarczenie to
+> osobny plan `implement`, który pisze dla floty.
 
 <!-- /fleet-imperative -->
 
-# vc-intents — Od intencji do prawdy runtime'u
+# vc-intents — od tego, co powiedział Founder, do planu cięć
 
-## Wejście operatora
+Długo żyjący projekt gromadzi intencje szybciej niż kod. Founder mówi coś w
+marcu, poprawia w maju, agent proponuje inny kształt w czerwcu i twierdzi w
+lipcu, że dowiózł. We wrześniu nikt nie umie powiedzieć, które z tego jeszcze
+obowiązuje — a jedyna osoba, która by mogła, płaci za odpowiedź.
 
-### Reguła Living Tree / Worktree
+Ten skill jest właścicielem całej ścieżki: **zebrać → rozdzielić głosy →
+katalog z dosłownymi cytatami → konfrontacja dwiema flotami → reklasyfikacja
+tego, co ukrywa „landed" → stabilna kolejka → plan dispatchu, który flota może
+odpalić**. `vc-canary` znajduje kolizje prawdy i nigdy nie refaktoruje;
+`vc-implement` tnie kod, ale nie odtwarza obietnicy; `vc-audit` falsyfikuje plan
+wobec kodu. `vc-intents` odtwarza obietnicę, dowodzi, co z niej zostało, i
+przekazuje resztę jako cięcia.
 
-Ten workflow działa w bieżącym checkoucie i na bieżącej gałęzi operatora. Nie twórz worktree gita, nie przełączaj się na niego ani nie przenoś do niego wykonania, chyba że operator wprost poprosi o worktree w tym prompcie. Ogólne słowa w stylu „isolate", „parallel" czy „clean branch" to za mało. Jedyny usankcjonowany drugi tryb to dispatch Fleet Worktrees (pisany plan, zacommitowane wcześniej verifiery, rozłączne domeny plików, jednowątkowy integrator — patrz Reguła Living Tree, Tryb B); poza tą formacją zostań we wspólnym drzewie. Czytaj pliki ponownie przed edycją, dostosowuj się do równoległych zmian i zgłoś awarię podłoża (substrate failure), jeśli bieżące drzewo jest zbyt zatrute, by bezpiecznie kontynuować.
+## Cel
 
-Zobacz [Reguła Living Tree](../LIVING_TREE_RULE.md).
+`vc-intents` produkuje ledger, w którym każda intencja Foundera z wybranego okna
+ma jedną jawną dyspozycję, wynik zgodności między dwiema niezależnymi flotami i
+warstwę korekt edytowalną przez człowieka — i jest gotowy, gdy
+`intents_cli.py <workdir> status` nazywa, co jest jeszcze otwarte, a
+`plan --stage implement` zapisał dla tego plan dispatchu. Katalog nie zamyka
+celu. Audyt nie zamyka celu. Plan cięć zamyka.
 
-## Checkpoint orientacji
+## Canonical Orientation Gate
 
-Zanim ten workflow wykona analizę specyficzną dla repo, planowanie, implementację, przegląd, release lub delegowanie, MUSI uruchomić lub skonsumować procedurę `vc-init` dla przypisanego repo. Jeśli brakuje świeżych dowodów z `vc-init`, najpierw wykonaj przebieg init i traktuj pracę specyficzną dla workflow jako zablokowaną, dopóki nie ma aktualnej prawdy repo.
+Przed każdym krokiem dotyczącym repo — sweep wobec repo, konfrontacja, plan —
+uruchom albo skonsumuj procedurę `vc-init` dla przydzielonego repo.
+`Loctree:loctree` jest domyślnym skillem percepcji strukturalnej w tym
+przebiegu i musi wytworzyć albo odświeżyć Code-Derived Application Map
+(`context`, `repo-view`, `focus`, `slice`, `impact`, `find`, `follow`). Tory
+konfrontacji to dziedziczą: brief czyni loctree-mcp pierwszym ruchem, a
+`landed` bez strukturalnej ścieżki za sobą nie jest werdyktem. Jeśli brak
+świeżych dowodów `vc-init`, wykonaj najpierw init i traktuj polowanie jako
+zablokowane, dopóki nie istnieje prawda repo. Sweep korpusu transkrypcji bez
+podpiętego repo deklaruje w raporcie wyjątek no-repo.
 
-`Loctree:loctree` to domyślny skill do mapowania struktury repo dla tego przebiegu. Używaj Loctree przed grepem lub twierdzeniami opartymi na dokumentacji, aby wygenerować lub odświeżyć Mapę Aplikacji Wyprowadzoną z Kodu (Code-Derived Application Map): repo-view, focus, slice, impact, find i follow w odpowiednim zakresie. Szukaj istniejących symboli i kontraktów, zanim utworzysz nowe; uruchom impact przed usunięciem lub dużym refactorem; uruchom slice przed edycją.
+## Zakres to okno, nie historia
 
-Chodzi o znalezienie zaczepów: węzłów nośnych, twins (duplikaty), martwego kodu, dryfu, entrypointów runtime'u oraz pułapek o dużym zasięgu zmiany. Jeśli zadanie jawnie nie dotyczy repo lub nie dotyczy kodu, odnotuj w raporcie wyjątek „bez repo". W przeciwnym razie brak dowodów z `vc-init`/Loctree to błąd procesu.
+Ogranicz polowanie przed sweepem: `--since/--until` albo temat. Pokrycie
+raportujesz wobec tego okna. Cała historia to jedno z legalnych okien — nie
+warunek zamknięcia. Czego okno nie zawiera, zapisujesz jako _poza zakresem_,
+nigdy jako _absent_.
 
-Standardowy launcher (`vibecrafted start` / `vc-start`, następnie `vc-<launcher> <agent> [--prompt|--file ...]`).
-Preferuj `--prompt` dla świeżego audytu, a `--file` wtedy, gdy istniejący plan, raport
-lub wyekstrahowany bundle intencji ma być porównany z drzewem.
-
-```bash
-vibecrafted intents codex --prompt 'Check which planned implementations actually landed in Codescribe'
-vc-intents claude --prompt 'Build a 20-item checklist from intents and mark done/partial/missing'
-vibecrafted intents gemini --file ~/.vibecrafted/artifacts/vetcoders/Codescribe/2026_0419/plans/research-plan.md
-```
-
-Zależności fundamentowe: `vc-aicx` (pozyskiwanie intencji, source chunks, pamięć
-ostatnich decyzji), `vc-loctree` (żywa percepcja repo, weryfikacja strukturalna).
-
-> Plany są tanie.
-> Prawdą jest to, czy plan faktycznie wylądował w runtimie.
-
-## Doktryna pracy z repozytorium
-
-W pracy z repozytorium zacznij od Loctree jako mapy: użyj `loct context`,
-`loct occurrences`, `loct body` i `loct find --literal` przed szerokim ręcznym
-przeszukiwaniem. Używaj AICX do kontekstu intencji i sesji. Używaj rg/grep jako
-fallbacku lub lokalnej lupy, nie jako zamiennika mapowania strukturalnego. Jeśli Loctree
-zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted/loctree/loctree-fail.md`.
-
-## Główna doktryna
-
-`vc-intents` to nie skill przeglądu i nie skill planowania. To warstwa
-uzgadniania między:
-
-- tym, co zespół zamierzał zbudować
-- tym, co sesje wskazały jako następne
-- tym, co baza kodu faktycznie zawiera teraz
-
-Ten skill istnieje, bo pozostałe powierzchnie zatrzymują się za wcześnie:
-
-- `vc-init` przywraca kontekst, ale nie uzgadnia ukończenia
-- `vc-review` ocenia diff, nie pierwotną intencję
-- `vc-scaffold` tworzy przyszły kształt, nie obecną prawdę
-- `vc-marbles` utwardza to, co istnieje, ale nie normalizuje najpierw, które obietnice są realne
-
-Odpowiada na węższe pytanie operatora: co z planu naprawdę jest w
-kodzie, co wylądowało połowicznie, co nigdy się nie wydarzyło, co zostało zastąpione
-lepszym kształtem i jaka jest najwyższa pozostała prawda.
-
-## Dlaczego to działa
-
-Sesje agentów są bogate w intencje, ale zaszumione w formie. `aicx intents` ekstrahuje
-ustrukturyzowane sygnały intencji z wcześniejszej pracy — ale surowy output intencji to wciąż
-nie prawda. To pragnienie, rozpęd, niedokończona rozmowa, czasem
-zhalucynowana pewność.
-
-Druga połowa jest tym, co się liczy: zredukuj surowy strumień intencji do kandydatów
-do implementacji, zbadaj żywe repo, odmów przeszacowywania, sklasyfikuj każdego kandydata
-względem obecnej prawdy runtime'u. Tak przestajemy traktować plany, changelogi
-i podsumowania sesji tak, jakby były produktem.
-
-## Co robi ten skill
-
-Jedna inwokacja = jeden bounded audyt od intencji do prawdy:
-
-1. pozyskaj ostatnie intencje projektu z `aicx`
-2. otwórz pliki `source_chunk` przywoływane przez wytypowane pozycje
-3. zredukuj zaszumiony strumień do bounded checklisty kandydatów do implementacji
-4. zweryfikuj każdego kandydata względem żywego drzewa
-5. sklasyfikuj każdego kandydata
-6. wyemituj checklistę + najwyższą pozostałą prawdę
-7. zatrzymaj się
-
-Domyślny cel checklisty: **20 znaczących pozycji implementacyjnych**. Jeśli realnych
-kandydatów jest mniej, raportuj mniej. Nie nadymaj watą ani powielonymi obietnicami.
-
-## Protokół pozyskiwania
-
-### Szybki tor operatora
+## Narzędzie
 
 ```bash
-aicx intents -p <ProjectName> --emit json 2>&1 | tail -200
+CLI=~/.claude/skills/vc-intents/scripts/intents_cli.py   # albo ścieżka w store
+W=~/.vibecrafted/artifacts/<owner>/<repo>/intents         # jeden workdir na polowanie
+uv run "$CLI" "$W" <komenda> …
 ```
 
-Powierzchnia do triażu, nie ostateczny dowód.
+Jeden katalog roboczy trzyma wszystko, co musi przeżyć kompakcję albo drugi
+host: `sweep.json`, `shards/`, `intents.json`, `lanes/`, `LEDGER.json`,
+`overrides.jsonl`, `queue.json`, `STABLE-QUEUE.md`, `LEDGER.md`,
+`intents.html`. Agenci czytają i orzekają; skrypt prowadzi księgi, robi
+falsyfikacje, które nie wymagają osądu, i pisze plany oddające osąd flocie.
 
-### Tor prawdy
+## Procedura
 
-Przed klasyfikacją otwórz przywoływane pliki `source_chunk` i odtwórz
-faktyczny kontekst planu wokół wytypowanych intencji. Dyscyplina:
+### 0 · Orientacja
 
-1. pociągnij `aicx intents`
-2. wytypuj kandydatów do implementacji
-3. otwórz chunki źródłowe stojące za nimi
-4. dopiero wtedy znormalizuj do pozycji checklisty
+Uruchom albo skonsumuj `vc-init` dla repo. Ustal tożsamość katalogu przez
+`aicx intents -p /<repo>` (wiodący slash — każdy historyczny właściciel).
+Przeczytaj linię `project:` w nagłówku: to Twój mianownik dla aicx. Potem
+kontrola negatywna: data najnowszej intencji vs data najnowszego commitu. Luka
+to brakująca tożsamość, nie cichy kwartał.
 
-Nie klasyfikuj na podstawie samego jednolinijkowego podsumowania, gdy dostępny jest
-source chunk.
+### 1 · Sweep — rozlicz każde źródło w oknie
 
-## Protokół weryfikacji
+```bash
+uv run "$CLI" "$W" sweep --since 2026-06-01 --until 2026-09-18 \
+  --source dir:~/.codescribe/transcriptions --source aicx --repo <repo> --shard-size 120
+```
 
-Po wyekstrahowaniu checklisty zweryfikuj każdą pozycję względem żywego repo.
-Preferowana kolejność:
+Źródła są pierwszej klasy i nierówne. Wynik z pola (Codescribe, IX 2026): aicx
+miał **~10 %** głosu Foundera i **0 %** korpusu dyktowanego; katalog transkrypcji
+miał 2 842 pliki na dwu hostach. Katalog żyjący na innej maszynie ściągasz
+(`rsync` z tego hosta) przed sweepem, albo jest `unavailable` w pokryciu —
+znany nieznany, który trzyma cel otwarty. Obcięcie korpusu aicx raportuje
+**tylko na stderr**; skrypt łapie to do pliku i flaguje `truncated`.
 
-1. `vc-loctree` / loctree MCP — kształt repo, scope, gorące pliki
-2. ukierunkowane sprawdzenia symboli lub ścieżek
-3. `rg` / odczyty z shella dla lokalnego detalu
-4. dokumentacja tylko jako materiał wspierający
+`sweep` pisze chronologiczne shardy do ekstrakcji. Nic jeszcze nie zostało
+przeczytane.
 
-Repozytorium to główny sąd. Dokumentacja to świadkowie wspierający.
+### 2 · Ekstrakcja — flota czyta, dosłownie
 
-### Hierarchia dowodów
+```bash
+uv run "$CLI" "$W" plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
+vibecrafted dispatch <plan> --doctor --json && vibecrafted dispatch <plan> --json
+uv run "$CLI" "$W" verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
+```
 
-1. **Ścieżka kodu runtime'u** — żywa implementacja osiągalna z bieżącego kodu
-2. **Ścieżka z testami** — testy dowodzą, że ścieżka istnieje lub że kontrakt jest ćwiczony
-3. **Powierzchnia UI / CLI / config** — istnieje powierzchnia widoczna dla użytkownika/operatora
-4. **Dokumentacja / CHANGELOG / plany** — tylko wspierające, nigdy same w sobie wystarczające do `done`
+Brief to `references/extraction-brief.md`. Jedna twarda zasada: **`quote` jest
+dosłownym podciągiem pliku źródłowego.** `verify-quotes` odrzuca wszystko inne
+przez zawieranie ciągu — parafraza podana jako głos Foundera to najgorszy błąd
+tej roboty, bo przypisuje człowiekowi decyzję, której nie podjął. Przekręty
+Whispera zostają; normalizacja żyje w `topic`.
 
-Jeśli wszystko, co masz, to dokumentacja lub changelog, ta pozycja nie jest `done`.
+Dobór agenta to **przepustowość**, nie ranking: masowe czytanie krótkich plików
+to robota na 375 tps (`junie`/`gemini-3.8-flash`), nie dla modelu z czołówki.
+Osiem natywnych Opusów spaliło raz tygodniowy budżet na to, co flota flash robi
+w minuty. Zobacz `references/replication.md`.
 
-## Kontrakt klasyfikacji
+### 3 · Rozdziel głosy
 
-Każda pozycja checklisty musi kończyć się dokładnie jednym stanem: `done`, `partial`,
-`missing`, `superseded`, `non-code`.
+Wiążą tylko własne słowa Foundera. Propozycje agentów to kandydaci; claimy
+wykonania to cele audytu; dokumenty pisane przez agentów (CHANGELOG, ADR,
+roadmapa, raport) to claimy w przebraniu dokumentu. Korpus transkrypcji też nie
+jest z automatu czysty: agenci wklejali odpowiedzi modelu do plików dyktowania w
+~30 % plików jednego miesiąca. Brief ekstrakcji wylicza, co pomijać; pole
+`kind` zapisuje, co Founder robił (`complaint`, `task`, `constraint`,
+`decision`, `preference`, `question`).
 
-- **`done`** — zamierzona implementacja jest materialnie obecna. Realna ścieżka kodu,
-  powierzchnia config lub kontrakt runtime'u. Nie tylko wzmianka w dokumentacji.
-- **`partial`** — kształt istnieje, ale pierwotna obietnica nie wylądowała w pełni
-  (config bez UI, treść UI bez runtime'u, główna logika bez ścieżki dostarczenia
-  lub powierzchni operatora).
-- **`missing`** — plan jest realny i konkretny, ale w żywym drzewie nie ma żadnej znaczącej
-  powierzchni implementacji. Wymaga rzetelnego przeszukania, nie wzruszenia ramionami.
-- **`superseded`** — pierwotna intencja nie ma już sensu, bo zastąpił ją
-  inny kształt. Nazwij zastępujący kształt wprost. Nie używaj
-  tego, by ukryć porażkę.
-- **`non-code`** — realna pozycja planu, ale należy przede wszystkim do dystrybucji,
-  operacji, choreografii release'u, powierzchni klienta/produktu. Nadal ma znaczenie;
-  po prostu nie należy do verdictu „siedzi w kodzie".
+### 4 · Chronologia
 
-## Najwyższa prawda
+Późniejsze słowa Foundera unieważniają wcześniejsze **tylko z nazwanym
+następcą** (`superseded_by`). Dwie wypowiedzi, które się wykluczają bez
+późniejszego rozstrzygnięcia, to `contradiction` — instrumentem jest
+`aicx clarify`, potem Founder. Deduplikuj wypowiedzi, nigdy proweniencję: jedna
+intencja, wiele cytatów.
 
-Każdy przebieg musi kończyć się sekcją o nazwie **Najwyższa prawda**. Nie podsumowaniem —
-pojedynczą najważniejszą nierozwiązaną rzeczywistością, na którą operator powinien zadziałać jako następną.
+### 5 · Konfrontacja — dwie floty, dwa hosty
 
-Dobrze:
+```bash
+uv run "$CLI" "$W" lanes                     # po obszarze; domyślnie sześć torów Codescribe
+uv run "$CLI" "$W" plan --stage confront --repo <repo> --host div0 \
+  --agent 'L1-overlay-ui=kimi:kimi-code/k3' --agent 'L4-quality-lexicon=junie:gemini-3.8-flash' …
+```
 
-- „UI mówi, że qube-daemon uruchamia się automatycznie, ale żadna ścieżka runtime'u faktycznie go nie startuje."
-- „Dyskryminator ciszy istnieje w core, ale operator nie ma powierzchni ustawień, by nim sterować."
-- „Bundle aplikacji jest podpisany i notaryzowalny, ale ścieżka aktualizacji wciąż jest ręczna."
+Potem ten sam plan na drugiej maszynie, z tymi samymi pinami i modelami, z
+katalogami werdyktów wyłączonymi z rsync workdira (druga flota nie może widzieć
+odpowiedzi pierwszej). Brief to `references/confrontation-brief.md`: loctree-mcp
+najpierw, `landed` wymaga `plik:linia`, `absent` wymaga pytania, które zwróciło
+zero, zero edycji, wszystkie id zachowane.
 
-Źle:
+Weryfikacja jest strukturalna: „X startuje automatycznie" to _krawędź od
+entrypointu do X_ (`loct follow trace`), nie trafienie grepa. Tabela obietnica →
+pytanie → komenda: `references/loctree-questions.md`.
 
-- „Część pozycji jest partial."
-- „Jest jeszcze trochę pracy do zrobienia."
-- „Powinniśmy dalej się poprawiać."
+```bash
+uv run "$CLI" "$W" merge --verdicts div0=<dir> --verdicts dragon=<dir> --primary div0 --project <owner>/<repo>
+```
 
-Najwyższa prawda powinna trochę boleć. Jeśli nie tworzy dźwigni, jest
-zbyt miękka.
+`merge` pisze `LEDGER.json` i `replication-report.json`. Zgodność per id przy
+tym samym agencie i modelu wyniosła **72,8 %**; największy rozjazd to
+`partial ↔ landed`. Czytaj to tak: żaden pojedynczy werdykt nie jest dowodem —
+zgodna para jest. Do kolejki wchodzą tylko stabilne pary.
 
-## Kontrakt outputu
+### 6 · Reklasyfikacja — `landed` to dolna granica
 
-1. **Źródło intencji** — projekt, okno pozyskiwania lub pliki źródłowe, metoda typowania
-2. **Checklista** — do 20 pozycji, każda z `status`, `item`, `why`, `evidence`
-3. **Najwyższa prawda** — jeden akapit
-4. **Następna dźwignia** — 1-3 najwartościowsze ruchy następcze
+```bash
+uv run "$CLI" "$W" reclassify
+```
 
-### Format evidence
+Dwie reguły bez osądu, stosowane przed liczeniem czegokolwiek jako zamknięte:
+`kind = complaint ∧ landed → landed-contested` (Founder mówi, że nie działa;
+flota znalazła kod; runtime niezweryfikowany — skarga wygrywa do czasu sondy) i
+`dowód bez pliku kodu → landed-by-doc` (dokument dowodzi, że kontrakt spisano,
+nie że go dotrzymano). Wynik z pola: **43–45 % `landed` spadło** na obu hostach.
+Obie pochodne dyspozycje liczą się jako otwarte. Reguły dopisują do
+`overrides.jsonl`; werdykt floty nigdy nie jest nadpisywany. Schemat i treść
+reguł: `references/ledger-schema.md`.
 
-Preferuj zwięzłe odniesienia do repo: ścieżka pliku, nazwa symbolu, komenda użyta do weryfikacji.
-Nie zrzucaj ogromnych logów ani nie zakopuj verdictu pod spamem grepa.
+### 7 · Warstwa człowieka
 
-## Dyscyplina scope'u
+```bash
+uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base https://github.com/<o>/<r>/blob/<sha>/
+open "$W/intents.html"
+uv run "$CLI" "$W" decide --import-file decisions.jsonl --by founder      # albo --id … --to … --reason …
+```
 
-Jednostką analizy nie jest „wszystkie myśli, jakie kiedykolwiek padły o projekcie". Preferuj
-ostatnie, trafne okna intencji; pozycje w kształcie implementacji; prawdę jednej bieżącej
-gałęzi / workspace'u.
+Strona pokazuje każdą intencję z dosłownym cytatem, szerszym wycinkiem
+transkrypcji, werdyktami obu hostów z dowodami podlinkowanymi do przypiętego
+commitu, korektami mechanicznymi i formularzem decyzji: zgadza się,
+reklasyfikuj, usuń jako fałszywy trop, komentarz. Decyzje eksportują się jako
+JSONL i wracają przez `decide`. To jest powierzchnia edycji Foundera — linia w
+`overrides.jsonl`, nigdy ręczna edycja pliku werdyktów. Opublikowana jako
+artefakt claude.ai z capability `db`, ta sama strona zapisuje decyzje na żywo;
+plik jest kanonem w obu przypadkach. Zobacz `references/review-surface.md`.
 
-Odfiltruj: czystą ideologię · filozofię narzędziową bez konsekwencji
-implementacyjnej · powielone sformułowania · gadanie operatora, które nigdy nie utwardziło się w
-konkretnego kandydata.
+### 8 · Kolejka i plan cięć
 
-## Czego ten skill nie robi
+```bash
+uv run "$CLI" "$W" queue --min-strength 4
+uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit 6 --gate 'cd {repo} && make check'
+```
 
-- Zamienia `aicx intents` w ślepy generator backlogu
-- Oznacza pozycje jako `done` na podstawie samej dokumentacji
-- Myli nazwę gałęzi z dowiezioną implementacją
-- Liczy komentarz TODO jako wylądowaną funkcję
-- Nadyma checklistę do 20 niskosygnałowym szumem
-- Dryfuje w przegląd PR na poziomie linii
-- Przepisuje plan na nowy roadmap (chyba że operator o to poprosił)
-- Traktuje „obecne w kodzie" i „działające end-to-end" jako automatycznie tożsame
+Kolejka trzyma intencje **otwarte, stabilne między hostami albo rozstrzygnięte
+przez człowieka i wystarczająco mocne**, uporządkowane po zależności (`after`),
+potem ryzyku, potem wpływie na główny przepływ, potem sile i wieku. Plan
+implement daje każdej cięcie: cytat Foundera jako brief, dowód i lukę floty,
+bramkę repo jako verifier, `mode = write`, `require_commit = true`. `codex` jest
+domyślnym workerem. Wszystko, co wymaga guzika Foundera (merge, deploy, sekrety,
+kasowanie danych), jest w cucie opisane i nigdy nie naciskane.
 
-Jeśli operator chce jakości diffa → `vc-review`. Nowa architektura →
-`vc-scaffold` lub `vc-partner`. Domknięcie luk → `vc-ownership` lub `vc-marbles`.
+### 9 · Zamknięcie
 
-## Relacja do innych skillów
+`status` zwraca 0 tylko, gdy nie zostaje żadna otwarta dyspozycja, żadne źródło
+nie jest niedostępne ani obcięte, a każde `landed` ma `runtime_verified = yes`.
+Do tego czasu cel jest otwarty — zgodnie z prawdą. Po powrocie z kompakcji:
+przeczytaj `LEDGER.md`, odpal `status`, potem `queue`; **nie powtarzaj sweepu**,
+wynik jest na dysku.
 
-- **Po `vc-init`** — znacznie silniejszy, bo worker zna już
-  kształt strukturalny i powierzchnię intencji.
-- **Przed `vc-marbles`** — gdy operator pyta „co z planu faktycznie
-  wylądowało?" / „które obietnice są fake-complete (fałszywie ukończone)?", uruchom najpierw `vc-intents`, a potem
-  wyślij najostrzejsze pozostałe kłamstwo do `vc-marbles`.
-- **Przed `vc-ownership`** — zdefiniuj powierzchnię prawdy, żeby tryb ownership działał
-  na rzeczywistości, nie na dryfie.
+## Kontrakt wyjścia
 
-## Heurystyki operatora
+1. **Pokrycie** — okno, źródła ze stanem (`read`/`empty`/`unavailable`/
+   `truncated`), pliki i wiersze per źródło.
+2. **Katalog** — zweryfikowane intencje, odrzucone cytaty z powodami.
+3. **Ledger** — werdykty per host, zgodność per para, dyspozycja efektywna,
+   korekty (reguła i człowiek), `runtime_verified`.
+4. **Kolejka** — stabilne otwarte intencje z uzasadnieniem porządku.
+5. **Plan** — `intents-implement.<host>.dispatch.toml`, czysty po doktorze.
+6. **Najwyższa prawda** — jedna nierozwiązana rzeczywistość, która powinna
+   trochę zaboleć. „43 % tego, co dwie floty nazwały landed, kwestionują własne
+   słowa Foundera" to najwyższa prawda; „część pozycji jest partial" nie.
 
-- Mniej, ostrzejszych pozycji zamiast rozdętej listy
-- Jawne evidence zamiast teatru pewności
-- Prawda runtime'u zamiast lojalności wobec planu
-- Nazwanie kłamstwa zamiast kosmetycznego zmiękczania go
+## Antywzorce
 
-Celem nie jest udowodnienie, że dokonano postępu. Celem jest dokładne wiedzieć, jaki
-kształt postęp naprawdę przyjął.
+Traktowanie rankingowego trafienia aicx jak przeczytanego źródła · parafraza w
+`quote` · werdykt jednej floty jako dowód · `landed` z `docs/*.md` ·
+`superseded` bez następcy · powtarzanie sweepu po powrocie · modele z czołówki
+do masowego czytania · verifier `run` z literałem toru (`release` w
+`L6-build-release` wyzwala hard-stop parsera dispatchu; skrypt pisze ścieżki
+przez `{id}`) · naciskanie hard-stopu, bo kolejka tak kazała · raportowanie
+zielonego audytu jako zamknięcia, gdy kolejka jest niepusta.
 
-## Końcowe przypomnienie
+## Skille pokrewne
 
-Ten skill nie chodzi o zachowanie godności planu. Chodzi o
-zachowanie godności rzeczywistości.
+`vc-init` przed wszystkim · `vc-canary`, gdy dwa moduły konkurują o prawdę,
+której intencja potrzebuje · `vc-dispatch` odpala każdy plan, który ten skill
+pisze · `vc-implement` / `vc-ownership` to cięcia · `vc-trust` falsyfikuje
+potem claim ukończenia workera · `vc-audit` dla spisanego planu zamiast korpusu.
 
-Gdy plan i repo się nie zgadzają, ufaj najpierw repo. Gdy repo i runtime
-się nie zgadzają, ufaj najpierw runtime'owi. Gdy wszystkie trzy się nie zgadzają, nazwij pęknięcie
-jasno i nazwij je najwyższą prawdą.
+## Zweryfikuj przed przekazaniem
+
+Obejdź ciężarówkę — [Reguła Weryfikacji](../VERIFICATION_RULE.md): ledger
+istnieje i `status` mówi OPEN z powodami, które umiesz nazwać; plan przeszedł
+`vibecrafted dispatch --doctor`; HTML otwiera się z właściwymi nazwami hostów i
+działającymi linkami do kodu; każda liczba w raporcie pochodzi z pliku w
+workdirze, nie z pamięci.
 
 ---
 

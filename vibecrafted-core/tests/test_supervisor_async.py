@@ -4,7 +4,10 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
+from typing import NoReturn
 
 from vibecrafted_core import control_plane, dispatcher
 from vibecrafted_core import supervisor_async as supervisor_async_module
@@ -18,7 +21,7 @@ from vibecrafted_core.lifecycle_runner import (
     record_stage_worker_completion,
 )
 from vibecrafted_core.report_contract import CLAIM_DIGEST_ENV
-from vibecrafted_core.supervisor_async import AsyncSupervisor
+from vibecrafted_core.supervisor_async import AsyncRunHandle, AsyncSupervisor
 
 
 def _runtime_meta(tmp_path: Path, run_id: str) -> Path:
@@ -82,6 +85,79 @@ def test_async_supervisor_emits_lifecycle_and_validates_artifacts(
     assert "created" in states
     assert "process_spawned" in states
     assert "report_validated" in states
+
+
+def test_async_supervisor_completion_closes_owned_resources_without_live_reconcile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Terminal worker ownership must not reopen fleet-wide process discovery."""
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+
+    def reject_live_reconcile(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("terminal completion must not scan process inventory")
+
+    monkeypatch.setattr(control_plane, "_worker_process_truth", reject_live_reconcile)
+    script = tmp_path / "worker.py"
+    script.write_text("print('worker terminal')\n", encoding="utf-8")
+
+    async def exercise() -> tuple[AsyncRunHandle, list[asyncio.Task[object]]]:
+        handle = await AsyncSupervisor().run(
+            run_id="asup-terminal-owner",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            require_report=False,
+        )
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current and not task.done()
+        ]
+        return handle, pending
+
+    handle, pending = asyncio.run(exercise())
+
+    assert handle.exit_code == 0
+    assert handle.process.returncode == 0
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.at_eof()
+    assert pending == []
+
+
+def test_async_supervisor_reads_operator_stop_from_its_event_range(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An accepted stop remains durable without a live-state board rebuild."""
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    script = tmp_path / "stopped-worker.py"
+    script.write_text(
+        "import os\n"
+        "from vibecrafted_core.control_plane import record_stop_transition\n"
+        "record_stop_transition(\n"
+        "    os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "    accepted=True,\n"
+        "    reason='test_operator_stop',\n"
+        ")\n"
+        "print('stopped worker terminal')\n",
+        encoding="utf-8",
+    )
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="asup-stopped-owner",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.operator_stopped is True
+    assert handle.operator_stop_reason == "test_operator_stop"
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.at_eof()
 
 
 def test_async_supervisor_persists_explicit_artifact_meta_outside_control_plane(
@@ -313,6 +389,87 @@ def test_async_supervisor_preseeds_and_stamps_launcher_owned_identity(
     assert meta_payload["claim_digest"] == digest
 
 
+def test_async_supervisor_publishes_provider_identity_while_child_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    run_id = "active-provider-axis"
+    meta = _runtime_meta(tmp_path, run_id)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "running",
+                "workspace_id": "workspace-alpha",
+                "worker_host_session": "frame-alpha",
+                "launch_receipt": "preserve-me",
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = tmp_path / "release-worker"
+    worker = tmp_path / "codex"
+    worker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, time\n"
+        "from pathlib import Path\n"
+        f"release = Path({str(release)!r})\n"
+        "print(json.dumps({'type': 'thread.started', "
+        "'thread_id': 'codex-live-provider'}), flush=True)\n"
+        "while not release.exists():\n"
+        "    time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    worker.chmod(0o755)
+
+    async def exercise() -> tuple[dict[str, object] | None, bool, bool, AsyncRunHandle]:
+        supervisor = AsyncSupervisor()
+        task = asyncio.create_task(
+            supervisor.run(
+                run_id=run_id,
+                command=[str(worker)],
+                root=tmp_path,
+                meta_path=meta,
+                require_report=False,
+            )
+        )
+        active_payload: dict[str, object] | None = None
+        process_was_live = False
+        task_was_done = True
+        try:
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                payload = json.loads(meta.read_text(encoding="utf-8"))
+                if payload.get("provider_session_id") == "codex-live-provider":
+                    active_payload = payload
+                    live_handle = supervisor.get(run_id)
+                    process_was_live = bool(
+                        live_handle is not None
+                        and live_handle.process.returncode is None
+                    )
+                    task_was_done = task.done()
+                    break
+        finally:
+            release.touch()
+        handle = await asyncio.wait_for(task, timeout=5)
+        return active_payload, process_was_live, task_was_done, handle
+
+    active_payload, process_was_live, task_was_done, handle = asyncio.run(exercise())
+
+    assert active_payload is not None, "provider identity was not published while live"
+    assert process_was_live is True
+    assert task_was_done is False
+    assert active_payload["session_id"] == "codex-live-provider"
+    assert active_payload["agent_session_id"] == "codex-live-provider"
+    assert active_payload["provider_session_id"] == "codex-live-provider"
+    assert active_payload["provider_session_source"] == "provider_stream"
+    assert active_payload["workspace_id"] == "workspace-alpha"
+    assert active_payload["worker_host_session"] == "frame-alpha"
+    assert active_payload["launch_receipt"] == "preserve-me"
+    assert handle.exit_code == 0
+
+
 def test_async_supervisor_preserves_explicit_resume_identity_without_new_event(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -349,10 +506,10 @@ def test_async_supervisor_preserves_explicit_resume_identity_without_new_event(
     )
 
     assert handle.agent_session_id == "codex-native-parent"
-    assert handle.session_id == "runtime-child"
+    uuid.UUID(handle.session_id)
     meta_payload = json.loads(meta.read_text(encoding="utf-8"))
     assert meta_payload["agent_session_id"] == "codex-native-parent"
-    assert meta_payload["runtime_session_id"] == "runtime-child"
+    assert meta_payload["runtime_session_id"] == handle.session_id
 
 
 def test_async_supervisor_preserves_blocked_claim_while_filling_identity(
@@ -766,13 +923,17 @@ def test_async_supervisor_salvages_grok_report_from_streaming_json(
     assert "Transport channel" not in out
     assert "None" not in out
     assert "session_id: grok-session" in out
-    assert "tokens_input: 0" in out
-    assert "tokens_output: 0" in out
+    # grok emitted no usage event: tokens are unknown, never a fictional 0
+    # (W3-01; this assertion used to pin the fake zero).
+    assert "tokens_input: unknown" in out
+    assert "tokens_output: unknown" in out
+    assert "tokens_input: 0" not in out
     assert "cost_usd: unknown" in out
     report_text = report.read_text(encoding="utf-8")
     assert "fallback_report: true" in report_text
-    assert "tokens_input: 0" in report_text
-    assert "tokens_output: 0" in report_text
+    assert "tokens_input: unknown" in report_text
+    assert "tokens_output: unknown" in report_text
+    assert "tokens_input: 0" not in report_text
     assert "cost_usd: unknown" in report_text
     assert "Ok." in report_text
     assert "thinking" not in report_text
@@ -1427,3 +1588,67 @@ def test_unparseable_silence_override_does_not_disable_the_bound() -> None:
             os.environ.pop("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", None)
         else:
             os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = previous
+
+
+def test_kimi_provider_session_id_lands_in_meta_before_settlement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A kimi run killed after its first stream event still carries the session id.
+
+    kimi's stream reveals the session id only in the trailing resume hint, so
+    the supervisor adopts it from the on-disk session store while the run is
+    live. Regression: impl-260930-210226-46946 timed out with the session dir
+    on disk from second one and provider_session_id=None in meta, which made
+    `vibecrafted resume` impossible (d4-session-id-early).
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_deadbeef-1234-4567-89ab-0123456789ab"
+    state = (
+        provider_home
+        / ".kimi-code"
+        / "sessions"
+        / "wd_worktree_00"
+        / session_id
+        / "state.json"
+    )
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "id": session_id,
+                "version": 2,
+                "cwd": str(root),
+                "createdAt": int(time.time() * 1000),
+            }
+        )
+    )
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import time\n"
+        'print(\'{\\"role\\":\\"meta\\",\\"type\\":\\"system.version\\",\\"version\\":\\"9.9.9\\"}\', flush=True)\n'
+        "time.sleep(3600)\n"
+    )
+    meta = tmp_path / "run.meta.json"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-early-session",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={"VIBECRAFTED_AGENT": "kimi"},
+            meta_path=meta,
+            report_path=tmp_path / "report.md",
+            transcript_path=tmp_path / "transcript.log",
+            timeout=15,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code != 0  # killed by the wall-clock timeout
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == session_id
+    assert payload["provider_session_source"] == "provider_session_store"

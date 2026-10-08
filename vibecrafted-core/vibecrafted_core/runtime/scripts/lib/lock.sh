@@ -38,3 +38,29 @@ status=running
 LOCK
   printf '%s\n' "$lock_file"
 }
+
+spawn_stamp_run_lock_pid() {
+  # Liveness contract: a lock without a probeable PID can only be judged by
+  # age. The launcher stamps itself so every projection (Python and Rust)
+  # can settle the run the moment this process is gone.
+  local lock_file="${1:-}" pid="${2:-}" tmp
+  [[ -n "$lock_file" && -n "$pid" && -f "$lock_file" ]] || return 0
+  tmp="${lock_file}.tmp.$pid"
+  {
+    grep -v '^launcher_pid=' "$lock_file" 2>/dev/null || true
+    printf 'launcher_pid=%s\n' "$pid"
+  } > "$tmp" && mv -f "$tmp" "$lock_file"
+}
+
+spawn_release_run_lock() {
+  # The lock is liveness state, not history: terminal truth lives in the run
+  # meta and control-plane snapshot. Release only a lock this run owns.
+  local lock_file="${1:-}" run_id="${2:-}"
+  [[ -n "$lock_file" && -f "$lock_file" ]] || return 0
+  # Safe run ids include '.' (spawn_is_safe_run_id). Match the ownership
+  # line as a fixed whole line so run.a cannot delete a lock for run-a.
+  if [[ -n "$run_id" ]] && ! grep -F -x -q -- "run_id=${run_id}" "$lock_file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$lock_file"
+}

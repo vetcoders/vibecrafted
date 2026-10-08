@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$agent" ]] || spawn_die "Missing --agent"
-[[ "$agent" =~ ^(claude|codex|agy|junie|grok)$ ]] || spawn_die "Invalid agent: $agent"
+[[ "$agent" =~ ^(claude|codex|agy|junie|grok|cursor|kimi|copilot)$ ]] || spawn_die "Invalid agent: $agent"
 spawn_validate_runtime "$runtime"
 spawn_require_positive_int "$count" "--count"
 spawn_rotation_validate_mode "$rotation"
@@ -85,9 +85,9 @@ if (( use_watcher )); then
 fi
 
 sources=0
-[[ -n "$depth" ]]  && ((sources++)) || true
-[[ -n "$task" ]]   && ((sources++)) || true
-[[ -n "$prompt" ]] && ((sources++)) || true
+if [[ -n "$depth" ]]; then ((sources += 1)); fi
+if [[ -n "$task" ]]; then ((sources += 1)); fi
+if [[ -n "$prompt" ]]; then ((sources += 1)); fi
 [[ $sources -le 1 ]] || spawn_die "Use at most one source: --depth, --file, or --prompt"
 if [[ $sources -eq 0 ]]; then
   depth=3
@@ -126,7 +126,7 @@ if [[ -n "$marbles_run_id" ]]; then
     elif [[ -f "$candidate_state_dir/god.md" && ! -w "$candidate_state_dir/god.md" ]]; then
       refuse_reason="god.md is read-only (prior dispatch finalized the seed)"
     elif [[ -f "$candidate_state_dir/state.json" ]]; then
-      terminal_status="$(python3 -c 'import json,sys
+      terminal_status="$("$(spawn_python_bin)" -c 'import json,sys
 try:
   with open(sys.argv[1]) as fh:
     print(json.load(fh).get("status",""))

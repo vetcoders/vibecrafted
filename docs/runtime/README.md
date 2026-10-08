@@ -63,14 +63,14 @@ not substitutes for telemetry-backed fleet dispatch.
 
 ## Documents in this directory
 
-| Document                                                           | What it covers                                                                                                                                     |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [CONTRACT.md](./CONTRACT.md)                                       | Session ownership, vc_frame layout, plan templates, living tree rule, spawn commands, output conventions, observation, quality gates, safety rules |
-| [TRIAGE_AND_SESSIONS.md](./TRIAGE_AND_SESSIONS.md)                 | Finished-run triage: `vc-frame triage-run`, bucket sessions `f·x·n`, origin stamp, push≠install, research vs implement                             |
-| [AGENT_OPS.md](./AGENT_OPS.md)                                     | Multi-agent failure classes, await contracts, worker host sessions (G7), remediations                                                              |
-| [EXECUTION_SURFACES.md](./EXECUTION_SURFACES.md)                   | Canonical command surfaces, agent PATH expectations, shell helper boundaries, and sandbox execution notes                                          |
-| [TOPOLOGY.md](./TOPOLOGY.md)                                       | Current runtime component topology                                                                                                                 |
-| [RUNTIME_INTEGRATION_ROADMAP.md](./RUNTIME_INTEGRATION_ROADMAP.md) | Runtime integration status and remaining work                                                                                                      |
+| Document                                           | What it covers                                                                                                                                     |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [CONTRACT.md](./CONTRACT.md)                       | Session ownership, vc_frame layout, plan templates, living tree rule, spawn commands, output conventions, observation, quality gates, safety rules |
+| [OPEN_THREADS.md](./OPEN_THREADS.md)               | What the superseded June-August 2026 direction docs left open, plus the invariants that still bind                                                 |
+| [TRIAGE_AND_SESSIONS.md](./TRIAGE_AND_SESSIONS.md) | Finished-run triage: `vc-frame triage-run`, bucket sessions `f·x·n`, origin stamp, push≠install, research vs implement                             |
+| [AGENT_OPS.md](./AGENT_OPS.md)                     | Multi-agent failure classes, await contracts, worker host sessions (G7), remediations                                                              |
+| [EXECUTION_SURFACES.md](./EXECUTION_SURFACES.md)   | Canonical command surfaces, agent PATH expectations, shell helper boundaries, and sandbox execution notes                                          |
+| [TOPOLOGY.md](./TOPOLOGY.md)                       | Current runtime component topology                                                                                                                 |
 
 ---
 
@@ -114,18 +114,12 @@ Just like in the human teams, AI agents have their strengths and weaknesses.
         Claude --> ClaudeBest
         Claude --> ClaudeAvoid
     end
-
-    subgraph Gemini
-        GeminiDesc[Why choose it:\n\n– Bold reframing\n– Creative system redesign\n– Fearless simplification]
-        GeminiBest[Best for:\n\n– Architecture leaps\n– Radical cleanup ideas\n– Product reframing and high‑variance exploration]
-        GeminiAvoid[Avoid when:\n\n– Task needs predictable, surgical implementation\n– Low‑variance execution suffices]
-        Gemini --> GeminiDesc
-        Gemini --> GeminiBest
-        Gemini --> GeminiAvoid
-    end
 ```
+
+Gemini is deprecated: `vibecrafted init/operator gemini` refuse and point to `agy`
+(Google Antigravity CLI). The launchable fleet is codex, claude, agy, junie, grok, cursor.
 
 ---
 
 _For the full runtime contract and spawn mechanics, see [CONTRACT.md](./CONTRACT.md)._
-_For the delegation doctrine used by agents, see [`skills/vc-agents/SKILL.md`](../../skills/vc-agents/SKILL.md)._
+_For the delegation doctrine used by agents, see [`vibecrafted-core/vibecrafted_core/skills/vc-agents/SKILL.md`](../../vibecrafted-core/vibecrafted_core/skills/vc-agents/SKILL.md)._

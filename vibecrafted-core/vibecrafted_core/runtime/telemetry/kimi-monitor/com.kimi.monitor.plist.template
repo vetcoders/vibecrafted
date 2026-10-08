@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.kimi.monitor</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON3_BIN__</string>
+		<string>__KIMI_HOME__/kimi_monitor.py</string>
+		<string>daemon</string>
+		<string>--config</string>
+		<string>__KIMI_HOME__/kimi-monitor.toml</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>__USER_HOME__</string>
+		<key>PATH</key>
+		<string>__KIMI_HOME__/bin:__USER_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>__KIMI_HOME__/logs/kimi-monitor.log</string>
+	<key>StandardErrorPath</key>
+	<string>__KIMI_HOME__/logs/kimi-monitor.log</string>
+</dict>
+</plist>

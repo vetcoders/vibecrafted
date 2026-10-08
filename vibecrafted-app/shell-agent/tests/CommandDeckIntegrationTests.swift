@@ -1,0 +1,1592 @@
+import AppKit
+import Foundation
+import SwiftUI
+import WebKit
+
+/// W3-only executable harness. All network traffic targets the fixture passed
+/// by test_command_deck_integration.py; no installed runtime is consulted.
+@main
+@MainActor
+struct CommandDeckIntegrationTests {
+  struct Failure: Error { let message: String }
+  final class Actions: CommandDeckActionHandling {
+    var received: [CommandDeckChromeAction] = []
+    func handle(_ action: CommandDeckChromeAction) { received.append(action) }
+  }
+  @MainActor
+  final class DownloadChoice {
+    var cancel = false
+  }
+
+  static func require(_ value: Bool, _ message: String) throws {
+    if !value { throw Failure(message: message) }
+  }
+
+  static func waitFor(line: UInt = #line, _ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(10)
+    while !condition() {
+      if Date() > deadline { throw Failure(message: "Fixture navigation timed out at line \(line)") }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+  }
+
+  /// Traverse mounted AppKit views and any exposed accessibility children.
+  /// SwiftUI hosts its inspector in a distinct native split-view column.
+  static func accessibilityNodes(_ root: NSObject) -> [NSObject] {
+    var visited = Set<ObjectIdentifier>()
+    var nodes: [NSObject] = []
+    func visit(_ node: NSObject) {
+      guard visited.insert(ObjectIdentifier(node)).inserted else { return }
+      nodes.append(node)
+      if node.responds(to: NSSelectorFromString("accessibilityChildren")),
+        let children = node.value(forKey: "accessibilityChildren") as? [NSObject] {
+        children.forEach(visit)
+      }
+      if let view = node as? NSView { view.subviews.forEach(visit) }
+    }
+    visit(root)
+    return nodes
+  }
+
+  static func inspectorContract(_ endpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(websiteDataStore: .nonPersistent())
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    let autosaveName = "CommandDeckShown-\(UUID().uuidString)"
+    let saved = CommandDeckWindowFactory.makeWindow(title: "Saved geometry fixture", frameAutosaveName: nil)
+    guard let screen = saved.screen ?? NSScreen.main else { throw Failure(message: "No fixture screen") }
+    let visible = screen.visibleFrame
+    saved.setFrame(NSRect(x: visible.maxX - 1545, y: visible.minY - 28,
+      width: min(1545, visible.width), height: visible.height + 28), display: false)
+    saved.saveFrame(usingName: autosaveName)
+    saved.close()
+    defer { NSWindow.removeFrame(usingName: autosaveName) }
+    let controller = MainWindowController(frameAutosaveName: autosaveName, model: model, session: session, actions: Actions())
+    controller.showWindow(nil)
+    defer { controller.close() }
+    guard let window = controller.window else { throw Failure(message: "Inspector window missing") }
+    try await waitFor { model.presentation.exposesCanvas }
+    func inspector() -> NSView? {
+      accessibilityNodes(window.contentView!).compactMap { $0 as? NSView }.first {
+        guard String(describing: type(of: $0)).contains("InspectorStyleContext"),
+          !$0.isHiddenOrHasHiddenAncestor else { return false }
+        var child = $0
+        while let parent = child.superview {
+          if let split = parent as? NSSplitView, split.isSubviewCollapsed(child) { return false }
+          child = parent
+        }
+        return window.contentView!.bounds.intersects(window.contentView!.convert($0.bounds, from: $0))
+      }
+    }
+    func toggle() -> NSToolbarItem? {
+      window.toolbar?.items.first { $0.label.contains("Inspector") }
+    }
+    func requireMountedDocument(_ checkpoint: String) async throws {
+      // DOM readiness and retained bounds also pass for a detached WKWebView.
+      // Let outgoing SwiftUI containers finish updating before checking ownership.
+      try await Task.sleep(for: .milliseconds(300))
+      try require(session.webView.window === window,
+        "Web document detached from its native window at \(checkpoint)")
+      try require(session.webView.isDescendant(of: window.contentView!),
+        "Web document left the visible content hierarchy at \(checkpoint)")
+      let rect = window.contentView!.convert(session.webView.bounds, from: session.webView)
+      try require(rect.width > 200 && rect.height > 200
+        && window.contentView!.bounds.intersects(rect)
+        && !session.webView.isHiddenOrHasHiddenAncestor,
+        "Web document has no visible native viewport at \(checkpoint): \(rect)")
+    }
+    try await waitFor { inspector() != nil && toggle() != nil }
+    try await Task.sleep(for: .milliseconds(300))
+    FileHandle.standardError.write(Data("SHOWN frame=\(window.frame) visible=\(visible) min=\(window.minSize)\n".utf8))
+    try require(visible.contains(window.frame), "Shown ready shell escaped the visible screen after toolbar/inspector mounting: \(window.frame), visible \(visible)")
+    for size in [NSSize(width: 1200, height: 800), NSSize(width: 800, height: 600)] {
+      window.setContentSize(size)
+      try await tick()
+      try require(inspector() != nil && toggle() != nil, "Inspector or discovery button missing at \(size)")
+      try require(session.webView.bounds.width > 200 && session.webView.bounds.height > 200,
+        "Inspector squeezed the document out of the window at \(size): \(session.webView.bounds)")
+      try await requireMountedDocument("resize \(size)")
+      let webRect = window.contentView!.convert(session.webView.bounds, from: session.webView)
+      try require(window.contentView!.bounds.contains(webRect),
+        "Ready web document escapes the window content at \(size): \(webRect)")
+      try require(visible.contains(window.frame), "Resized ready shell escaped the screen")
+    }
+    // A valid user-sized saved frame survives the mounted native chrome.
+    // "Valid" means it fits this display: hosted CI runners expose a
+    // 1024x768 screen (681pt visible), where a fixed 1000x700 request is
+    // clamped by AppKit and the equality contract would test the window
+    // server, not the shell.
+    let userWidth = min(CGFloat(1000), floor(visible.width) - 24)
+    let userHeight = min(CGFloat(700), floor(visible.height) - 20)
+    let userFrame = NSRect(x: floor(visible.midX - userWidth / 2), y: floor(visible.midY - userHeight / 2), width: userWidth, height: userHeight)
+    window.setFrame(userFrame, display: false)
+    window.saveFrame(usingName: autosaveName)
+    try await Task.sleep(for: .milliseconds(300))
+    try require(window.frame == userFrame, "Mounted layout replaced a valid user-sized frame: \(window.frame), requested \(userFrame)")
+    print("Witness: shown ready shell fits the full outer frame and web viewport; valid user geometry retained")
+    // The existing menu transport invokes the shell's toggle action. The
+    // bridged toolbar title must follow the same real mounted pane.
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() == nil }
+    try await waitFor { toggle()?.label == "Show Inspector" }
+    try await requireMountedDocument("inspector closed")
+    try await Task.sleep(for: .milliseconds(300))
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() != nil }
+    try await waitFor { toggle()?.label == "Hide Inspector" }
+    try await requireMountedDocument("inspector opened")
+    controller.openWorkspacePath("/usage")
+    try await waitFor { session.navigation.currentURL?.path == "/usage" }
+    try await waitFor { inspector() == nil }
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await tick()
+    try require(inspector() == nil, "Costs & usage exposed an empty run inspector")
+    try await requireMountedDocument("/usage")
+    controller.openWorkspacePath("/runs")
+    try await waitFor { session.navigation.currentURL?.path == "/runs" }
+    try await waitFor { inspector() != nil }
+    try await requireMountedDocument("/runs")
+    // Web navigation bypasses the sidebar; eligibility must follow the actual page.
+    try await evaluate("location.href = '/projects'", in: session.webView)
+    try await waitFor { session.navigation.currentURL?.path == "/projects" }
+    try await waitFor { inspector() == nil }
+    try await requireMountedDocument("/projects")
+    try await evaluate("location.href = '/'", in: session.webView)
+    try await waitFor { session.navigation.currentURL?.path == "/" }
+    try await waitFor { inspector() != nil }
+    try await requireMountedDocument("/")
+    NotificationCenter.default.post(name: .commandDeckToggleInspector, object: nil)
+    try await waitFor { inspector() == nil }
+    controller.openWorkspacePath("/runs")
+    try await waitFor { session.navigation.currentURL?.path == "/runs" }
+    try await tick()
+    try require(inspector() == nil, "Route navigation discarded the user's closed inspector preference")
+    try await requireMountedDocument("/runs with inspector closed")
+    for path in ["/settings", "/skills", "/", "/usage", "/"] {
+      controller.openWorkspacePath(path)
+      try await waitFor { session.navigation.currentURL?.path == path }
+      try await requireMountedDocument(path)
+    }
+    let retainedWebView = session.webView
+    controller.close()
+    controller.showWindow(nil)
+    try await requireMountedDocument("window reopen")
+    try require(session.webView === retainedWebView && controller.window === window,
+      "Window reopen recreated the native document session")
+    print("Witness: native document remains mounted across inspector eligibility changes")
+    print("Witness: existing native inspector defaults open, toolbar and menu toggle it, actual routes govern eligibility, window preference survives navigation at 800×600 and 1200×800")
+  }
+
+  static func windowGeometryContract() throws {
+    let fresh = CommandDeckWindowFactory.makeWindow(title: "Geometry fixture", frameAutosaveName: nil)
+    defer { fresh.close() }
+    guard let screen = fresh.screen ?? NSScreen.main else {
+      throw Failure(message: "No screen for AppKit geometry contract")
+    }
+    try require(screen.visibleFrame.contains(fresh.frame),
+      "Fresh Command Deck extends beyond its screen's visible frame: \(fresh.frame)")
+
+    let name = "CommandDeckGeometry-\(UUID().uuidString)"
+    defer { NSWindow.removeFrame(usingName: name) }
+    let saved = NSWindow(contentRect: .zero,
+      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    saved.isReleasedWhenClosed = false
+    defer { saved.close() }
+    let oversized = NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.minY,
+      width: screen.visibleFrame.width + 400, height: screen.visibleFrame.height + 400)
+    saved.setFrame(oversized, display: false)
+    saved.saveFrame(usingName: name)
+    let restored = CommandDeckWindowFactory.makeWindow(title: "Restored fixture", frameAutosaveName: name)
+    defer { restored.close() }
+    try require(screen.visibleFrame.contains(restored.frame),
+      "Restored oversized Command Deck extends beyond visible frame: \(restored.frame)")
+
+    // Keep both the size and position of an already valid user frame.
+    let userWidth = min(950, screen.visibleFrame.width)
+    let userHeight = min(700, screen.visibleFrame.height)
+    let userFrame = NSRect(
+      x: screen.visibleFrame.minX + min(70, screen.visibleFrame.width - userWidth),
+      y: screen.visibleFrame.minY + min(50, screen.visibleFrame.height - userHeight),
+      width: userWidth, height: userHeight)
+    saved.setFrame(userFrame, display: false)
+    saved.saveFrame(usingName: name)
+    let userSized = CommandDeckWindowFactory.makeWindow(title: "User-sized fixture", frameAutosaveName: name)
+    defer { userSized.close() }
+    try require(userSized.frame == userFrame, "Valid saved geometry was resized or recentered")
+
+    // Mount at the visible boundary: native toolbar bridging can change the
+    // titled frame after makeWindow. It must still fit after layout.
+    fresh.setFrame(screen.visibleFrame, display: false)
+    CommandDeckWindowFactory.mount(
+      Text("Geometry fixture").toolbar { Button("Fixture") {} }, in: fresh)
+    try require(fresh.toolbar != nil, "Geometry fixture did not mount a native toolbar")
+    try require(screen.visibleFrame.contains(fresh.frame), "Mounted toolbar escaped visible frame")
+
+    let cases: [(String, NSRect, NSRect, NSRect)] = [
+      ("Dock and menu exclusion",
+        NSRect(x: 42, y: 70, width: 1398, height: 800),
+        NSRect(x: 0, y: 0, width: 1440, height: 900),
+        NSRect(x: 42, y: 70, width: 1398, height: 800)),
+      ("positive monitor origin",
+        NSRect(x: 1920, y: 80, width: 1024, height: 700),
+        NSRect(x: 2500, y: 600, width: 900, height: 650),
+        NSRect(x: 2044, y: 130, width: 900, height: 650)),
+      ("negative monitor origin",
+        NSRect(x: -1920, y: -900, width: 1400, height: 820),
+        NSRect(x: -2400, y: -1200, width: 1000, height: 700),
+        NSRect(x: -1920, y: -900, width: 1000, height: 700)),
+      ("screen below ordinary minimum",
+        NSRect(x: 10, y: 40, width: 640, height: 480),
+        NSRect(x: 0, y: 0, width: 1200, height: 822),
+        NSRect(x: 10, y: 40, width: 640, height: 480)),
+      ("valid user frame",
+        NSRect(x: 42, y: 70, width: 1398, height: 800),
+        NSRect(x: 100, y: 100, width: 950, height: 700),
+        NSRect(x: 100, y: 100, width: 950, height: 700)),
+      ("disconnected display",
+        NSRect(x: 42, y: 0, width: 2006, height: 1121),
+        NSRect(x: 5000, y: 3000, width: 950, height: 700),
+        NSRect(x: 1098, y: 421, width: 950, height: 700)),
+    ]
+    for (label, visible, input, expected) in cases {
+      try require(CommandDeckWindowFactory.fittedFrame(input, in: visible) == expected,
+        "Incorrect complete-frame geometry: \(label)")
+      try require(CommandDeckWindowFactory.fittedFrame(expected, in: visible) == expected,
+        "Fitting twice changed geometry: \(label)")
+      // Actual NSWindow sizing must honor the same geometry, including when
+      // the screen is smaller than the usual 800x600 frame minimum.
+      saved.minSize = .zero
+      saved.setFrame(input, display: false)
+      CommandDeckWindowFactory.fitToVisibleFrame(saved, in: visible)
+      try require(saved.frame == expected, "AppKit frame did not fit: \(label): \(saved.frame)")
+      try require(saved.minSize == NSSize(width: min(800, visible.width), height: min(600, visible.height)),
+        "AppKit minimum prevents visible-frame fit: \(label)")
+    }
+    print("CommandDeck window geometry passed")
+  }
+
+  static func stateContract(_ endpoint: URL) throws {
+    var published: URL? = endpoint
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: published,
+        workspaces: published?.appendingPathComponent("workspaces"),
+        unavailableReason: published == nil ? "fixture offline" : nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    var endpoints: [URL?] = []
+    model.endpointDidChange = { endpoints.append($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    try require(model.state == .connecting, "Caretaker availability was mistaken for web success")
+    model.receiveWebState(.failed(url: endpoint, reason: "fixture failed"))
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    try require(model.state == .recovering("fixture failed"), "Polling erased the web failure")
+    try require(endpoints.count == 1, "Same endpoint reloaded on each poll")
+    model.receiveWebState(.loaded(endpoint.appendingPathComponent("workspaces")))
+    try require(model.presentation.exposesCanvas, "Loaded page did not expose the canvas")
+    model.receiveWebState(.loading(endpoint.appendingPathComponent("runs")))
+    try require(model.presentation.exposesCanvas && model.isNavigating,
+      "Ordinary internal navigation hid the retained canvas")
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    try require(model.presentation.exposesCanvas, "Caretaker poll hid in-session navigation")
+    model.receiveWebState(.failed(url: endpoint, reason: "HTTP failure"))
+    try require(!model.presentation.exposesCanvas, "HTTP failure retained online canvas")
+    model.receiveWebState(.loading(endpoint))
+    try require(!model.presentation.exposesCanvas, "Retry displayed failed content as online")
+    model.receiveWebState(.loaded(endpoint))
+    published = nil
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    model.receiveWebState(.loaded(endpoint))
+    try require(!model.presentation.exposesCanvas, "Stale finish bypassed unavailable owner")
+    published = endpoint
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+    try require(endpoints.count == 3 && endpoints[1] == nil && endpoints[2] == endpoint,
+      "Same-endpoint recovery did not reapply the endpoint")
+    try require(model.state == .connecting, "Reappearing endpoint reused stale loaded state")
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: false)
+    try require(model.endpoint == nil && !model.presentation.exposesCanvas, "Missing runtime stayed online")
+  }
+
+  static func trayMenuContract() throws {
+    let primary = StatusItemController.primaryCommands
+    try require(primary.map(\.title) == [
+      "Open Vibecrafted", "Open Terminal", "Check for Updates…", "Workspaces", "Help & Diagnostics…"
+    ], "Tray primary actions are not human-facing")
+    try require(primary.map(\.action) == [
+      .showCommandDeck, .openTerminal, .checkForUpdates, .showWorkspaces, .help
+    ], "Tray primary actions changed dispatch")
+    try require(primary[0].keyEquivalent == "o" && primary[1].keyEquivalent == "t",
+      "Tray shortcuts changed")
+
+    let advanced = StatusItemController.advancedCommands
+    for action in [
+      StatusItemAction.startServer, .restartServer, .stopRuntime, .showLogs,
+      .revealRuntime, .revealControlPlane, .copyRuntimeIdentity
+    ] {
+      try require(advanced.contains { $0.action == action },
+        "Advanced menu omitted \(action.rawValue)")
+    }
+
+    let unavailable = StatusItemAvailability(
+      canShowCommandDeck: true, canOpenTerminal: false, canRetryConnection: false,
+      canRepairRuntime: false, canStopRuntime: false, canShowDiagnostics: true,
+      canQuitApp: true)
+    try require(StatusItemController.isEnabled(.showCommandDeck, availability: unavailable),
+      "Open Vibecrafted should remain available")
+    try require(StatusItemController.isEnabled(.showWorkspaces, availability: unavailable),
+      "Workspaces should remain available")
+    try require(StatusItemController.isEnabled(.help, availability: unavailable),
+      "Help should remain available")
+    try require(StatusItemController.isEnabled(.checkForUpdates, availability: unavailable),
+      "Check for Updates should remain available")
+    try require(!StatusItemController.isEnabled(.openTerminal, availability: unavailable)
+      && !StatusItemController.isEnabled(.stopRuntime, availability: unavailable)
+      && !StatusItemController.isEnabled(.startServer, availability: unavailable),
+      "Unavailable runtime actions became enabled")
+
+    let running = StatusItemAvailability(
+      canShowCommandDeck: true, canOpenTerminal: true, canRetryConnection: true,
+      canRepairRuntime: true, canStopRuntime: true, canShowDiagnostics: true,
+      canQuitApp: true, runtimeActions: [.startServer, .restartServer, .showLogs,
+        .revealRuntime, .revealControlPlane, .copyRuntimeIdentity])
+    try require(StatusItemController.isEnabled(.startServer, availability: running)
+      && StatusItemController.isEnabled(.copyRuntimeIdentity, availability: running),
+      "Available runtime actions became disabled")
+  }
+
+  static func policyContract(_ endpoint: URL) throws {
+    let origin = WebRuntimeOrigin(url: endpoint)!
+    for path in ["/", "/workspaces", "/run/example"] {
+      let url = URL(string: path, relativeTo: endpoint)!.absoluteURL
+      try require(WebNavigationPolicy.decide(url: url, runtime: origin,
+        isMainFrame: true, shouldPerformDownload: false) == .allowInApp, "Internal route escaped")
+    }
+    let external = URL(string: "https://example.com/")!
+    try require(WebNavigationPolicy.decide(url: external, runtime: origin,
+      isMainFrame: true, shouldPerformDownload: false) == .openExternally(external), "External URL policy")
+    for value in ["file:///tmp/private", "javascript:alert(1)", "data:text/html,x", "mailto:a@example.com"] {
+      let decision = WebNavigationPolicy.decide(url: URL(string: value), runtime: origin,
+        isMainFrame: true, shouldPerformDownload: true)
+      guard case .block = decision else { throw Failure(message: "Download flag bypassed scheme policy") }
+    }
+
+    // The caretaker may select either loopback or a Tailscale IP literal for
+    // its local HTTP server. Both remain the exact in-app runtime origin.
+    for value in ["http://127.0.0.1:4107/console", "http://100.64.0.7:4107/console"] {
+      let runtimeURL = URL(string: value)!
+      let runtime = WebRuntimeOrigin(url: runtimeURL)!
+      try require(WebNavigationPolicy.decide(url: runtimeURL, runtime: runtime,
+        isMainFrame: true, shouldPerformDownload: false) == .allowInApp,
+        "Caretaker-selected local runtime was rejected: \(value)")
+    }
+
+    let foreignHTTPS = URL(string: "https://foreign.example/frame")!
+    try require(WebNavigationPolicy.decide(url: foreignHTTPS, runtime: origin,
+      isMainFrame: false, shouldPerformDownload: false) == .allowInApp,
+      "Secure foreign sub-frame was rejected")
+    let foreignHTTP = URL(string: "http://foreign.example/frame")!
+    guard case .block = WebNavigationPolicy.decide(url: foreignHTTP, runtime: origin,
+      isMainFrame: false, shouldPerformDownload: false)
+    else { throw Failure(message: "Foreign cleartext sub-frame bypassed runtime boundary") }
+  }
+
+  static func authenticationAndDownloadContract(_ endpoint: URL) throws {
+    let origin = WebRuntimeOrigin(url: endpoint)!
+    try require(WebNavigationPolicy.decideAuthenticationChallenge(
+      method: NSURLAuthenticationMethodServerTrust, host: origin.host, port: origin.port,
+      scheme: origin.scheme, runtime: origin) == .performDefaultHandling,
+      "TLS bypassed system trust")
+    let foreign = WebNavigationPolicy.decideAuthenticationChallenge(
+      method: NSURLAuthenticationMethodHTTPBasic, host: "foreign.example", port: origin.port,
+      scheme: origin.scheme, runtime: origin)
+    guard case .cancel = foreign else { throw Failure(message: "Credentials escaped runtime origin") }
+    let downgrade = WebNavigationPolicy.decideAuthenticationChallenge(
+      method: NSURLAuthenticationMethodHTTPBasic, host: origin.host, port: origin.port,
+      scheme: "https", runtime: origin)
+    guard case .cancel = downgrade else { throw Failure(message: "Credential scheme mismatch allowed") }
+    let blob = URL(string: "blob:\(endpoint.absoluteString)fixture-id")!
+    try require(WebNavigationPolicy.decideResponse(url: blob, runtime: origin,
+      isMainFrame: true, canShowMIMEType: false, statusCode: nil) == .startDownload,
+      "Same-origin blob rejected at response stage")
+    let foreignBlob = WebNavigationPolicy.decideResponse(
+      url: URL(string: "blob:https://foreign.example/id"), runtime: origin,
+      isMainFrame: true, canShowMIMEType: false, statusCode: nil)
+    guard case .block = foreignBlob else { throw Failure(message: "Foreign blob admitted") }
+    try require(WebNavigationPolicy.decideResponse(url: endpoint, runtime: origin,
+      isMainFrame: true, canShowMIMEType: false, statusCode: 200) == .startDownload,
+      "Normal download rejected")
+    try require(WebNavigationPolicy.decideResponse(url: URL(string: "https://foreign.example/frame"),
+      runtime: origin, isMainFrame: false, canShowMIMEType: true, statusCode: 200) == .allowInApp,
+      "Action/response subframe policies disagree")
+    let directory = URL(fileURLWithPath: "/fixture/downloads")
+    let destination = WebNavigationPolicy.downloadDestination(directory: directory,
+      suggestedFilename: "report.txt", fileExists: { $0.lastPathComponent == "report.txt" })
+    try require(destination == .save(directory.appendingPathComponent("report-1.txt")),
+      "Download overwrote an existing file")
+    let name = WebNavigationPolicy.sanitizedDownloadFilename("../private/secret")
+    try require(name != nil && !name!.contains("/") && !name!.hasPrefix("."), "Unsafe filename")
+  }
+
+
+  /// Tab-role and MIME contracts: a UI route and an API endpoint on the same
+  /// origin are told apart by the response, never by guessing from the path.
+  static func tabPolicyContract(_ endpoint: URL) throws {
+    let origin = WebRuntimeOrigin(url: endpoint)!
+    let api = URL(string: "/api/scaffold/artifacts?plan_id=x", relativeTo: endpoint)!.absoluteURL
+    let page = URL(string: "/scaffold", relativeTo: endpoint)!.absoluteURL
+    func response(_ url: URL, mime: String?, role: WebTabRole, mainFrame: Bool = true) -> WebResponseDecision {
+      WebNavigationPolicy.decideResponse(url: url, runtime: origin, isMainFrame: mainFrame,
+        canShowMIMEType: true, statusCode: 200, mimeType: mime, role: role)
+    }
+    try require(response(api, mime: "application/json", role: .console) == .divertToReferenceTab,
+      "Console let a JSON endpoint replace its document")
+    try require(response(api, mime: "text/plain; charset=utf-8", role: .console) == .divertToReferenceTab,
+      "Console let a plain-text machine document replace its document")
+    try require(response(page, mime: "text/html; charset=utf-8", role: .console) == .allowInApp,
+      "Console refused its own HTML route")
+    try require(response(api, mime: "application/json", role: .console, mainFrame: false) == .allowInApp,
+      "Console blocked a same-origin JSON sub-frame; API requests must not be globally blocked")
+    try require(response(api, mime: "application/json", role: .reference) == .allowInApp,
+      "Reference tab refused the machine document it exists for")
+    try require(response(api, mime: "application/json", role: .tool) == .allowInApp,
+      "Tool tab refused a machine document")
+    try require(response(api, mime: nil, role: .console) == .allowInApp,
+      "An unknown MIME was treated as a machine document")
+    guard case .block = WebNavigationPolicy.decideResponse(
+      url: URL(string: "https://foreign.example/landing"), runtime: origin, isMainFrame: true,
+      canShowMIMEType: true, statusCode: 200, mimeType: "text/html", role: .tool)
+    else { throw Failure(message: "Tool tab followed a foreign main-frame redirect") }
+    try require(WebNavigationPolicy.isInteractiveDocumentMIME("application/xhtml+xml")
+      && !WebNavigationPolicy.isInteractiveDocumentMIME("application/x-ndjson"), "MIME classification")
+
+    // target=_blank / window.open: a native tab, never a second WebKit view.
+    try require(WebNavigationPolicy.decideNewWindow(url: page, runtime: origin, role: .console,
+      shouldPerformDownload: false) == .openInTab(page, .tool), "Same-origin _blank did not become a tool tab")
+    try require(WebNavigationPolicy.decideNewWindow(url: page, runtime: origin, role: .tool,
+      shouldPerformDownload: false) == .openInTab(page, .tool), "Tool tab _blank policy")
+    let foreign = URL(string: "https://example.com/")!
+    try require(WebNavigationPolicy.decideNewWindow(url: foreign, runtime: origin, role: .console,
+      shouldPerformDownload: false) == .openExternally(foreign), "Foreign _blank did not leave via the system browser")
+    guard case .block = WebNavigationPolicy.decideNewWindow(url: page, runtime: origin, role: .reference,
+      shouldPerformDownload: false) else { throw Failure(message: "Reference tab opened a window") }
+    guard case .block = WebNavigationPolicy.decideNewWindow(url: URL(string: "javascript:alert(1)"),
+      runtime: origin, role: .console, shouldPerformDownload: false)
+    else { throw Failure(message: "javascript: window.open escaped") }
+
+    // A local report tab shows exactly one file.
+    let document = URL(fileURLWithPath: "/fixture/.aicx/aicx-dashboard.html")
+    try require(WebNavigationPolicy.decideLocalDocumentNavigation(
+      url: URL(string: "file:///fixture/.aicx/aicx-dashboard.html#sessions"), document: document,
+      isMainFrame: true, shouldPerformDownload: false) == .allowInApp, "Fragment of the local document refused")
+    guard case .block = WebNavigationPolicy.decideLocalDocumentNavigation(
+      url: URL(fileURLWithPath: "/fixture/.aicx/config.toml"), document: document,
+      isMainFrame: true, shouldPerformDownload: false)
+    else { throw Failure(message: "Local document tab reached a sibling file") }
+    guard case .block = WebNavigationPolicy.decideLocalDocumentNavigation(
+      url: URL(string: "https://example.com/frame"), document: document,
+      isMainFrame: false, shouldPerformDownload: false)
+    else { throw Failure(message: "Local document tab embedded a frame") }
+    try require(WebNavigationPolicy.decideLocalDocumentNavigation(
+      url: foreign, document: document, isMainFrame: true, shouldPerformDownload: false) == .openExternally(foreign),
+      "Local document link did not leave via the system browser")
+  }
+
+  /// Destinations resolve against runtime truth or say why they cannot.
+  static func destinationContract(_ endpoint: URL) throws {
+    let home = URL(fileURLWithPath: "/fixture/home", isDirectory: true)
+    func context(endpoint: URL?, env: [String: String] = [:], exists: @escaping (URL) -> Bool = { _ in false })
+      -> ToolDestinationContext {
+      ToolDestinationContext(runtimeEndpoint: endpoint, homeDirectory: home, environment: env, fileExists: exists)
+    }
+    let report = ToolDestination.named("loctree-report")!
+    guard case .available(let url, .runtime(let origin)) = report.resolve(in: context(endpoint: endpoint)) else {
+      throw Failure(message: "Loctree report did not resolve against the connected runtime")
+    }
+    try require(url.host == endpoint.host && url.port == endpoint.port && url.path == "/structure/report"
+      && origin == WebRuntimeOrigin(url: endpoint)!, "Loctree report route was not derived from the endpoint")
+    guard case .unavailable = report.resolve(in: context(endpoint: nil)) else {
+      throw Failure(message: "Loctree report claimed availability without a runtime")
+    }
+
+    let usage = ToolDestination.named("usage")!
+    guard case .available(let usageURL, .runtime(let usageOrigin)) = usage.resolve(
+      in: context(endpoint: endpoint))
+    else { throw Failure(message: "Usage dashboard did not resolve against the connected runtime") }
+    try require(usageURL.host == endpoint.host && usageURL.port == endpoint.port
+      && usageURL.path == "/usage" && usageOrigin == WebRuntimeOrigin(url: endpoint)!,
+      "Usage dashboard route was not derived from the runtime endpoint")
+    guard case .unavailable = usage.resolve(in: context(endpoint: nil)) else {
+      throw Failure(message: "Usage dashboard claimed availability without a runtime")
+    }
+
+    let dashboard = ToolDestination.named("aicx-dashboard")!
+    guard case .unavailable(let reason) = dashboard.resolve(in: context(endpoint: endpoint)),
+      reason.contains("/fixture/home/.aicx/aicx-dashboard.html"), reason.contains("aicx dashboard")
+    else { throw Failure(message: "Missing AICX dashboard was not reported with its path and the owner command") }
+    let generated = URL(fileURLWithPath: "/fixture/home/.aicx/aicx-dashboard.html")
+    guard case .available(let file, .localDocument(let scoped)) = dashboard.resolve(
+      in: context(endpoint: nil, exists: { $0.path == generated.path })), file == scoped, file.path == generated.path
+    else { throw Failure(message: "Generated AICX dashboard did not resolve as a local document") }
+    let overridden = URL(fileURLWithPath: "/fixture/aicx-home/aicx-dashboard.html")
+    guard case .available(let overrideFile, _) = dashboard.resolve(in: context(endpoint: nil,
+      env: ["AICX_HOME": "/fixture/aicx-home"], exists: { $0.path == overridden.path })),
+      overrideFile.path == overridden.path
+    else { throw Failure(message: "AICX_HOME override was ignored") }
+
+    // Slack console: owner-backed through the operator's config.toml [tools]
+    // table. Unset reads as a boundary that names the owner and the file.
+    let slack = ToolDestination.named("slack-agent-console")!
+    func configured(_ toml: String?, xdg: String? = nil) -> ToolDestinationContext {
+      var env: [String: String] = [:]
+      if let xdg { env["XDG_CONFIG_HOME"] = xdg }
+      return ToolDestinationContext(runtimeEndpoint: endpoint, homeDirectory: home, environment: env,
+        fileExists: { _ in true }, readConfiguration: { _ in toml })
+    }
+    guard case .unavailable(let slackReason) = slack.resolve(in: configured(nil)),
+      slackReason.contains("vc-slack-agent"), slackReason.contains("/fixture/home/.config/vibecrafted/config.toml"),
+      slackReason.contains("[tools.slack-console]")
+    else { throw Failure(message: "Unconfigured Slack console did not name its owner and the config file") }
+    guard case .unavailable(let onlyServer) = slack.resolve(in: configured("[server]\nport = 3025\n")),
+      onlyServer.contains("not configured")
+    else { throw Failure(message: "A config.toml with only [server] was not read as unconfigured") }
+    guard case .available(let consoleURL, .service(let consoleOrigin)) = slack.resolve(in: configured(
+      "# operator config\n[server]\nport = 3025\n\n[tools.slack-console]\nurl = \"http://100.82.232.70:4300/console\" # served by make portal-preview\n")),
+      consoleURL.absoluteString == "http://100.82.232.70:4300/console",
+      consoleOrigin == WebRuntimeOrigin(url: URL(string: "http://100.82.232.70:4300/")!)!
+    else { throw Failure(message: "Configured Slack console did not resolve to a service scope on its own origin") }
+    try require(ToolDestinationConfiguration.configurationFile(homeDirectory: home, environment: ["XDG_CONFIG_HOME": "/fixture/xdg"]).path
+      == "/fixture/xdg/vibecrafted/config.toml", "XDG_CONFIG_HOME was ignored for config.toml")
+    guard case .unavailable(let emptyReason) = slack.resolve(in: configured("[tools.slack-console]\nurl = \"\"\n")),
+      emptyReason.contains("not configured")
+    else { throw Failure(message: "An empty url was not read as unconfigured") }
+    let frame = ToolDestination.named("vc-frame")!
+    guard case .unavailable(let frameReason) = frame.resolve(in: configured(nil)),
+      frameReason.contains("vc-frame web"), frameReason.contains("[tools.vc-frame]"),
+      frameReason.contains("/fixture/home/.config/vibecrafted/config.toml")
+    else { throw Failure(message: "Unconfigured Frame did not name vc-frame web and the config file") }
+    guard case .available(let frameURL, .service(let frameOrigin)) = frame.resolve(in: configured(
+      "[tools.vc-frame]\nurl = \"http://127.0.0.1:8082/\"\n")),
+      frameURL.absoluteString == "http://127.0.0.1:8082/",
+      frameOrigin == WebRuntimeOrigin(url: URL(string: "http://127.0.0.1:8082/")!)!
+    else { throw Failure(message: "Configured Frame did not resolve to a service scope on its own origin") }
+    guard FrameWebLaunch.bind(url: frameURL)?.startArguments == ["web", "--ip", "127.0.0.1", "--port", "8082"]
+    else { throw Failure(message: "Configured Frame bind did not take host and port from the named URL") }
+    try require(FrameWebLaunch.bind(url: URL(string: "https://127.0.0.1:8082/")!) == nil,
+      "HTTPS Frame origins must not be started by the App")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://100.82.232.70:8082/")!) == nil,
+      "Remote Frame origins must not be started by the App")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://127.0.0.1:9090/")!)?.port == 9090,
+      "A non-default Frame port must come from the named URL, never a guessed 8082")
+    for invalid in [
+      "[tools.slack-console]\nurl = \"ftp://x/console\"\n",
+      "[tools.slack-console]\nurl = \"http://u:p@x/console\"\n",
+      "[tools.slack-console]\nurl = \"http://x/console?token=1\"\n",
+      "[tools.slack-console]\nurl = \"http://x/console#frag\"\n",
+      "[tools.slack-console]\nurl = 4300\n",
+      "[tools.slack-console]\nport = 4300\n",
+      "[tools.portal]\nurl = \"http://x/\"\n",
+      "[tools]\nslack-console = 1\n",
+    ] {
+      guard case .unavailable(let reason) = slack.resolve(in: configured(invalid)), reason.contains("invalid [tools] table")
+      else { throw Failure(message: "Invalid [tools] contract was accepted: \(invalid)") }
+    }
+    try require(!ToolDestination.catalog.contains { destination in
+      if case .runtimeRoute(let path) = destination.target { return path.contains("://") || path.contains(":") }
+      if case .unavailable = destination.target { return true }
+      return false
+    }, "A destination hardcodes a host or port, or is registered as permanently unavailable")
+    try require(report.isolatedContent && !usage.isolatedContent && !dashboard.isolatedContent,
+      "Generated report must be isolated; trusted runtime and local dashboards keep their normal stores")
+  }
+
+  /// The corner mark is not a sidebar destination. A configured loopback URL
+  /// still binds through FrameWebLaunch, and only the mark calls present(service:).
+  static func frameProjectionContract(_ endpoint: URL) throws {
+    try require(FrameProjectionMark.label == "vc_", "The corner mark is not vc_")
+    try require(!FrameProjectionMark.isSidebarDestination(),
+      "The vc_ mark is a CommandDeckDestination")
+    let loopback = URL(string: "http://127.0.0.1:8082/")!
+    try require(
+      FrameWebLaunch.bind(url: loopback)?.startArguments == ["web", "--ip", "127.0.0.1", "--port", "8082"],
+      "Configured loopback URL did not bind via FrameWebLaunch")
+    try require(FrameWebLaunch.bind(url: URL(string: "https://127.0.0.1:8082/")!) == nil,
+      "HTTPS Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://10.0.0.8:8082/")!) == nil,
+      "Non-loopback Frame origins must not bind")
+    try require(FrameWebLaunch.bind(url: URL(string: "http://127.0.0.1:9090/")!)?.port == 9090,
+      "A non-default Frame port must come from the named URL")
+
+    let model = AppModel()
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    session.apply(endpoint: endpoint)
+    let frameURL = URL(string: "http://127.0.0.1:9/")!
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: session, actions: Actions())
+    controller.frameWebURL = { frameURL }
+    controller.openWorkspacePath("/frame")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "A sidebar path presented the frame origin")
+    }
+    try require(controller.presentConfiguredFrame(), "The mark did not present the configured origin")
+    guard case .service(let origin) = session.scope, origin == WebRuntimeOrigin(url: frameURL) else {
+      throw Failure(message: "present(service:) was not reached from the mark")
+    }
+    controller.restoreFromFrame()
+    guard case .runtime(let restored) = session.scope, restored == WebRuntimeOrigin(url: endpoint) else {
+      throw Failure(message: "Back did not restore the product console in this window")
+    }
+    controller.frameWebURL = { nil }
+    try require(!controller.presentConfiguredFrame(), "An absent frame URL still presented")
+    guard case .runtime = session.scope else {
+      throw Failure(message: "The quiet mark changed the window")
+    }
+    session.webView.stopLoading()
+    controller.close()
+    print("Witness: vc_ mark presents the configured origin; sidebar path and absent URL do not")
+  }
+
+  static func hasFixtureCookie(_ store: WKHTTPCookieStore) async -> Bool {
+    await withCheckedContinuation { continuation in
+      store.getAllCookies { cookies in
+        continuation.resume(returning: cookies.contains { $0.name == "w3_session" })
+      }
+    }
+  }
+
+  static func evaluateString(_ script: String, in view: WKWebView) async throws -> String {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+      view.evaluateJavaScript(script) { value, error in
+        if let error { continuation.resume(throwing: error) }
+        else { continuation.resume(returning: value as? String ?? "") }
+      }
+    }
+  }
+
+  static func tick() async throws {
+    try await Task.sleep(for: .milliseconds(50))
+  }
+
+  static func evaluate(_ script: String, in view: WKWebView) async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      view.evaluateJavaScript(script) { _, error in
+        if let error { continuation.resume(throwing: error) }
+        else { continuation.resume() }
+      }
+    }
+  }
+
+  static func webContract(_ endpoint: URL) async throws {
+    let model = AppModel()
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let downloadChoice = DownloadChoice()
+    let session = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { name, _, _ in
+      downloadChoice.cancel ? nil : directory.appendingPathComponent(name)
+    })
+    var downloaded: [URL] = []
+    var downloadErrors: [String] = []
+    session.events.downloadFinished = { downloaded.append($0) }
+    session.events.downloadFailed = { downloadErrors.append($0) }
+    var interruptions = 0
+    session.events.stateDidChange = { state in
+      if case .interrupted = state { interruptions += 1 }
+    }
+    let original = session.webView
+    session.apply(endpoint: endpoint)
+    try await waitFor { if case .loaded = session.loadState { return true }; return false }
+    session.navigate(path: "/workspaces?filter=active#fixture")
+    try await waitFor { if case .loaded(let url) = session.loadState { return url.path == "/workspaces" }; return false }
+    let cookieBefore = await hasFixtureCookie(session.webView.configuration.websiteDataStore.httpCookieStore)
+    try require(cookieBefore, "Fixture cookie missing")
+    let firstContainer = NSView()
+    let secondContainer = NSView()
+    session.attach(to: firstContainer)
+    session.attach(to: secondContainer)
+    try require(session.webView === original && session.webView.superview === secondContainer,
+      "Mounting recreated the web session")
+    session.apply(endpoint: nil)
+    session.apply(endpoint: endpoint)
+    try await waitFor { if case .loaded(let url) = session.loadState { return url.query == "filter=active" }; return false }
+    try require(session.webView.url?.fragment == "fixture", "Recovery lost the route fragment")
+    let cookieAfter = await hasFixtureCookie(session.webView.configuration.websiteDataStore.httpCookieStore)
+    try require(cookieAfter, "Recovery discarded cookies")
+    session.navigate(path: "/failure")
+    try await waitFor { if case .failed = session.loadState { return true }; return false }
+    session.retry()
+    try await waitFor { if case .failed = session.loadState { return true }; return false }
+    session.navigate(path: "/workspaces")
+    try await waitFor { if case .loaded = session.loadState { return true }; return false }
+    // Obtain ownership directly from this nonpersistent fixture view. A
+    // requested WebKit termination suppresses the crash callback, so inject
+    // an actual process loss into that exact process instead.
+    // Source: WebKit/Source/WebKit/UIProcess/API/Cocoa/WKWebViewPrivate.h
+    let processIdentifier = NSSelectorFromString("_webProcessIdentifier")
+    try require(session.webView.responds(to: processIdentifier),
+      "WebKit process-loss fixture SPI unavailable; witness cannot be accepted")
+    let fixturePID = (session.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value ?? 0
+    try require(fixturePID > 1 && fixturePID != getpid(), "Invalid fixture process identity")
+    try require(kill(fixturePID, SIGKILL) == 0, "Fixture process-loss injection failed")
+    try await waitFor { interruptions == 1 }
+    try await waitFor { if case .loaded(let url) = session.loadState { return url.path == "/workspaces" }; return false }
+    try require(session.webView === original, "Process recovery replaced the retained web view")
+    let recoveredPID = (session.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value ?? 0
+    try require(recoveredPID > 1 && recoveredPID != fixturePID, "Content process was not replaced")
+    let cookieAfterProcessLoss = await hasFixtureCookie(session.webView.configuration.websiteDataStore.httpCookieStore)
+    try require(cookieAfterProcessLoss, "Process recovery discarded the original cookie")
+    print("Witness: real WebKit process loss, delegate interruption, retained-view route recovery and cookie retention")
+    try await evaluate("document.getElementById('download').click()", in: session.webView)
+    try await waitFor { downloaded.count == 1 }
+    try require(try String(contentsOf: downloaded[0], encoding: .utf8) == "server-download", "Server download bytes")
+    try await evaluate("document.getElementById('blob').click()", in: session.webView)
+    try await waitFor { downloaded.count == 2 }
+    try require(try String(contentsOf: downloaded[1], encoding: .utf8) == "blob-download", "Blob download bytes")
+    downloadChoice.cancel = true
+    try await evaluate("document.getElementById('blob').click()", in: session.webView)
+    try await waitFor { !downloadErrors.isEmpty }
+    try require(downloaded.count == 2, "Cancelled download wrote a file")
+    print("Witness: server download bytes, blob download bytes and blob cancellation")
+    let actions = Actions()
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: session, actions: actions)
+    let window = controller.window
+    controller.close()
+    controller.showWindow(nil)
+    try require(controller.window === window && session.webView === original, "Reopen recreated native or web window")
+
+    print("Witness: remount, reconnect, query/fragment, HTTP failure/retry and close/reopen identity")
+    controller.close()
+  }
+
+  /// A normal server response must prove both WebKit completion and script
+  /// execution before the AppModel exposes the canvas. This keeps HTTP 200
+  /// distinct from a merely reachable endpoint.
+  static func inlineScriptSuccessContract(_ endpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
+    session.navigate(path: "/inline-script")
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+
+    try await waitFor {
+      if case .loaded(let url) = session.loadState { return url.path == "/inline-script" }
+      return false
+    }
+    try require(model.presentation.phase == .online && model.presentation.exposesCanvas,
+      "HTTP 200 inline document did not reach the AppModel canvas")
+    try require(try await evaluateString("document.documentElement.dataset.inlineFixture", in: session.webView)
+      == "ready", "Inline script did not execute before the canvas was exposed")
+    print("Witness: HTTP 200 inline script committed through WebKit and exposed the AppModel canvas")
+  }
+
+  /// A live endpoint can still leave WebKit without a completion callback.
+  /// Before the watchdog this fixture waited until the harness timeout while
+  /// the Command Deck stayed Connecting. The timeout must instead become a
+  /// retryable web failure, and it must reach the AppModel rather than merely
+  /// changing a private session field.
+  static func firstLoadTimeoutContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    session.navigate(path: "/stall-retry")
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+
+    try await waitFor {
+      if case .failed(_, let reason) = session.loadState {
+        return reason.contains("did not finish loading")
+      }
+      return false
+    }
+    guard case .recovering(let reason) = model.state else {
+      throw Failure(message: "Timed-out first load left the model in \(model.state)")
+    }
+    try require(reason.contains("did not finish loading"), "First-load timeout was not actionable")
+    try require(!model.presentation.exposesCanvas, "Timed-out first load exposed an unproven canvas")
+
+    // Retry the same endpoint through the AppModel endpoint/state callback
+    // chain. The fixture holds the first response open until this retry has
+    // committed, so success proves a new navigation can recover the first
+    // document without replacing the retained session.
+    let original = session.webView
+    session.retry()
+    try await waitFor {
+      if case .loaded(let url) = session.loadState {
+        return url.path == "/stall-retry" && url.port == endpoint.port
+      }
+      return false
+    }
+    try require(model.presentation.phase == .online && model.presentation.exposesCanvas,
+      "Same-endpoint retry did not restore the AppModel canvas")
+    try require(session.webView === original, "Same-endpoint retry recreated the web session")
+    try require(try await evaluateString("document.title", in: session.webView) == "retry fixture",
+      "Same-endpoint retry committed the wrong document")
+
+    let (_, releaseResponse) = try await URLSession.shared.data(
+      from: endpoint.appendingPathComponent("release-first-stall"))
+    try require((releaseResponse as? HTTPURLResponse)?.statusCode == 204,
+      "Fixture did not release the delayed first response")
+    try await tick()
+    try require(try await evaluateString("document.title", in: session.webView) == "retry fixture",
+      "Delayed first response replaced the retried document")
+    try require(session.webView.url?.path == "/stall-retry" && model.presentation.exposesCanvas,
+      "Delayed first response replaced the retried navigation state")
+
+    try await evaluate("document.getElementById('retry-next').click()", in: session.webView)
+    try await waitFor {
+      if case .loaded(let url) = session.loadState { return url.path == "/workspaces" }
+      return false
+    }
+    try require(session.webView === original && model.presentation.exposesCanvas,
+      "Post-retry link navigation lost the persistent session or canvas")
+
+    // Withdrawing or replacing an endpoint invalidates the older watchdog.
+    // Its eventual timeout must never overwrite the state of the later owner.
+    let replacement = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    replacement.navigate(path: "/stall-always")
+    replacement.apply(endpoint: endpoint)
+    try await tick()
+    replacement.apply(endpoint: nil)
+    try await Task.sleep(for: .milliseconds(300))
+    try require(replacement.loadState == .idle, "Withdrawn endpoint accepted a stale timeout")
+
+    replacement.apply(endpoint: endpoint)
+    try await tick()
+    replacement.apply(endpoint: reconnectEndpoint)
+    try await waitFor {
+      if case .failed(let url, let reason) = replacement.loadState {
+        return url?.port == reconnectEndpoint.port && reason.contains("did not finish loading")
+      }
+      return false
+    }
+  }
+
+
+  /// Real WKWebView proof: an endpoint link and a `_blank` link leave the
+  /// console document, its DOM edit state and its history untouched; tabs are
+  /// deduplicated; Home/back in a tool tab never move the console; closing a
+  /// tab keeps the console and its web view.
+  static func tabsContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
+    let model = AppModel()
+    let console = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
+    var opened: [(URL, WebTabRole)] = []
+    var blocked: [String] = []
+    var externals: [URL] = []
+    console.events.openInTab = { opened.append(($0, $1)) }
+    console.events.navigationBlocked = { _, reason in blocked.append(reason) }
+    console.events.openExternally = { externals.append($0) }
+    let actions = Actions()
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: console, actions: actions,
+      openExternally: { externals.append($0) })
+    controller.showWindow(nil)
+    let consoleView = console.webView
+    console.apply(endpoint: endpoint)
+    try await waitFor { if case .loaded = console.loadState { return true }; return false }
+    let nativeMarker = try await evaluateString("String(window.__vcNativeShell === true)", in: consoleView)
+    try require(nativeMarker == "true", "Native appearance marker was lost before the document element existed")
+    try require(consoleView.appearance == nil, "Web view froze the launch-time appearance")
+    console.navigate(path: "/scaffold")
+    try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/scaffold" }; return false }
+    try await evaluate("document.getElementById('draft').value = 'edited-draft'", in: consoleView)
+    try await waitFor { console.navigation.canGoBack }
+
+    // 1. Endpoint link: JSON must not replace the Scaffold document.
+    try await evaluate("document.getElementById('api').click()", in: consoleView)
+    try await waitFor { opened.count == 1 }
+    try require(opened[0].1 == .reference && opened[0].0.path == "/api/scaffold/artifacts",
+      "JSON endpoint was not diverted to a reference tab")
+    try await tick()
+    try require(consoleView.url?.path == "/scaffold", "Endpoint link replaced the Scaffold document")
+    try require(console.loadState == .loaded(consoleView.url!), "Diverted endpoint left the console stranded")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "Endpoint link discarded Scaffold edit state")
+    try require(model.presentation.exposesCanvas || model.state == .bootstrapping,
+      "Diverted endpoint hid the canvas")
+
+    // 2. target=_blank: a tool tab request, same document kept.
+    try await evaluate("document.getElementById('blank').click()", in: consoleView)
+    try await waitFor { opened.count == 2 }
+    try require(opened[1].1 == .tool && opened[1].0.path == "/workspaces", "_blank did not request a tool tab")
+    try await evaluate("window.open('/runs')", in: consoleView)
+    try await waitFor { opened.count == 3 }
+    try require(opened[2].0.path == "/runs", "window.open did not request a tool tab")
+    try require(consoleView.url?.path == "/scaffold" && console.webView === consoleView,
+      "_blank replaced or recreated the console view")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "_blank discarded Scaffold edit state")
+    print("Witness: JSON endpoint and _blank kept the Scaffold DOM, edit state and history in the console")
+
+    // 3. Coordinator: one window per destination, focus instead of twins.
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: home.appendingPathComponent(".aicx"), withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let coordinator = NativeTabCoordinator(
+      anchorWindow: { controller.window }, openExternally: { externals.append($0) },
+      websiteDataStore: .nonPersistent(), homeDirectory: home, environment: [:],
+      fileExists: { FileManager.default.fileExists(atPath: $0.path) })
+    coordinator.apply(runtimeEndpoint: endpoint)
+    let apiURL = opened[0].0
+    try require(coordinator.open(.url(apiURL, .reference)) == .opened(NativeTabCoordinator.key(for: apiURL, role: .reference)),
+      "Reference tab did not open")
+    try require(coordinator.tabs.count == 1, "Reference tab count")
+    let reference = coordinator.tabs.values.first!
+    try require(reference.session.role == .reference && reference.session.webView !== consoleView,
+      "Reference tab reused the console web view")
+    try require(!reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
+      "Reference tab runs page script")
+    try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(coordinator.open(.url(apiURL, .reference)) == .focused(reference.key) && coordinator.tabs.count == 1,
+      "Repeated destination opened a twin tab")
+    try require(reference.window?.tabGroup != nil && reference.window?.tabGroup === controller.window?.tabGroup,
+      "Reference tab is not in the console's native tab group")
+
+    let workspaces = opened[1].0
+    guard case .opened(let toolKey) = coordinator.open(.url(workspaces, .tool)) else {
+      throw Failure(message: "Tool tab did not open")
+    }
+    let tool = coordinator.tabs[toolKey]!
+    try require(coordinator.tabs.count == 2 && tool.session.role == .tool, "Tool tab identity")
+    try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/workspaces" }; return false }
+    try require(tool.model.presentation.exposesCanvas, "Tool tab did not expose its canvas")
+
+    // 4. Home/back in the tool tab move only the tool tab. Home in a tab
+    //    opened from a link is the runtime overview, never the URL that
+    //    opened it; Back still reaches that page.
+    tool.session.navigate(path: "/runs")
+    try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/runs" }; return false }
+    try await waitFor { tool.session.navigation.canGoBack }
+    tool.navigate(.back)
+    try await waitFor { tool.session.webView.url?.path == "/workspaces" }
+    try await waitFor { tool.session.navigation.canGoForward }
+    tool.navigate(.home)
+    try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/" }; return false }
+    try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
+      "Tool tab Home/back mutated the console tab")
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts", "Tool tab Home mutated the reference tab")
+    tool.navigate(.back)
+    try await waitFor { tool.session.webView.url?.path == "/workspaces" }
+    controller.navigate(.home)
+    try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/" }; return false }
+    try require(tool.session.webView.url?.path == "/workspaces", "Console Home mutated the tool tab")
+    try require(console.navigation.canGoBack, "Console Home discarded history")
+    controller.navigate(.back)
+    try await waitFor { consoleView.url?.path == "/scaffold" }
+    print("Witness: Home/back/forward targeted the selected tab only, in both directions")
+
+    // 5. Closing a tool tab keeps the console, its window and its web view.
+    let consoleWindow = controller.window
+    tool.close()
+    try await waitFor { coordinator.tabs.count == 1 }
+    try require(controller.window === consoleWindow && console.webView === consoleView
+      && consoleView.url?.path == "/scaffold", "Closing a tool tab disturbed the console")
+    try require(coordinator.tabs[reference.key] != nil, "Closing one tab closed a sibling")
+
+    // 6. Destinations: unavailable is said, available is one local file.
+    let dashboard = ToolDestination.named("aicx-dashboard")!
+    guard case .unavailable(let reason) = coordinator.open(.destination(dashboard)), reason.contains("aicx dashboard") else {
+      throw Failure(message: "Missing dashboard opened a fake tab")
+    }
+    try require(coordinator.tabs.count == 1, "Unavailable destination created a tab")
+    let file = home.appendingPathComponent(".aicx/aicx-dashboard.html")
+    try "<!doctype html><title>AICX fixture</title><p id='ok'>dashboard</p>".write(to: file, atomically: true, encoding: .utf8)
+    try require(coordinator.open(.destination(dashboard)) == .opened("aicx-dashboard"), "Generated dashboard did not open")
+    let local = coordinator.tabs["aicx-dashboard"]!
+    var localBlocked: [String] = []
+    local.session.events.navigationBlocked = { _, reason in localBlocked.append(reason) }
+    try await waitFor { if case .loaded = local.session.loadState { return true }; return false }
+    try require(local.session.scope == .localDocument(file.standardizedFileURL), "Local document scope")
+    // WebKit itself refuses file→file moves from a page loaded with read
+    // access to one file, so the policy may never be consulted; the proof is
+    // the outcome: the tab still shows its one document and nothing else.
+    try await evaluate("location.href = 'file:///etc/hosts'", in: local.session.webView)
+    try await tick()
+    try await tick()
+    try require(local.session.webView.url?.standardizedFileURL.path == file.standardizedFileURL.path,
+      "Local document tab navigated to another file (blocked=\(localBlocked))")
+    try require(try await evaluateString("document.getElementById('ok').textContent", in: local.session.webView) == "dashboard",
+      "Local document tab lost its document")
+    try require(local.session.loadState == .loaded(file.standardizedFileURL), "Local document tab state drifted")
+    try require(coordinator.open(.destination(dashboard)) == .focused("aicx-dashboard"), "Dashboard tab duplicated")
+    let slack = ToolDestination.named("slack-agent-console")!
+    guard case .unavailable = coordinator.open(.destination(slack)) else {
+      throw Failure(message: "Slack console opened without a contract")
+    }
+    try require(coordinator.tabs.count == 2, "Unconfigured service created a tab")
+
+    // 6b. The Loctree report is a generated document: its own tab, an
+    //     ephemeral data store, the console's store untouched.
+    let reportDestination = ToolDestination.named("loctree-report")!
+    try require(coordinator.open(.destination(reportDestination)) == .opened("loctree-report"), "Report tab did not open")
+    let report = coordinator.tabs["loctree-report"]!
+    try require(!report.session.webView.configuration.websiteDataStore.isPersistent,
+      "Generated report shares the console's persistent website data store")
+    try require(report.session.webView !== consoleView && report.session.role == .tool, "Report tab identity")
+    try require(report.session.scope == .runtime(WebRuntimeOrigin(url: endpoint)!), "Report tab scope")
+    try require(coordinator.open(.destination(reportDestination)) == .focused("loctree-report"), "Report tab duplicated")
+
+    // 6c. A configured service console: its own origin, its own store, no
+    //     runtime coupling, foreign links leave through the system browser.
+    let serviceHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let configDir = serviceHome.appendingPathComponent(".config/vibecrafted", isDirectory: true)
+    try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: serviceHome) }
+    try "[tools.slack-console]\nurl = \"http://127.0.0.1:\(endpoint.port!)/console\"\n"
+      .write(to: configDir.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+    var serviceExternals: [URL] = []
+    let serviceCoordinator = NativeTabCoordinator(
+      anchorWindow: { controller.window }, openExternally: { serviceExternals.append($0) },
+      websiteDataStore: .nonPersistent(), homeDirectory: serviceHome, environment: [:],
+      fileExists: { FileManager.default.fileExists(atPath: $0.path) })
+    // No runtime endpoint applied on purpose: a service does not need one.
+    try require(serviceCoordinator.open(.destination(slack)) == .opened("slack-agent-console"),
+      "Configured service did not open without a runtime")
+    let service = serviceCoordinator.tabs["slack-agent-console"]!
+    try require(service.session.scope == .service(WebRuntimeOrigin(url: endpoint)!), "Service tab scope")
+    try require(!service.session.webView.configuration.websiteDataStore.isPersistent, "Service tab shares the console store")
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console" }; return false }
+    try require(service.model.presentation.exposesCanvas, "Service tab did not expose its canvas")
+    service.session.navigate(path: "/console/wire")
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console/wire" }; return false }
+    service.navigate(.home)
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console" }; return false }
+    try await evaluate("location.href = 'https://example.com/foreign'", in: service.session.webView)
+    try await waitFor { !serviceExternals.isEmpty }
+    try require(serviceExternals.last?.host == "example.com" && service.session.webView.url?.path == "/console",
+      "Foreign navigation from the service tab did not leave via the system browser")
+    serviceCoordinator.apply(runtimeEndpoint: endpoint)
+    serviceCoordinator.apply(runtimeEndpoint: nil)
+    try require(service.model.presentation.exposesCanvas && service.session.webView.url?.path == "/console",
+      "Service tab was tied to the runtime endpoint")
+    try require(serviceCoordinator.open(.destination(slack)) == .focused("slack-agent-console"), "Service tab duplicated")
+    service.close()
+
+    // 7. Losing the runtime: runtime tabs say so, the local document does not care.
+    coordinator.apply(runtimeEndpoint: nil)
+    try require(reference.model.presentation.phase == .recovering && !reference.model.presentation.exposesCanvas,
+      "Runtime tab kept a cached page after the endpoint vanished")
+    try require(report.model.presentation.phase == .recovering, "Report tab kept a cached page after the endpoint vanished")
+    try require(local.model.presentation.exposesCanvas, "Local document tab was tied to the runtime")
+    coordinator.apply(runtimeEndpoint: endpoint)
+    try await waitFor { reference.model.presentation.exposesCanvas }
+    try await waitFor { report.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.port == endpoint.port && report.session.webView.url?.port == endpoint.port,
+      "Runtime tabs did not reconnect to the same endpoint")
+    coordinator.apply(runtimeEndpoint: reconnectEndpoint)
+    try await waitFor { reference.model.presentation.exposesCanvas && report.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.port == reconnectEndpoint.port
+      && report.session.webView.url?.port == reconnectEndpoint.port,
+      "Runtime tabs did not reconnect to the replacement endpoint")
+    print("Witness: destinations resolve honestly, report and service tabs are isolated, local document confined, runtime loss and same/new endpoint reconnect shown")
+
+    // 8. One chrome: the bridged toolbar exists at compact and regular widths; no content chrome row.
+    try await waitFor { controller.window?.toolbar != nil }
+    let toolbar = controller.window!.toolbar!
+    let sidebarItems = toolbar.items.filter {
+      ($0.itemIdentifier.rawValue + " " + $0.label).lowercased().contains("sidebar")
+    }
+    try require(sidebarItems.count == 1, "Expected one native sidebar toggle, found \(sidebarItems.count)")
+    try require(!toolbar.items.contains { $0.label == "Diagnostics" || $0.label == "Reinitialize" },
+      "Online toolbar duplicates machine navigation")
+    let identifiersRegular = toolbar.items.map(\.itemIdentifier)
+    controller.window?.setContentSize(NSSize(width: 800, height: 600))
+    try await tick()
+    try require(controller.window?.toolbar === toolbar && toolbar.items.map(\.itemIdentifier) == identifiersRegular,
+      "Compact width changed the toolbar item set instead of overflowing")
+    try require(!identifiersRegular.isEmpty, "Toolbar bridged no items")
+    for tab in coordinator.tabs.values { tab.close() }
+    controller.close()
+    try require(blocked.isEmpty, "Console blocked navigations unexpectedly: \(blocked)")
+    print("Witness: unified toolbar bridged into the window; item set stable across widths")
+  }
+
+  /// Home ownership on a real WKWebView. The Scaffold Inspector's artifact
+  /// endpoint link (`target=_blank`, answered with JSON) opens a tool tab;
+  /// Home returns that tab to the runtime overview on the same origin, from
+  /// the JSON and from an error page, with its own history intact and every
+  /// sibling untouched. A destination keeps its own overview. An ordinary
+  /// endpoint link lands in a script-less reference view; Home from there
+  /// reaches the overview through the coordinator in an interactive tab.
+  /// No host or port is ever named by the App.
+  static func homeContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
+    let model = AppModel()
+    let console = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
+    var opened: [(URL, WebTabRole)] = []
+    var externals: [URL] = []
+    console.events.openInTab = { opened.append(($0, $1)) }
+    console.events.openExternally = { externals.append($0) }
+    let actions = Actions()
+    let controller = MainWindowController(frameAutosaveName: nil, model: model, session: console, actions: actions,
+      openExternally: { externals.append($0) })
+    controller.showWindow(nil)
+    let consoleView = console.webView
+    console.apply(endpoint: endpoint)
+    try await waitFor { if case .loaded = console.loadState { return true }; return false }
+    console.navigate(path: "/scaffold")
+    try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/scaffold" }; return false }
+    try await evaluate("document.getElementById('draft').value = 'edited-draft'", in: consoleView)
+
+    // The Inspector's artifact endpoint link: target=_blank on a JSON route.
+    try await evaluate("document.getElementById('api-blank').click()", in: consoleView)
+    try await waitFor { opened.count == 1 }
+    let endpointURL = opened[0].0
+    try require(opened[0].1 == .tool && endpointURL.path == "/api/scaffold/artifacts"
+      && endpointURL.query == "org=o&repo=r&day=d&plan_id=p",
+      "_blank endpoint link did not request a tool tab with its query")
+
+    let coordinator = NativeTabCoordinator(
+      anchorWindow: { controller.window }, openExternally: { externals.append($0) },
+      websiteDataStore: .nonPersistent(),
+      homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+      environment: [:], fileExists: { _ in false })
+    coordinator.apply(runtimeEndpoint: endpoint)
+    guard case .opened(let rawKey) = coordinator.open(.url(endpointURL, .tool)) else {
+      throw Failure(message: "Raw endpoint tool tab did not open")
+    }
+    let raw = coordinator.tabs[rawKey]!
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(raw.session.webView.url?.query == "org=o&repo=r&day=d&plan_id=p", "Tool tab lost the endpoint query")
+    try require(raw.model.presentation.phase == .online && raw.model.presentation.exposesCanvas,
+      "Loaded JSON left the tool toolbar in \(raw.model.presentation.phase)")
+    try require(!raw.session.navigation.canGoBack, "A fresh tool tab claimed history")
+
+    // 1. Home from raw JSON: the runtime overview on the same origin, as a
+    //    new history entry; the console and its edit state stay put.
+    raw.navigate(.home)
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/" }; return false }
+    let overview = raw.session.webView.url!
+    try require(overview.host == endpoint.host && overview.port == endpoint.port && overview.query == nil,
+      "Home left the runtime origin or kept the endpoint query: \(overview)")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: raw.session.webView) == "Ready",
+      "Home did not render the product overview")
+    try require(raw.model.presentation.phase == .online, "Home left the toolbar in \(raw.model.presentation.phase)")
+    try await waitFor { raw.session.navigation.canGoBack }
+    try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
+      "Tool tab Home moved the console")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "Tool tab Home discarded Scaffold edit state")
+    raw.navigate(.back)
+    try await waitFor { raw.session.webView.url?.path == "/api/scaffold/artifacts" }
+    try await waitFor { raw.session.navigation.canGoForward }
+    raw.navigate(.forward)
+    try await waitFor { raw.session.webView.url?.path == "/" }
+    print("Witness: _blank raw endpoint tab: Home returned to the runtime overview; Back/Forward kept the JSON in the tab's own history")
+
+    // 2. Home from an error page recovers the tab.
+    raw.session.navigate(path: "/failure")
+    try await waitFor { if case .failed = raw.session.loadState { return true }; return false }
+    try require(raw.model.presentation.phase == .recovering, "HTTP failure did not surface in the tool tab")
+    raw.navigate(.home)
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/" }; return false }
+    try require(raw.model.presentation.phase == .online, "Home from an error page did not recover the tab")
+
+    // 3. Same-origin classification: only the connected runtime gets a tab,
+    //    and Home follows the endpoint the caretaker resolved, never a host
+    //    or port of its own.
+    var foreign = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)!
+    foreign.port = (endpoint.port ?? 0) + 1
+    guard case .unavailable = coordinator.open(.url(foreign.url!, .tool)) else {
+      throw Failure(message: "A foreign origin was given a runtime tab")
+    }
+    coordinator.apply(runtimeEndpoint: reconnectEndpoint)
+    try await waitFor { raw.session.webView.url?.port == reconnectEndpoint.port }
+    raw.session.navigate(path: "/workspaces")
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/workspaces" }; return false }
+    raw.navigate(.home)
+    try await waitFor {
+      if case .loaded(let url) = raw.session.loadState { return url.path == "/" && url.port == reconnectEndpoint.port }
+      return false
+    }
+    coordinator.apply(runtimeEndpoint: endpoint)
+    try await waitFor { raw.session.webView.url?.port == endpoint.port }
+    print("Witness: Home followed the replacement endpoint; a foreign origin got no tab")
+
+    // 4. A destination keeps its own overview: the Loctree report returns to
+    //    the report, not to the product root.
+    let reportDestination = ToolDestination.named("loctree-report")!
+    try require(coordinator.open(.destination(reportDestination)) == .opened("loctree-report"), "Report tab did not open")
+    let report = coordinator.tabs["loctree-report"]!
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report" }; return false }
+    report.session.navigate(path: "/structure/report/graph")
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report/graph" }; return false }
+    report.navigate(.home)
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report" }; return false }
+    try require(report.session.webView.url?.port == endpoint.port, "Report Home left its origin")
+    try require(raw.session.webView.url?.path == "/", "Report Home moved the raw endpoint tab")
+
+    print("Witness: destination Home stayed on the report")
+
+    // 5. The ordinary endpoint link: JSON diverted from a plain `<a>` into a
+    //    read-only reference view. That view runs no script, so it cannot
+    //    render the product overview itself; Home from it must still bring
+    //    the user to the overview, through the coordinator, in an
+    //    interactive tool tab on the same origin. The reference view keeps
+    //    its document, role, no-script setting and history; the console
+    //    keeps its edit state; no sibling tab moves.
+    try await evaluate("document.getElementById('api').click()", in: consoleView)
+    try await waitFor { opened.count == 2 }
+    try require(opened[1].1 == .reference, "Plain endpoint link was not diverted to a reference view")
+    guard case .opened(let referenceKey) = coordinator.open(.url(opened[1].0, .reference)) else {
+      throw Failure(message: "Reference tab did not open")
+    }
+    let reference = coordinator.tabs[referenceKey]!
+    try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(!reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
+      "Reference view runs page script")
+    // The overview is derived here from the fixture endpoint, not read from
+    // the App, so this witness also holds against product code that lacks it.
+    var overviewComponents = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+    overviewComponents.path = "/"
+    overviewComponents.query = nil
+    overviewComponents.fragment = nil
+    let overviewKey = NativeTabCoordinator.key(for: overviewComponents.url!, role: .tool)
+    let tabsBeforeHome = coordinator.tabs.count
+    try require(coordinator.tabs[overviewKey] == nil, "An overview tab existed before Home")
+    reference.navigate(.home)
+    try await waitFor { coordinator.tabs[overviewKey] != nil }
+    let overviewTab = coordinator.tabs[overviewKey]!
+    try require(coordinator.tabs.count == tabsBeforeHome + 1, "Reference Home opened more than one tab")
+    try require(overviewTab.session.role == .tool && overviewTab.session.webView !== reference.session.webView
+      && overviewTab.session.webView !== consoleView, "Overview tab identity")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    let overviewURL = overviewTab.session.webView.url!
+    try require(overviewURL.host == endpoint.host && overviewURL.port == endpoint.port && overviewURL.query == nil,
+      "Reference Home left the runtime origin: \(overviewURL)")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: overviewTab.session.webView) == "Ready",
+      "Reference Home did not render the product overview")
+    try require(overviewTab.model.presentation.phase == .online && overviewTab.model.presentation.exposesCanvas,
+      "Overview tab toolbar in \(overviewTab.model.presentation.phase)")
+    try require(overviewTab.window?.tabGroup != nil && overviewTab.window?.tabGroup === controller.window?.tabGroup,
+      "Overview tab is not in the console's native tab group")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Reference Home did not bring the overview tab forward")
+    try await tick()
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts"
+      && reference.session.loadState == .loaded(reference.session.webView.url!),
+      "Reference Home reloaded or moved the reference view")
+    try require(!reference.session.navigation.canGoBack, "Reference Home added a history entry to the reference view")
+    try require(reference.session.role == .reference
+      && !reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
+      "Reference Home changed the view's role or enabled script")
+    try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
+      "Reference Home moved the console")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "Reference Home discarded Scaffold edit state")
+    try require(raw.session.webView.url?.path == "/" && report.session.webView.url?.path == "/structure/report",
+      "Reference Home moved a sibling tab")
+    print("Witness: ordinary API link -> reference view -> Home reached the product overview in an interactive tab; the reference view, console and siblings stayed put")
+
+    // 5b. Home again from the reference view focuses that overview tab; no twin.
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    try require(overviewTab.window?.tabGroup?.selectedWindow === reference.window, "Fixture could not reselect the reference tab")
+    reference.navigate(.home)
+    try await tick()
+    try require(coordinator.tabs.count == tabsBeforeHome + 1 && coordinator.tabs[overviewKey] === overviewTab,
+      "Repeated reference Home opened a twin overview tab")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Repeated reference Home did not focus the existing overview tab")
+    // The overview tab is an ordinary tool tab: its own Home is `/`.
+    overviewTab.session.navigate(path: "/workspaces")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/workspaces" }; return false }
+    overviewTab.navigate(.home)
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts", "Overview Home moved the reference view")
+
+    // 5b'. The overview tab was navigated away, then failed, since it opened.
+    //      Home from the reference view must bring that same tab back to `/`
+    //      of the current runtime, not merely focus whatever it shows now,
+    //      with the tab's Back history kept and no twin opened.
+    overviewTab.session.navigate(path: "/runs")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/runs" }; return false }
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    reference.navigate(.home)
+    try await waitFor {
+      if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" && url.port == endpoint.port }
+      return false
+    }
+    try require(coordinator.tabs.count == tabsBeforeHome + 1 && coordinator.tabs[overviewKey] === overviewTab,
+      "Reference Home over a navigated-away overview tab opened a twin")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Reference Home did not select the reused overview tab")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: overviewTab.session.webView) == "Ready",
+      "Reused overview tab did not render the product overview")
+    try require(overviewTab.session.navigation.canGoBack, "Reference Home over a navigated-away overview tab discarded its history")
+    overviewTab.navigate(.back)
+    try await waitFor { overviewTab.session.webView.url?.path == "/runs" }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts" && !reference.session.navigation.canGoBack,
+      "Reusing the overview tab touched the reference view")
+    overviewTab.session.navigate(path: "/failure")
+    try await waitFor { if case .failed = overviewTab.session.loadState { return true }; return false }
+    try require(overviewTab.model.presentation.phase == .recovering, "HTTP failure did not surface in the overview tab")
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    reference.navigate(.home)
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    try require(overviewTab.model.presentation.phase == .online && coordinator.tabs.count == tabsBeforeHome + 1,
+      "Reference Home did not recover the failed overview tab in place")
+    print("Witness: reference Home brought a navigated-away and then a failed overview tab back to `/` with history kept and no twin")
+
+    // 5c. Without a runtime there is no overview to show: Home from the
+    //     reference view opens nothing, and the reconnect re-presents the
+    //     document the view exists for.
+    overviewTab.close()
+    try await waitFor { coordinator.tabs[overviewKey] == nil }
+    coordinator.apply(runtimeEndpoint: nil)
+    try require(reference.model.presentation.phase == .recovering, "Runtime loss was not shown on the reference view")
+    reference.navigate(.home)
+    try await tick()
+    try require(coordinator.tabs.count == tabsBeforeHome && coordinator.tabs[overviewKey] == nil,
+      "Reference Home opened a tab without a connected runtime")
+    coordinator.apply(runtimeEndpoint: endpoint)
+    try await waitFor { reference.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts"
+      && reference.session.webView.url?.port == endpoint.port,
+      "Reconnect moved the reference view off its document")
+    print("Witness: repeated reference Home focused the one overview tab; no runtime, no tab; reconnect kept the document")
+
+    for tab in coordinator.tabs.values { tab.close() }
+    controller.close()
+  }
+
+  /// Three shelves and a quiet footer. Retired peer titles are not destinations.
+  static func sidebarGroupsContract() throws {
+    try require(CommandDeckDestinationSection.allCases.map(\.title) == ["Work", "Trace", "Machine"],
+      "CommandDeckDestinationSection titles are not Work, Trace, Machine")
+    let peers = CommandDeckDestinationSection.allCases.flatMap { CommandDeckDestination.inSection($0) }
+    try require(peers.map(\.title) == [
+      "Overview", "Runs", "Projects", "Costs & usage",
+      "Skills", "Artifacts", "Code intelligence", "History & context",
+      "Settings & config", "Diagnostics",
+    ], "Section rows are not the ten shelf doors")
+    try require(peers.map(\.path) == [
+      "/", "/runs", "/projects", "/usage",
+      "/skills", "/artifacts", "/structure", "/history",
+      "/settings", "/diagnostics",
+    ], "Shelf paths drifted")
+    try require(CommandDeckDestination.footerCases.map(\.title) == ["Help & docs", "About"],
+      "Help & docs and About are not the footer")
+    try require(CommandDeckDestination.footerCases.map(\.path) == ["/help", "/about"],
+      "Footer paths drifted")
+    try require(Set(peers).isDisjoint(with: CommandDeckDestination.footerCases),
+      "Footer rows are section peers")
+    let banned = [
+      "Frame", "Active", "Sessions", "Agents", "Live", "Activity", "Plans", "Guide",
+      "Transcripts", "Structure", "Workspaces", "Failures", "Health", "Lifecycle",
+    ]
+    for title in CommandDeckDestination.allCases.map(\.title) {
+      try require(!banned.contains(title), "Retired sidebar title remained: \(title)")
+    }
+    try require(CommandDeckDestination.usage.title == "Costs & usage"
+      && CommandDeckDestination.usage.path == "/usage",
+      "Costs & usage is not /usage")
+    try require(CommandDeckDestination.structure.title == "Code intelligence"
+      && CommandDeckDestination.structure.path == "/structure",
+      "Code intelligence is not /structure")
+    try require(CommandDeckDestination.help.title == "Help & docs"
+      && CommandDeckDestination.about.title == "About",
+      "Footer titles drifted from the sidebar labels")
+  }
+
+
+  static func trayActivityContract(sourceURL: URL) async throws {
+    func decode(_ summary: String, schema: String = "vibecrafted.lifecycle-activity.v1",
+      status: Int32 = 0) -> TrayWorkActivity {
+      decodeTrayWorkActivity(data: Data("{\"schema_version\":\"\(schema)\",\"summary\":\(summary)}".utf8),
+        terminationStatus: status)
+    }
+    try require(decode("{\"lanes\":3,\"running\":1}") == .running(1), "Owner running count was lost")
+    try require(decode("{\"lanes\":300,\"running\":0}") == .idle,
+      "Retained stalled lanes caused activity")
+    for payload in ["{}", "{\"lanes\":3}", "{\"lanes\":1,\"running\":2}",
+      "{\"lanes\":1,\"running\":-1}", "{\"lanes\":1,\"running\":true}"] {
+      try require(decode(payload) == .unavailable, "Invalid/old owner count became idle or running")
+    }
+    try require(decode("{\"lanes\":1,\"running\":1}", schema: "other") == .unavailable,
+      "Unknown schema became work evidence")
+    try require(decode("{\"lanes\":1,\"running\":1}", status: 2) == .unavailable,
+      "Failed owner invocation became work evidence")
+    let observation = TrayWorkObservation(activity: .running(1), observedAt: 100)
+    try require(observation.current(at: 109.9) == .running(1)
+      && observation.current(at: 110) == .unavailable
+      && observation.current(at: 99) == .unavailable, "Work observation did not expire")
+    var frame = TrayActivityFrame()
+    for step in 1...6 {
+      frame.advance(activity: .running(1), reduceMotion: false)
+      try require(frame.step == step % 6, "Animation did not advance by exactly one 60-degree step")
+    }
+    frame.advance(activity: .running(1), reduceMotion: false)
+    frame.advance(activity: .idle, reduceMotion: false)
+    try require(frame.step == 0, "Idle did not reset base orientation")
+    frame.advance(activity: .running(1), reduceMotion: false)
+    frame.advance(activity: .unavailable, reduceMotion: false)
+    try require(frame.step == 0, "Unknown work kept animating")
+    frame.advance(activity: .running(1), reduceMotion: true)
+    try require(frame.step == 0, "Reduced Motion animated work")
+
+    guard let source = NSImage(contentsOf: sourceURL),
+      let originalData = source.tiffRepresentation,
+      let original = NSBitmapImageRep(data: originalData),
+      let filledData = TrayGlyph.fillingActivityCircle(in: source).tiffRepresentation,
+      let filled = NSBitmapImageRep(data: filledData)
+    else { throw Failure(message: "Canonical tray mask could not be decoded") }
+    func alpha(_ bitmap: NSBitmapImageRep, _ x: Int, _ y: Int) -> Int {
+      var pixel = [Int](repeating: 0, count: bitmap.samplesPerPixel)
+      bitmap.getPixel(&pixel, atX: x, y: y)
+      return pixel[bitmap.bitmapFormat.contains(.alphaFirst) ? 0 : bitmap.samplesPerPixel - 1]
+    }
+    var changed = Set<Int>()
+    for y in 0..<original.pixelsHigh {
+      for x in 0..<original.pixelsWide {
+        let before = alpha(original, x, y)
+        let after = alpha(filled, x, y)
+        if before != after {
+          try require(before == 0 && after == 255, "Existing contour/antialias was changed")
+          changed.insert(y * original.pixelsWide + x)
+        }
+      }
+    }
+    try require(changed.count == 570, "One original eye interior did not fill exactly")
+    try require(alpha(filled, 25, 61) == 255
+      && alpha(filled, 44, 28) == 0
+      && alpha(filled, 63, 61) == 0,
+      "Activity filled more than the lower-left circle")
+    try require(source.tiffRepresentation == originalData, "Source image was mutated")
+    func bitmap(_ image: NSImage, pixels: Int) throws -> NSBitmapImageRep {
+      guard let result = NSBitmapImageRep(bitmapDataPlanes: nil,
+        pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: pixels * 4, bitsPerPixel: 32),
+        let context = NSGraphicsContext(bitmapImageRep: result)
+      else { throw Failure(message: "Cannot rasterize tray witness") }
+      NSGraphicsContext.saveGraphicsState()
+      NSGraphicsContext.current = context
+      image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+      context.flushGraphics()
+      NSGraphicsContext.restoreGraphicsState()
+      return result
+    }
+    let working = TrayGlyph.fillingActivityCircle(in: source)
+    for side in [18, 36, 88] {
+      let padding = 8
+      for step in 0..<6 {
+        let normal = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60), pixels: side)
+        let expanded = try bitmap(TrayGlyph.renderMask(source: working,
+          side: CGFloat(side), rotation: step * 60, canvasPadding: CGFloat(padding)),
+          pixels: side + padding * 2)
+        var outside = 0
+        var edge = 0
+        for y in 0..<expanded.pixelsHigh {
+          for x in 0..<expanded.pixelsWide {
+            let a = alpha(expanded, x, y)
+            if x < padding || x >= padding + side || y < padding || y >= padding + side {
+              if a != 0 { outside += 1 }
+            } else {
+              try require(a == alpha(normal, x - padding, y - padding),
+                "Clipped and expanded viewport rasters differ")
+              if a != 0 && (x == padding || x == padding + side - 1
+                || y == padding || y == padding + side - 1) { edge += 1 }
+            }
+          }
+        }
+        try require(outside == 0, "A rotated circle contour was cropped")
+        print("Tray viewport side=\(side) rotation=\(step * 60) outside=\(outside) edge=\(edge)")
+      }
+    }
+    var rotations = Set<Data>()
+    for step in 0..<6 {
+      let image = TrayGlyph.statusImage(health: .healthy,
+        activity: .running(1), step: step, source: source)
+      try require(image.isTemplate && image.size == NSSize(width: 18, height: 18),
+        "Work glyph bypassed system appearance or menu-bar size")
+      try require(image.accessibilityDescription!.contains("online")
+        && image.accessibilityDescription!.contains("executing dispatched"),
+        "Health and work labels were conflated")
+      rotations.insert(image.tiffRepresentation!)
+    }
+    try require(rotations.count == 6, "Rendered 60-degree orientations did not differ")
+    let idle = TrayGlyph.statusImage(health: .healthy, activity: .idle, step: 3, source: source)
+    let unknown = TrayGlyph.statusImage(health: .failed, activity: .unavailable, step: 4, source: source)
+    try require(idle.tiffRepresentation == unknown.tiffRepresentation,
+      "Service health or old rotation changed idle contours")
+    try require(idle.isTemplate && unknown.isTemplate, "Idle image ignores system appearance")
+    var now: TimeInterval = 100
+    var motionReduced = false
+    let controller = StatusItemController(activityClock: { now }, reduceMotion: { motionReduced }) { _ in }
+    controller.install()
+    defer { controller.uninstall() }
+    var presentation = StatusItemPresentation.bootstrapping
+    presentation.work = observation
+    controller.update(presentation)
+    try require(controller.isAnimatingActivity && controller.isAwaitingActivityExpiry,
+      "Confirmed work failed to schedule animation and expiry")
+    try await waitFor { controller.activityStep == 1 }
+    presentation.work = TrayWorkObservation(activity: .idle, observedAt: now)
+    controller.update(presentation)
+    try require(!controller.isAnimatingActivity && controller.activityStep == 0,
+      "Idle did not cancel timer and reset orientation")
+    presentation.work = observation
+    motionReduced = true
+    controller.update(presentation)
+    try require(!controller.isAnimatingActivity && controller.isAwaitingActivityExpiry,
+      "Reduced Motion either animated or forgot the observation expiry")
+    now = 109.9
+    controller.update(presentation)
+    now = 110
+    try await waitFor { !controller.isAwaitingActivityExpiry }
+    try require(!controller.isAnimatingActivity && !controller.isAwaitingActivityExpiry,
+      "Expired work retained a timer")
+    now = 100
+    motionReduced = false
+    controller.update(presentation)
+    controller.uninstall()
+    try require(!controller.isAnimatingActivity && !controller.isAwaitingActivityExpiry
+      && controller.activityStep == 0, "Uninstall left activity timers running")
+    print("Tray activity owner, expiry, discrete motion and exact mask passed")
+  }
+
+  static func main() async throws {
+    _ = NSApplication.shared
+    if CommandLine.arguments.dropFirst().first == "--tray" {
+      try await trayActivityContract(sourceURL: URL(fileURLWithPath: CommandLine.arguments[2]))
+      return
+    }
+    try windowGeometryContract()
+    if CommandLine.arguments.dropFirst().first == "--geometry" { return }
+    let endpoint = URL(string: CommandLine.arguments[1])!
+    let reconnectEndpoint = URL(string: CommandLine.arguments[2])!
+    try require(endpoint.scheme == "http" && endpoint.host == "127.0.0.1" && endpoint.port != nil,
+      "Only a loopback fixture endpoint is permitted")
+    try require(reconnectEndpoint.scheme == "http" && reconnectEndpoint.host == "127.0.0.1" && reconnectEndpoint.port != nil,
+      "Only a loopback reconnect endpoint is permitted")
+    try sidebarGroupsContract()
+    try stateContract(endpoint)
+    try trayMenuContract()
+    try policyContract(endpoint)
+    try authenticationAndDownloadContract(endpoint)
+    try tabPolicyContract(endpoint)
+    try destinationContract(endpoint)
+    try frameProjectionContract(endpoint)
+    try await inspectorContract(endpoint)
+    try await webContract(endpoint)
+    try await inlineScriptSuccessContract(endpoint)
+    try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)
+    try await tabsContract(endpoint, reconnectEndpoint: reconnectEndpoint)
+    try await homeContract(endpoint, reconnectEndpoint: reconnectEndpoint)
+    print("CommandDeckIntegrationTests passed")
+  }
+}

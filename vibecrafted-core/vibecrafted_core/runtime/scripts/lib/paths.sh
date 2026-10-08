@@ -104,9 +104,20 @@ spawn_link_repo_artifacts() {
   local repo_root="$2"
   local repo_vibecrafted="$repo_root/.vibecrafted"
 
+  [[ -n "$store_base" && -n "$repo_root" ]] || return 0
   [[ "$store_base" != "$repo_root/.vibecrafted" ]] || return 0
 
-  mkdir -p "$repo_vibecrafted"
+  # Durable plans/reports already live under VIBECRAFTED_HOME (spawn_store_dir).
+  # The $repo_root/.vibecrafted/{plans,reports} links are a convenience view for
+  # an operator project. Tests pin VIBECRAFTED_HOME at a fixture and keep cwd at
+  # the source checkout so git remote still names this repo; writing the view
+  # into that cwd leaves untracked symlinks in the product tree.
+  if [[ "${VIBECRAFTED_TEST_MODE:-0}" == "1" ]]; then
+    mkdir -p "$store_base/plans" "$store_base/reports"
+    return 0
+  fi
+
+  mkdir -p "$repo_vibecrafted" "$store_base/plans" "$store_base/reports"
   ln -sfn "$store_base/plans" "$repo_vibecrafted/plans" 2>/dev/null || true
   ln -sfn "$store_base/reports" "$repo_vibecrafted/reports" 2>/dev/null || true
 }

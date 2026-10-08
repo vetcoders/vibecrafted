@@ -1608,7 +1608,7 @@ Znaczenie: pliki źródłowe / dokumenty, które model może dostać jako wiedz�
 Dobre:
 
 - “Dodaj notatkę do Source Files.”
-- “Nowa Mikserka ma dostać Source Files o VC.”
+- “Nowy agent-partner ma dostać Source Files o VC.”
 
 ⸻
 

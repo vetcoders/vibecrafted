@@ -78,7 +78,7 @@ spawn_skill_prefix() {
 spawn_generate_run_id() {
   local prefix="${1:-impl}"
   local entropy=""
-  entropy="$(python3 - <<'PY' 2>/dev/null || true
+  entropy="$("$(spawn_python_bin)" - <<'PY' 2>/dev/null || true
 import os
 print(f"{int.from_bytes(os.urandom(3), 'big') % 100000:05d}")
 PY
@@ -104,7 +104,7 @@ spawn_marbles_state_dir() {
 spawn_archive_marbles_state_dir() {
   local run_id="$1"
   local status="${2:-archived}"
-  local state_dir target_date target_parent target_dir state_file
+  local state_dir target_date target_parent target_dir state_file py
 
   [[ -n "$run_id" ]] || return 1
   state_dir="$(spawn_marbles_state_dir "$run_id")"
@@ -119,8 +119,9 @@ spawn_archive_marbles_state_dir() {
   mv "$state_dir" "$target_dir"
 
   state_file="$target_dir/state.json"
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$status" "$state_dir" "$target_dir" <<'PY' || true
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$status" "$state_dir" "$target_dir" <<'PY' || true
 import datetime
 import json
 import sys
@@ -307,6 +308,7 @@ spawn_scan_active() {
   local tmp_root="${TMPDIR:-/tmp}"
   local marker=""
   local recent_active=""
+  local py=""
 
   tmp_root="${tmp_root%/}"
   marker="${tmp_root}/.vibecrafted-scan-marker"
@@ -316,10 +318,14 @@ spawn_scan_active() {
     return 0
   }
 
+  # Resolved once per scan, not once per meta file: the loops below run in a
+  # command-substitution subshell and inherit this value.
+  py="$(spawn_python_bin)"
+
   if [[ -e "$marker" ]]; then
     recent_active="$(
       find "$reports_dir" -name '*.meta.json' -newer "$marker" 2>/dev/null | sort | while read -r f; do
-        python3 - "$f" <<'PY'
+        "$py" - "$f" <<'PY'
 import json
 import sys
 
@@ -333,7 +339,7 @@ PY
   else
     recent_active="$(
       find "$reports_dir" -name '*.meta.json' 2>/dev/null | sort | while read -r f; do
-        python3 - "$f" <<'PY'
+        "$py" - "$f" <<'PY'
 import json
 import sys
 

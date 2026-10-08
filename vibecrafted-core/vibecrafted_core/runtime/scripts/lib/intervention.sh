@@ -12,7 +12,7 @@ spawn_append_operator_intervention() {
   [[ -f "$meta_path" ]] || spawn_die "meta.json not found: $meta_path"
   [[ -n "$message" ]] || spawn_die "operator intervention message is empty"
 
-  python3 - "$meta_path" "$actor" "$message" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" "$actor" "$message" <<'PY'
 import datetime as dt
 import json
 import os

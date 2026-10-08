@@ -1,0 +1,11 @@
+{
+  "algorithm": "sha256",
+  "layouts": {
+    "dashboard.kdl": "ddb06918307ec683bf7ceed73ada57a42d4796ee376785a3d26bed3cfaa9fb22",
+    "marbles.kdl": "e1e6f0148f59c4c05bfb69a34c7c4e3c2a0954a7465642b289b3a7f903f845bf",
+    "operator.kdl": "206e0ccbc4f39fab8b51d941d8fc1fd1c8238432e64bccafa5188ff9eb88d6b4",
+    "research.kdl": "cb784ffb2070a2076a089c578fa4f67a652a2d74bc4bb18eeba02ebf0d899ccd",
+    "workflow.kdl": "d5b11b6b6e468a217530a854beb7f72eb76d0e74f2417751bc33aeb1be56f2f1"
+  },
+  "schema": "io.vetcoders.vibecrafted.layout-hashes.v1"
+}

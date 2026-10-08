@@ -1,0 +1,72 @@
+# Three independent cuts, two providers, one scheduler — the typed plan a
+# vc-ship mission hands to the dispatcher with `dispatch_plan:`.
+#
+# Declaring the plan (rather than letting the mission derive one) is what makes
+# the fleet recoverable: `vibecrafted dispatch <plan> --resume <run_id>` needs a
+# plan file to name. A derived plan lives only in memory.
+#
+# reports_dir/tracker are optional. Canonical `~/.vibecrafted/artifacts/...`
+# is allowed; repo-local `.vibecrafted` and provider homes remain recovery-only.
+# This example omits both so the runtime allocates.
+schema = "vibecrafted.dispatch.v1"
+
+[meta]
+name = "ship-acceptance-fleet"
+repo = "/absolute/path/to/repository"
+
+[policy]
+# Three cuts, three slots: the fleet is concurrent or it is not a fleet.
+concurrency = 3
+allow_concurrency = true
+require_commit = true
+await = { poll_s = 5, timeout_min = 90 }
+
+[common]
+text = """
+Work only inside the worktree the dispatcher gave you. Never switch checkout,
+branch or Cargo target — the dispatcher owns all three. Commit your cut and
+leave a complete report at VIBECRAFTED_REPORT_PATH.
+"""
+
+[[phases]]
+title = "Acceptance"
+detail = "three disjoint cuts across two providers"
+
+# --- provider 1: GPT Terra ------------------------------------------------
+[[cuts]]
+id = "W0-a"
+phase = "Acceptance"
+agent = "codex"
+model = "gpt-5.6-terra"
+workflow = "implement"
+prompt = "Implement cut {id} in {repo}. Touch only vibecrafted-core/vibecrafted_core/lifecycle_fleet.py and its nearest test."
+
+  [[cuts.verify]]
+  run = "python3 -m pytest vibecrafted-core/tests/test_lifecycle_fleet.py -q"
+  expect = { exit_code = 0 }
+
+# --- provider 2: Claude ---------------------------------------------------
+[[cuts]]
+id = "W0-b"
+phase = "Acceptance"
+agent = "claude"
+model = "claude-opus-5"
+workflow = "implement"
+prompt = "Implement cut {id} in {repo}. Touch only vibecrafted-core/vibecrafted_core/lifecycle_control.py and its nearest test."
+
+  [[cuts.verify]]
+  run = "python3 -m pytest vibecrafted-core/tests/test_lifecycle_control.py -q"
+  expect = { exit_code = 0 }
+
+# --- provider 1 again: two providers, three independent cuts --------------
+[[cuts]]
+id = "W0-c"
+phase = "Acceptance"
+agent = "codex"
+model = "gpt-5.6-terra"
+workflow = "implement"
+prompt = "Implement cut {id} in {repo}. Touch only vibecrafted-core/vibecrafted_core/lifecycle_runner.py and its nearest test."
+
+  [[cuts.verify]]
+  run = "python3 -m pytest vibecrafted-core/tests/test_lifecycle_runner.py -q"
+  expect = { exit_code = 0 }

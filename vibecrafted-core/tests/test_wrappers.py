@@ -29,7 +29,7 @@ def test_supervised_skill_main_routes_runtime_launch_through_dispatcher(
 ) -> None:
     calls: list[dict[str, object]] = []
     monkeypatch.setenv("VIBECRAFTED_RUN_ID", "impl-test")
-    monkeypatch.setattr(wrappers, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(wrappers, "invocation_root", lambda: tmp_path)
     monkeypatch.setattr(
         wrappers,
         "_await_run_forever",
@@ -40,7 +40,7 @@ def test_supervised_skill_main_routes_runtime_launch_through_dispatcher(
     )
 
     class FailingSupervisor:
-        def __init__(self) -> None:  # pragma: no cover - would fail before branch body
+        def __init__(self) -> None:  # would fail before branch body
             raise AssertionError("normal runtime launches must use dispatcher")
 
     def fake_call(
@@ -174,6 +174,80 @@ def test_print_completed_sends_missing_payload_error_to_stderr(capsys) -> None:
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "completed without control-plane payload" in captured.err
+
+
+def test_argv_has_job_input_detects_prompt_and_file_flags() -> None:
+    assert wrappers.argv_has_job_input([]) is False
+    assert wrappers.argv_has_job_input(["claude"]) is False
+    assert wrappers.argv_has_job_input(["claude", "--runtime", "plain"]) is False
+    assert wrappers.argv_has_job_input(["claude", "--prompt", "x"]) is True
+    assert wrappers.argv_has_job_input(["claude", "-p", "x"]) is True
+    assert wrappers.argv_has_job_input(["claude", "--file", "brief.md"]) is True
+    assert wrappers.argv_has_job_input(["claude", "-f", "brief.md"]) is True
+    assert wrappers.argv_has_job_input(["claude", "--prompt-stdin"]) is True
+    assert wrappers.argv_has_job_input(["--prompt=x", "claude"]) is True
+    assert wrappers.argv_has_job_input(["--file=brief.md"]) is True
+
+
+def _force_interactive_stdio(
+    monkeypatch: pytest.MonkeyPatch, interactive: bool
+) -> None:
+    monkeypatch.setattr(wrappers.sys.stdin, "isatty", lambda: interactive)
+    monkeypatch.setattr(wrappers.sys.stdout, "isatty", lambda: interactive)
+
+
+def test_partner_main_without_prompt_calls_deck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_call(cmd):
+        calls.append(list(cmd))
+        return 0
+
+    _force_interactive_stdio(monkeypatch, True)
+    monkeypatch.setattr(subprocess, "call", fake_call)
+
+    assert wrappers.partner_main(["claude"]) == 0
+    assert calls
+    assert calls[0][1:] == ["partner", "claude"]
+
+
+def test_partner_main_with_prompt_stays_on_deck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_call(cmd):
+        calls.append(list(cmd))
+        return 0
+
+    def boom(_skill, _argv):
+        raise AssertionError("partner --prompt must not call supervised_skill_main")
+
+    _force_interactive_stdio(monkeypatch, True)
+    monkeypatch.setattr(subprocess, "call", fake_call)
+    monkeypatch.setattr(wrappers, "supervised_skill_main", boom)
+
+    assert wrappers.partner_main(["claude", "--prompt", "x"]) == 0
+    assert calls
+    assert calls[0][1:] == ["partner", "claude", "--prompt", "x"]
+
+
+def test_partner_main_without_tty_refuses_even_with_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def boom(_cmd):
+        raise AssertionError("headless vc-partner must not spawn the deck")
+
+    _force_interactive_stdio(monkeypatch, False)
+    monkeypatch.setattr(subprocess, "call", boom)
+
+    assert wrappers.partner_main(["claude", "--prompt", "x"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == wrappers.PARTNER_INTERACTIVE_ONLY
 
 
 def test_resume_main_routes_through_tracked_native_resume_api(
@@ -322,3 +396,37 @@ def test_stop_main_accepts_last_for_agent(
 
     assert code == 0
     assert "run_id=work-260816-213657-08420" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_stop_main_swarm_reports_each_child_and_incomplete_cascade(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], complete: bool
+) -> None:
+    def stopped(run_id: str) -> dict:
+        return {
+            "accepted": True,
+            "run_id": run_id,
+            "target": "worker_pgid",
+            "target_pid": 123,
+            "target_pgid": 123,
+            "run": {"state": "stopped"},
+        }
+
+    monkeypatch.setattr(
+        workflow,
+        "stop_run",
+        lambda run_id, **kwargs: {
+            **stopped(run_id),
+            "children": [stopped(run_id + "-research-codex")],
+            "cascade_complete": complete,
+        },
+    )
+    assert wrappers.stop_main(["--agent", "swarm", "--run-id", "rese-parent"]) == (
+        0 if complete else 1
+    )
+    output = capsys.readouterr()
+    assert output.out.index("run_id=rese-parent-research-codex") < output.out.index(
+        "run_id=rese-parent state="
+    )
+    assert "pgid=123" in output.out
+    assert ("swarm stop incomplete" in output.err) == (not complete)

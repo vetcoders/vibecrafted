@@ -12,22 +12,108 @@ order: 10
 ```bash
 vibecrafted doctor
 vibecrafted doctor --verbose      # list every check, including passing ones
+vibecrafted doctor --release      # VERSION vs GitHub Latest + last source gate
 ```
 
 ## What doctor audits
 
-| Audit               | What it proves                                                                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Generation manifest | `runtime-manifest.json` (schema `vibecrafted.runtime-generation.v2`) exists, carries the v2 source-payload identity, and is valid for the current generation        |
-| Content hashes      | SHA-256 digests for `VERSION`, launcher/deck, generated vc-frame config, and verifier engine/runner/schema/policy/key still match — any drift fails                 |
-| Launcher binding    | The public launcher resolves to the exact current generation entrypoint inside `~/.local/share/vibecrafted` — a launcher resolving outside the installed root fails |
-| Checkout-link scan  | No active config, KDL, helper, or command-deck content references a source checkout                                                                                 |
-| Symlink census      | No installed symlink is broken or resolves outside its generation                                                                                                   |
-| Foundations         | Product-managed foundation binaries (loct, aicx, prview, screenscribe) are present and are never silently replaced with stale copies                                |
+| Audit               | What it proves                                                                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Generation manifest | `runtime-manifest.json` (schema `vibecrafted.runtime-generation.v2`) exists, carries the v2 source-payload identity, and is valid for the current generation                                             |
+| Content hashes      | SHA-256 digests for `VERSION`, launcher/deck, generated vc-frame config, and verifier engine/runner/schema/policy/key still match — any drift fails                                                      |
+| Launcher binding    | The public launcher resolves to the exact current generation entrypoint inside `~/.local/share/vibecrafted` — a launcher resolving outside the installed root fails                                      |
+| Checkout-link scan  | No active config, KDL, helper, or command-deck content references a source checkout                                                                                                                      |
+| Symlink census      | No installed symlink is broken or resolves outside its generation                                                                                                                                        |
+| Foundations         | Product-managed foundation binaries (loct, aicx, prview, screenscribe) are present and are never silently replaced with stale copies                                                                     |
+| Skill-copy shadows  | No per-runtime skill directory (`~/.junie/skills`, `~/.agy/skills`, `~/.grok/skills`, `~/.cursor/skills`) holds a real directory copy of a bundled skill shadowing the canonical `~/.agents/skills` view |
+| Skill-root links    | Every per-runtime skill root is a real directory. One reached through a symlink or junction, or resolving into the skill store, is named (`skill-root:<runtime>`) rather than skipped in silence         |
+
+## Generation integrity (`runtime-generation:integrity`)
+
+Every ordinary doctor run compares the active generation with
+`runtime-pack-provenance.json` → `payload.files`. It hashes the files and checks
+their sizes and modes, reporting `CHANGED`, `MISSING`, and `ADDITIONAL` paths.
+The report lists up to 20 paths and counts the remainder. Move manual fixes into
+the source checkout: changes made directly in an installed generation will be
+lost at the next installation.
+
+This is a difference report against the pack inventory, not proof that a person
+authored every difference. Installer-generated files and Python bytecode can
+also appear as additional files; source changes are listed before those paths.
+Only the admission contract's `.DS_Store` exception is ignored. Invalid or
+missing inventory, symlinks, and unreadable payloads fail verification; an
+unresolvable active generation is explicitly reported as not checked. Doctor
+does not repair or rebaseline the generation.
+
+## Skill-copy shadows (`shadow-dir:<runtime>/<skill>`)
+
+Installers before 3.x materialized **real directory copies** of `vc-*` skills into per-runtime skill dirs instead of views. Those copies survive next to the canonical `~/.agents/skills` symlink view, drift silently, and an agent that reads both directories (Junie does) sees a stale duplicate. Neither install, update nor doctor used to notice: shadow pruning covered only `claude`/`codex` and only symlinks, and orphan pruning covered only names that had left the bundle.
+
+The same proof governs **orphans** — a `vc-*` directory whose name is no longer in the bundle. A retired skill like `vc-canvas` is also a name you could put your own work under, and orphan pruning used to remove the directory either way (with the prompt defaulting to yes, and returning that default in a non-interactive install). A real orphan directory now has to prove the same provenance before it is quarantined and removed; one that cannot is kept, reported with the `mv` command, and never offered at the prompt. Pointers and stray files are still removed as the leftovers of views we wrote.
+
+Doctor now reports one `shadow-dir:<runtime>/<skill>` warning per copy, with the exact path and its provenance class:
+
+| Class               | What is proven                                                                                                                                                                                                                        | What install/update does                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `managed_identical` | The copy's file tree and content hashes match the store copy of that skill                                                                                                                                                            | Copied into a quarantine dir, then removed                 |
+| `managed_stale`     | The copy's `SKILL.md` bytes are a release we shipped (sha256), and every file in it is byte for byte a version we shipped at that same path (git blob id), under a directory that really held a `SKILL.md`                            | Copied into a quarantine dir, then removed                 |
+| `unknown`           | Anything less — an edited file, a path we never shipped, a symlink, or a `SKILL.md` we never released. A real **file** under a skill name is always this: a view is a link and a legacy copy is a directory, so a file there is yours | **Never touched** — reported with a manual `mv` suggestion |
+
+Reconciliation happens during install and update, so the fix doctor names is `vibecrafted update --force`: a plain `vibecrafted update` returns without reinstalling when the channel version matches the executing launcher. This comparison does not attest installation health, and the reconciliation does not run on that path.
+
+Provenance is proven from content, never from the `vc-` name: your own skill parked under a `vc-*` name is reported and left alone. Two proofs are tried, in order:
+
+1. **Identical tree** — the copy's file tree and content hashes match the store copy of that skill. Nothing can be lost: the store holds the same bytes, and the copy is quarantined before it is removed.
+2. **Release history** — `SKILL_PROVENANCE.json`, shipped inside the skill store, records per skill the sha256 of every `SKILL.md` Vibecrafted has ever released, and for every relative path under a real skill directory the **git blob id of every version of that file we ever committed**. The copy is claimed only when both halves hold: its `SKILL.md` hashes into the released set, and every entry in it is a plain file whose bytes are one of the versions we shipped at that exact path. Editor litter (`__pycache__/`, `*.pyc`, `.DS_Store`) is skipped.
+
+   A path is deliberately not evidence on its own. A name says nothing about content, so your own edited `scripts/await.sh` sitting at a path we do ship is `unknown`, and the warning names the file. A symlink inside the copy is `unknown` too: a materialized copy is files, and a link points somewhere nobody can vouch for.
+
+   "Real skill directory" is just as deliberate. Only a directory that has ever held a `SKILL.md`, under a root where one has actually lived, counts. `runtime/vc-marbles/` never held one, so `orchestrator/commands/help.md` is not a `vc-marbles` file and does not widen what the installer may delete — while the identically-named path under `skills/vc-marbles/` is, because that root did.
+
+   One shape needs naming: we have shipped a file as a _symlink_ (`skills/vc-agents/shell/vetcoders.zsh -> vetcoders.sh`), and an installer that copies a tree dereferences it, so the copy holds the target's bytes under the link's name. Those bytes are still ours, so the manifest records the target's blob ids under the link's path as well. Without that, the largest real copy on the affected host is unprovable for one file out of 54.
+
+A missing, corrupt or older-schema manifest disables that second proof only; the identical-tree proof still applies, and everything else is reported as `unknown`. An older schema counts as missing: v1 recorded `SKILL.md` hashes alone and v2 added bare paths, and neither can say whether a file's bytes are ours.
+
+Maintainers regenerate the manifest from the repository history after editing, adding or removing any skill file:
+
+```bash
+scripts/gen_skill_provenance.py            # merge history + working tree into the manifest
+scripts/gen_skill_provenance.py --check     # gate: fails when the committed manifest is not what a regeneration renders
+```
+
+`--check` runs inside `make check`, so an unrecorded file fails Portable Checks rather than shipping a bundle that cannot prove its own skills. It compares the whole rendered document (`generated_at` aside), so an unsorted or duplicated entry fails too, not only a missing one.
+
+The merge is additive and idempotent, so regenerating in a shallow clone never shrinks the proof set — which is also why a well-formed entry for a skill this clone cannot see is kept rather than flagged: that is how a retired skill's proof survives.
+
+A runtime skill directory reached through a symlink or a Windows directory junction, or that resolves into the skill store, is skipped entirely (a junction reports `is_symlink() == False` while `rmtree` still walks through it): comparing the store with itself would classify every skill as an identical copy, and removing it would take the canonical store with it. A real directory in a runtime that carries a managed view is reported **twice, on purpose**: `symlink:<runtime>/<skill>` "is a COPY, not a symlink" is the view contract, and `shadow-dir:<runtime>/<skill>` carries the provenance class. The COPY finding alone never said whether the copy could be proven — the one fact that decides what happens next — and its suggested action used to be a plain `vibecrafted update`, a no-op on a host already at the latest version. Both findings now point at `vibecrafted update --force`. Reconciliation itself covers **every** runtime and runs before install writes the views. Quarantined copies land in `~/.vibecrafted/backups/installer/shadowed-views-<timestamp>/<runtime>/<skill>` and are never removed by the installer; the canonical `~/.agents/skills` view is never modified by this reconciliation.
+
+Reconciliation refuses to remove a copy unless the skill stays readable afterwards: either `~/.agents/skills/<skill>` already points at the store, or the copy's own runtime is one this pass is about to link. So install links the canonical `agents` view first, reconciles shadows next, and links the remaining runtimes last. A first install therefore clears its own shadows in one pass; it used to leave them for a later run, which a plain `vibecrafted update` never performed. The second condition matters for an advanced or `--tool` selection that leaves `agents` out entirely — without it the precondition would be unmeetable and every proven copy would stay on the host for good.
+
+The view writer never removes anything real — not a directory and not a file. It replaces a symlink or a junction with the correct link — removing the pointer itself, never the tree behind it — and leaves everything else where it is, with a `Keeping real directory …` or `Keeping real file …` line. By the time it runs, every copy whose provenance could be proven has already been quarantined, so whatever is still there is something nobody could vouch for, and overwriting it with a symlink would destroy an operator's own work with no backup. A plain file needs that protection most, because nothing else offers it any: shadow detection only ever examines directories, and it skips a runtime whose skills dir is reached through a symlink — so with `~/.grok/skills -> ~/notes`, a note named `vc-research` had nothing between it and the writer.
+
+## A linked skill root (`skill-root:<runtime>`)
+
+The skip described above is real, and it is now reported rather than silent. Doctor emits one `skill-root:<runtime>` warning per such root, naming the path, where it resolves to, and the fact that copies under it are never inspected and nothing there is ever removed; the action list asks the operator to look at it (`ls -l ~/.<runtime>/skills`) and to replace it with a real directory if they want that runtime reconciled. Install and update print the same fact as a `WARN <runtime> skill root … shadows there are not inspected and nothing is removed` line. Without it, a skipped root was indistinguishable from a clean host: no finding at all, and the `shadow-dirs` OK line listed the directory among the ones it had just cleared. That OK line now covers only the roots actually inspected.
+
+A root that resolves **into the store** additionally gets no views written into it. Every view there would be a symlink inside the canonical store aimed at its own sibling, and the root-rule sync would copy `*_RULE.md` into the store on every run — litter in the one directory that has to stay exactly what was published. Nothing is lost by skipping it: that root _is_ the store, so `~/.junie/skills/vc-x` already resolves to `~/.vibecrafted/skills/vc-x` with no view in between.
+
+The pruner that removes **managed symlink views** from a runtime left out of the install now requires the same pointer-free root. `~/.codex/skills -> ~/.claude/skills` on a claude-only host shows every one of claude's live views under the inactive `codex` name — same inode, same managed target — and each one was unlinked as codex's leftover, taking the active runtime's deck with it. The check is per runtime, not per entry, because the entry in front of the pruner is indistinguishable from a view it wrote itself.
 
 Launcher audits are scoped by **ownership, not naming**: doctor judges only the launchers Vibecrafted publishes itself (the installer's wrappers and Python entrypoints, the legacy packs, and the provider-published `vc-slack`). Another product that shares `~/.local/bin` and the `vc-` prefix — and legitimately links into its own checkout — keeps its own installation contract and is left alone.
 
 This is the same audit that gates publication of a new generation: what fails a publish also fails doctor afterward.
+
+## Release valve (`--release`)
+
+Default doctor does **not** ask GitHub anything. That is why VERSION could sit at 4.1.0 while GitHub Latest and the last successful `Release source gate` stayed on v3.5.0, and every local gate still printed green.
+
+`vibecrafted doctor --release` is the named probe:
+
+- local `VERSION` (the checkout file, stamp stripped to `vX.Y.Z`)
+- `gh release view --json tagName` (GitHub Latest)
+- latest `gh run list --workflow "Release source gate" --limit 1` conclusion
+
+Mismatch, a missing release, or a non-success source-gate conclusion is **red** and names the operator button: **tag/publish**. Missing `gh` is a loud **warn**, never a silent skip and never a fake green. The probe is off the public network in unit tests; it only talks to GitHub when you actually run `--release`.
 
 ## Reading the output
 
@@ -55,6 +141,55 @@ vibecrafted doctor --fix-server-service     # reconcile the LaunchAgent with the
 ```
 
 Each fix flag re-verifies after repairing, so a clean exit means the repair actually held.
+
+## Terminal startup recovery
+
+The `vc-terminal` launcher validates the installed shell specification before
+opening its default workspace. A malformed record, missing shell or script,
+or persisted `/tmp` probe selects the product recovery shell for that invocation.
+The terminal prints the reason, recovery commands, and the startup log path
+(`$VIBECRAFTED_HOME/logs/terminal-startup.log`, defaulting to
+`~/.vibecrafted/logs/terminal-startup.log`).
+
+```bash
+vc-terminal --doctor       # apply the installer's configuration repair transaction
+vc-frame attach vc-host    # return to the named session
+vc-frame list-sessions     # list available sessions
+```
+
+The repair preserves a backup and unrelated preferences. Temporary diagnostic
+shell overrides belong in invocation arguments; never save them in
+`terminal-policy.toml` or `vc-terminal/vc-terminal.toml`.
+
+When the reserved `vc-host` name has a guest layout, `vc-start` preserves it
+and creates `vc-host-recovered` as the host. The diagnostic names the old session
+and gives its exact attach and cleanup commands. Save its work before choosing
+`kill-session` and `delete-session`; startup never runs those commands for you.
+`vc-frame ka` is an alias for `kill-all-sessions`: it stops every session, so use
+it only for an intentional global reset after saving work in all sessions.
+
+### Open the active generation beside an existing host
+
+Sessions survive runtime upgrades. A `vc-frame:generation-split` warning means
+some live servers still use an older generation. Keep them running and open
+another host with:
+
+```bash
+vc-start --new-host
+vibecrafted start --new-host --repo ~/Projects/example
+```
+
+This opens an empty host on the active generation, even when the repository's
+workspace already exists. Names are `vc-host@<shortgen>`, then `-2`, `-3`, and
+so on; an unstamped development entry uses `vc-host-2`. Occupied names, including
+EXITED records, are preserved. The launcher reports each existing host's
+generation when its socket owner can be identified, otherwise `unknown`.
+
+Ordinary `start` proposes a new host when it detects a generation split.
+Declining cancels the start; a non-interactive caller must pass `--new-host`
+explicitly. `resume` remains deliberate re-entry. The new host has its own
+terminal when started from inside another host. Open projects from that host;
+workspaces remain guests and roles still come from layout identity markers.
 
 ## Receipt — provenance on top of health
 

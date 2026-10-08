@@ -53,8 +53,15 @@ FIXTURE_REQUIRED_FILES = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
+    "scripts/build-linux-runtime-pack.sh",
+    "scripts/build-windows-x64-runtime-pack.ps1",
+    "scripts/install-runtime-pack.ps1",
+    "scripts/package-runtime-pack.ps1",
+    "scripts/installer_brand.py",
+    "scripts/install-foundations.sh",
+    "scripts/lib/runtime-roots.sh",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -71,6 +78,9 @@ FIXTURE_REQUIRED_FILES = {
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 }
 FIXTURE_REQUIRED_SURFACES = {
     "bin/vc-workflow",
@@ -578,7 +588,7 @@ def test_repo_version_file_exists_and_is_non_empty() -> None:
         "VIBECRAFTED_RUN_NO_UV_E2E=1 to opt in."
     ),
 )
-def test_make_install_no_uv_e2e(tmp_path: Path) -> None:  # pragma: no cover
+def test_make_install_no_uv_e2e(tmp_path: Path) -> None:
     env = _build_no_uv_env(tmp_path, fake_uv=False)
     result = subprocess.run(
         ["make", "install"],
@@ -595,3 +605,35 @@ def test_make_install_no_uv_e2e(tmp_path: Path) -> None:  # pragma: no cover
     # survived. Look for installer-side output.
     combined = result.stdout + result.stderr
     assert "uv run" in combined or "vetcoders-installer" in combined, combined
+
+
+def test_uv_fixture_required_files_track_canonical_manifest() -> None:
+    """Fixture required files must cover all required distribution files.
+
+    Exposes future required-file drift without replacing the independent
+    fixture oracle wholesale.
+    """
+    assert "scripts/install-foundations.sh" in FIXTURE_REQUIRED_FILES
+    assert "scripts/lib/runtime-roots.sh" in FIXTURE_REQUIRED_FILES
+    from scripts import distribution_manifest
+
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    import re
+
+    match = re.search(r"REQUIRED_FILES = frozenset\(\s*\{([^}]+)\}\s*\)", text)
+    assert match is not None, "Could not find REQUIRED_FILES in install.sh"
+    install_sh_required = {
+        item.strip().strip('"').strip("'")
+        for item in match.group(1).split(",")
+        if item.strip() and not item.strip().startswith("#")
+    }
+    missing_from_fixture = install_sh_required - FIXTURE_REQUIRED_FILES
+    assert not missing_from_fixture, (
+        f"FIXTURE_REQUIRED_FILES drifted from install.sh REQUIRED_FILES: {missing_from_fixture}"
+    )
+    manifest_missing = (
+        set(distribution_manifest.REQUIRED_FILES) - FIXTURE_REQUIRED_FILES
+    )
+    assert not manifest_missing, (
+        f"FIXTURE_REQUIRED_FILES drifted from distribution_manifest.py REQUIRED_FILES: {manifest_missing}"
+    )

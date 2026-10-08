@@ -25,10 +25,10 @@ import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now_iso
 from .runtime_paths import vibecrafted_launcher_bin
 
 # Ghost roots the runtime explicitly refuses to treat as canonical. A product
@@ -93,11 +93,6 @@ class ToolCapability:
         }
 
 
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _default_runner(timeout: float) -> Runner:
     """Build a :data:`Runner` that executes real subprocesses with ``timeout`` seconds."""
 
@@ -115,7 +110,7 @@ def _default_runner(timeout: float) -> Runner:
             return ProbeResult(ok=False, returncode=None, stderr="not found")
         except subprocess.TimeoutExpired:
             return ProbeResult(ok=False, returncode=None, stderr="timeout")
-        except OSError as exc:  # pragma: no cover - defensive
+        except OSError as exc:  # defensive
             return ProbeResult(ok=False, returncode=None, stderr=str(exc))
         return ProbeResult(
             ok=completed.returncode == 0,
@@ -241,7 +236,7 @@ def probe_tool(
     product (binary absent from ``$PATH``) from a broken runtime (binary
     present but not executable) and from a non-canonical install location.
     """
-    checked_at = _now_iso()
+    checked_at = utc_now_iso()
     executable = _resolve_executable(name)
     provenance = _classify_provenance(executable)
 
@@ -334,7 +329,7 @@ def foundation_capabilities(
     healthy = summary["product_broken"] == 0
     return {
         "schema": "vibecrafted.capabilities.v1",
-        "generated_at": _now_iso(),
+        "generated_at": utc_now_iso(),
         "canonical_bin": str(vibecrafted_launcher_bin()),
         "healthy": healthy,
         "summary": summary,

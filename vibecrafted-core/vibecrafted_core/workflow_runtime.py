@@ -15,16 +15,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .effort_overrides import _with_effort_override
 from .model_overrides import _with_model_override
 from .package_resources import package_root
+from .report_contract import parse_report_path
 from .research_config import (
     SUPPORTED_RESEARCH_AGENTS,
     ResearchAgentSelection,
     resolve_research_runtime_config,
 )
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import agent_tool_search_path, selected_runtime_environment
+from .server_config import load_agent_launch_config
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
+from .telemetry import tokens_total as _tokens_total
+
+_LOOP_STOP_REPORT_STATUSES = frozenset({"blocked", "failed"})
 
 
 @dataclass(frozen=True)
@@ -189,12 +195,13 @@ def _child_env(
     model_requested: str = "",
 ) -> dict[str, str]:
     """Child process env: agent + artifact paths, plus model override if requested."""
-    env = os.environ.copy()
+    env = selected_runtime_environment()
     env["VIBECRAFTED_AGENT"] = agent
     env["VIBECRAFTED_REPORT_PATH"] = str(report)
     env["VIBECRAFTED_TRANSCRIPT_PATH"] = str(transcript)
     env["VIBECRAFTED_META_PATH"] = str(meta)
     env["PATH"] = agent_tool_search_path(env)
+    env.pop("VIBECRAFTED_MODEL_REQUESTED", None)
     if model_requested:
         env["VIBECRAFTED_MODEL_REQUESTED"] = model_requested
     return env
@@ -237,23 +244,6 @@ def _optional_float(value: object) -> float | None:
         except ValueError:
             return None
     return None
-
-
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
-
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
-    """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
 
 
 def _child_tokens_total(result: ChildResult) -> int:
@@ -516,7 +506,7 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot"})
 
 
 def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
@@ -567,6 +557,15 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "--prompt-file",
             "/dev/stdin",
         ]
+    if normalized_agent == "agy":
+        # agy 1.2.1 probe 2026-09-11: `--conversation <id>` composes with the
+        # private `--print=` + stream-json stdin lane and keeps the same
+        # conversation_id (context preserved). Prompt never rides argv.
+        command = _stdin_command("agy")
+        return [command[0], "--conversation", native_id, *command[1:]]
+    if normalized_agent == "copilot":
+        command = _stdin_command("copilot")
+        return [command[0], "--resume", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
 
@@ -592,9 +591,46 @@ async def _run_child(
     prompt_body: str | None = None,
 ) -> ChildResult:
     """Spawn and await one supervised child agent process, writing its prompt
-    file, resolving its command (default: stdin command with model override),
-    and returning the collected `ChildResult`.
+    file, resolving its command, applying a requested model pin once, and
+    returning the collected `ChildResult`.
     """
+    from .workflow import (
+        WorkflowLaunchSpec,
+        launch_selection_receipt,
+        select_plan_effort,
+        select_plan_model,
+    )
+
+    defaults = load_agent_launch_config(agent)
+    model, model_source = select_plan_model(
+        agent, "", model=model_requested, defaults=defaults
+    )
+    effort, effort_source = select_plan_effort(
+        agent,
+        effort=os.environ.get("VIBECRAFTED_EFFORT_REQUESTED", ""),
+        defaults=defaults,
+    )
+    if model_requested and model_requested == os.environ.get(
+        "VIBECRAFTED_MODEL_REQUESTED"
+    ):
+        model_source = os.environ.get("VIBECRAFTED_MODEL_SOURCE") or model_source
+    if os.environ.get("VIBECRAFTED_EFFORT_REQUESTED"):
+        effort_source = os.environ.get("VIBECRAFTED_EFFORT_SOURCE") or effort_source
+    selection = launch_selection_receipt(
+        WorkflowLaunchSpec(
+            agent=agent,
+            mode=kind,
+            skill="workflow",
+            prompt=prompt,
+            file="",
+            runtime="headless",
+            root=root,
+            model=model,
+            model_source=model_source,
+            effort=effort,
+            effort_source=effort_source,
+        )
+    )
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
     report, transcript, meta, prompt_file = _child_artifact_paths(
@@ -607,13 +643,18 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = (
-        list(command)
-        if command is not None
-        else _with_model_override(agent, _stdin_command(agent), model_requested)
+    child_command = _with_effort_override(
+        agent,
+        _with_model_override(
+            agent,
+            command if command is not None else _stdin_command(agent),
+            model,
+        ),
+        effort,
     )
-    child_env = _child_env(agent, report, transcript, meta, model_requested)
+    child_env = _child_env(agent, report, transcript, meta, model)
     child_command = _resolve_agent_command(agent, child_command, child_env)
+    _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
     if _tee_enabled():
         print(f"\n===== {kind}:{label}:{agent} =====", flush=True)
     handle: AsyncRunHandle = await AsyncSupervisor().run(
@@ -630,6 +671,8 @@ async def _run_child(
         tee_output=_tee_enabled(),
     )
     validation = handle.artifact_validation
+    settled = getattr(handle, "telemetry", None)
+    counts = settled.usage.flat() if settled is not None else {}
     return ChildResult(
         label=label,
         agent=agent,
@@ -645,11 +688,20 @@ async def _run_child(
         exit_code=handle.exit_code,
         artifact_ok=bool(validation.ok if validation is not None else False),
         artifact_errors=tuple(validation.errors if validation is not None else ()),
-        tokens_input=handle.tokens_input,
-        tokens_cached_input=handle.tokens_cached_input,
-        tokens_cache_write=handle.tokens_cache_write,
-        tokens_output=handle.tokens_output,
-        cost_usd=handle.cost_usd,
+        tokens_input=_optional_int(counts.get("tokens_input", handle.tokens_input))
+        or 0,
+        tokens_cached_input=_optional_int(
+            counts.get("tokens_cached_input", handle.tokens_cached_input)
+        )
+        or 0,
+        tokens_cache_write=_optional_int(
+            counts.get("tokens_cache_write", handle.tokens_cache_write)
+        ),
+        tokens_output=_optional_int(counts.get("tokens_output", handle.tokens_output))
+        or 0,
+        cost_usd=_optional_float(settled.cost.flat()["cost_usd"])
+        if settled is not None
+        else handle.cost_usd,
         resume_command=handle.resume_command,
         completed_at=handle.completed_at.isoformat() if handle.completed_at else "",
     )
@@ -712,10 +764,12 @@ def _child_result_from_meta(label: str, meta_path: Path) -> ChildResult | None:
         exit_code=exit_code,
         artifact_ok=not artifact_errors and exit_code == 0 and report.is_file(),
         artifact_errors=artifact_errors,
-        tokens_input=int(payload.get("tokens_input") or 0),
-        tokens_cached_input=int(payload.get("tokens_cached_input") or 0),
+        # Child meta records "unknown" (not 0) when the provider emitted no
+        # usage; this receipt still sums integers, so unknown counts add 0.
+        tokens_input=_optional_int(payload.get("tokens_input")) or 0,
+        tokens_cached_input=_optional_int(payload.get("tokens_cached_input")) or 0,
         tokens_cache_write=_optional_int(payload.get("tokens_cache_write")),
-        tokens_output=int(payload.get("tokens_output") or 0),
+        tokens_output=_optional_int(payload.get("tokens_output")) or 0,
         cost_usd=_optional_float(payload.get("cost_usd")),
         resume_command=str(payload.get("resume_command") or ""),
         completed_at=str(
@@ -843,6 +897,17 @@ def _research_survivors(results: Sequence[ChildResult]) -> list[ChildResult]:
     return [r for r in results if r.exit_code == 0 and r.artifact_ok]
 
 
+def _child_report_status(result: ChildResult) -> str:
+    """Return the child's report frontmatter ``status``, or empty if unreadable.
+
+    Missing report / unreadable frontmatter is empty, not a stop signal.
+    """
+    parsed = parse_report_path(result.report)
+    if not parsed.has_frontmatter:
+        return ""
+    return (parsed.fields.get("status") or "").strip().lower()
+
+
 def _research_run_status(
     results: Sequence[ChildResult],
     synthesis: ChildResult | None,
@@ -854,7 +919,9 @@ def _research_run_status(
     Research degrades gracefully: a majority of surviving lanes plus a valid
     synthesis is ``partial_success`` (a green run, not a failure) instead of
     collapsing the whole swarm to ``failed`` on a single dead lane. Non-research
-    kinds (marbles/polarize) keep the strict all-or-nothing contract.
+    kinds (marbles/polarize) keep the strict all-or-nothing contract, and also
+    surface a child report ``blocked``/``failed`` instead of calling an early
+    loop stop ``completed``.
     """
 
     total = len(results)
@@ -863,7 +930,14 @@ def _research_run_status(
     survivors = _research_survivors(results)
     all_ok = len(survivors) == total
     if kind != "research":
-        return "completed" if all_ok else "failed"
+        if not all_ok:
+            return "failed"
+        statuses = [_child_report_status(result) for result in results]
+        if "failed" in statuses:
+            return "failed"
+        if "blocked" in statuses:
+            return "blocked"
+        return "completed"
     synthesis_ok = (
         synthesis is not None and synthesis.exit_code == 0 and synthesis.artifact_ok
     )
@@ -1073,6 +1147,7 @@ async def _run_research_synthesis(
         root=root,
         prompt=prompt,
         command=synthesis_command,
+        model_requested=model_requested,
         prompt_body=_research_synthesis_prompt(root, prompt, survivors),
     )
 
@@ -1149,7 +1224,9 @@ def _write_parent_report(
             [
                 "## Research Lane Selection",
                 "",
+                "- precedence (low to high): builtin -> install.toml -> deprecated research.yaml -> config.toml -> environment -> explicit",
                 f"- source: {research_selection.source}",
+                f"- warnings: {'; '.join(research_selection.warnings) or 'none'}",
                 f"- agents: {', '.join(research_selection.agents) or 'none'}",
                 f"- ignored: {', '.join(research_selection.ignored) or 'none'}",
                 f"- synthesizer: {research_selection.synthesizer or 'last-survivor'}",
@@ -1306,6 +1383,7 @@ async def run_research(root: str, prompt: str, model_requested: str = "") -> int
         )
     if not selection.agents:
         print("vc-research: no supported research agents configured.", file=sys.stderr)
+        _write_parent_report("research", root, prompt, [], research_selection=selection)
         return 1
     tasks = [
         _run_child(
@@ -1376,6 +1454,7 @@ async def run_research_synthesis(
         )
     if not selection.agents:
         print("vc-research: no supported research agents configured.", file=sys.stderr)
+        _write_parent_report("research", root, prompt, [], research_selection=selection)
         return 1
     hard_timeout = float(
         os.environ.get("VIBECRAFTED_RESEARCH_SYNTHESIS_TIMEOUT", "3600")
@@ -1417,7 +1496,8 @@ async def run_marbles(
     model_requested: str = "",
 ) -> int:
     """Run up to `count` sequential marbles/polarize loop iterations, stopping
-    early on the first failed/invalid child; writes the parent report.
+    early on the first failed/invalid child or a child report whose ``status``
+    is ``blocked`` or ``failed``; writes the parent report.
     Returns 0 only if all `count` iterations completed cleanly.
     """
     model_requested = _remember_runtime_model_request(model_requested)
@@ -1436,11 +1516,18 @@ async def run_marbles(
         results.append(result)
         if result.exit_code != 0 or not result.artifact_ok:
             break
+        if _child_report_status(result) in _LOOP_STOP_REPORT_STATUSES:
+            break
     _write_parent_report(kind, root, prompt, results)
     return (
         0
         if len(results) == count
-        and all(result.exit_code == 0 and result.artifact_ok for result in results)
+        and all(
+            result.exit_code == 0
+            and result.artifact_ok
+            and _child_report_status(result) not in _LOOP_STOP_REPORT_STATUSES
+            for result in results
+        )
         else 1
     )
 
@@ -1527,5 +1614,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

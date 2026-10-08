@@ -186,7 +186,7 @@ zarabia PASS tylko przy wszystkich czterech:
 
 NIE WOLNO ci ufać statusowi z frontmattera taska, raportom wcześniejszych
 agentów, commit messages, wpisom AICX, memory slices (wycinkom pamięci),
-notatkom z kroniki, adnotacjom „completed", opisom PR-ów, inline'owym
+notatkom z dziennika projektu, adnotacjom „completed", opisom PR-ów, inline'owym
 komentarzom `// done` ani wcześniejszym raportom `vc-followup` /
 `vc-review` — chyba że **niezależnie potwierdzone w bieżącym kodzie/testach**.
 Każde z nich to _twierdzenie_, nie evidence. Audit zamienia twierdzenia

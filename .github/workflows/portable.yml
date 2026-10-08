@@ -1,15 +1,31 @@
 name: Portable Checks
 
+# PR-first event matrix:
+# - feature push: no run (open a PR)
+# - pull_request open/synchronize: run; group includes the PR number
+# - push to main: post-merge default-branch check
+# - merge_group: merge-queue check; cancel-in-progress is false
+# - tag: no run (Release source gate owns tags)
+# Required names preserved: "portable (macos-latest, macOS)" and
+# "portable (ubuntu-latest, Linux)" — do not add a job-level name here.
+
 on:
   push:
+    branches:
+      - main
   pull_request:
   merge_group:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 jobs:
   portable:
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -76,10 +92,72 @@ jobs:
         run: make check
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Pin uv to a managed Python on macOS
+        if: matrix.os == 'macOS'
+        run: |
+          # Homebrew's framework CPython resolves sys.executable through
+          # symlinks, which hides the generation interpreter from the
+          # runtime-bootstrap PYTHONPATH scrub and fails the installed-spawn
+          # installer tests. A uv-managed CPython keeps the invoked path,
+          # matching the operator lane and production Runtime Packs.
+          echo "UV_PYTHON_PREFERENCE=only-managed" >> "$GITHUB_ENV"
       - name: Run Semgrep security gate
         run: make semgrep
+      - name: Verify VOC against the exact source core
+        run: make voc-core-contract-gate
       - name: Run installer tests
-        run: make test
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            test_uid="$(id -u)"
+            test_gid="$(id -g)"
+            test_user="$(id -un)"
+            test_pid_ns="$(readlink /proc/self/ns/pid)"
+            [[ "$test_uid" != 0 ]]
+            test_state="$(mktemp -d "$RUNNER_TEMP/vc-installer-tests.XXXXXX")"
+            trap 'rm -rf -- "$test_state"' EXIT
+            test_env=(
+              "PATH=$PATH" "HOME=$HOME" "USER=$test_user" "LOGNAME=$test_user"
+              "CI=${CI:-true}" "GITHUB_ACTIONS=${GITHUB_ACTIONS:-true}"
+              "RUNNER_TEMP=$RUNNER_TEMP" "PYTEST_ADDOPTS=$PYTEST_ADDOPTS"
+              "VIBECRAFTED_HOME=$test_state"
+            )
+            # Keep setup-uv path/mode and the earlier pinned Rust toolchain paths.
+            for key in UV_CACHE_DIR UV_PYTHON_PREFERENCE RUSTUP_HOME CARGO_HOME; do
+              if [[ -n "${!key:-}" ]]; then
+                test_env+=("$key=${!key}")
+              fi
+            done
+            sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+              /usr/bin/unshare --pid --fork --kill-child --mount-proc --propagation private \
+              /usr/bin/setpriv --reuid="$test_uid" --regid="$test_gid" --clear-groups \
+              --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+              --no-new-privs --pdeathsig keep --reset-env \
+              /usr/bin/env -i "${test_env[@]}" /bin/bash -euc '
+                [[ "$(id -u)" == "$1" && "$(id -g)" == "$2" ]]
+                [[ "$$" == 1 && "$(pwd -P)" == "$3" ]]
+                [[ "$(readlink /proc/self/ns/pid)" != "$4" ]]
+                cap_count=0
+                no_new_privs=0
+                while read -r key value; do
+                  case "$key" in
+                    CapInh:|CapPrm:|CapEff:|CapBnd:|CapAmb:)
+                      [[ "$value" =~ ^0+$ ]]
+                      cap_count=$((cap_count + 1))
+                      ;;
+                    NoNewPrivs:) no_new_privs="$value" ;;
+                  esac
+                done < /proc/self/status
+                [[ "$cap_count" == 5 && "$no_new_privs" == 1 ]]
+                printf "installer test namespace uid=%s gid=%s pid=%s\n" "$1" "$2" "$$"
+                exec make test-source
+              ' _ "$test_uid" "$test_gid" "$(pwd -P)" "$test_pid_ns"
+          else
+            make test-source
+          fi
+        env:
+          PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
       - name: Build marketplace bundle
         run: make bundle
       - name: Install rsync on Linux
@@ -90,41 +168,22 @@ jobs:
         run: bash scripts/check-portable.sh
 
   curl-bootstrap:
-    name: curl | bash bootstrap
-    if: github.event_name == 'merge_group'
+    name: Runtime Pack bootstrap (${{ matrix.os }})
     needs: portable
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            os: macOS
+          - runner: ubuntu-latest
+            os: Linux
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          # install.sh -> make install builds voc, whose arboard clipboard dep
-          # links gtk-sys/glib-sys on Linux. libgtk-3-dev transitively provides
-          # the glib-2.0 pkg-config files the build needs. (Rust is preinstalled
-          # on ubuntu-latest with a default toolchain, and this job uses the real
-          # HOME, so no rustup pin is needed here.)
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            libclang-dev \
-            libgtk-3-dev \
-            libxdo-dev \
-            libayatana-appindicator3-dev \
-            protobuf-compiler
-      - name: Provision leptos toolchain for the server shell build
-        shell: bash
-        run: |
-          # Same requirement as the portable job: install.sh -> make install
-          # -> install-bundle-tools hard-requires cargo-leptos once cargo is
-          # present, plus a Cargo.lock-matched wasm-bindgen-cli.
-          rustup target add wasm32-unknown-unknown
-          curl -L --proto '=https' --tlsv1.2 -sSf -o /tmp/install-binstall.sh https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
-          bash /tmp/install-binstall.sh
-          cargo binstall -y cargo-leptos
-          lock_version="$(cargo tree --locked --manifest-path vibecrafted-server/Cargo.toml -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $2); print $2 }')"
-          cargo binstall -y "wasm-bindgen-cli@${lock_version}"
-      - name: Serve install.sh locally and bootstrap
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Build canonical source side of the release tuple
         run: |
           archive="/tmp/vibecrafted-bootstrap.tar.gz"
           source_revision="$(git rev-parse HEAD)"
@@ -134,26 +193,8 @@ jobs:
             --root-name vibecrafted-bootstrap \
             --owner-repo "$GITHUB_REPOSITORY" \
             --source-revision "$source_revision"
-          bash install.sh --archive-file "$archive"
-      - name: Verify bootstrap result
+      - name: Prove canonical carrier and bootstrap contract
         run: |
-          # install.sh stages the source snapshot under the RUNTIME home
-          # ($XDG_DATA_HOME/vibecrafted, default ~/.local/share/vibecrafted),
-          # not the skills home (~/.vibecrafted). Mirror install.sh's own
-          # tools-dir resolution (default_vibecrafted_runtime_home +
-          # VIBECRAFTED_TOOLS_HOME override) so verify checks the path the
-          # installer actually wrote.
-          if [ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]; then
-            runtime_home="$VIBECRAFTED_RUNTIME_HOME"
-          elif [ -n "${XDG_DATA_HOME:-}" ]; then
-            runtime_home="$XDG_DATA_HOME/vibecrafted"
-          else
-            runtime_home="$HOME/.local/share/vibecrafted"
-          fi
-          tools_dir="${VIBECRAFTED_TOOLS_HOME:-$runtime_home/tools}"
-          test -L "$tools_dir/vibecrafted-current"
-          test -f "$tools_dir/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
-          # Runtime contract: the default install lane does not wire legacy shell
-          # helpers (vc-skills.sh) — that is an explicit --with-shell opt-in — so
-          # the bootstrap verify no longer asserts the helper file here.
-          echo "Bootstrap OK"
+          env -u PYTHONPATH uv run --project vibecrafted-core --with pytest \
+            python -m pytest tests/tui/test_runtime_pack_cli.py \
+            tests/tui/test_install_bootstrap.py -q

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import signal
 
+import pytest
 from vibecrafted_core import process_control as pc
 from vibecrafted_core import run_reaper
 
@@ -22,6 +24,85 @@ TERMINAL_RUN = {
     "exit_code": 0,
     "worker_pgid": 4242,
 }
+
+
+def test_terminate_tree_captures_recursive_ppid_targets_before_signalling(monkeypatch):
+    table = [entry(100), entry(200, ppid=100), entry(300, ppid=200), entry(400)]
+    monkeypatch.setattr(pc, "build_process_table", lambda: tuple(table))
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: f"start:{pid}")
+    signals = []
+
+    def signal_pid(pid, sig):
+        signals.append((pid, sig))
+        if pid == 100:
+            # TERM kills the root; descendants are reparented to init and
+            # have unrelated PGIDs. The pre-signal capture must survive this.
+            table[:] = [entry(200), entry(300), entry(400)]
+        return "signalled"
+
+    monkeypatch.setattr(pc, "_signal_pid", signal_pid)
+    sleeps = []
+    monkeypatch.setattr(
+        pc.time, "sleep", lambda window: sleeps.append((window, list(signals)))
+    )
+
+    outcome = pc.terminate_process_tree(100, grace=0.25)
+
+    assert outcome.ok
+    assert signals == [
+        (300, signal.SIGTERM),
+        (200, signal.SIGTERM),
+        (100, signal.SIGTERM),
+        (300, signal.SIGKILL),
+        (200, signal.SIGKILL),
+    ]
+    assert sleeps == [(0.25, signals[:3])]
+    assert outcome.receipt["pids"] == [100, 200, 300]
+
+
+def test_terminate_tree_does_not_kill_reused_pid_after_grace(monkeypatch):
+    monkeypatch.setattr(
+        pc, "build_process_table", lambda: [entry(100), entry(200, ppid=100)]
+    )
+    generation = {100: "original", 200: "original"}
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: generation[pid])
+    signals = []
+    monkeypatch.setattr(
+        pc, "_signal_pid", lambda pid, sig: signals.append((pid, sig)) or "signalled"
+    )
+    monkeypatch.setattr(
+        pc.time, "sleep", lambda window: generation.update({200: "reused"})
+    )
+
+    outcome = pc.terminate_process_tree(100, grace=0.1)
+
+    assert outcome.ok
+    assert (200, signal.SIGTERM) in signals
+    assert (200, signal.SIGKILL) not in signals
+    assert (100, signal.SIGKILL) in signals
+
+
+@pytest.mark.parametrize("table", [[], [entry(100), entry(999, ppid=100)]])
+def test_terminate_tree_refuses_missing_table_or_own_ancestor(monkeypatch, table):
+    monkeypatch.setattr(pc, "build_process_table", lambda: table)
+    monkeypatch.setattr(pc.os, "getpid", lambda: 999)
+    signals = []
+    monkeypatch.setattr(pc, "_signal_pid", lambda pid, sig: signals.append((pid, sig)))
+
+    assert not pc.terminate_process_tree(100, grace=0).ok
+    assert signals == []
+
+
+def test_terminate_tree_reports_signal_permission_failure(monkeypatch):
+    monkeypatch.setattr(pc, "build_process_table", lambda: [entry(100)])
+    monkeypatch.setattr(pc, "process_start_token", lambda pid, command: "start:100")
+    monkeypatch.setattr(pc, "_signal_pid", lambda pid, sig: "permission_denied")
+
+    outcome = pc.terminate_process_tree(100, grace=0)
+
+    assert not outcome.ok
+    assert outcome.outcome == "signal_failed"
+    assert "permission_denied" in outcome.detail
 
 
 def test_snapshot_marks_owned_process_killable():
@@ -64,7 +145,7 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     assert reason == "process_identity_current"
     assert identity is not None
 
-    reused, reason, _identity = pc.validate_process_identity(
+    reused, reason, recaptured_identity = pc.validate_process_identity(
         receipt,
         expected_pid=904,
         expected_pgid=5004,
@@ -74,6 +155,7 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     )
     assert reused is False
     assert reason == "process_identity_mismatch"
+    assert recaptured_identity is not None
 
     wrong_run, reason, _identity = pc.validate_process_identity(
         receipt,
@@ -85,6 +167,54 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     )
     assert wrong_run is False
     assert reason == "process_run_id_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            lambda receipt: receipt.pop("start_token"),
+            "process_identity_receipt_invalid",
+        ),
+        (lambda receipt: receipt.pop("run_id"), "process_identity_receipt_invalid"),
+        (
+            lambda receipt: receipt.__setitem__("command_sha256", "g" * 64),
+            "process_identity_receipt_invalid",
+        ),
+    ],
+)
+def test_process_identity_rejects_malformed_receipt_before_recapture(
+    monkeypatch, mutation, reason
+):
+    original = [entry(905, pgid=5005, command="python worker.py")]
+    receipt = pc.process_identity_receipt(
+        905,
+        run_id="impl-malformed",
+        table=original,
+    )
+    assert receipt is not None
+    malformed = copy.deepcopy(receipt)
+    mutation(malformed)
+    captures: list[int] = []
+    monkeypatch.setattr(
+        pc,
+        "capture_process_identity",
+        lambda pid, **_kwargs: captures.append(pid),
+    )
+
+    current, actual_reason, identity = pc.validate_process_identity(
+        malformed,
+        expected_pid=905,
+        expected_pgid=5005,
+        expected_run_id="impl-malformed",
+        table=original,
+        env_index={905: "impl-malformed"},
+    )
+
+    assert current is False
+    assert actual_reason == reason
+    assert identity is None
+    assert captures == []
 
 
 def test_snapshot_protects_vc_frame():

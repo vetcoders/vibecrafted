@@ -13,6 +13,31 @@ INSTALL_RUNTIME = REPO_ROOT / "scripts" / "install-runtime.sh"
 FOUNDATIONS_SCRIPT = REPO_ROOT / "scripts" / "install-foundations.sh"
 
 
+def test_runtime_installer_initializes_and_preserves_app_lifecycle_log(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    crafted_home = tmp_path / ".vibecrafted"
+    receipt: dict[str, object] = {"owned_empty_dirs": []}
+
+    lifecycle_log = vetcoders_install._ensure_runtime_lifecycle_log(
+        crafted_home, runtime_home=runtime_home, receipt=receipt
+    )
+
+    assert lifecycle_log == crafted_home / "logs" / "app-lifecycle.log"
+    assert lifecycle_log.is_file()
+    assert str(lifecycle_log) not in receipt.get("owned_files", {})
+
+    lifecycle_log.write_text("durable evidence\n", encoding="utf-8")
+    assert (
+        vetcoders_install._ensure_runtime_lifecycle_log(
+            crafted_home, runtime_home=runtime_home, receipt=receipt
+        ).read_text(encoding="utf-8")
+        == "durable evidence\n"
+    )
+
+
 def test_install_runtime_none_is_noop(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
@@ -119,7 +144,7 @@ def test_foundations_fail_fast_on_runtime_root_drift(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     merged_output = f"{result.stdout}\n{result.stderr}"
-    assert "Fail-fast: runtime root drift detected" in merged_output
+    assert "✗ runtime root drift:" in merged_output
 
 
 def test_install_sh_fail_fast_on_launcher_root_drift(tmp_path: Path) -> None:
@@ -146,3 +171,52 @@ def test_install_sh_fail_fast_on_launcher_root_drift(tmp_path: Path) -> None:
     assert result.returncode == 1
     merged_output = f"{result.stdout}\n{result.stderr}"
     assert "✗ launcher root drift:" in merged_output
+
+
+def test_foundations_phase_covers_every_terminal_status(tmp_path: Path) -> None:
+    """No install scenario may finish green without the foundations phase.
+
+    The pack carries the foundations INSTALLER, never the foundations
+    (Maciej, 2026-10-07); each terminal status must be explicit so wrappers
+    cannot mistake a silent gap for success.
+    """
+    generation = tmp_path / "gen"
+    (generation / "scripts").mkdir(parents=True)
+
+    skipped = vetcoders_install._ensure_foundations_installed(generation, skip=True)
+    assert skipped["status"] == "skipped"
+
+    missing = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert missing["status"] == "failed"
+    assert "does not bundle" in missing["reason"]
+
+    script = generation / "scripts" / "install-foundations.sh"
+    script.write_text("#!/bin/bash\necho foundations ready\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    installed = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert installed["status"] == "installed"
+    assert "foundations ready" in installed["output_tail"]
+
+    script.write_text("#!/bin/bash\necho npm missing >&2\nexit 3\n", encoding="utf-8")
+    failed = vetcoders_install._ensure_foundations_installed(generation, skip=False)
+    assert failed["status"] == "failed"
+    assert failed["exit_code"] == 3
+    assert "npm missing" in failed["reason"]
+
+
+def test_every_pack_carrier_stages_the_foundations_installer() -> None:
+    """All four pack builders and both source inventories carry the installer."""
+    assert FOUNDATIONS_SCRIPT.is_file()
+    carriers = {
+        REPO_ROOT / "scripts" / "build-vibecrafted-release.sh",
+        REPO_ROOT / "scripts" / "build-linux-arm64-runtime-pack.sh",
+        REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1",
+        REPO_ROOT / "scripts" / "distribution_manifest.py",
+        INSTALL_SH,
+    }
+    for carrier in carriers:
+        text = carrier.read_text(encoding="utf-8")
+        assert "install-foundations.sh" in text, carrier
+        # The installer sources this library; a pack without it fails at run
+        # time on a clean host (proven in the container e2e, 2026-10-07).
+        assert "runtime-roots.sh" in text, carrier

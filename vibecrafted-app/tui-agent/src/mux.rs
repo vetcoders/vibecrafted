@@ -759,6 +759,12 @@ impl MuxSubscriber {
     }
 }
 
+impl Drop for MuxSubscriber {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 #[cfg(test)]
 mod subscriber_tests {
     use super::*;

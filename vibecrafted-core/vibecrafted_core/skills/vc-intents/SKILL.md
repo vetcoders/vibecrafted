@@ -1,278 +1,280 @@
 ---
 name: vc-intents
-version: 1.0.1
+version: 2.0.0
 description: >
-  Operator-side intention-to-runtime truth audit. Use when the team needs to
-  know which planned implementations actually landed in code, which are only
-  partially present, which never materialized, and what the highest remaining
-  truth is. This skill pulls intentions from aicx, reduces them to a bounded
-  implementation checklist, then verifies each item against the live repo.
-  Trigger phrases: "intents", "co z planu siedzi", "which planned items exist",
-  "what from the plan is in code", "check intent coverage", "planned vs code",
-  "highest truth", "checklist from intents".
-loctree_value: "primary repo map for structural/literal repository work"
-aicx_value: "intent, session, and decision-context retrieval"
-dogfooding: "required for repo-impacting work"
+  Hunt the Founder's intents for one repository inside a chosen window, settle
+  every one of them against the live code with two independent fleets, and hand
+  back a stable, dependency-ordered plan of cuts for vc-dispatch. Use whenever
+  the team asks "zbierz intencje", "rozlicz intencje", "czego chciał Founder",
+  "co obiecaliśmy i nie dowieźliśmy", "co z planu siedzi w kodzie", "what did we
+  agree to build", "what is still owed", "intent coverage", "planned vs code",
+  "highest truth", "checklist from intents" — or when scattered decisions from
+  transcripts and sessions must become an implementation queue that survives
+  compactions and machines. Reach for this instead of a bare `aicx search`
+  whenever the Founder's own words must be separated from agent proposals and
+  agent completion claims, and the answer must end in a plan, not a catalogue.
+loctree_value: "structural questions decide whether a promise has a runtime shape"
+aicx_value: "indexed intents, session context; one source among several"
+dogfooding: "required — this skill is the join between corpus, aicx, Loctree and dispatch"
 ---
 
 <!-- fleet-imperative: v3 -->
 
-> **Invocation for `vc-intents` (launcher `intents`)**
+> **Invocation for `vc-intents` (launcher `intents`)** — see the
+> [Delegation Matrix](../DELEGATION_MATRIX.md).
 >
-> Same three-path _shape_ as the fleet, with **this** skill's literals — see the
-> canonical [Delegation Matrix](../DELEGATION_MATRIX.md):
+> | Path                    | Literal for this skill                                                                                |
+> | ----------------------- | ----------------------------------------------------------------------------------------------------- |
+> | 1. User-launched worker | `vibecrafted intents <agent>` — one lane of extraction or confrontation, READ, writes only its JSON   |
+> | 2. Interactive          | `/vc-intents` — the hunt itself, **in this session**: sweep, lanes, plans, merge, queue, render       |
+> | 3. Agent-operator       | dispatches the worker form through `vc-dispatch` with a plan written by `scripts/intents_cli.py plan` |
 >
-> - [Shared three paths](../DELEGATION_MATRIX.md#shared-three-paths)
-> - [Launcher catalogue](../DELEGATION_MATRIX.md#launcher-catalogue-core-runtime)
-> - [Per-launcher rule](../DELEGATION_MATRIX.md#per-launcher-rule-the-semantic-delta)
-> - [Native vs external](../DELEGATION_MATRIX.md#native-subagents-vs-external-workers)
->
-> | Path                    | Literal for this skill                                                                                                                   |
-> | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-> | 1. User-launched worker | `vibecrafted intents <agent>`                                                                                                            |
-> | 2. Interactive          | `/vc-intents` — execute **in this session**; use native subagents when required; do **not** externalize merely because a launcher exists |
-> | 3. Agent-operator       | may dispatch the worker form above via `vc-dispatch` / operator lines while preserving this skill's identity                             |
-
-> Freer native on some runs ≠ abandon external fleet. `vc-dispatch` and `vc-ship` keep their own identities.
+> Cadence stays **read**: this skill never edits the repo. Delivery is a
+> separate `implement` plan it writes for the fleet.
 
 <!-- /fleet-imperative -->
 
-# vc-intents — Intention To Runtime Truth
+# vc-intents — from what the Founder said to a plan of cuts
 
-## Operator Entry
+A long-lived project accumulates intent faster than code. The Founder says
+something in March, corrects it in May, an agent proposes another shape in June
+and claims it shipped in July. By September nobody can say which of those still
+binds — and the only person who could is the one paying for the answer.
 
-### Living Tree / Worktree Rule
+This skill owns the whole path: **collect → separate voices → verbatim catalog →
+confront with two fleets → reclassify what "landed" hides → stable queue → a
+dispatch plan the fleet can run**. `vc-canary` finds truth collisions and never
+refactors; `vc-implement` cuts code but does not reconstruct what was promised;
+`vc-audit` falsifies a plan against code. `vc-intents` reconstructs the promise,
+proves what is left of it, and hands the rest over as cuts.
 
-This workflow runs in the operator's current checkout and current branch. Do not create, switch to, or move execution into a git worktree unless the operator explicitly asks for a worktree in this prompt. Generic words like "isolate", "parallel", or "clean branch" are not enough. The one sanctioned second mode is a Fleet Worktree dispatch (written plan, pre-committed verifiers, disjoint domains, single-thread integrator — see Living Tree Rule, Mode B); outside that formation, stay in the shared tree. Re-read files before editing, adapt to concurrent changes, and report a substrate failure if the current tree is too poisoned to continue safely.
+## Goal
 
-See [Living Tree Rule](../LIVING_TREE_RULE.md).
+`vc-intents` produces a ledger in which every Founder intent from the chosen
+window carries one explicit disposition, an agreement score between two
+independent fleets, and a human-editable override layer — and it is done when
+`intents_cli.py <workdir> status` names what is still open and
+`plan --stage implement` has written a dispatch plan for it. A catalogue does
+not close the goal. An audit does not close the goal. The plan of cuts does.
 
 ## Canonical Orientation Gate
 
-Before this workflow performs repo-specific analysis, planning, implementation, review, release, or delegation, it MUST run or consume the `vc-init` procedure for the assigned repo. If fresh `vc-init` evidence is absent, perform the init pass first and treat workflow-specific work as blocked until repo truth exists.
+Before any repo-specific step — sweep against a repo, confrontation, plan —
+run or consume the `vc-init` procedure for the assigned repo. `Loctree:loctree`
+is the default structural perception skill for that pass and must produce or
+refresh the Code-Derived Application Map (`context`, `repo-view`, `focus`,
+`slice`, `impact`, `find`, `follow`). Confrontation lanes inherit this: the
+brief makes loctree-mcp the first move, and a `landed` without a structural
+path behind it is not a verdict. If fresh `vc-init` evidence is absent, perform
+the init pass first and treat the hunt as blocked until repo truth exists. A
+sweep of a transcript corpus with no repo attached states the no-repo exception
+in its report.
 
-`Loctree:loctree` is the default structural perception skill for that pass. Use Loctree before grep or docs-driven claims to produce or refresh the Code-Derived Application Map: repo-view, focus, slice, impact, find, and follow as relevant. Search for existing symbols and contracts before creating new ones; run impact before delete or major refactor; run slice before editing.
+## Scope is a window, not a history
 
-The point is to find the hooks: load-bearing hubs, twins, dead code, drift, runtime entrypoints, and blast-radius traps. If the task is explicitly non-repo or no-code, state the no-repo exception in the report. Otherwise, missing `vc-init`/Loctree evidence is a process failure.
+Bound the hunt before sweeping: `--since/--until`, or a theme. Coverage is
+reported against that window. The whole history is one legal window among
+others — not a precondition of closure. What the window does not contain is
+recorded as _not in scope_, never as _absent_.
 
-Standard launcher: `vibecrafted start` / `vc-start`, then `vibecrafted intents <agent>` / `vc-intents` (see [Delegation Matrix](../DELEGATION_MATRIX.md)).
-Prefer `--prompt` for a fresh audit and `--file` when an existing plan, report,
-or extracted intent bundle should be compared against the tree.
-
-```bash
-vibecrafted intents codex --prompt 'Check which planned implementations actually landed in Codescribe'
-vc-intents claude --prompt 'Build a 20-item checklist from intents and mark done/partial/missing'
-vibecrafted intents gemini --file ~/.vibecrafted/artifacts/vetcoders/Codescribe/2026_0419/plans/research-plan.md
-```
-
-Foundation deps: `vc-aicx` (intention retrieval, source chunks, recent decision
-memory), `vc-loctree` (live repo perception, structural verification).
-
-> Plans are cheap.
-> The truth is whether the plan actually landed in runtime.
-
-## Repository Work Doctrine
-
-For repository work, start with Loctree as the map: use `loct context`,
-`loct occurrences`, `loct body`, and `loct find --literal` before broad manual
-search. Use AICX for intent and session context. Use rg/grep as fallback or
-local magnifier, not as a replacement for structural mapping. If Loctree fails
-or misses a surface, append feedback to `~/.vibecrafted/loctree/loctree-fail.md`.
-
-## Core doctrine
-
-`vc-intents` is not a review skill and not a planning skill. It is the
-reconciliation layer between:
-
-- what the team meant to build
-- what the sessions said was next
-- what the codebase actually contains now
-
-This skill exists because the other surfaces stop too early:
-
-- `vc-init` restores context but does not reconcile completion
-- `vc-review` judges a diff, not the original intention
-- `vc-scaffold` creates future shape, not present truth
-- `vc-marbles` hardens what exists but does not first normalize which promises are real
-
-It answers the operator's narrower question: what from the plan is really in
-the code, what is half-landed, what never happened, what was replaced by a
-better shape, and what is the highest remaining truth.
-
-## Why this works
-
-Agent sessions are rich in intent but noisy in form. `aicx intents` extracts
-structured intention signals from prior work — but raw intent output is still
-not the truth. It is desire, momentum, unfinished conversation, sometimes
-hallucinated certainty.
-
-The second half is what matters: reduce the raw intent stream to implementation
-candidates, inspect the live repo, refuse to overclaim, classify every candidate
-against present runtime truth. This is how we stop treating plans, changelogs,
-and session summaries as if they were the product.
-
-## What this skill does
-
-One invocation = one bounded intention-to-truth audit:
-
-1. retrieve recent project intents from `aicx`
-2. open referenced `source_chunk` files for shortlisted items
-3. reduce the noisy stream into a bounded checklist of implementation candidates
-4. verify each candidate against the live tree
-5. classify each candidate
-6. emit checklist + highest remaining truth
-7. stop
-
-Default checklist target: **20 meaningful implementation items**. If fewer real
-candidates exist, report fewer. Do not pad with fluff or duplicate promises.
-
-## Retrieval protocol
-
-### Quick operator lane
+## The tool
 
 ```bash
-aicx intents -p <ProjectName> --emit json 2>&1 | tail -200
+CLI=~/.claude/skills/vc-intents/scripts/intents_cli.py   # or the store path
+W=~/.vibecrafted/artifacts/<owner>/<repo>/intents         # one workdir per hunt
+uv run "$CLI" "$W" <command> …
 ```
 
-Triage surface, not final evidence.
+One working directory holds everything that must survive a compaction or a
+second host: `sweep.json`, `shards/`, `intents.json`, `lanes/`, `LEDGER.json`,
+`overrides.jsonl`, `queue.json`, `STABLE-QUEUE.md`, `LEDGER.md`,
+`intents.html`. Agents read and judge; the script keeps the books, performs the
+falsifications that need no judgment, and writes the plans that hand the
+judging to a fleet.
 
-### Truth lane
+## Procedure
 
-Before classifying, open the referenced `source_chunk` files and recover the
-actual plan context around shortlisted intents. Discipline:
+### 0 · Orientation
 
-1. pull `aicx intents`
-2. shortlist implementation candidates
-3. open the backing chunks
-4. only then normalize into checklist items
+Run or consume `vc-init` for the repo. Resolve catalog identity with
+`aicx intents -p /<repo>` (leading slash — every historical owner). Read the
+`project:` header line: that is your aicx denominator. Then the negative
+control: newest intent date vs newest commit date. A gap means a missing
+identity, not a quiet quarter.
 
-Do not classify from a one-line summary alone when the source chunk is
-available.
+### 1 · Sweep — account for every source in the window
 
-## Verification protocol
+```bash
+uv run "$CLI" "$W" sweep --since 2026-06-01 --until 2026-09-18 \
+  --source dir:~/.codescribe/transcriptions --source aicx --repo <repo> --shard-size 120
+```
 
-After extracting the checklist, verify each item against the live repo.
-Preferred order:
+Sources are first-class and unequal. Field result (Codescribe, 2026-09): aicx
+held **~10 %** of the Founder's voice and **0 %** of the dictated corpus; the
+transcript directory held 2 842 files across two hosts. A directory that lives
+on another machine is fetched (`rsync` from that host) before the sweep, or it
+is `unavailable` in coverage — a known unknown that keeps the goal open. aicx
+truncation is reported on **stderr only**; the script captures it to a file and
+flags `truncated`.
 
-1. `vc-loctree` / loctree MCP — repo shape, scope, hot files
-2. targeted symbol or path checks
-3. `rg` / shell reads for local detail
-4. docs only as supporting evidence
+`sweep` writes chronological shards for extraction. Nothing has been read yet.
 
-The repository is the primary court. Docs are supporting witnesses.
+### 2 · Extract — the fleet reads, verbatim
 
-### Evidence hierarchy
+```bash
+uv run "$CLI" "$W" plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
+vibecrafted dispatch <plan> --doctor --json && vibecrafted dispatch <plan> --json
+uv run "$CLI" "$W" verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
+```
 
-1. **Runtime code path** — live implementation reachable from current code
-2. **Test-bearing path** — tests prove the path exists or contract is exercised
-3. **UI / CLI / config surface** — user/operator-visible surface exists
-4. **Docs / CHANGELOG / plans** — supporting only, never enough alone for `done`
+The brief is `references/extraction-brief.md`. Its one hard rule: **`quote` is a
+verbatim substring of the source file.** `verify-quotes` rejects anything else
+by string containment — a paraphrase presented as the Founder's voice is the
+worst error this work can make, because it assigns a human a decision they did
+not take. Whisper misspellings stay; normalization lives in `topic`.
 
-If all you have is docs or a changelog, that item is not `done`.
+Agent choice is **throughput**, not rank: mass reading of short files is a
+375-tps job (`junie`/`gemini-3.8-flash`), not a frontier-model job. Eight native
+Opus subagents once burned a weekly budget on what a flash fleet does in
+minutes. See `references/replication.md`.
 
-## Classification contract
+### 3 · Separate voices
 
-Every checklist item must end in exactly one state: `done`, `partial`,
-`missing`, `superseded`, `non-code`.
+Only the Founder's own words bind. Agent proposals are candidates; execution
+claims are audit targets; agent-authored documents (CHANGELOG, ADR, roadmap,
+report) are claims in a document's clothes. A transcript corpus is not
+automatically clean either: agents pasted model replies into dictation files in
+~30 % of one month's files. The extraction brief lists what to skip; the
+`kind` field records what the Founder was doing (`complaint`, `task`,
+`constraint`, `decision`, `preference`, `question`).
 
-- **`done`** — intended implementation is materially present. Real code path,
-  config surface, or runtime contract. Not merely mentioned in docs.
-- **`partial`** — shape exists but the original promise is not fully landed
-  (config without UI, UI wording without runtime, core logic without delivery
-  path or operator surface).
-- **`missing`** — plan is real and specific but no meaningful implementation
-  surface in the live tree. Requires good-faith search, not a shrug.
-- **`superseded`** — the original intent no longer makes sense because a
-  different shape replaced it. Name the replacing shape explicitly. Do not use
-  to hide failure.
-- **`non-code`** — real plan item but belongs primarily to distribution,
-  operations, release choreography, customer/product surface. Still matters;
-  simply does not belong in a "sits in code" verdict.
+### 4 · Chronology
 
-## Highest truth
+Later Founder words supersede earlier ones **only with a named successor**
+(`superseded_by`). Two statements that conflict with no later resolution are a
+`contradiction` — the instrument for that is `aicx clarify`, then the Founder.
+Deduplicate statements, never provenance: one intent, many citations.
 
-Every run must end with a section named **Highest truth**. Not a summary — the
-single most important unresolved reality the operator should act on next.
+### 5 · Confront — two fleets, two hosts
 
-Good:
+```bash
+uv run "$CLI" "$W" lanes                     # by subject; default six Codescribe lanes
+uv run "$CLI" "$W" plan --stage confront --repo <repo> --host div0 \
+  --agent 'L1-overlay-ui=kimi:kimi-code/k3' --agent 'L4-quality-lexicon=junie:gemini-3.8-flash' …
+```
 
-- "The UI says qube-daemon autostarts, but no runtime path actually starts it."
-- "Silence discriminator exists in core, but the operator has no settings surface to steer it."
-- "App bundle is signed and notarizable, but the update path is still manual."
+Then the same plan on a second machine with the same pins and models, verdict
+directories excluded from any rsync of the workdir (the second fleet must not
+see the first's answers). The brief is `references/confrontation-brief.md`:
+loctree-mcp first, `landed` needs `path:line`, `absent` needs the question that
+returned zero, no edits, all ids preserved.
 
-Bad:
+Verification is structural: "X starts automatically" is _an edge from an
+entrypoint to X_ (`loct follow trace`), not a grep hit. The promise → question
+→ command table is `references/loctree-questions.md`.
 
-- "Some items are partial."
-- "There is more work to do."
-- "We should continue improving."
+```bash
+uv run "$CLI" "$W" merge --verdicts div0=<dir> --verdicts dragon=<dir> --primary div0 --project <owner>/<repo>
+```
 
-The highest truth should hurt a little. If it does not create leverage, it is
-too soft.
+`merge` writes `LEDGER.json` and `replication-report.json`. Agreement per id
+with the same agent and model was **72.8 %**; the top disagreement was
+`partial ↔ landed`. Read that as: no single verdict is evidence — an agreeing
+pair is. Only stable pairs enter the queue.
+
+### 6 · Reclassify — `landed` is a lower bound
+
+```bash
+uv run "$CLI" "$W" reclassify
+```
+
+Two rules that need no judgment, applied before anything is counted closed:
+`kind = complaint ∧ landed → landed-contested` (the Founder says it does not
+work; the fleet found code; runtime unverified — the complaint wins until a
+probe says otherwise), and `evidence without a code file → landed-by-doc` (a
+document proves a contract was written, not kept). Field result: **43–45 % of
+`landed` fell** on both hosts. Both derived dispositions count as open. The
+rules append to `overrides.jsonl`; the fleet's verdict is never overwritten.
+Schema and rule text: `references/ledger-schema.md`.
+
+### 7 · The human layer
+
+```bash
+uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base https://github.com/<o>/<r>/blob/<sha>/
+open "$W/intents.html"
+uv run "$CLI" "$W" decide --import-file decisions.jsonl --by founder      # or --id … --to … --reason …
+```
+
+The page shows every intent with its verbatim quote, the wider transcript
+excerpt, both hosts' verdicts with evidence linked to the pinned commit, the
+mechanical overrides, and a decision form: agree, reclassify, drop as a false
+lead, comment. Decisions export as JSONL and come back through `decide`. This is
+the Founder's editing surface — a line in `overrides.jsonl`, never a hand-edit
+of a verdict file. Published as a claude.ai artifact with the `db` capability,
+the same page saves decisions live; the file is the canon either way. See
+`references/review-surface.md`.
+
+### 8 · Queue and plan of cuts
+
+```bash
+uv run "$CLI" "$W" queue --min-strength 4
+uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit 6 --gate 'cd {repo} && make check'
+```
+
+The queue holds intents that are **open, stable across hosts or decided by a
+human, and strong enough**, ordered by dependency (`after`), then risk, then
+core-flow impact, then strength and age. The implement plan gives each one a
+cut: the Founder's quote as the brief, the fleet's evidence and gap, a repo
+gate as verifier, `mode = write`, `require_commit = true`. `codex` is the
+default worker. Anything that needs a Founder's button (merge, deploy, secrets,
+deleting data) is described in the cut and never pressed.
+
+### 9 · Closure
+
+`status` exits 0 only when no open disposition remains, no source is
+unavailable or truncated, and every `landed` carries `runtime_verified = yes`.
+Until then the goal is open — truthfully. On re-entry after a compaction: read
+`LEDGER.md`, run `status`, then `queue`; **do not re-sweep**, the result is on
+disk.
 
 ## Output contract
 
-1. **Intent source** — project, retrieval window or source files, shortlist method
-2. **Checklist** — up to 20 items, each with `status`, `item`, `why`, `evidence`
-3. **Highest truth** — one paragraph
-4. **Next leverage** — 1-3 most valuable follow-up moves
+1. **Coverage** — window, sources with state (`read`/`empty`/`unavailable`/
+   `truncated`), files and rows per source.
+2. **Catalog** — verified intents, rejected quotes with reasons.
+3. **Ledger** — per-host verdicts, agreement per pair, effective disposition,
+   overrides (rule and human), `runtime_verified`.
+4. **Queue** — stable open intents with the ordering rationale.
+5. **Plan** — `intents-implement.<host>.dispatch.toml`, doctor-clean.
+6. **Highest truth** — the one unresolved reality that should hurt a little.
+   "43 % of what two fleets called landed is contested by the Founder's own
+   words" is a highest truth; "some items are partial" is not.
 
-### Evidence format
+## Anti-patterns
 
-Prefer concise repo references: file path, symbol name, command used to verify.
-Do not dump huge logs or bury the verdict under grep spam.
+Treating a ranked aicx hit as a read source · a paraphrase in `quote` · one
+fleet's verdict as evidence · `landed` from `docs/*.md` · `superseded` without a
+successor · re-running the sweep on re-entry · frontier models for mass reading
+· the verifier `run` naming a lane literal (`release` inside `L6-build-release`
+trips the dispatch hard-stop scan; the script spells paths through `{id}`) ·
+pressing a hard-stop because the queue said so · reporting a green audit as
+closure while the queue is non-empty.
 
-## Scope discipline
+## Related skills
 
-Unit of analysis is not "all thoughts ever had about the project." Prefer
-recent, relevant intent windows; implementation-shaped items; one current
-branch / workspace truth.
+`vc-init` before everything · `vc-canary` when two modules compete for the
+truth an intent needs · `vc-dispatch` runs every plan this skill writes ·
+`vc-implement` / `vc-ownership` are the cuts · `vc-trust` falsifies a worker's
+completion claim afterwards · `vc-audit` for a written plan rather than a
+corpus.
 
-Filter out: pure ideology · tooling philosophy without implementation
-consequence · duplicate phrasings · operator chatter that never hardened into
-a concrete candidate.
+## Verify before the handoff
 
-## What this skill does not do
-
-- Turn `aicx intents` into a blind backlog generator
-- Mark items `done` from docs alone
-- Confuse a branch name with shipped implementation
-- Count a TODO comment as a landed feature
-- Pad the checklist to 20 with low-signal noise
-- Drift into line-level PR review
-- Rewrite the plan into a new roadmap (unless the operator asked)
-- Treat "present in code" and "working end-to-end" as automatically identical
-
-If the operator wants diff quality → `vc-review`. New architecture →
-`vc-scaffold` or `vc-partner`. Gaps closed → `vc-ownership` or `vc-marbles`.
-
-## Relation to other skills
-
-- **After `vc-init`** — much stronger because the worker already knows the
-  structural shape and intention surface.
-- **Before `vc-marbles`** — when operator asks "what from the plan actually
-  landed?" / "which promises are fake-complete?", run `vc-intents` first, then
-  send the sharpest remaining lie into `vc-marbles`.
-- **Before `vc-ownership`** — define the truth surface so ownership mode acts
-  on reality, not drift.
-
-## Operator heuristics
-
-- Fewer, sharper items over a bloated list
-- Explicit evidence over confidence theater
-- Runtime truth over plan loyalty
-- Naming the lie over cosmetically softening it
-
-The goal is not to prove progress was made. The goal is to know exactly what
-shape progress actually took.
-
-## Final reminder
-
-This skill is not about preserving the dignity of the plan. It is about
-preserving the dignity of reality.
-
-When plan and repo disagree, trust the repo first. When repo and runtime
-disagree, trust runtime first. When all three disagree, name the fracture
-clearly and call it the highest truth.
+Walk around the truck — [Verification Rule](../VERIFICATION_RULE.md): the
+ledger exists and `status` says OPEN with reasons you can name; the plan passed
+`vibecrafted dispatch --doctor`; the HTML opens with the right host names and
+working code links; every number in the report comes from a file in the
+workdir, not from memory.
 
 ---
 

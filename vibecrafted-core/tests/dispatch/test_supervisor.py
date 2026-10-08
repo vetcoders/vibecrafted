@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import signal
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -17,6 +21,7 @@ from vibecrafted_core.dispatch.model import (
     STATE_VERIFIED,
     Dispatch,
 )
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
 from vibecrafted_core.dispatch.schema import parse_dispatch
 from vibecrafted_core.dispatch.supervisor import (
     CellRun,
@@ -25,7 +30,211 @@ from vibecrafted_core.dispatch.supervisor import (
     workflow_cell_launcher,
 )
 
+pytestmark = pytest.mark.usefixtures("worker_claims")
+
+
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and signals")
+@pytest.mark.parametrize("process_handle", [True, False])
+def test_timeout_fail_kills_detached_descendants(
+    tmp_path: Path, process_handle: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_REAPER_GRACE_SECONDS", "0.1")
+    dispatch, _, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "slow"
+agent = "codex"
+workflow = "implement"
+prompt = "timeout tree regression"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+        policy='on_timeout = "fail"\nawait = { poll_s = 0.01, timeout_min = 0.002 }',
+    )
+    ready = tmp_path / "descendants.json"
+    # Both descendants escape the worker's group/session and ignore TERM.
+    grandchild = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"
+    child = f"""
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+p = subprocess.Popen([sys.executable, "-c", {grandchild!r}], start_new_session=True, stdout=subprocess.PIPE, text=True)
+assert p.stdout.readline().strip() == "ready"
+Path({str(ready)!r}).write_text(json.dumps([os.getpid(), p.pid]))
+time.sleep(60)
+"""
+    worker = f"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", {child!r}], start_new_session=True)
+time.sleep(60)
+"""
+    proc = subprocess.Popen([sys.executable, "-c", worker], start_new_session=True)
+    descendants: list[int] = []
+
+    def executing(pid: int) -> bool:
+        state = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        return bool(state) and not state.startswith("Z")
+
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "worker descendants did not become ready"
+        descendants = json.loads(ready.read_text())
+        assert all(os.getpgid(pid) != proc.pid for pid in descendants)
+
+        def launcher(cut, prompt, kind):
+            return CellRun(
+                cut_id=cut.id,
+                kind=kind,
+                accepted=True,
+                pid=proc.pid,
+                proc=proc if process_handle else None,
+            )
+
+        result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+        assert result.states == {"slow": STATE_FAILED}
+        deadline = time.monotonic() + 2
+        while (
+            any(executing(pid) for pid in [proc.pid, *descendants])
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        assert not executing(proc.pid)
+        assert not any(executing(pid) for pid in descendants)
+    finally:
+        # Red-before proof must not leave the very orphans it reproduces.
+        if ready.exists():
+            descendants = json.loads(ready.read_text())
+        for pid in [*reversed(descendants), proc.pid]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize("depends_on", [False, True])
+@pytest.mark.parametrize("command", ["echo red", "echo green; exit 7"])
+def test_unverified_contract_blocks_next_cut_by_default(
+    tmp_path: Path, depends_on: bool, command: str
+) -> None:
+    dependency = 'depends_on = ["first"]' if depends_on else ""
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f'''
+[[cuts]]
+id = "first"
+agent = "codex"
+workflow = "implement"
+prompt = "s02-017 first contract"
+  [[cuts.verify]]
+  run = "{command}"
+  expect = {{ contains = "green" }}
+[[cuts]]
+id = "next"
+agent = "codex"
+workflow = "implement"
+prompt = "must not start without first contract"
+{dependency}
+  [[cuts.verify]]
+  run = "echo green"
+  expect = {{ contains = "green" }}
+''',
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    marker = dispatch.meta.repo + "/next-started"
+    launcher.cells[("next", "initial")] = FakeCell(bash=f"touch {shlex.quote(marker)}")
+
+    supervisor = DispatchSupervisor(
+        dispatch, launcher=launcher, artifacts_dir=artifacts_dir
+    )
+    result = supervisor.run()
+
+    assert result.line_broken
+    assert result.states == {"first": STATE_FAILED, "next": STATE_PENDING}
+    assert launcher.launches == [("first", "initial")]
+    assert not Path(marker).exists()
+    assert supervisor._receipt_store.cut("next")["state"] == "stopped"
+
+
+def test_unknown_timeout_contract_blocks_next_cut(tmp_path: Path) -> None:
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "slow"
+agent = "codex"
+workflow = "implement"
+prompt = "unknown contract"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+[[cuts]]
+id = "next"
+agent = "codex"
+workflow = "implement"
+prompt = "must stay queued"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+        policy='on_timeout = "continue"\nawait = { poll_s = 0.01, timeout_min = 0.001 }',
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    launcher.cells[("slow", "initial")] = FakeCell(bash="sleep 1", write_report=False)
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.line_broken
+    assert result.states == {"slow": STATE_UNKNOWN, "next": STATE_PENDING}
+    assert launcher.launches == [("slow", "initial")]
+
+
+def test_failed_parallel_contract_fences_queue_and_preserves_active_sibling(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "contract-failed"
+    cuts = "\n".join(
+        f'''
+[[cuts]]
+id = "{cut_id}"
+agent = "codex"
+workflow = "implement"
+prompt = "parallel contract"
+  [[cuts.verify]]
+  run = {json.dumps(f"touch {shlex.quote(str(marker))}; echo red" if cut_id == "bad" else "echo ok")}
+  expect = {{ contains = "ok" }}
+'''
+        for cut_id in ("bad", "active", "queued")
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, cuts, policy="concurrency = 2\nallow_concurrency = true"
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    launcher.cells[("active", "initial")] = FakeCell(
+        bash=f"while [ ! -f {shlex.quote(str(marker))} ]; do sleep 0.01; done; sleep 0.2"
+    )
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.line_broken
+    assert result.states == {
+        "bad": STATE_FAILED,
+        "active": STATE_VERIFIED,
+        "queued": STATE_PENDING,
+    }
+    assert set(launcher.launches) == {("bad", "initial"), ("active", "initial")}
 
 
 @dataclass
@@ -75,6 +284,8 @@ def build_dispatch(
 ) -> tuple[Dispatch, Path, Path]:
     repo_dir = repo if repo is not None else tmp_path / "repo"
     repo_dir.mkdir(exist_ok=True)
+    if repo is None:
+        init_git_repo(repo_dir)
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir(exist_ok=True)
     artifacts_dir = tmp_path / "artifacts"
@@ -160,7 +371,11 @@ prompt = "canonical dispatch report prompt"
         def kill(self) -> None:
             pass
 
+    real_popen = workflow.subprocess.Popen
+
     def fake_popen(command: list[str], **kwargs: object) -> FakeProc:
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
         if "env" in kwargs:
             # The tracked launcher owns the child env. Identity capture may
             # subsequently invoke `ps` through the same monkeypatched
@@ -196,9 +411,11 @@ prompt = "canonical dispatch report prompt"
     assert run.report_path == env["VIBECRAFTED_REPORT_PATH"]
     assert run.meta_path == env["VIBECRAFTED_META_PATH"]
     assert command[command.index("--report") + 1] == run.report_path
-    assert "/artifacts/local/repo/" in run.report_path
+    assert "/artifacts/local/" not in run.report_path
+    assert "/.vibecrafted/reports/implement/" in run.report_path
     assert "/reports/implement/" in run.report_path
-    assert "canonical-dispatch-report" in Path(run.report_path).name
+    assert "canonical-dispatch-report" not in Path(run.report_path).name
+    assert "_codex_implement_" in Path(run.report_path).name
     assert "/control_plane/runtime_runs/" not in run.report_path
     assert "/control_plane/runtime_runs/" in env["VIBECRAFTED_TRANSCRIPT_PATH"]
     assert "/control_plane/runtime_runs/" in env["VIBECRAFTED_META_PATH"]
@@ -230,16 +447,23 @@ prompt = "unpinned cut"
   expect = { contains = "ok" }
 """,
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
-    def fake_launch_workflow(spec, _base_dir, *, env=None):
+    def fake_launch_workflow(spec, _base_dir, *, env=None, launch_meta=None):
         captured[spec.agent] = spec.model
         assert env is not None
+        assert launch_meta is not None
+        captured[f"{spec.agent}_dispatch_attempt"] = launch_meta["dispatch_attempt"]
+        captured[f"{spec.agent}_idempotency"] = env.get(
+            workflow.LAUNCH_IDEMPOTENCY_KEY_ENV
+        )
         return {"accepted": True, "run_id": "r", "pid": 1, "report": ""}
 
     monkeypatch.setattr(supervisor_module, "launch_workflow", fake_launch_workflow)
 
-    launch = workflow_cell_launcher(dispatch, source_dir=tmp_path)
+    launch = workflow_cell_launcher(
+        dispatch, source_dir=tmp_path, dispatch_run_id="dispatch-stable-1"
+    )
     launch(dispatch.cuts[0], "pinned cut", "initial")
     launch(dispatch.cuts[1], "unpinned cut", "initial")
 
@@ -247,6 +471,13 @@ prompt = "unpinned cut"
     # cut forwards an empty pin (account default is a deliberate non-decision).
     assert captured["codex"] == "test-codex-model"
     assert captured["claude"] == ""
+    assert captured["codex_idempotency"] == (
+        "dispatch:dispatch-stable-1:cut:c1:attempt:initial"
+    )
+    assert captured["claude_idempotency"] == (
+        "dispatch:dispatch-stable-1:cut:c2:attempt:initial"
+    )
+    assert captured["codex_dispatch_attempt"] == "initial"
 
 
 def test_passing_cuts_flip_to_verified_and_emit_artifacts(tmp_path: Path) -> None:
@@ -344,6 +575,17 @@ prompt = "create the marker"
         policy="repair_rounds = 1",
     )
     repo_dir = Path(dispatch.meta.repo)
+    # This marker models generated runtime evidence, not uncommitted source.
+    (repo_dir / ".gitignore").write_text("/marker.txt\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "ignore generated repair marker"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
     launcher = FakeCells(reports_dir=reports_dir)
     launcher.cells[("c1", "initial")] = FakeCell(bash="true")
     launcher.cells[("c1", "repair1")] = FakeCell(
@@ -535,7 +777,7 @@ prompt = "sleeps forever"
     assert result.states == {"slow": STATE_UNKNOWN}
     journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
     assert "timed out" in journal
-    assert "process terminated" in journal
+    assert "process tree termination signals sent" in journal
 
 
 def test_broken_announced_report_recovers_by_mtime(tmp_path: Path) -> None:
@@ -586,7 +828,7 @@ prompt = "writes report elsewhere"
 def test_supervisor_default_artifacts_follow_tracker_path(tmp_path: Path) -> None:
     plans_dir = tmp_path / "plans"
     repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
+    init_git_repo(repo_dir)
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
     text = f"""
@@ -867,9 +1109,11 @@ prompt = "repair and commit"
     result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
 
     assert result.line_broken is True
-    assert result.states == {"c1": STATE_FAILED}
+    assert result.states == {"c1": STATE_UNKNOWN}
     assert result.baton.last is not None
-    assert any("uncommitted changes" in f for f in result.baton.last.failures)
+    assert any("claim" in f for f in result.baton.last.failures)
+    journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
+    assert "claim not received, verifiers were not run" in journal
 
 
 def test_committed_repair_verifies_clean_final_head(tmp_path: Path) -> None:
@@ -995,7 +1239,8 @@ prompt = "fails normally"
         policy="repair_rounds = 0\nrequire_commit = true",
     )
 
-    marker = repo_dir / "uncommitted.txt"
+    # A failed matcher may have generated evidence without changing source.
+    marker = tmp_path / "uncommitted.txt"
     launcher = FakeCells(reports_dir=reports_dir)
     launcher.cells[("ordinary-failure", "initial")] = FakeCell(
         bash=f"printf dirty > {shlex.quote(str(marker))}"
@@ -1003,8 +1248,11 @@ prompt = "fails normally"
 
     result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
 
-    assert result.line_broken is False
+    assert result.line_broken is True
     assert result.states == {"ordinary-failure": STATE_FAILED}
+    assert "dispatch substrate failure" not in (artifacts_dir / "journal.md").read_text(
+        encoding="utf-8"
+    )
     assert marker.read_text(encoding="utf-8") == "dirty"
 
 
@@ -1071,6 +1319,7 @@ prompt = "must identify the cut"
 
 def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Living Tree Rule v3, Mode B: a WRITE cut delivered in its own worktree on
     ``cut/<id>`` never moves the main checkout's HEAD. The supervisor must judge
@@ -1083,6 +1332,13 @@ def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
     """
     repo_dir = tmp_path / "repo"
     init_git_repo(repo_dir)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
     baseline = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repo_dir,
@@ -1090,15 +1346,6 @@ def test_fleet_worktree_cut_delivery_commit_comes_from_cut_branch(
         text=True,
         check=True,
     ).stdout.strip()
-    worktree_bash = (
-        f"cd {shlex.quote(str(repo_dir))}"
-        " && git worktree add -q -b cut/wt-cut .claude/worktrees/wt-cut"
-        " && cd .claude/worktrees/wt-cut"
-        " && printf 'delivered\\n' > delivered.txt"
-        " && git add delivered.txt"
-        " && git -c user.email=agents@vetcoders.io -c user.name=fake"
-        " commit -qm '[codex/vc-implement] feat: wt-cut delivered'"
-    )
     dispatch, reports_dir, artifacts_dir = build_dispatch(
         tmp_path,
         """
@@ -1115,9 +1362,25 @@ prompt = "deliver in a fleet worktree"
         policy="repair_rounds = 0\nrequire_commit = true",
     )
     cells = FakeCells(reports_dir=reports_dir)
-    cells.cells[("wt-cut", "initial")] = FakeCell(bash=worktree_bash)
 
-    result = run_dispatch(dispatch, launcher=cells, artifacts_dir=artifacts_dir)
+    def launcher(cut, prompt, kind):
+        cells.cells[(cut.id, kind)] = FakeCell(
+            bash=(
+                f"cd {shlex.quote(cut.runtime_root)}"
+                " && printf 'delivered\\n' > delivered.txt"
+                " && git add delivered.txt"
+                " && git -c user.email=agents@vetcoders.io -c user.name=fake"
+                " commit -qm '[codex/vc-implement] feat: wt-cut delivered'"
+            )
+        )
+        return cells(cut, prompt, kind)
+
+    result = run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        manage_worktrees=True,
+    )
 
     branch_tip = subprocess.run(
         ["git", "rev-parse", "cut/wt-cut"],
@@ -1129,3 +1392,310 @@ prompt = "deliver in a fleet worktree"
     assert branch_tip != baseline
     assert result.states == {"wt-cut": STATE_VERIFIED}
     assert result.cuts[0]["commit"] == branch_tip
+
+
+TWO_CUTS = """
+[[cuts]]
+id = "first"
+agent = "codex"
+workflow = "implement"
+prompt = "first cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+
+[[cuts]]
+id = "second"
+agent = "codex"
+workflow = "implement"
+prompt = "second cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+"""
+
+
+class _FenceOnFirstLaunch:
+    """Launcher double whose first cut trips the operator's interrupt mid-flight.
+
+    This is the race the ledger lock has to settle: the stop lands *after* the
+    scheduler has already decided there is work to do, and before the queued
+    sibling reaches its spawn.
+    """
+
+    def __init__(self, inner: FakeCells, store: DispatchReceiptStore) -> None:
+        self.inner = inner
+        self.store = store
+        self.launches: list[str] = []
+
+    def __call__(self, cut, prompt: str, kind: str) -> CellRun:
+        self.launches.append(cut.id)
+        run = self.inner(cut, prompt, kind)
+        if cut.id == "first":
+            self.store.update_metadata(scheduler_stop_requested=True)
+        return run
+
+
+def test_an_accepted_stop_prevents_any_further_queued_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued cut must not reach a provider after the interrupt is accepted."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, TWO_CUTS, policy="repair_rounds = 0\nconcurrency = 1"
+    )
+    run_id = "fence-race-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+    launcher = _FenceOnFirstLaunch(FakeCells(reports_dir=reports_dir), store)
+
+    run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+    )
+
+    # The provider transport is the only place a launch can be observed, and
+    # it never saw the queued sibling.
+    assert launcher.launches == ["first"]
+    payload = store.read()
+    assert payload["cuts"]["second"]["state"] == "stopped"
+    assert payload["cuts"]["second"]["acceptance"] == "interrupted"
+    # Admission is the ordering record; a cut that was never admitted cannot
+    # have been spawned, whatever a later reader believes about timing.
+    assert "launch_admitted_at" not in payload["cuts"]["second"]
+    assert payload["cuts"]["first"]["launch_admitted_at"]
+
+
+def test_admission_refuses_under_the_same_lock_that_records_the_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the fence is durable, admission can never return a stale yes."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, _reports_dir, _artifacts_dir = build_dispatch(tmp_path, TWO_CUTS)
+    store = DispatchReceiptStore(
+        "fence-order-run", dispatch.cuts, repo_root=str(tmp_path)
+    )
+
+    assert store.admit_launch("first", scheduler_slot=1) is True
+    store.update_metadata(scheduler_stop_requested=True)
+    assert store.admit_launch("second", scheduler_slot=1) is False
+
+    payload = store.read()
+    assert payload["cuts"]["first"]["scheduler_slot"] == 1
+    assert "launch_admitted_at" not in payload["cuts"]["second"]
+
+
+def test_explicit_resume_lifts_the_fence_and_reruns_only_the_failed_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_history
+) -> None:
+    """Recovery clears the interrupt it inherited, and nothing else."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, TWO_CUTS, policy="repair_rounds = 0\nconcurrency = 1"
+    )
+    run_id = "resume-fence-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+    historical = DispatchSupervisor(
+        dispatch,
+        launcher=FakeCells(reports_dir=reports_dir),
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+    verified_history(
+        historical,
+        dispatch.cuts[0],
+        reports_dir / "first-history.md",
+        provider_run_id="provider-first",
+    )
+    store.update("second", "failed", acceptance="failed")
+    store.update_metadata(
+        scheduler_stop_requested=True, scheduler_error="owner lost transport"
+    )
+    settled_before = store.cut("first")
+
+    launcher = FakeCells(reports_dir=reports_dir)
+    result = run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+
+    # Exactly one execution, and only of the cut that failed.
+    assert launcher.launches == [("second", "initial")]
+    assert result.states["first"] == STATE_VERIFIED
+
+    payload = store.read()
+    assert payload["scheduler_stop_requested"] is False
+    assert payload["scheduler_error"] == ""
+    assert payload["scheduler_resumed_at"]
+    # The settled sibling is not re-run, not re-admitted, and not rewritten.
+    assert payload["cuts"]["first"]["state"] == "settled"
+    assert payload["cuts"]["first"]["provider_run_id"] == "provider-first"
+    assert (
+        payload["cuts"]["first"]["settled_epoch_ns"]
+        == settled_before["settled_epoch_ns"]
+    )
+    assert "launch_admitted_at" not in payload["cuts"]["first"]
+
+
+def test_stop_ordered_after_resume_request_is_not_cleared_by_that_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later interrupt wins even when the child has not reached run() yet."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(tmp_path, TWO_CUTS)
+    run_id = "resume-stop-order-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+
+    # This barrier models the parent recording the handoff request before
+    # Popen returns, followed by an independently accepted lifecycle stop.
+    resume_sequence = store.request_resume()
+    store.request_stop(scheduler_stop_requested_at="after-resume-request")
+    monkeypatch.setenv("VIBECRAFTED_SCHEDULER_RESUME_SEQUENCE", str(resume_sequence))
+
+    launcher = FakeCells(reports_dir=reports_dir)
+    run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+
+    payload = store.read()
+    assert launcher.launches == []
+    assert payload["scheduler_stop_requested"] is True
+    assert payload["scheduler_resume_cleared"] is False
+    assert all(cut["state"] == "stopped" for cut in payload["cuts"].values())
+
+
+def _acceptance_brief(tmp_path: Path, body: str) -> Path:
+    brief = tmp_path / "briefs" / "W1-01_gate.md"
+    brief.parent.mkdir(exist_ok=True)
+    brief.write_text(body, encoding="utf-8")
+    return brief
+
+
+def test_unflipped_acceptance_boxes_do_not_skip_claim_verifiers(tmp_path: Path) -> None:
+    """An admitted claim triggers verifiers regardless of Markdown checkbox state."""
+    brief = _acceptance_brief(
+        tmp_path,
+        "# W1-01\n\n## Mission\n\nDo it.\n\n## Acceptance\n\n"
+        "- [ ] A1 behavior holds — `echo ok`\n"
+        "- [x] A2 already measured — `echo ok`\n\n"
+        "## Gates\n\n`echo ok`\n",
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f"""
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ contains = "ok" }}
+""",
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.states == {"c1": STATE_VERIFIED}
+    journal = (artifacts_dir / "journal.md").read_text(encoding="utf-8")
+    assert "verifier pass:" in journal
+    assert "acceptance checkbox never flipped" not in journal
+    assert "- [ ] A1 behavior holds" in brief.read_text()
+
+
+def test_worker_checkbox_flip_cannot_override_red_claim_verifiers(
+    tmp_path: Path,
+) -> None:
+    """A worker that flips every box is not believed: verifiers still decide."""
+    brief = _acceptance_brief(
+        tmp_path,
+        "# W1-01\n\n## Mission\n\nDo it.\n\n## Acceptance\n\n"
+        "- [ ] A1 behavior holds — `echo ok`\n\n"
+        "## Gates\n\n`echo ok`\n",
+    )
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        f"""
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ contains = "ok" }}
+
+[[cuts]]
+id = "c2"
+agent = "claude"
+workflow = "implement"
+brief = "{brief}"
+depends_on = ["c1"]
+  [[cuts.verify]]
+  run = "false"
+  expect = {{ exit_code = 0 }}
+""",
+    )
+    launcher = FakeCells(reports_dir=reports_dir)
+    # The c1 worker flips its checkbox (delivery claim); c2 inherits the same
+    # flipped brief but its verifier is red — the claim must not save it.
+    launcher.cells[("c1", "initial")] = FakeCell(
+        bash=(
+            "python3 - <<'PY'\n"
+            f"from pathlib import Path\n"
+            f"p = Path({str(brief)!r})\n"
+            "p.write_text(p.read_text().replace('- [ ]', '- [x]'))\n"
+            "PY"
+        )
+    )
+
+    result = run_dispatch(dispatch, launcher=launcher, artifacts_dir=artifacts_dir)
+
+    assert result.states["c1"] == STATE_VERIFIED
+    assert result.states["c2"] == STATE_FAILED
+
+
+def test_keyboard_interrupt_marks_receipts_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, _reports_dir, artifacts_dir = build_dispatch(
+        tmp_path,
+        """
+[[cuts]]
+id = "c1"
+agent = "claude"
+workflow = "implement"
+prompt = "will be interrupted"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+""",
+    )
+
+    def boom(*_args: object, **_kwargs: object) -> CellRun:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_dispatch(
+            dispatch,
+            launcher=boom,
+            artifacts_dir=artifacts_dir,
+            run_id="kb-int",
+        )
+
+    store = DispatchReceiptStore("kb-int", dispatch.cuts, create=False)
+    cut = store.cut("c1")
+    assert cut["state"] == "stopped"
+    assert cut["acceptance"] == "interrupted"
+    assert store.read().get("scheduler_stop_requested") is True

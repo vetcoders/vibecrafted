@@ -1,319 +1,227 @@
 ---
 name: vc-workflow
-version: 1.0.0
+version: 3.6.0
 description: >
   This skill should be used when the user asks to "examine and implement",
-  "research then implement", "zbadaj i zaimplementuj", "workflow", "pipeline",
-  "examine → research → implement", "full workflow", "ERi pipeline", "ERi",
-  "plan and implement", "analyze then build", "structured implementation",
-  "przebadaj repo i zaimplementuj", or describes a task that requires
-  understanding code structure before making changes. Orchestrates a
-  three-phase pipeline: Examine (loctree), Research (Brave Search / web),
-  Implement (subagents). Each phase feeds context to the next.
+  "research then implement", "workflow", "pipeline", "examine → research → implement", "full workflow", "ERi pipeline", "native fleet workflow",
+  "plan and implement", "analyze then build", "structured implementation"
+  or describes a task that requires understanding code structure before making changes. Orchestrates a three-phase pipeline: Examine (loctree), Research (Brave Search / web), Implement (subagents). Each phase feeds context to the next.
 loctree_value: "primary repo map for structural/literal repository work"
 aicx_value: "intent, session, and decision-context retrieval"
 dogfooding: "required for repo-impacting work"
+native_fleet: "use native fleet delegation widely"
 ---
 
 <!-- fleet-imperative: v3 -->
 
-> **Wywołanie dla `vc-workflow` (launcher `workflow`)**
+> **Wywołanie `vc-workflow` (launcher `workflow`)**
 >
-> Ten sam _kształt_ trzech ścieżek floty, z **literałami tego** skilla — zobacz
-> kanoniczną [Matrycę Delegacji](../DELEGATION_MATRIX.md):
+> Trzy ścieżki według [Matrycy Delegacji](../DELEGATION_MATRIX.md):
+> [wspólne ścieżki](../DELEGATION_MATRIX.md#wspólne-trzy-ścieżki),
+> [katalog](../DELEGATION_MATRIX.md#katalog-launcherów-core-runtime),
+> [reguła launchera](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna),
+> [native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy).
 >
-> - [Wspólne trzy ścieżki](../DELEGATION_MATRIX.md#wspólne-trzy-ścieżki)
-> - [Katalog launcherów](../DELEGATION_MATRIX.md#katalog-launcherów-core-runtime)
-> - [Reguła per-launcher](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna)
-> - [Native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy)
+> | Ścieżka            | Wywołanie                                                                                      |
+> | ------------------ | ---------------------------------------------------------------------------------------------- |
+> | Worker użytkownika | `vibecrafted workflow <agent>`                                                                 |
+> | Interactive        | `/vc-workflow` w tej sesji; natywni subagenci, gdy trzeba; sam launcher nie uzasadnia external |
+> | Agent-Operator     | dispatch przez vc-dispatch/linie Operatora z zachowaniem tożsamości skilla                     |
 >
-> | Ścieżka               | Literał tego skilla                                                                                                             |
-> | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-> | 1. Worker użytkownika | `vibecrafted workflow <agent>`                                                                                                  |
-> | 2. Interactive        | `/vc-workflow` — wykonaj **w tej sesji**; native subagenty gdy trzeba; **nie** zewnętrzniaj tylko dlatego, że launcher istnieje |
-> | 3. Agent-operator     | może odpalić formę workera powyżej przez `vc-dispatch` / linie operatora, zachowując tożsamość tego skilla                      |
->
-> **Uwaga:** ERi pipeline only. Other skills are not ERi by paste.
-
-> Swobodniejszy native na niektórych biegach ≠ porzucenie floty external. `vc-dispatch` i `vc-ship` zachowują własne tożsamości.
+> To pipeline ERi. Inne skille nie stają się ERi przez wklejenie jego tekstu.
+> Swobodniejszy native nie zastępuje floty external; vc-dispatch/vc-ship
+> zachowują tożsamość.
 
 <!-- /fleet-imperative -->
 
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Workflow — pipeline ERi
 
-## Wejście operatora
+## Wejście Operatora
 
-### Reguła Living Tree / Worktree
+### Living Tree / Worktree
 
-Ten workflow działa w bieżącym checkoucie i na bieżącej gałęzi operatora. Nie twórz worktree gita, nie przełączaj się na niego ani nie przenoś do niego wykonania, chyba że operator wprost poprosi o worktree w tym prompcie. Ogólne słowa w stylu „isolate", „parallel" czy „clean branch" to za mało. Jedyny usankcjonowany drugi tryb to dispatch Fleet Worktrees (pisany plan, zacommitowane wcześniej verifiery, rozłączne domeny plików, jednowątkowy integrator — patrz Reguła Living Tree, Tryb B); poza tą formacją zostań we wspólnym drzewie. Czytaj pliki ponownie przed edycją, dostosowuj się do równoległych zmian i zgłoś awarię podłoża (substrate failure), jeśli bieżące drzewo jest zbyt zatrute, by bezpiecznie kontynuować.
-
-Zobacz [Reguła Living Tree](../LIVING_TREE_RULE.md).
+Pracuj w bieżącym checkoucie i na bieżącej gałęzi; bez worktree, chyba że został
+jawnie wybrany. Drugim usankcjonowanym trybem jest dispatch Fleet Worktrees:
+plan, wcześniej zacommitowane verifiery, rozłączne domeny, jednowątkowy integrator.
+Czytaj ponownie przed edycją; przy zatrutym drzewie zgłoś substrate failure.
+Pełna [reguła Living Tree](../LIVING_TREE_RULE.md).
 
 ## Checkpoint orientacji
 
-Zanim ten workflow wykona analizę specyficzną dla repo, planowanie, implementację, review, release lub delegację, MUSI uruchomić lub skonsumować procedurę `vc-init` dla przydzielonego repo. Jeśli brakuje świeżych dowodów (evidence) z `vc-init`, najpierw wykonaj przebieg init i traktuj pracę specyficzną dla workflow jako zablokowaną, dopóki nie ma aktualnej prawdy repo.
+Przed analizą repo, planowaniem, implementacją, review, release i delegacją
+uruchom albo skonsumuj vc-init; brak świeżych dowodów blokuje pracę.
+`Loctree:loctree` buduje Mapę Aplikacji Wyprowadzoną z Kodu
+(Code-Derived Application Map): repo-view/focus/slice/impact/find/follow.
+Szukaj przed tworzeniem, impact przed usuwaniem, slice przed edycją.
+Brak dowodów jest błędem procesu. Pełny checkpoint: [vc-init](../vc-init/SKILL.md).
+Mapę przeczytaj, nie poprzestawaj na obecności atlasu.
 
-`Loctree:loctree` to domyślny skill do mapowania struktury repo dla tego przebiegu. Użyj Loctree przed grepem lub twierdzeniami z dokumentacji, aby wyprodukować lub odświeżyć Mapę Aplikacji Wyprowadzoną z Kodu (Code-Derived Application Map): repo-view, focus, slice, impact, find i follow w odpowiednim zakresie. Szukaj istniejących symboli i kontraktów, zanim utworzysz nowe; uruchom impact przed delete lub dużym refaktorem; uruchom slice przed edycją.
-
-Chodzi o znalezienie zaczepów: węzłów nośnych, twins (duplikaty), martwego kodu, dryfu, entrypointów runtime'u oraz pułapek o dużym zasięgu zmiany. Jeśli task jest jawnie nie-repo lub no-code, zadeklaruj w raporcie wyjątek no-repo. W przeciwnym razie brak dowodów (evidence) z `vc-init`/Loctree to awaria procesu.
-
-Standardowy launcher (`vibecrafted start` / `vc-start`, następnie `vc-<launcher> <agent> [--prompt|--file ...]`).
+Standardowe wejście: vibecrafted start/vc-start, potem
+`vc-<launcher> <agent> [--prompt|--file ...]`.
 
 ```bash
 vibecrafted workflow claude --prompt 'Examine auth surface and implement fixes'
 vc-workflow codex --prompt 'Research SSO options then implement the best fit'
-vibecrafted workflow agy --file /path/to/research-plan.md  # gemini deprecated
+vibecrafted workflow agy --file /path/to/research-plan.md   # gemini deprecated; agy is Google replacement
 ```
 
-Zależności fundamentowe (ładowane wraz z frameworkiem): `vc-loctree`, `vc-aicx`.
+Fundamenty ładowane z frameworkiem: vc-loctree, vc-aicx i
+[vc-delegate](../vc-delegate/SKILL.md) — polityka native fan-out w fazie 3.
 
-**Examine. Research. Implement.** Trzyfazowy pipeline, który łańcuchuje strukturalną
-inteligencję kodu, research na twardych faktach (ground truth) i równoległą delegację
-agentów. Każda faza akumuluje kontekst dla następnej — żadnej ślepej implementacji.
+Examine. Research. Implement. Pipeline łączy mapę strukturalną kodu, research
+oparty na faktach i równoległą delegację. Każda faza przekazuje kontekst dalej;
+implementacja nie jest ślepa.
 
-## Doktryna pracy z repozytorium
+## Doktryna repo
 
-W pracy z repozytorium zacznij od Loctree jako mapy: użyj `loct context`,
-`loct occurrences`, `loct body` i `loct find --literal` przed szerokim ręcznym
-przeszukiwaniem. Używaj AICX do kontekstu intencji i sesji. Używaj rg/grep jako
-fallbacku lub lokalnej lupy, nie jako zamiennika mapowania strukturalnego. Jeśli Loctree
-zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted/loctree/loctree-fail.md`.
+Najpierw Loctree (`loct context/occurrences/body/find --literal`), AICX dla
+historii intencji, rg/grep jako lokalna lupa. Braki Loctree zgłaszaj przez append
+w `~/.vibecrafted/loctree/loctree-fail.md`.
 
-## Pozycja w pipelinie
+## Miejsce w pipeline
 
 ```
 scaffold → init → [WORKFLOW] → followup → marbles → dou → decorate → hydrate → release
 ```
 
-## Przegląd pipeline'u
+## Przegląd pipeline
 
-```
- EXAMINE (loctree)         RESEARCH (web)          IMPLEMENT (agents)      CONVERGE (marbles+polarize)
- ┌────────────────┐        ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
- │ repo-view      │        │ Brave Search   │      │ write plans    │      │ marbles: fix   │
- │ focus 1-3 dirs │ ─────▸ │ WebFetch docs  │ ───▸ │ spawn agents   │ ───▸ │ gates (P0=0)   │
- │ slice + impact │        │ Context7 libs  │      │ collect reports│      │ polarize: align│
- │ find symbols   │        │ curate         │      │ review + merge │      │ docs & product │
- └────────────────┘        └────────────────┘      └────────────────┘      └────────────────┘
-        ↓                          ↓                       ↓                       ↓
-   CONTEXT.md                 RESEARCH.md             REPORTS/*.md            THESIS.md
-```
+EXAMINE (loctree repo-view → focus → slice/impact → find) ⇒ CONTEXT.md →
+RESEARCH (brave/WebFetch/Context7, wybrane źródła) ⇒ RESEARCH.md →
+IMPLEMENT (fan-out, raporty, review+merge) ⇒ reports/*.md →
+CONVERGE (marbles P0=0 → polarize align) ⇒ THESIS.md.
 
-Kanoniczny katalog główny artefaktów: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/{plans,reports,tmp}/`.
-Finalne artefakty Markdown używają `%Y-%m-%d_<org>_<repo>_<full_session_id>-<kind>.md`
-(`kind=report,plan,tracker,research,...`) z pasującymi sidecarami `.transcript.log` i
-`.meta.json`. `CONTEXT.md` i `RESEARCH.md` żyją w `plans/` jako
-`<ts>_<slug>_CONTEXT.md` i `<ts>_<slug>_RESEARCH.md`. `../../runtime/scripts/common.sh`
-`spawn_prepare_paths()` to źródło prawdy dla rozwiązywania korzenia dnia (day-root).
-Lokalne dla repo `.vibecrafted/plans` i `.vibecrafted/reports` to tylko wygodne
-symlinki.
+Kanoniczny root artefaktów:
+`$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/{plans,reports,tmp}/`.
+`spawn_prepare_paths()` w `../../runtime/scripts/common.sh` jest właścicielem
+nazewnictwa/day-root; repo-local `.vibecrafted/{plans,reports}` są tylko symlinkami.
 
 ## Faza 1 — EXAMINE
 
-Zmapuj bazę kodu, zanim czegokolwiek dotkniesz. Skille fundamentowe to główna
-warstwa sensoryczna.
+Mapuj przed edycją. Fundamenty są podstawową warstwą percepcji.
 
-1. **Skonsumuj wyjścia `vc-init`** — przeczytaj `AGENTS.md` i raport
-   sytuacyjny. Jeśli `vc-init` nie był uruchomiony, uruchom go najpierw.
-2. **Pogłęb mapę (loctree)** poza bazową linię z initu:
-   - `slice(file)` dla każdego pliku, który prawdopodobnie się zmieni (zależności + konsumenci)
-   - `impact(file)` dla plików będących węzłami nośnymi lub kandydatami do usunięcia
-   - `find(name)` przed utworzeniem jakichkolwiek nowych typów/funkcji
-3. **AICX (intencje)** — `aicx extract`, jeśli wyjście poprzedniej sesji jest zbyt duże
-   lub w surowym JSONL.
-4. **PRView** — wygeneruj najpierw artefakty, jeśli workflow jest częścią review PR-a.
-5. **Screenscribe** — skonsumuj findingi, jeśli task wziął się z wizualnego dema.
+1. Skonsumuj vc-init: AGENTS.md i raport sytuacyjny; jeśli go brak, najpierw init.
+2. Pogłęb mapę: slice dla każdego kandydata do edycji (deps+consumers), impact
+   dla hubów i kandydatów do usunięcia, find przed nowym typem/funkcją.
+3. AICX: aicx extract, gdy poprzednia sesja jest za duża lub w surowym JSONL.
+4. PRView: przy review PR najpierw generuj artefakty.
+5. Screenscribe: skonsumuj ustalenia, jeśli zadanie pochodzi z demo wizualnego.
 
 ### Wyjście: CONTEXT.md
 
-Zapisz do `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<ts>_<slug>_CONTEXT.md`:
-
-```markdown
----
-run_id: <id>
-agent: <claude|codex|gemini>
-skill: vc-workflow
-project: <repo>
-status: completed
-created: <ISO-8601>
----
-
-# Examination: <slug>
-
-## Repo Health
-
-- <3-5 bullets from repo-view>
-
-## Scope
-
-- Target dirs: <list>
-- Why: <rationale>
-
-## Critical Files
-
-| File | Consumers | Risk | Notes |
-
-## Symbols Found
-
-- <existing symbols relevant to task>
-
-## Risk Map
-
-- <high-impact files + mitigation>
-
-## Decision
-
-- [ ] Research needed (unknown APIs/patterns)
-- [ ] Skip to Implement (well-understood domain)
-```
+Zapisz `plans/<ts>_<slug>_CONTEXT.md` według
+[szablonu](references/output-templates.md): frontmatter, zdrowie repo, scope,
+pliki krytyczne, symbole, ryzyko i decyzja research/implementacja.
 
 ### Bramka fazy
 
-Przedstaw podsumowanie CONTEXT.md. Zapytaj: **Research czy Implement?** Jeśli domena jest
-dobrze zrozumiana, pomiń Fazę 2.
+Przedstaw syntezę CONTEXT.md i pytanie Research czy Implement?
+Przy dobrze znanej domenie pomiń fazę 2.
 
 ## Faza 2 — RESEARCH
 
-Dla głębokich niewiadomych architektonicznych lub dużych dochodzeń **NIE prowadź
-ad-hoc researchu samodzielnie.** Przekaż pytania wyprowadzone z Examination do
-`vc-research` (rój triple-agent) i skonsumuj jego raport.
-
-Dla prostych lookupów (pojedynczy parametr API, składnia pliku) użyj Brave Search / Context7 /
-WebFetch bezpośrednio: zapytaj `"<API> usage example <year>"`, pobierz standardową dokumentację.
+Głębokie niewiadome architektoniczne i duże śledztwa przekazuj z pytaniami z
+Examination do vc-research (trzyagentowy swarm), zamiast własnego ad-hoc researchu.
+Skonsumuj raport. Proste lookupy (parametr API, składnia pliku) wykonuj przez
+Brave Search/Context7/WebFetch: zapytanie `<API> usage example <year>`,
+potem dokumentacja standardu.
 
 ### Wyjście: RESEARCH.md
 
-```markdown
----
-run_id: <id>
-agent: <claude|codex|gemini>
-skill: vc-workflow
-project: <repo>
-status: completed
-created: <ISO-8601>
----
-
-# Research: <slug>
-
-## Questions (from Examination)
-
-1. <question>
-
-## Findings
-
-### Q1: <question>
-
-- **Source**: <URL or Context7 lib>
-- **Answer**: <concise>
-- **Code example**: <if applicable>
-
-## Architectural Decision
-
-- Chosen: <decision>
-- Why: <findings-based>
-- Alternatives rejected: <reasons>
-
-## Implementation Notes
-
-- <concrete guidance for agents>
-```
+Zapisz `plans/<ts>_<slug>_RESEARCH.md` według
+[szablonu](references/output-templates.md): pytania z examination, ustalenia
+ze źródłami, decyzja architektoniczna i wskazówki implementacji.
 
 ### Bramka fazy
 
-Przedstaw podsumowanie RESEARCH.md. Zapytaj: **Przejść do Implement?**
+Przedstaw syntezę RESEARCH.md i pytanie, czy przejść do implementacji.
 
 ## Faza 3 — IMPLEMENT
 
-Uzbrojony w CONTEXT.md + RESEARCH.md, deleguj do równoległych agentów.
+Kontekst CONTEXT.md + RESEARCH.md pozwala rozdzielić implementację.
+
+- Operator uruchamia zewnętrznych workerów według vc-agents (Spawn Pattern).
+- Worker dispatchowany jako `vibecrafted workflow <agent>`: external należy tylko
+  do Operatora, ale nie oznacza to zakazu pracy równoległej. Rozdzielaj rozłączne
+  subcuty przez native runtime'u: Claude Task przez vc-delegate, swarm Kimi,
+  natywna ścieżka pozostałych runtime'ów. Rola workera ogranicza zakres,
+  nie prawa do native fan-out. Dobieraj tiery według ekonomii podzadania
+  (vc-delegate → Native Delegation Policy). Szeregowe wykonanie równoległego
+  planu pogarsza szybkość dostawy; nie daje samo z siebie bezpieczeństwa.
 
 ### Szablon planu agenta
 
-Każdy plan MUSI zawierać:
+Każdy plan zawiera:
 
-1. **Obowiązkowy frontmatter** — `run_id`, `agent`, `skill (vc-workflow/vc-agents)`, itd.
-2. **Kontekst pipeline'u** — wklej odpowiednie sekcje z CONTEXT.md + RESEARCH.md.
-3. **Preambuła z instrukcją loctree** (sprawdzona kompletność 98% vs 85%):
-   ```
-   Use loctree MCP tools as your primary exploration layer:
-   - repo-view(project) first for overview
-   - slice(file) before modifying any file
-   - find(name) before creating new symbols
-   - impact(file) before deleting
-   Never edit code without mapping it first.
-   ```
-4. **Reguła living tree** — standardowa preambuła 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.
-5. **Bramka jakości** — komendy testów/lintu specyficzne dla repo.
+1. Obowiązkowy frontmatter: run_id, agent, skill (vc-workflow/vc-agents), itd.
+2. Kontekst pipeline: odpowiednie części CONTEXT.md + RESEARCH.md.
+3. Preambułę Loctree (zmierzona kompletność 98% vs 85%) z
+   [phase-implement](references/phase-implement.md): repo-view przed pracą,
+   slice przed edycją, find przed tworzeniem, impact przed usuwaniem,
+   bez edycji niezmapowanego kodu.
+4. Standardową preambułę żywego drzewa.
+5. Bramkę jakości: test/lint właściwy dla repo.
 
-### Wzorzec spawnowania
+### Spawn Pattern
 
-Postępuj wg `vc-agents` po komendy spawnowania (preferowane skrypty przenośne). Plany →
-domyślnie `plans/`, raporty → domyślnie `reports/` pod
-`$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`. Lokalne dla repo
-`.vibecrafted/plans` i `.vibecrafted/reports` to tylko wygodne symlinki.
+Komendy spawnu są w vc-agents; preferuj przenośne skrypty.
+Plany i raporty trafiają do plans/reports pod kanonicznym rootem artefaktów,
+repo-local .vibecrafted/plans i .vibecrafted/reports są tylko symlinkami.
+Supervisor natychmiast uzbraja `vibecrafted await <agent> --run-id <id>`.
+Doktryna trzech sygnałów, znanego skew i naruszeń klasy 3 jest w
+docs/runtime/AGENT_OPS.md oraz vc-agents → references/runbook.md.
 
-Po dispatchu natychmiast uzbrój po stronie supervisora
-`vibecrafted await <agent> --run-id <id>`. JSON control-plane, pliki raportów,
-transkrypty, panele i zaplanowane wybudzenia są wyłącznie diagnostyką, a nie
-sygnałami wybudzenia. Zabezpieczanie await dodatkowymi, doraźnymi
-pollerami/watcherami jest naruszeniem klasy 3; napraw `control_plane.await_run`,
-zamiast normalizować obejście. Zobacz `docs/runtime/AGENT_OPS.md`.
+## Faza 4 — CONVERGE (Marbles & Polarize)
 
-Trzy sygnały liveness: werdykt await, terminalne meta runu, martwy PID workera
-oraz obecność obiecanego raportu. Dwa zgodne sygnały wystarczą do działania,
-trzy do ogłoszenia zakończenia; każda rozbieżność oznacza, że run należy uznać
-za żywy i ponownie uzbroić await. Znane przekłamania: rc=0 dla żywego runu oraz
-meta utknięte w `active`/`stalled` po rzeczywistym zakończeniu.
+Istniejąca implementacja nie dowodzi prawdziwości ani gotowości do wydania.
+(1) Przeczytaj raporty, make check i mapę ryzyka.
+(2) Czerwone gate'y lub kruchy runtime: kontynuuj, nie pokazuj diffu z
+wiadomymi lukami jako zamkniętej pracy — vc-marbles do P0=0.
+(3) Kod stabilny, lecz koncepcja rozmyta/konkurujące ścieżki: `vc-polarize --task <concept>`; pasma prism: 0..4 abort, 5..8 memo, 9..12 pass, 13..15 doctrine.
+(4) Przekaż syntezę diffu/THESIS.md gotową do dou i Release.
 
-### Faza 4 — CONVERGE (Marbles & Polarize)
+### Rytm commitów
 
-Po ukończeniu pracy przez agentów implementacyjnych kod istnieje, ale może nie być prawdziwy ani gotowy do dowiezienia.
-Nie zatrzymuj się na implementacji. Przejdź przez granicę zbieżności:
+Jeden commit na rundę (marbles: runda = commit), zgodny z hookiem commit-msg.
+Nie pozostawiaj dostarczonej pracy bez commitu; run daje do trzech commitów
+(Implement, Marbles, Polarize). Potem obowiązuje niedestrukcyjny push feature
+brancha zgodnie z autoryzacją misji. Force-push, trunk, merge i deploy pozostają
+guzikami Foundera.
 
-1. **Sprawdzenie bramek** — Przeczytaj wszystkie raporty, uruchom bramki jakości (`make check`), zweryfikuj mapę ryzyka.
-2. **Prawda kodu (`vc-marbles`)** — Jeśli bramki padają, testy są czerwone lub ścieżka runtime'u jest krucha:
-   - **NIE ZATRZYMUJ SIĘ.** Nie przedstawiaj podsumowania diffa z zepsutymi testami lub znanymi lukami.
-   - Wywołaj `vc-marbles`, aby zapętlić, dopóki bramki nie staną się zielone (P0=0), a baza kodu nie przestanie kłamać.
-3. **Prawda produktu (`vc-polarize`)** — Gdy kod jest stabilny (bramki przechodzą), sprawdź „rozmaz koncepcyjny" (np. sprzeczna dokumentacja, niejednoznaczne publiczne interfejsy lub architektoniczne „split-brain", gdzie dwie poprawne ścieżki ze sobą rywalizują).
-   - Jeśli koncepcja jest rozmazana, uruchom `vc-polarize --task <concept>` i pozwól, by prism band-action contract zadecydował: `0..4 abort`, `5..8 memo`, `9..12 full pass`, `13..15 doctrine pass with regression contract`.
-4. **Przekazanie** — Przedstaw finalne podsumowanie diffa i/lub `THESIS.md` gotowe dla `dou` i Release.
-
-### Kadencja commitów
-
-Jeden commit na rundę (marbles: jedna runda = jeden commit), commitowany lokalnie na bieżącej
-gałęzi, dobrze sformowany wg hooka commit-msg — dowieziona praca nigdy nie zostaje niezacommitowana.
-Przebieg vc-workflow produkuje **do 3 commitów** (fazy zapisu — Implement, Marbles, Polarize
-— każda commituje swoją rundę). Niedestruktywny remote push tej gałęzi feature to obowiązek po tych commitach. Force-push, push na trunk, merge i deploy zostają przyciskami operatora.
-
-## Szybka ściąga
+## Szybka mapa
 
 | Faza      | Narzędzie                          | Wyjście                         |
 | --------- | ---------------------------------- | ------------------------------- |
 | Examine   | loctree MCP                        | `plans/<ts>_<slug>_CONTEXT.md`  |
 | Research  | brave-search + Context7 + WebFetch | `plans/<ts>_<slug>_RESEARCH.md` |
-| Implement | vc-agents (portable scripts)       | `reports/*.md`                  |
+| Implement | vc-agents (przenośne skrypty)      | reports/*.md                    |
 
 ## Pomijanie faz
 
-- Mała poprawka, znana domena → tylko Examine, implementuj bezpośrednio
-- Integracja nowego API/biblioteki → wszystkie trzy fazy
-- Refaktor → Examine + Implement (bez zewnętrznego researchu)
-- Tylko research → Examine + Research (jeszcze bez implementacji)
+- Mała poprawka, znana domena: Examine i bezpośrednia implementacja.
+- Nowa biblioteka/API: wszystkie trzy fazy.
+- Refactor: Examine + Implement, bez zewnętrznego researchu.
+- Tylko research: Examine + Research, bez implementacji.
 
-Na starcie pipeline'u zadeklaruj, które fazy mają zastosowanie.
+Na początku podaj, które fazy stosujesz. Pipeline jest obowiązkowy dla nietrywialnej
+pracy funkcjonalnej w wielu plikach. Jeśli MCP Loctree jest niedostępne, fallback
+jest w references/phase-examine.md. Brave Search pochodzi z narzędzi runtime'u
+lub fallbacku web, nie z lokalnego katalogu wrapperów.
 
-## Notatki
+## Materiały
 
-- Obowiązkowe dla nietrywialnej, wieloplikowej pracy nad funkcją.
-- Jeśli loctree MCP jest niedostępne, zobacz `references/phase-examine.md` po fallback na grepa.
-- Brave Search pochodzi z powierzchni narzędziowej runtime'u lub fallbacku web search, nie z lokalnego katalogu wrappera.
-
-## Dodatkowe zasoby
-
-- `references/phase-examine.md` — wzorce głębokiej analizy loctree
-- `references/phase-research.md` — metodologia researchu, ranking źródeł
-- `references/phase-implement.md` — delegacja agentów z akumulowanym kontekstem
-- `scripts/pipeline-init.sh` — inicjalizacja domyślnych ścieżek artefaktów
+- references/phase-examine.md — pogłębione wzorce mapowania
+- references/phase-research.md — metodologia i ranking źródeł
+- references/phase-implement.md — delegacja ze skumulowanym kontekstem
+- scripts/pipeline-init.sh — domyślne ścieżki artefaktów
 
 ---
+
+## Weryfikacja przed handoffem
+
+Przed „done” obejdź ciężarówkę według [Verification Rule](../VERIFICATION_RULE.md):
+uruchom PRAWDZIWY artefakt (app/binarium, nie samo --version), zweryfikuj runtime,
+nie traktuj upstream jako dowodu i sprawdź własne sprawdzenie. Zielone gate'y
+nie dowodzą działania. Przenieś regułę do stopki prompta implementera.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_

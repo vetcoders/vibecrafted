@@ -5,12 +5,14 @@ Użyj tego szablonu jako wyjścia planowania. W swoim faktycznym wyjściu wytnij
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-scaffold|vc-workflow|vc-implement>
 project: <repo-name>
 status: pending
 vector: <stabilize|implement|recon|e2e> # selects the gate profile = what counts as delivery
 created: <ISO-8601 timestamp>
+founder_interview_evidence: <ścieżka journala | sesja/ekstrakt AICX | odpowiedzi z bieżącej rozmowy>
+dispatch_artifact: <absolutny root planu>/<plan-id>.dispatch.toml
 ---
 
 # Architecture Plan: [Project Name]
@@ -99,7 +101,23 @@ Delivery-verifier: `pnpm test auth` green — rejects invalid tokens, passes val
 Acceptance: intent (auth enforced on all routes) vs baseline (routes open); delivery proven by the verifier, not "agent said so"
 Pre-handoff baseline: branch, HEAD, git status, changed files, verifier output, known failures, next instruction
 
-```
+````
+
+## Dispatch Contract
+
+Root planu zawiera `<plan-id>.dispatch.toml` z `schema = "vibecrafted.dispatch.v1"`. Mapuje każdy task powyżej
+na jeden wpis `[[cuts]]` z zależnościami, agentem/workflow, promptem wskazującym brief oraz
+delivery-verifierem. `vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor`
+musi przejść przed handoffem. Wielocięciowe wykonanie należy do `/vc-ship` A→Z.
+
+Jeśli plan używa compile embargo, podaj jawną autoryzację Foundera, marker fazy, listę odroczonych
+bramek, tymczasowy dowód strukturalny, procedurę checkpointu, nazwaną atestację zdjęcia embarga
+oraz raport lokalnego commita workera wymagane przez `references/compile-embargo.md`. Selektywna
+repo-owned polityka hooków jest preferowana, gdy jest dostępna; jej brak nie blokuje embarga ani
+nie wymaga najpierw budowania nowego systemu polityk. Raport workera musi podać, co uruchomiono,
+a co pominięto. Plan musi rozróżnić lokalny checkpoint, structural admission integratora (dokładny
+SHA/zakres, Semgrep i przegląd sekretów/bezpieczeństwa; odroczone compile/lint/type/test nadal
+pominięte) oraz verified delivery po nazwanej closure i pełnym, odpowiednim dla języka zestawie bramek.
 
 ## Test Gates (per Vector profile)
 
@@ -111,7 +129,21 @@ każdego cięcia `[~]→[x]`.
 - **stabilize** → krwawienie ustaje + bramka regresji/canary zielona (busy ≠ dead)
 - **recon** → mapa/odpowiedź dostarczona z referencjami do evidence
 - **e2e** → pełna ścieżka przebiega end-to-end
-- **always** → żadnych odsłoniętych sekretów; bramka bezpieczeństwa nie pominięta (`--no-verify` zabronione)
+- **always** → żadnych odsłoniętych sekretów; structural admission integratora zapisuje Semgrep
+  i przegląd sekretów/bezpieczeństwa, a verified delivery po closure zapisuje pełne, odpowiednie dla języka bramki
+
+## Odbiór (matryca wyników) — R12
+
+Każde wymaganie w tym planie startuje jako `[ ]`. Nietknięte `[ ]` na końcu przebiegu to wskaźnik
+niedowiezienia, nie usterka formatowania. Worker przerzuca własne pola w ramach dostawy; żadnemu
+przerzuceniu się nie wierzy — supervisor i tak ponownie uruchamia verifiery. Pola Foundera nigdy
+nie wypełnia agent; zaznaczone pole uznaje się wyłącznie przy pliku dowodu akceptacji w root planu.
+
+| cut | agent | commit | dowód (Operator) | zintegrowane | Worker | Operator | Founder |
+|---|---|---|---|---|---|---|---|
+| [W1-01] | [agent] | — | — | — | [ ] | [ ] | [ ] |
+
+Zatwierdzono przez: Worker [ ] Operator [ ] Founder [ ]
 
 ## Living Tree Note
 
@@ -128,12 +160,39 @@ Udokumentuj rozumowanie. Przyszli inżynierowie ci podziękują.
 
 ## Running This Plan
 
-1. Przeczytaj ten dokument od góry do dołu
-2. Dla każdego taska odpal agenta lub przypisz człowieka
-3. Każdy task produkuje artefakty (kod, testy, docy)
-4. Zwaliduj wobec kryteriów akceptacji
-5. Uchwyć pre-handoff baseline przed przypisaniem następnego właściciela
-6. Gdy wszystkie taski fazy 1 przechodzą bramki, przejdź do fazy 2
+`<plan-id>.dispatch.toml` jest jedynym kontraktem wykonania. Uruchom bramkę pakietu planu, zweryfikuj
+artefakt dispatch, a potem przekaż dokładnie ten artefakt do `/vc-ship`; nie odpalaj cięć ręcznie.
+REFUSE z scaffold-doctor = brak handoffu.
 
-Żadnego machania rękami. Jasna praca. Jasne kryteria. Tak dowożą founderzy.
+```bash
+vibecrafted scaffold-doctor --plan <root-planu> --repo <git-root>
+vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor
+vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --dry-run --json
+````
+
+`/vc-ship` jest właścicielem startu A→Z, nadzoru, resume/recovery, bramek verifierów i ukończenia
+przez deterministyczny dispatcher. Ta sekcja nie może zawierać bezpośredniej recepty start/resume
+ani recepty per cięcie `vibecrafted workflow ... --prompt`.
+
+### Awaryjny fallback ręczny
+
+Tylko gdy `/vc-ship` lub jego supervisor są dowodnie niedostępne, zapisz dokładną awarię i powód
+konieczności fallbacku przed podaniem ograniczonej komendy direct-dispatch albo recovery per cięcie.
+Zapisz, jak kontrola wraca do `/vc-ship`; fallback nigdy nie może stać się drugą ścieżką wykonania.
+
+## Zamknięcie — duch Emila (wymagane)
+
+=======================
+[Jedna linijka motywacyjna związana z tym zadaniem i kaomoji.]
+=======================
+
+**Call to Action:** [Następny autoryzowany krok → właściciel → oczekiwany handback.
+Trzymaj się stanu planu i kanonicznej trasy wykonania; nazwij blokera, jeśli
+wykonanie jest zablokowane.]
+
+**Suchar:** [Świeży, zaskakujący, celowo suchy żart o tym zadaniu. Dodaj kaomoji;
+nie powtarzaj gotowej puenty z innego planu albo briefu.]
+
+```
+
 ```

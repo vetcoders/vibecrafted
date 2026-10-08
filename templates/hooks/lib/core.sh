@@ -27,7 +27,9 @@ husky_repo_root() {
 
 HUSKY_REPO_ROOT="$(husky_repo_root)"
 HUSKY_DIR="$HUSKY_REPO_ROOT/.husky"
-HUSKY_LIB_DIR="$HUSKY_DIR/lib"
+# This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+# file, so deleting the binding would break the shared helper contract.
+# shellcheck disable=SC2034
 HUSKY_SCRIPTS_DIR="$HUSKY_DIR/scripts"
 HUSKY_WARNS_DIR="$HUSKY_DIR/warns"
 HUSKY_LOCAL_HOOK_DIR_BASE="$HUSKY_DIR/local"
@@ -39,7 +41,6 @@ HUSKY_LOCAL_HOOK_DIR_BASE="$HUSKY_DIR/local"
 husky_load_config() {
   local config="$HUSKY_DIR/config.env"
   if [ -f "$config" ]; then
-    # shellcheck disable=SC1090
     set -a
     . "$config"
     set +a
@@ -54,6 +55,7 @@ husky_apply_defaults() {
   : "${HUSKY_WARN_RETENTION:=5}"
 
   : "${HUSKY_PRECOMMIT_SECRETS:=0}"
+  : "${HUSKY_PRECOMMIT_CLAIMS:=1}"
   : "${HUSKY_PRECOMMIT_ENV_FILES:=0}"
   : "${HUSKY_PRECOMMIT_LINT_STAGED:=0}"
   : "${HUSKY_PRECOMMIT_PRETTIER_STAGED:=0}"
@@ -72,6 +74,7 @@ husky_apply_defaults() {
   : "${HUSKY_RUST_CARGO_DIR:=.}"
 
   : "${HUSKY_PREPUSH_PRETTIER_FULL:=0}"
+  : "${HUSKY_PREPUSH_RUFF_FULL:=0}"
   : "${HUSKY_PREPUSH_SEMGREP_FULL:=0}"
   : "${HUSKY_PREPUSH_TSC:=0}"
   : "${HUSKY_PREPUSH_LOCT_CYCLES:=0}"
@@ -183,9 +186,13 @@ husky_warns_rotate() {
   local dir
   dir="$(husky_warns_dir)"
   local count
-  # shellcheck disable=SC2012  # hook names are alphanumeric+hyphen — ls is safe and faster than find -printf
+  # The caller needs newest-first filesystem mtime order for hook logs with constrained generated
+  # names; this ls pipeline is not used to traverse arbitrary user paths.
+  # shellcheck disable=SC2012
   count="$(ls -1t "$dir"/"${hook}"-*.log 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$count" -gt "$HUSKY_WARN_RETENTION" ]; then
+    # The caller needs newest-first filesystem mtime order for hook logs with constrained generated
+    # names; this ls pipeline is not used to traverse arbitrary user paths.
     # shellcheck disable=SC2012
     ls -1t "$dir"/"${hook}"-*.log 2>/dev/null \
       | tail -n +$((HUSKY_WARN_RETENTION + 1)) \
@@ -222,6 +229,8 @@ husky_warns_print_backlog() {
     return 0
   fi
   husky_info "Pending warns for $hook (latest):"
+  # The caller needs newest-first filesystem mtime order for hook logs with constrained generated
+  # names; this ls pipeline is not used to traverse arbitrary user paths.
   # shellcheck disable=SC2012
   ls -1t "$dir"/"${hook}"-*.log 2>/dev/null | head -3 | while IFS= read -r f; do
     local sig
@@ -262,6 +271,9 @@ husky_run_step() {
     STEP_LAST_FAILED=0
     return 0
   fi
+  # This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+  # file, so deleting the binding would break the shared helper contract.
+  # shellcheck disable=SC2034
   STEP_LAST_FAILED=1
   STEP_FAILURE_COUNT=$((STEP_FAILURE_COUNT + 1))
   if husky_warn_mode_active; then
@@ -299,6 +311,9 @@ husky_run_strict_step() {
     STEP_LAST_FAILED=0
     return 0
   fi
+  # This sourced helper publishes a caller-visible result or status; its consumer lives outside this
+  # file, so deleting the binding would break the shared helper contract.
+  # shellcheck disable=SC2034
   STEP_LAST_FAILED=1
   STEP_FAILURE_COUNT=$((STEP_FAILURE_COUNT + 1))
   if [ -n "${HUSKY_STRICT_FAILED_FILE:-}" ]; then
@@ -353,7 +368,9 @@ husky_is_blocked() {
   while IFS= read -r pattern; do
     pattern="$(printf '%s' "$pattern" | sed 's/[[:space:]]*$//')"
     [ -z "$pattern" ] && continue
-    # shellcheck disable=SC2254  # patterns are intentionally globbed
+    # The case pattern intentionally treats configured hook patterns as globs; quoting the pattern
+    # would silently change matching into literal comparison.
+    # shellcheck disable=SC2254
     case "$path" in
       $pattern) return 0 ;;
     esac

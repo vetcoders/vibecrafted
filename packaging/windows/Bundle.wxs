@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Burn EXE bootstrapper. Same UpgradeCode / product name / version as Product.wxs.
+  Chains the thin MSI adapter; does not invent a second install path.
+  LicenseFile is packaging/windows/License.rtf from the repo LICENSE (BUSL-1.1).
+  AboutUrl remains the product homepage; security contact is hello@vetcoders.io
+  (SECURITY.md) and surfaces on the MSI ARP properties.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+  <?include Identity.wxi ?>
+  <Bundle
+      Name="$(var.ProductName)"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.UpgradeCode)"
+      Copyright="(c) 2024-2026 Libraxis AI Sp. z o.o."
+      AboutUrl="https://vibecrafted.io"
+      HelpUrl="https://github.com/vetcoders/vibecrafted/blob/main/SECURITY.md">
+    <!-- Default 0 so a double-click EXE wizard still launches vc-terminal.
+         WixStdBA applies VC_SKIP_TERMINAL_LAUNCH=1 only when Overridable. -->
+    <Variable Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes" />
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="License.rtf"
+          LogoFile="burn-logo.bmp" />
+    </BootstrapperApplicationRef>
+    <Chain>
+      <MsiPackage
+          Id="VibecraftedRuntimePackMsi"
+          SourceFile="!(bindpath.out)\Vibecrafted.msi"
+          Compressed="yes"
+          Vital="yes"
+          Visible="yes">
+        <!-- DisplayInternalUI stays off, so the chained MSI sees a silent UILevel.
+             WixBundleUILevel full is 4; Product.wxs launches vc-terminal only then.
+             /quiet sets that level to 2. VC_SKIP_TERMINAL_LAUNCH=1 is the second gate. -->
+        <MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]" />
+        <MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="[VC_SKIP_TERMINAL_LAUNCH]" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

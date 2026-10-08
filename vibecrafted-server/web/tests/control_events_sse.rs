@@ -5,14 +5,15 @@
 //! cargo test -p vibecrafted-server-web --features ssr --test control_events_sse
 //! ```
 //!
-//! Each test uses an isolated `VIBECRAFTED_HOME` tmp dir so the read-only
-//! control-plane contract is exercised against a real `events.jsonl` path.
+//! Each test passes its own control-plane home into the router. SSE poll and
+//! keepalive are router arguments, not process env.
 
 #![cfg(feature = "ssr")]
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use std::net::SocketAddr;
@@ -22,43 +23,38 @@ use axum::http::{Request, StatusCode, header};
 use futures_util::StreamExt;
 use leptos::config::{Env, LeptosOptions};
 use tower::ServiceExt;
-use vibecrafted_server_web::control::api::control_routes;
+use vibecrafted_server_web::control::api::{SsePace, control_routes_with};
 
-/// Serialise env mutation — `VIBECRAFTED_HOME` is process-global.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 const TEST_EPOCH: &str = "123e4567-e89b-12d3-a456-426614174000";
 const SEGMENT_SCHEMA: &str = "vibecrafted.event-stream-segment.v1";
 
 struct TempHome {
     path: PathBuf,
-    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl TempHome {
     fn new(label: &str) -> Self {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let path = std::env::temp_dir().join(format!(
-            "vc-sse-{}-{}-{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let control = path.join("control_plane");
-        fs::create_dir_all(&control).expect("create control_plane");
-        // Safety: single-threaded under ENV_LOCK for the test body lifetime.
-        unsafe {
-            std::env::set_var("VIBECRAFTED_HOME", &path);
-            // Fast poll / keepalive so silence tests finish well under 30s.
-            std::env::set_var("VC_CONTROL_SSE_POLL_MS", "50");
-            std::env::set_var("VC_CONTROL_SSE_KEEPALIVE_MS", "200");
-        }
-        Self {
-            path,
-            _guard: guard,
-        }
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = (0..100)
+            .find_map(|attempt| {
+                let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let candidate = std::env::temp_dir().join(format!(
+                    "vc-sse-{label}-{}-{nanos}-{nonce}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(candidate),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => None,
+                    Err(error) => panic!("create isolated sse home: {error}"),
+                }
+            })
+            .expect("allocate an isolated sse home");
+        fs::create_dir_all(path.join("control_plane")).expect("create control_plane");
+        Self { path }
     }
 
     fn control_plane(&self) -> PathBuf {
@@ -110,11 +106,6 @@ impl TempHome {
 
 impl Drop for TempHome {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("VIBECRAFTED_HOME");
-            std::env::remove_var("VC_CONTROL_SSE_POLL_MS");
-            std::env::remove_var("VC_CONTROL_SSE_KEEPALIVE_MS");
-        }
         let _ = fs::remove_dir_all(&self.path);
     }
 }
@@ -132,7 +123,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn test_app() -> axum::Router {
+fn test_app(home: &TempHome) -> axum::Router {
     let opts = LeptosOptions::builder()
         .output_name("vibecrafted-server-web-test")
         .site_root("target/site-test")
@@ -141,7 +132,14 @@ fn test_app() -> axum::Router {
         .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
         .reload_port(0)
         .build();
-    control_routes().with_state(opts)
+    control_routes_with(
+        &home.path,
+        SsePace {
+            poll: Duration::from_millis(50),
+            keepalive: Duration::from_millis(200),
+        },
+    )
+    .with_state(opts)
 }
 
 #[tokio::test]
@@ -149,7 +147,7 @@ async fn health_is_constant_and_independent_of_control_plane_history() {
     let home = TempHome::new("health");
     fs::remove_dir_all(home.control_plane()).expect("remove control plane");
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/health")
@@ -289,7 +287,7 @@ async fn sse_streams_appended_event_with_id_and_json_data() {
     let line_a = event_line("run-a", "spawn", "started");
     home.append_event_line(&line_a);
 
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -336,7 +334,7 @@ async fn sse_streams_typed_settlement_frame() {
     let home = TempHome::new("settlement-frame");
     home.append_event_line(&settlement_event_line("run-settled", 7));
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events")
@@ -383,7 +381,7 @@ async fn sse_reconnect_with_since_cursor_does_not_duplicate_or_skip() {
     home.append_event_line(&line_c);
 
     // Full drain first to learn middle cursor (after event B).
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -404,7 +402,7 @@ async fn sse_reconnect_with_since_cursor_does_not_duplicate_or_skip() {
     let mid_cursor = &ids[1]; // after event B
 
     // Reconnect from middle cursor: should see only event C (no A/B, no dup of B).
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -447,7 +445,7 @@ async fn sse_reconnect_recovers_when_cursor_is_beyond_rotated_eof() {
     let old_line = event_line("run-old", "progress", &"old".repeat(200));
     home.append_event_line(&old_line);
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events")
@@ -480,7 +478,7 @@ async fn sse_reconnect_recovers_when_cursor_is_beyond_rotated_eof() {
     );
     home.rotate_to_generation(1, &[new_line]);
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events")
@@ -524,7 +522,7 @@ async fn sse_last_event_id_header_resumes_without_query() {
     home.append_event_line(&line_a);
     home.append_event_line(&line_b);
 
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -542,7 +540,7 @@ async fn sse_last_event_id_header_resumes_without_query() {
     .await;
     let first_id = sse_ids(&full).into_iter().next().expect("first id");
 
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -575,7 +573,7 @@ async fn legacy_zero_migrates_to_v2_and_catches_up_once() {
     let home = TempHome::new("legacy-zero-migration");
     home.write_generation(0, &[event_line("legacy-zero", "progress", "baseline")]);
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events?since=0")
@@ -624,7 +622,7 @@ async fn legacy_nonzero_segmented_emits_gap_not_infinite_baseline() {
         )],
     );
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events?since=42")
@@ -669,7 +667,7 @@ async fn rotation_after_window_drains_archived_baseline_before_caught_up() {
 
     // `oneshot` constructs the SSE response and captures the connection
     // window; the body has not been polled yet.
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events")
@@ -718,7 +716,7 @@ async fn sse_caught_up_targets_connection_high_watermark_under_continuous_traffi
         .collect();
     home.write_generation(0, &baseline);
 
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri("/api/control/events")
@@ -771,7 +769,7 @@ async fn sse_expired_generation_emits_gap_without_effect_replay() {
         )],
     );
     let expired = format!("v2:{TEST_EPOCH}:0:128");
-    let response = test_app()
+    let response = test_app(&home)
         .oneshot(
             Request::builder()
                 .uri(format!("/api/control/events?since={expired}"))
@@ -801,9 +799,9 @@ async fn sse_expired_generation_emits_gap_without_effect_replay() {
 
 #[tokio::test]
 async fn sse_heartbeat_comment_on_empty_stream() {
-    let _home = TempHome::new("heartbeat");
+    let home = TempHome::new("heartbeat");
     // No events.jsonl — pure silence; keepalive must still fire.
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()
@@ -841,7 +839,7 @@ async fn sse_session_writes_nothing_to_control_plane() {
         })
         .collect();
 
-    let app = test_app();
+    let app = test_app(&home);
     let response = app
         .oneshot(
             Request::builder()

@@ -39,8 +39,10 @@ report_poll_s=5
 _state_scalar() {
   local key="$1"
   local fallback="${2:-}"
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$key" "$fallback" <<'PY'
+  local py
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$key" "$fallback" <<'PY'
 import json
 import sys
 
@@ -73,9 +75,11 @@ _state_json_edit() {
   local mutator="$1"
   shift
 
-  command -v python3 >/dev/null 2>&1 || return 1
+  local py
+  py="$(spawn_python_bin)"
+  command -v "$py" >/dev/null 2>&1 || return 1
 
-  STATE_JSON_MUTATOR="$mutator" python3 - "$state_file" "$@" <<'PY'
+  STATE_JSON_MUTATOR="$mutator" "$py" - "$state_file" "$@" <<'PY'
 import datetime
 import fcntl
 import json
@@ -129,14 +133,17 @@ _loop_child_plan() {
 
 _find_meta_for_loop() {
   local loop_nr="$1"
-  local expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local expected_run_id
+  expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   spawn_find_meta_for_run_id "$store/reports" "$expected_run_id"
 }
 
 _read_loop_state() {
   local loop_nr="$1"
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$loop_nr" <<'PY'
+  local py
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$loop_nr" <<'PY'
 import json
 import sys
 
@@ -161,14 +168,16 @@ PY
 _read_session_id() {
   local loop_nr="$1"
   local meta_path=""
+  local py
   meta_path="$(_find_meta_for_loop "$loop_nr")"
   if [[ -n "$meta_path" ]]; then
     spawn_read_meta_field "$meta_path" "session_id"
     return 0
   fi
 
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$loop_nr" <<'PY'
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$loop_nr" <<'PY'
 import json
 import sys
 
@@ -315,7 +324,7 @@ _rewrite_loop_plan_frontmatter() {
 
   [[ -f "$loop_plan" ]] || return 0
 
-  python3 - "$loop_plan" "$loop_agent" "$loop_model" <<'PY'
+  "$(spawn_python_bin)" - "$loop_plan" "$loop_agent" "$loop_model" <<'PY'
 import pathlib
 import re
 import sys
@@ -431,7 +440,8 @@ _write_missing_report_failure() {
   local loop_nr="$1"
   local reason="$2"
   local loop_agent="$3"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -468,7 +478,8 @@ _write_report_failed_convergence() {
   local report_status="$4"
   local meta_status="$5"
   local reason="$6"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -506,7 +517,8 @@ CONV
 _write_invalid_ancestor_failure() {
   local loop_nr="$1"
   local invalid_agent="$2"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -523,7 +535,7 @@ reason: invalid_ancestor_agent
 'ancestor.md' requested an invalid agent for loop $loop_nr.
 
 - Invalid agent: ${invalid_agent:-<empty>}
-- Expected: claude, codex, agy, junie, or grok
+- Expected: claude, codex, agy, junie, grok, or cursor
 - GOD: $god_plan
 - ANCESTOR: $ancestor_plan
 CONV
@@ -639,6 +651,9 @@ PY
     agy)    nohup agy --conversation "$sid" --prompt-interactive "$prompt" >/dev/null 2>&1 & ;;
     junie)  nohup junie --session-id="$sid" --resume --task="$prompt" --project=. --skip-update-check >/dev/null 2>&1 & ;;
     grok)   nohup grok --resume "$sid" --cwd . --permission-mode bypassPermissions --no-alt-screen --single "$prompt" >/dev/null 2>&1 & ;;
+    # cursor-agent headless `-p --resume <id>` is UNVERIFIED (continuity
+    # capabilities fail closed until proven) — never background a maybe-dead lane.
+    cursor) printf '    ⚠ cursor headless resume is unverified — skipping verification\n' ;;
     *) printf '    ⚠ Unknown loop agent %s — skipping verification\n' "$loop_agent" ;;
   esac
 }
@@ -649,13 +664,15 @@ _write_spawn_failure_artifacts() {
   local loop_plan="$3"
   local reason="$4"
   local exit_code="${5:-1}"
-  local loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local loop_run_id
+  loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   local stamp=""
   local base=""
   local report_path=""
   local transcript_path=""
   local meta_path=""
-  local prompt_id="${loop_file_prefix}-ancestor_L${loop_nr}_$(date +%Y%m%d)"
+  local prompt_id
+  prompt_id="${loop_file_prefix}-ancestor_L${loop_nr}_$(date +%Y%m%d)"
 
   stamp="$(spawn_timestamp)"
   # Include loop_run_id (unique per dispatch+loop, has PID suffix) so parallel
@@ -751,7 +768,8 @@ _launch_next_loop() {
   local loop_agent="$2"
   local loop_model="$3"
   local loop_plan="$4"
-  local loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local loop_run_id
+  loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   local q_state=""
   local q_root=""
   local q_runtime=""
@@ -870,8 +888,9 @@ fi
 # Capture ancestor_mtime BEFORE refresh so the steering check below can detect
 # whether the child modified ancestor.md during this loop.
 _pre_refresh_ancestor_mtime=""
-if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-  _pre_refresh_ancestor_mtime="$(python3 -c "
+_marbles_next_py="$(spawn_python_bin)"
+if [[ -f "$state_file" ]] && command -v "$_marbles_next_py" >/dev/null 2>&1; then
+  _pre_refresh_ancestor_mtime="$("$_marbles_next_py" -c "
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as f:
     print(json.load(f).get('ancestor_mtime', ''))
@@ -938,8 +957,8 @@ _seed_agent=""
 # After refresh, state.json.ancestor_mtime == current file mtime, hiding
 # changes the child made during this loop.
 _stored_ancestor_mtime="$_pre_refresh_ancestor_mtime"
-if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-  read -r _rotation_mode _seed_agent < <(python3 - "$state_file" <<'PY'
+if [[ -f "$state_file" ]] && command -v "$_marbles_next_py" >/dev/null 2>&1; then
+  read -r _rotation_mode _seed_agent < <("$_marbles_next_py" - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     d = json.load(f)
@@ -1005,7 +1024,7 @@ printf '    ↳ steering: %s\n' "$_steering_source"
 # Consume the mtime signal so the next round sees only changes made by this child.
 _consume_ancestor_mtime_signal
 
-if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok)$ ]]; then
+if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok|cursor|kimi|copilot)$ ]]; then
   rm -f "$next_plan_tmp"
   _write_invalid_ancestor_failure "$next" "$next_agent"
   exit 0

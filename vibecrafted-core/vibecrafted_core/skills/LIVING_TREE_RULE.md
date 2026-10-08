@@ -179,7 +179,7 @@ a lifecycle segment, not smeared across "some agent did something".
 
 Living Tree disciplines parallel work but does not by itself make
 `git commit --only path1 path2` atomic against another agent's
-simultaneous commit on the same branch. Kronika 2026-04-16/17 captured the
+simultaneous commit on the same branch. Doctrine 2026-04-16/17 captured the
 exact failure mode: under concurrent activity, one agent's commit message
 can land under another agent's tree envelope.
 
@@ -260,7 +260,7 @@ rewrote content; not a race` and exits 0.
 **Trade-off**: a hypothetical race that mutates ONLY the content of staged
 files (without adding/removing files and without shifting HEAD) would
 now slip through. We accept this — no such race has been observed in
-four plan rounds, and the original kronika 2026-04-16/17 incident is
+four plan rounds, and the original doctrine 2026-04-16/17 incident is
 caught by the foreign-file detector (which remains strict).
 
 ### Limitation #2 — multi-line MSG quoting (1 confirmation in Plan 06)

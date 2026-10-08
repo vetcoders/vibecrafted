@@ -43,6 +43,17 @@ pub mod events;
 pub mod model;
 pub mod read;
 pub mod scaffold;
+pub mod scaffold_verifiers;
+pub mod transcript_open;
+pub mod usage;
+pub mod usage_agy;
+pub mod usage_claude;
+pub mod usage_codex;
+pub mod usage_cursor;
+pub mod usage_grok;
+pub mod usage_junie;
+pub mod usage_kimi;
+pub mod workspace;
 
 pub use events::{
     ConnectionWindow, EventBatch, EventStream, STREAM_BATCH_MAX_BYTES, STREAM_BATCH_MAX_EVENTS,
@@ -54,17 +65,64 @@ pub use model::{
     Event, ExecutionState, FINAL_STATES, Health, LifecycleBaton, LifecycleDouIndex,
     LifecycleOperatorAction, LifecycleRun, LifecycleRunSummary, LifecycleStage,
     LifecycleTransition, NativeResumeCandidate, ProofState, RECENT_RUN_LIMIT, RUN_STALL_SECONDS,
-    RunControls, RunStatus, SKILL_CODE_MAP, SettlementBoard, SettlementScope, SettlementTui,
-    SettlementVerdict, StateClass, classify_state, coerce_int_value, delivery_axes_for_receipt,
-    is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
-    skill_from_code, state_health,
+    RunControls, RunRouting, RunStatus, SKILL_CODE_MAP, SettlementBoard, SettlementScope,
+    SettlementTui, SettlementVerdict, StateClass, age_label, classify_state, coerce_int_value,
+    delivery_axes_for_receipt, is_active_state, is_final_state, lifecycle_next_action,
+    merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
 };
-pub use read::{is_safe_run_id, vibecrafted_home, ControlPlane, StateView};
+pub use read::{ControlPlane, StateView, is_safe_run_id, vibecrafted_home};
 pub use scaffold::{
     SCAFFOLD_EXPORT_SCHEMA_VERSION, SCAFFOLD_MANIFEST_SCHEMA_JSON, SCAFFOLD_SCHEMA_VERSION,
     ScaffoldArtifact, ScaffoldArtifactDeclaration, ScaffoldArtifactPatch, ScaffoldArtifactRole,
     ScaffoldArtifactStore, ScaffoldCatalog, ScaffoldCatalogSkip, ScaffoldChange,
     ScaffoldCheckpoint, ScaffoldCheckpointPatch, ScaffoldDoctorError, ScaffoldDoctorReport,
     ScaffoldError, ScaffoldExportArtifact, ScaffoldExportBundle, ScaffoldManifest,
-    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldWorkspace, doctor_plan_root,
+    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldVerifierProbe,
+    ScaffoldWorkspace, apply_plan_geometry, collect_delivery_verifiers, doctor_plan_root,
+    doctor_plan_root_in_repo,
+};
+pub use scaffold_verifiers::{
+    execute_brief_verifiers, execute_brief_verifiers_in_repo, extract_brief_verifier_commands,
+};
+pub use usage::{
+    USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension, UsageDimensions,
+    UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens, UsageTotals,
+};
+pub use usage_agy::{
+    AgyAdapterDiagnostics, AgyEstimatedCost, AgyEstimatedTokens, AgyFileError, AgyModelRate,
+    AgyPricing, AgySessionUsage, AgySignals, AgySurface, AgyTranscriptInput, AgyUsageReport,
+    analyze_agy_transcripts, normalize_agy_model,
+};
+pub use usage_claude::{
+    ClaudeAdapterDiagnostics, ClaudeEstimatedCost, ClaudeFileError, ClaudeModelRate, ClaudePricing,
+    ClaudeTokenBuckets, ClaudeTranscriptInput, ClaudeUsageReport, ClaudeUsageSlice,
+    analyze_claude_transcripts, normalize_claude_model,
+};
+pub use usage_codex::{
+    CodexAdapterDiagnostics, CodexEstimatedCost, CodexFileError, CodexModelRate, CodexPricing,
+    CodexSessionInput, CodexSessionUsage, CodexTokenBuckets, CodexUsageReport,
+    analyze_codex_sessions,
+};
+pub use usage_cursor::{
+    CursorAdapterDiagnostics, CursorCost, CursorFileError, CursorModelRate, CursorPricing,
+    CursorTokenBuckets, CursorTranscriptInput, CursorUsageReport, CursorUsageSlice,
+    analyze_cursor_transcripts,
+};
+pub use usage_grok::{
+    GrokAnalysisInput, GrokCostAnalysis, GrokCostMeasurement, GrokEvidenceStats,
+    GrokMeasurementKind, GrokPricing, GrokUsageMeasurement, analyze_grok_cost,
+};
+pub use usage_junie::{
+    JunieAdapterDiagnostics, JunieCost, JunieFileError, JunieModelRate, JuniePricing,
+    JunieTokenBuckets, JunieTranscriptInput, JunieUsageReport, JunieUsageSlice,
+    analyze_junie_transcripts,
+};
+pub use usage_kimi::{
+    KimiAdapterDiagnostics, KimiEstimatedCost, KimiFileError, KimiModelRate, KimiPricing,
+    KimiTokenBuckets, KimiUsageReport, KimiUsageSlice, KimiWireInput, analyze_kimi_wires,
+};
+pub use workspace::{
+    AttachmentIdentity, FrameSessionInventory, FrameSessionOwner, LiveFrameSession,
+    RuntimeSessionAttachment, SessionCurrency, WorkspaceCatalogProjection, WorkspaceProjection,
+    WorkspaceProjectionError, WorkspaceRecord, WorkspaceSession, current_workspace_ids,
 };

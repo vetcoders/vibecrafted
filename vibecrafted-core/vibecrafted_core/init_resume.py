@@ -125,6 +125,7 @@ def resume_payload(
         "available": True,
         "error": "",
         "matched": 0,
+        "native_conversation_resume": False,
         "classes": {name: [] for name in RESUME_CLASSES},
         "counts": dict.fromkeys(RESUME_CLASSES, 0),
     }
@@ -133,7 +134,9 @@ def resume_payload(
 
         listed = list_settlements(bucket="n")
         rows = listed.get("runs") or []
-    except Exception as exc:  # noqa: BLE001 - init must survive any ledger fault
+    # Resume projection crosses ledger parsers; any exception must set available=False and an error,
+    # preserving init as the entry point for diagnosing that ledger.
+    except Exception as exc:  # noqa: BLE001
         payload["available"] = False
         payload["error"] = f"{type(exc).__name__}: {exc}"
         return payload
@@ -214,7 +217,8 @@ def render_init_resume_block(payload: Mapping[str, Any]) -> str:
             "Resume payload (part of this init pass): the settlement ledger could "
             f"not be read ({reason}). Treat unfinished-work status as UNKNOWN — "
             "check `vibecrafted settlements list --bucket n` before assuming this "
-            "checkout is clean."
+            "checkout is clean. This note is unfinished-work context, not a native "
+            "provider-conversation resume."
         )
     if not payload.get("matched"):
         return ""
@@ -228,6 +232,11 @@ def render_init_resume_block(payload: Mapping[str, Any]) -> str:
             f"This checkout has {payload['matched']} run(s) settled `n` "
             "(needs attention). Unfinished work here is not hypothetical; "
             "read it before starting anything new."
+        ),
+        (
+            "This block recovers unfinished-work context. It is not a native "
+            "provider-conversation resume. Native resume requires a proven native "
+            "session ID; recovering context alone must not claim one."
         ),
     ]
     for name in RESUME_CLASSES:
@@ -258,7 +267,9 @@ def init_resume_block(
     """Compute and render the init resume payload in one call. Never raises."""
     try:
         return render_init_resume_block(resume_payload(root, limit=limit))
-    except Exception:  # noqa: BLE001 - a rendering fault must not brick init
+    # Resume rendering crosses optional projection code; any rendering failure must leave the main
+    # init output usable instead of blocking repository orientation.
+    except Exception:  # noqa: BLE001
         return ""
 
 
@@ -286,5 +297,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - module entrypoint
+if __name__ == "__main__":  # module entrypoint
     raise SystemExit(main())

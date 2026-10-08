@@ -14,12 +14,17 @@ dev = [
     "textual>=8.2.3",
 ]
 
+[tool.ruff]
+# ruff 0.16+ includes Markdown and formats fenced Python. Pre-push is a
+# Python gate (`scripts/hooks/pre-push` lists `*.py`). Keep docs out so
+# `ruff format --check .` (husky full / a manual whole-tree run) cannot
+# refuse a push over installer/iTerm examples.
+extend-exclude = ["*.md"]
+
 [tool.ruff.lint.per-file-ignores]
-# sys.path bootstrap shims and tests: the import legitimately follows the
-# path setup, so E402 is the declared pattern here — not a hidden violation.
-"scripts/control_plane_launch.py" = ["E402"]
-"scripts/control_plane_state.py" = ["E402"]
-"scripts/runtime_paths.py" = ["E402"]
+# The workshop admits/re-execs the generation interpreter before core imports.
+"vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py" = ["E402"]
+# tests whose imports legitimately follow a sys.path setup.
 "tests/agent_dispatch_test.py" = ["E402"]
 "tests/tui/test_installer_branding.py" = ["E402"]
 "tests/tui/test_installer_manifest.py" = ["E402"]
@@ -46,3 +51,6 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 pythonpath = ["vibecrafted-core", "vibecrafted-acp"]
+markers = [
+    "product_update_physical: mandatory macOS acceptance using authentic candidate and prior signed release carriers",
+]

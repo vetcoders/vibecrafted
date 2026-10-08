@@ -7,6 +7,7 @@ pub enum ClientKind {
     Codex,
     Gemini,
     Junie,
+    Cursor,
     Generic { name: String },
 }
 

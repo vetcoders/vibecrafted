@@ -10,7 +10,7 @@ spawn_rotation_validate_mode() {
 }
 
 spawn_rotation_pool_json() {
-  python3 - <<'PY'
+  "$(spawn_python_bin)" - <<'PY'
 import json
 
 print(json.dumps(["codex", "claude", "agy"]))
@@ -22,7 +22,7 @@ spawn_rotation_schedule_agent() {
   local seed_agent="${2:-codex}"
   local loop_nr="${3:-1}"
 
-  python3 - "$mode" "$seed_agent" "$loop_nr" <<'PY'
+  "$(spawn_python_bin)" - "$mode" "$seed_agent" "$loop_nr" <<'PY'
 import sys
 
 mode, seed_agent, loop_raw = sys.argv[1:4]

@@ -15,6 +15,7 @@ from vibecrafted_core.run_triage import (
 from vibecrafted_core.runtime_transcript import write_runtime_transcript_manifest
 from vibecrafted_core.vc_frame_tab_gc import (
     BUCKET_SESSIONS,
+    PROTECTED_TAB_NAMES,
     LiveTab,
     close_tab,
     collect_cleanup,
@@ -28,6 +29,10 @@ from vibecrafted_core.vc_frame_tab_gc import (
 ORIGIN_INSTANCE = "1" * 32
 VIEWER_INSTANCE = "2" * 32
 VIEWER_TOKEN = "a" * 32
+
+
+def test_product_workspace_tabs_are_never_gc_candidates() -> None:
+    assert PROTECTED_TAB_NAMES == {"Start here", "Agents", "Shell", "Voc"}
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -807,3 +812,25 @@ def test_gc_cli_rejects_bucket_limit_without_a_value() -> None:
 
     assert result.returncode == 1
     assert result.stderr.strip() == "--bucket-tab-limit requires a value"
+
+
+def test_protected_origin_tab_is_never_a_cleanup_candidate(tmp_path: Path) -> None:
+    cp = tmp_path / "control_plane"
+    durable_run(cp, "Voc")
+    proofs = durable_transfer_proofs(cp)
+    origin = live_tab(
+        session="vibecrafted",
+        name="Voc",
+        tab_id=7,
+        session_incarnation="origin-incarnation",
+        tab_instance_id=ORIGIN_INSTANCE,
+    )
+
+    assert (
+        plan_tab_cleanup(
+            {"vibecrafted": [origin]},
+            proofs=proofs,
+            bucket_tab_limit=None,
+        )
+        == []
+    )

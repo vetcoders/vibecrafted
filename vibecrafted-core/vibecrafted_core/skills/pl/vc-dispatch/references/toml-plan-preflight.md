@@ -1,10 +1,10 @@
-# Pisanie i pre-flight planu `.dispatch.toml` (wyuczone w polu)
+# Authoring & pre-flighting a `.dispatch.toml` plan (field-learned)
 
 Baza evidence: linia sessions-rail-live-buckets, 2026-08-09 (sekwencyjna linia
 3 cięć, workerzy claude, wdrożone CLI 3.7.0). Każda reguła poniżej została
 trafiona na żywo.
 
-## Autorytet schematu
+## Schema authority
 
 - Referencją jest `docs/public/dispatch/dispatch-schema.md` + `--doctor`.
   Parser działa fail closed; nie pisz pól z pamięci. Waliduj przez
@@ -14,7 +14,7 @@ trafiona na żywo.
   ostrzeżenia to nie błędy; pinuj i tak wg klasy cięcia (mechaniczne → tańszy
   tier, chirurgiczne / niosące decyzję → mocny tier).
 
-## Prawda renderera (klamry)
+## Renderer truth (braces)
 
 `_format_known` (`dispatch/schema.py`) podstawia **wyłącznie znane**
 placeholdery `{name}` (`{repo}` `{id}` `{agent}` `{workflow}`
@@ -33,7 +33,7 @@ promptach). Nieznane klamry przechodzą nietknięte. Konsekwencje:
     <reports_dir>/dry-run/prompts/*.md   # expect: no output
   ```
 
-## Bramki verify: dwie techniki, które czynią je nietrywialnymi
+## Verify gates: two techniques that make them non-trivial
 
 1. **Udowodnij, że selekcje `-k` nie są puste**, zanim linia ruszy — bramka
    matchująca 0 testów jest trywialnie zielona:
@@ -57,7 +57,7 @@ promptach). Nieznane klamry przechodzą nietknięte. Konsekwencje:
    Przy sondach wrażliwych na env wymuś non-TTY przez `</dev/null` i wstrzyknij
    env inline (`env KEY=val …`), żeby sonda była hermetyczna.
 
-## Escapowanie w TOML
+## TOML escaping
 
 - Komendy `run` w verify mieszające apostrofy i cudzysłowy: użyj wieloliniowych
   stringów literalnych `'''…'''` (w jednej linii też działa) — zero escapowania.
@@ -65,13 +65,13 @@ promptach). Nieznane klamry przechodzą nietknięte. Konsekwencje:
   klamrami umieszczaj tylko w komendach `run` (renderer przepuszcza je bez
   zmian).
 
-## Układ dry-run
+## Dry-run layout
 
 `--dry-run` zapisuje pod `reports_dir/dry-run/`: `prompts/<cut-id>.md`,
 `tracker.md`, `validated-dispatch.toml`, `dispatch-result.json`. Obejrzyj
 wyrenderowane prompty (bramka na placeholdery wyżej) przed prawdziwym launchem.
 
-## Wdrożone CLI vs checkout (push ≠ install, odsłona liniowa)
+## Deployed CLI vs checkout (push ≠ install, line edition)
 
 Supervisor i jego workerzy działają z **wdrożonego tools home**
 (`vibecrafted --version` → `X.Y.Z+g<sha>`), a nie z checkoutu, który cięcia
@@ -81,27 +81,39 @@ zachowania przez cały lot, a `make install` zostaw jako poliniowy guzik
 operatora. Wniosek: cięcie może w locie w sposób jawny _reprodukować_ bug, który
 naprawia.
 
-## Klauzula współbieżności Living Tree
+## Selected substrate and owned staging
 
-Gdy inne sesje edytują ten sam checkout w trakcie linii, napisz to wprost w
-`[common]`: nazwij równoległą pracę, wymagaj ponownego przeczytania bieżącego
-stanu każdego pliku przed edycją i zaznacz, że zgarnianie przez `git add -A` to
-zacommitowanie, nie zniszczenie. Workerzy nie mogą „chronić" się worktree'ami
-ani przełączaniem branchy.
+Zadeklaruj runtime wybrany przez Foundera/plan/launcher w `[common]`: Living Tree /
+`local-native`, Fleet Worktrees / `local-worktrees`, Fleet VM local lub Fleet VM
+cloud. Zachowaj jawny wybór; nie wnioskuj go ze starych worktree.
+Przy typowanym dispatchu supervisor przydziela każdemu nie-integratorowi dedykowany
+worktree i gałąź `cut/<cut-id>` z rozwiązanego baseline'u. `{repo}` wskazuje checkout
+workera, nie nadrzędny Living Tree. Workerzy nie tworzą kolejnej gałęzi/worktree
+ani nie integrują siebie. Użyj `base = "cut:<cut-id>"` z pasującą zależnością,
+gdy cut potrzebuje bajtów poprzednika, nie tylko kolejności.
 
-## Kształt launchu
+Nazwij współbieżną pracę i nietykalne ścieżki; czytaj ponownie przed edycją.
+Stage'uj wyłącznie własne pliki/hunki przez `git add -- <owned-path>` albo selekcję
+hunków. Nigdy sweep przez `git add -A` lub `git add .`, stash/discard ani commit
+cudzych zmian. Gdy overlap uniemożliwia uczciwą izolację, zachowaj diff i zgłoś granicę.
+
+## Launch shape
 
 ```bash
 bash -c 'ulimit -f unlimited; exec vibecrafted dispatch <plan> --json'   # detached/background
 ```
 
-Receipt = `tracker.md` napisany przez supervisora (jeden pisarz, baseline branch
+Receipt = tracker napisany przez supervisora i control-plane run_id plus runtime
+class, parent/effective roots, baseline branch/full SHA, worker branch i ścieżki
+artefaktów. Artefakty żyją pod `${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts`;
+zachowaj maszynową tożsamość raportu launchera. Uzbrój supervisor-side
+`vibecrafted await <agent> --run-id <id>` natychmiast; artefakty są diagnostyczne,
+nie są sygnałem wybudzenia. Bez gapienia się w pane i hedge pollerów. Headless
+workerzy kończą bramki na pierwszym planie, raport i commit przed końcem tury;
+nie mogą czekać na wybudzenie przez zadanie w tle. Piny jadą dosłownie;
+niedostępne wymagają uczciwej porażki, nigdy cichej podmiany modelu.
 
-- head) plus run_id pierwszego workera w control plane. Potem spanko: czekaj
-  przez artefakty i notyfikację task/await — żadnego gapienia się w pane, żadnych
-  asekuracyjnych pollerów.
-
-## Para kontraktów podłoża + recovery (wyuczone w polu, loty 2–4)
+## Substrate contract pair + recovery (field-learned, flights 2–4)
 
 Cięcia WRITE z `require_commit` siedzą między **dwiema symetrycznymi bramkami**
 (`dispatch/supervisor.py::_run_cut`): cięcie odmawia STARTU z dirty worktree i
@@ -116,16 +128,22 @@ linię: osierocona dostawa blokuje każdy refire.
   wyrzucaj.
 - **`repair_rounds` nie odpala** przy `CellContractError` — repair pokrywa
   czerwone verifiery, nie złamania kontraktu podłoża.
-- **Nieudany resume zaorywa tracker**: każdy run dispatchu przepisuje
-  `tracker.md` na starcie, więc resume, który umiera na bramce podłoża, kasuje
-  wcześniejsze stany `[x]`, a KOLEJNY resume startuje od pierwszego cięcia.
-  Trzymaj SHA dostarczonych commitów w journalu/notatkach — będą potrzebne.
+- **Resume z trwałych dowodów**: aktualny typowany dispatch używa receiptów
+  i ancestry Gita; brak katalogu lub pasujący temat commita nie dowodzi admission.
+  Operator zapisuje istotne recovery w ignored
+  `<repo-root>/.vibecrafted/THE_JOURNAL.md`; workerzy zwracają raporty i nigdy
+  nie piszą tego journala. Zachowaj dostarczone SHA oraz integration disposition.
+
 - **Idempotentny settle wymaga jawnego dowodu**
   (`supervisor.py::_existing_delivery_commit`): worker, który zastaje pracę już
   wylądowaną, musi umieścić w raporcie samodzielną linię `commit: <sha>`;
   supervisor przyjmuje ją tylko wtedy, gdy sha się rozwiązuje, jest przodkiem
   HEAD, a wiadomość commita identyfikuje cięcie (trzymaj `[<cut-id>]` w tytułach
   commitów dostawczych). Wpisz tę klauzulę do `[common]` od początku —
-  „nothing to do" bez linii dowodowej to złamanie kontraktu, a idempotentny
-  resume całej linii jest też czystym sposobem na ponowne zasettlowanie
-  zaoranego trackera.
+  „nothing to do" bez linii dowodowej to złamanie kontraktu.
+
+Zmiany bajtów skillów regenerują `vibecrafted-core/vibecrafted_core/skills/SKILL_PROVENANCE.json`
+przez `make skills-check UPDATE=1` (właściciel: `scripts/gen_skill_provenance.py`).
+Szanuj osobny cut generatora i zachowaj historyczne wpisy. Integrator regeneruje
+wspólny manifest po admission; source-green workera nigdy nie twierdzi, że dowodzi
+instalacji, live acceptance lub zgody Foundera.

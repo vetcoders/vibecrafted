@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
 import json
 import os
 import stat
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -142,10 +147,21 @@ def _secure_control_plane_home(path: Path | None = None) -> Path:
     """
     ledger_path = settlement_ledger_path() if path is None else path
     home = ledger_path.parent
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if sys.platform == "win32":
+        from ._windows_private_files import create_private_directory
+
+        home.parent.mkdir(parents=True, exist_ok=True)
+        create_private_directory(home)
+    else:
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = home.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"control-plane home is not a directory: {home}")
+    if sys.platform == "win32":
+        from ._windows_private_files import directory_guard
+
+        with directory_guard(home):
+            return home
     if metadata.st_uid != os.getuid():
         raise PermissionError("control-plane home is not owned by current user")
     if metadata.st_mode & 0o022:
@@ -158,6 +174,11 @@ def _validate_private_regular_file(fd: int, *, label: str) -> None:
     metadata = os.fstat(fd)
     if not stat.S_ISREG(metadata.st_mode):
         raise OSError(errno.EINVAL, f"{label} is not a regular file")
+    if sys.platform == "win32":
+        from ._windows_private_files import validate_private_file
+
+        validate_private_file(fd, label=label)
+        return
     if metadata.st_uid != os.getuid():
         raise PermissionError(f"{label} is not owned by current user")
     if metadata.st_mode & 0o022:
@@ -173,27 +194,56 @@ def _settlement_ledger_lock(
     """Hold the stable ledger boundary without taking the global sync lock."""
 
     home = _secure_control_plane_home(path)
+    if sys.platform == "win32":
+        from ._windows_private_files import directory_guard
+
+        guard = directory_guard(home)
+    else:
+        guard = contextlib.nullcontext()
+    with guard, _locked_file(exclusive=exclusive, path=path):
+        yield
+    # Persist the POSIX lock-file entry; Windows fsyncs its write-through handle.
+    _fsync_directory(home)
+
+
+def _open_private_file(path: Path, flags: int) -> int:
+    """Open without following the final link and validate the same handle."""
+    if sys.platform == "win32":
+        from ._windows_private_files import open_private_file
+
+        return open_private_file(path, flags)
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+
+
+@contextmanager
+def _locked_file(*, exclusive: bool, path: Path | None) -> Iterator[None]:
+    """Hold the POSIX or native Windows synchronization authority."""
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(_settlement_ledger_lock_path(path), flags, 0o600)
+    fd = _open_private_file(_settlement_ledger_lock_path(path), flags)
     try:
         _validate_private_regular_file(fd, label="settlement ledger lock")
         operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(fd, operation)
+        os.fsync(fd)
         try:
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
-    # The lock file may have been created by this call. Persisting the directory
-    # entry is cheap and keeps the synchronization authority crash-safe.
-    _fsync_directory(home)
 
 
 def _fsync_directory(path: Path) -> None:
-    """Fsync a directory so a preceding rename/create is durable across a crash."""
+    """Persist POSIX directory entries; NTFS writes flush metadata per file.
+
+    Windows opens use WRITE_THROUGH and all writes are fsynced on their file
+    handle. A POSIX directory-fsync emulation is neither available nor needed
+    for that NTFS policy. Errors in the file flush are never suppressed.
+    """
+    if sys.platform == "win32":
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     fd = os.open(path, flags)
     try:
@@ -218,11 +268,11 @@ def _repair_partial_tail_locked(fd: int) -> int:
     """Roll back only an unterminated tail; complete corrupt lines fail later."""
 
     end = os.lseek(fd, 0, os.SEEK_END)
-    if end == 0 or os.pread(fd, 1, end - 1) == b"\n":
+    if end == 0 or _pread_locked(fd, 1, end - 1) == b"\n":
         return end
 
     scan_size = min(end, SETTLEMENT_LEDGER_MAX_LINE_BYTES + 1)
-    tail = os.pread(fd, scan_size, end - scan_size)
+    tail = _pread_locked(fd, scan_size, end - scan_size)
     newline = tail.rfind(b"\n")
     if newline < 0:
         if end > SETTLEMENT_LEDGER_MAX_LINE_BYTES:
@@ -235,6 +285,19 @@ def _repair_partial_tail_locked(fd: int) -> int:
     os.ftruncate(fd, repaired_end)
     os.fsync(fd)
     return repaired_end
+
+
+def _pread_locked(fd: int, size: int, offset: int) -> bytes:
+    """Read at an offset while the ledger lock prevents shared-fd mutation."""
+    pread = getattr(os, "pread", None)
+    if pread is not None:
+        return pread(fd, size, offset)
+    position = os.lseek(fd, 0, os.SEEK_CUR)
+    try:
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.read(fd, size)
+    finally:
+        os.lseek(fd, position, os.SEEK_SET)
 
 
 def _decode_line(raw: bytes, *, line_number: int) -> dict[str, Any]:
@@ -657,7 +720,7 @@ def initialize_settlement_ledger(path: Path | None = None) -> dict[str, Any]:
         flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(resolved_path, flags, 0o600)
+        fd = _open_private_file(resolved_path, flags)
         try:
             _validate_private_regular_file(fd, label="settlement ledger")
             _repair_partial_tail_locked(fd)
@@ -687,7 +750,7 @@ def _append_settlement_fact(
         flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
+        fd = _open_private_file(path, flags)
         try:
             _validate_private_regular_file(fd, label="settlement ledger")
             _repair_partial_tail_locked(fd)
@@ -867,7 +930,7 @@ def read_settlement_ledger(path: Path | None = None) -> dict[str, Any]:
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(resolved_path, flags)
+            fd = _open_private_file(resolved_path, flags)
         except FileNotFoundError:
             return _snapshot_payload(_LedgerState(None, (), {}, {}, {}, {}, _ZERO_HASH))
         try:

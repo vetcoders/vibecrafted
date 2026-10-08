@@ -20,7 +20,7 @@ run_id: <generated-unique-id>
 skill: vc-research
 project: <repo-name>
 status: completed
-operator_synthesis_by: <claude|codex|gemini|maciej|monika>
+operator_synthesis_by: <claude|codex|gemini|cursor|operator>
 source_reports:
   - claude_<run_id>.md
   - codex_<run_id>.md
@@ -63,7 +63,7 @@ If any report could not be read in full, this synthesis MUST halt at section 0 w
 #### S1: <signal statement, in the agent's voice>
 
 **Source**: `gemini_<run_id>.md:L78-92`
-**Why others missed it**: <claude did not address Q3; codex addressed it but gave wrong answer because…; etc.>
+**Why others missed it**: <claude did not address Q3; codex addressed it but gave wrong answer because…; cursor timed out; etc.>
 **Operator's verdict**: **amplify** | **flag for follow-up** | **acknowledge & reject**
 **Reasoning**: <if amplify: why the signal is right and convergent view incomplete. If flag: what experiment / further research would resolve it. If reject: what specifically in the signal's reasoning fails, with reference to repo evidence or named external knowledge — never handwave.>
 

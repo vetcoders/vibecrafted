@@ -171,26 +171,15 @@ pub fn delivery_axes_for_receipt(
     let execution_default = match status {
         "created" | "initialized" => ExecutionState::Created,
         "launching" | "process_spawned" | "first_output_seen" => ExecutionState::Launched,
-        "running"
-        | "active"
-        | "artifact_seen"
-        | "report_started"
-        | "promise"
-        | "confirmed"
-        | "paused"
-        | "stalled" => ExecutionState::Running,
+        "running" | "active" | "artifact_seen" | "report_started" | "promise" | "confirmed"
+        | "paused" | "stalled" => ExecutionState::Running,
         "completed" | "closed" | "converged" | "report_validated" => ExecutionState::Exited,
-        "interrupted" | "stopped" | "killed_by_operator" => ExecutionState::Interrupted,
+        "interrupted" | "stopped" | "killed_by_operator" | "quota_exhausted" => {
+            ExecutionState::Interrupted
+        }
         "timed_out" => ExecutionState::TimedOut,
-        "failed"
-        | "blocked"
-        | "contract_failed"
-        | "report_missing"
-        | "report_invalid"
-        | "recovery_required"
-        | "gc"
-        | "ghost"
-        | "process_dead" => ExecutionState::Failed,
+        "failed" | "blocked" | "contract_failed" | "report_missing" | "report_invalid"
+        | "recovery_required" | "gc" | "ghost" | "process_dead" => ExecutionState::Failed,
         // Prefer Running over Failed for forward-compatible free-form states.
         _ => ExecutionState::Running,
     };
@@ -232,7 +221,10 @@ pub const ACTIVE_STATES: [&str; 13] = [
 ];
 
 /// Terminal states. Mirrors `control_plane.FINAL_STATES`.
-pub const FINAL_STATES: [&str; 14] = [
+pub const FINAL_STATES: [&str; 16] = [
+    // Guardian settlement is a durable outcome, never worker liveness. Keeping
+    // it outside this set lets old settlement heartbeats masquerade as stalls.
+    "settled",
     "report_validated",
     "completed",
     "closed",
@@ -245,6 +237,7 @@ pub const FINAL_STATES: [&str; 14] = [
     "contract_failed",
     "recovery_required",
     "timed_out",
+    "quota_exhausted",
     "gc",
     "ghost",
 ];
@@ -394,6 +387,21 @@ pub fn state_health(state: &str, updated_at: &str, now: DateTime<Utc>) -> Health
     }
 }
 
+/// Compact age for operator surfaces (`7d`, `3h`, `12m`).
+#[must_use]
+pub fn age_label(updated: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let delta = now.signed_duration_since(updated);
+    let days = delta.num_days();
+    if days >= 1 {
+        return format!("{days}d");
+    }
+    let hours = delta.num_hours();
+    if hours >= 1 {
+        return format!("{hours}h");
+    }
+    format!("{}m", delta.num_minutes().max(1))
+}
+
 /// Map a skill code to its long name. Mirrors `control_plane._skill_from_code`:
 /// known code → mapped name; unknown non-empty code → the code itself; empty →
 /// `"unknown"`.
@@ -487,6 +495,94 @@ pub struct RunControls {
 /// metadata. [`crate::read::ControlPlane`] then adds read-only process evidence
 /// and typed controls without mutating the Python-owned files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAgentPolicyProjection {
+    pub selection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub warning: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+/// Public, bounded continuity receipt. Prompt bodies and local material paths
+/// stay private; only the selected policy, lineage identity, and content hashes
+/// cross the control-plane read boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuityPolicyProjection {
+    pub mode: String,
+    pub lineage_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_provider_session_id: String,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default)]
+    pub materialized: Option<bool>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub loop_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisionRelationProjection {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relation_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub operator_run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub child_run_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub warning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAgentProjection {
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_session_id: String,
+    pub policy: OperatorAgentPolicyProjection,
+    pub supervision: SupervisionRelationProjection,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stop_actor_run_id: String,
+}
+
+/// Exact routing axes emitted by the runtime for one run.
+///
+/// This projection is deliberately separate from [`RunStatus`]: lifecycle
+/// state can be merged from snapshots, locks, and events, while routing must
+/// come from the canonical `runtime_runs/<id>/meta.json` receipt. Consumers
+/// must treat missing fields as missing evidence, never as permission to infer
+/// a workspace or Frame session from a path or command string.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunRouting {
+    pub agent: String,
+    pub root: String,
+    pub provider_session_id: String,
+    pub workspace_id: String,
+    pub workspace_instance_id: String,
+    pub workspace_display_label: String,
+    pub workspace_session_id: String,
+    pub worker_host_session: String,
+    pub worker_host_display: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub run_id: String,
     pub state: String,
@@ -516,10 +612,22 @@ pub struct RunStatus {
     pub completed_at: String,
     #[serde(default)]
     pub session_id: String,
+    /// Canonical Vibecrafted workspace-session identity.  This is deliberately
+    /// separate from the legacy/provider-facing `session_id` field.
+    #[serde(
+        default,
+        alias = "vibecrafted_session_id",
+        alias = "workspace_session_id",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub logical_session_id: String,
     #[serde(default)]
     pub current_loop: Option<i64>,
     #[serde(default)]
     pub total_loops: Option<i64>,
+    /// Explicit Vibecrafted lifecycle owner for supervised interactive runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<i64>,
     /// Durable worker process identity from supervisor metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i64>,
@@ -530,6 +638,19 @@ pub struct RunStatus {
     /// an N-process probe storm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_alive: Option<bool>,
+    /// Qualified process ownership projected by the canonical Python writer.
+    /// This outranks a Rust PID-existence probe and preserves a provider child
+    /// owned by the canonical worker PGID.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_truth: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_truth_reason: String,
+    /// Structured H2b2c relationship; absent on legacy and unsupervised runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_agent: Option<OperatorAgentProjection>,
+    /// Typed H2b2d continuity truth; absent on legacy and non-interactive runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<ContinuityPolicyProjection>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recovery_required: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -784,7 +905,7 @@ impl SettlementBoard {
 }
 
 fn is_unsettled_settlement_terminal(run: &RunStatus) -> bool {
-    const TERMINAL_STATES: [&str; 17] = [
+    const TERMINAL_STATES: [&str; 18] = [
         "report_validated",
         "completed",
         "closed",
@@ -797,6 +918,7 @@ fn is_unsettled_settlement_terminal(run: &RunStatus) -> bool {
         "contract_failed",
         "recovery_required",
         "timed_out",
+        "quota_exhausted",
         "gc",
         "ghost",
         "stalled",
@@ -871,6 +993,16 @@ pub struct LifecycleRun {
     pub root: String,
     #[serde(default)]
     pub status: String,
+    /// Optional supervisor pid from `state.json` (often null on abandoned runs).
+    #[serde(default)]
+    pub pid: Option<i64>,
+    #[serde(default)]
+    pub owner_pid: Option<i64>,
+    #[serde(default)]
+    pub launcher_pid: Option<i64>,
+    /// On-disk timestamp when the writer set one; otherwise the reader uses mtime.
+    #[serde(default)]
+    pub updated_at: String,
     #[serde(default)]
     pub await_stages: bool,
     #[serde(default)]
@@ -964,11 +1096,13 @@ impl LifecycleRun {
         }
         .to_string();
 
+        let status = nonempty_or(&self.status, "unknown");
+        let next_action = lifecycle_next_action(self, &updated_at, Utc::now());
         LifecycleRunSummary {
             schema: self.schema.clone(),
             run_id: self.run_id.clone(),
             workflow: self.workflow.clone(),
-            status: nonempty_or(&self.status, "unknown"),
+            status,
             agent: nonempty_or(&self.agent, "unknown"),
             root: self.root.clone(),
             current_stage: self.current_stage(),
@@ -982,6 +1116,7 @@ impl LifecycleRun {
             human_controls: self.human_controls.clone(),
             human_controls_count: self.human_controls.len(),
             operator_actions_count: self.operator_actions.len(),
+            next_action,
             state_path: self.state_path.clone(),
             report_path: self.report_path.clone(),
             transcript_path: self.transcript_path.clone(),
@@ -1046,11 +1181,21 @@ impl LifecycleRun {
             launcher_pid: None,
             completed_at: String::new(),
             session_id: String::new(),
+            logical_session_id: String::new(),
             current_loop: None,
             total_loops: None,
+            owner_pid: None,
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
+            process_truth: if terminal {
+                "terminal".to_string()
+            } else {
+                String::new()
+            },
+            process_truth_reason: String::new(),
+            operator_agent: None,
+            continuity: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),
@@ -1083,6 +1228,36 @@ impl LifecycleRun {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| self.baton.from_stage.clone())
     }
+}
+
+/// Operator next-action sentence for a lifecycle read model.
+///
+/// Abandoned containers never advertise `approve_transition`. The web Control
+/// surface prints this string; it must not invent a second policy.
+#[must_use]
+pub fn lifecycle_next_action(run: &LifecycleRun, updated_at: &str, now: DateTime<Utc>) -> String {
+    if run.status == "abandoned" {
+        let age = parse_iso(updated_at)
+            .map(|updated| age_label(updated, now))
+            .unwrap_or_else(|| "unknown age".to_string());
+        return format!("Abandoned · {age} without owner");
+    }
+    if let Some(control) = run.human_controls.iter().find(|item| !item.is_empty()) {
+        return format!("Operator: {control}");
+    }
+    if !run.baton.next_stage.is_empty() && !run.baton.next_agent.is_empty() {
+        return format!(
+            "Launch {} with {}",
+            run.baton.next_stage, run.baton.next_agent
+        );
+    }
+    if !run.baton.next_stage.is_empty() {
+        return format!("Advance to {}", run.baton.next_stage);
+    }
+    if !run.baton.next_agent.is_empty() {
+        return format!("Hand off to {}", run.baton.next_agent);
+    }
+    "Inspect the latest runtime event".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1227,6 +1402,9 @@ pub struct LifecycleRunSummary {
     pub human_controls: Vec<String>,
     pub human_controls_count: usize,
     pub operator_actions_count: usize,
+    /// Derived operator sentence. Empty only when the writer omitted everything.
+    #[serde(default)]
+    pub next_action: String,
     pub state_path: String,
     pub report_path: String,
     pub transcript_path: String,
@@ -1297,12 +1475,38 @@ pub struct AgentMeta {
     pub completed_at: String,
     #[serde(default)]
     pub session_id: String,
+    #[serde(
+        default,
+        alias = "vibecrafted_session_id",
+        alias = "workspace_session_id"
+    )]
+    pub logical_session_id: String,
+    #[serde(default, deserialize_with = "de_coerced_int")]
+    pub owner_pid: Option<i64>,
     #[serde(default, deserialize_with = "de_coerced_int")]
     pub worker_pid: Option<i64>,
     #[serde(default, deserialize_with = "de_coerced_int")]
     pub worker_pgid: Option<i64>,
     #[serde(default)]
     pub worker_alive: Option<bool>,
+    #[serde(default)]
+    pub process_truth: String,
+    #[serde(default)]
+    pub process_truth_reason: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub prompt_role: String,
+    #[serde(default)]
+    pub provider_session_id: String,
+    #[serde(default)]
+    pub operator_policy: Option<OperatorAgentPolicyProjection>,
+    #[serde(default)]
+    pub continuity: Option<ContinuityPolicyProjection>,
+    #[serde(default)]
+    pub supervision: Option<SupervisionRelationProjection>,
+    #[serde(default)]
+    pub stop_actor_run_id: String,
     #[serde(default)]
     pub recovery_required: bool,
     #[serde(default)]
@@ -1436,11 +1640,29 @@ impl AgentMeta {
             launcher_pid: self.launcher_pid,
             completed_at: self.completed_at.clone(),
             session_id: self.session_id.clone(),
+            logical_session_id: self.logical_session_id.clone(),
             current_loop: None,
             total_loops: None,
+            owner_pid: self.owner_pid,
             worker_pid: self.worker_pid,
             worker_pgid: self.worker_pgid,
             worker_alive: self.worker_alive,
+            process_truth: self.process_truth.clone(),
+            process_truth_reason: self.process_truth_reason.clone(),
+            operator_agent: match (&self.operator_policy, &self.supervision) {
+                (Some(policy), Some(supervision)) if !self.role.is_empty() => {
+                    Some(OperatorAgentProjection {
+                        role: self.role.clone(),
+                        prompt_role: self.prompt_role.clone(),
+                        provider_session_id: self.provider_session_id.clone(),
+                        policy: policy.clone(),
+                        supervision: supervision.clone(),
+                        stop_actor_run_id: self.stop_actor_run_id.clone(),
+                    })
+                }
+                _ => None,
+            },
+            continuity: self.continuity.clone(),
             recovery_required: self.recovery_required,
             stop_reason: self.stop_reason.clone(),
             agent_session_id: self.agent_session_id.clone(),
@@ -1531,11 +1753,26 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
         launcher_pid: preferred.launcher_pid.or(other.launcher_pid),
         completed_at: nonempty_or(&preferred.completed_at, &other.completed_at),
         session_id: nonempty_or(&preferred.session_id, &other.session_id),
+        logical_session_id: nonempty_or(&preferred.logical_session_id, &other.logical_session_id),
         current_loop: preferred.current_loop.or(other.current_loop),
         total_loops: preferred.total_loops.or(other.total_loops),
+        owner_pid: preferred.owner_pid.or(other.owner_pid),
         worker_pid: preferred.worker_pid.or(other.worker_pid),
         worker_pgid: preferred.worker_pgid.or(other.worker_pgid),
         worker_alive: preferred.worker_alive.or(other.worker_alive),
+        process_truth: nonempty_or(&preferred.process_truth, &other.process_truth),
+        process_truth_reason: nonempty_or(
+            &preferred.process_truth_reason,
+            &other.process_truth_reason,
+        ),
+        operator_agent: preferred
+            .operator_agent
+            .clone()
+            .or_else(|| other.operator_agent.clone()),
+        continuity: preferred
+            .continuity
+            .clone()
+            .or_else(|| other.continuity.clone()),
         recovery_required: preferred.recovery_required || other.recovery_required,
         stop_reason: nonempty_or(&preferred.stop_reason, &other.stop_reason),
         agent_session_id: nonempty_or(&preferred.agent_session_id, &other.agent_session_id),
@@ -1571,10 +1808,51 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
     merged
 }
 
-
 #[cfg(test)]
 mod status_thread_tests {
     use super::*;
+
+    #[test]
+    fn agent_meta_projects_typed_operator_agent_relationship() {
+        let raw = serde_json::json!({
+            "run_id": "init-child",
+            "status": "active",
+            "updated_at": "2026-08-25T12:00:00Z",
+            "role": "agent",
+            "prompt_role": "/vc-init",
+            "provider_session_id": "child-session",
+            "operator_policy": {
+                "selection": "auto", "provider": "claude", "supported": true
+            },
+            "supervision": {
+                "relation_id": "relation-1", "operator_run_id": "oper-1",
+                "child_run_id": "init-child", "state": "active",
+                "protocol": "operator-protocol-jsonl-v1"
+            },
+            "continuity": {
+                "mode": "full-lineage", "lineage_id": "parent-run-1",
+                "supported": true, "status": "SUPPORTED",
+                "materialized": true, "context_sha256": "abc", "loop_sha256": "def"
+            }
+        });
+        let meta: AgentMeta = serde_json::from_value(raw).expect("typed Agent meta");
+        let status = meta
+            .normalize(
+                DateTime::parse_from_rfc3339("2026-08-25T12:00:01Z")
+                    .unwrap()
+                    .to_utc(),
+            )
+            .expect("run projection");
+        let relationship = status.operator_agent.expect("Operator Agent projection");
+        assert_eq!(relationship.role, "agent");
+        assert_eq!(relationship.policy.provider.as_deref(), Some("claude"));
+        assert_eq!(relationship.supervision.operator_run_id, "oper-1");
+        assert_eq!(relationship.supervision.child_run_id, "init-child");
+        let continuity = status.continuity.expect("continuity projection");
+        assert_eq!(continuity.mode, "full-lineage");
+        assert_eq!(continuity.lineage_id, "parent-run-1");
+        assert_eq!(continuity.context_sha256, "abc");
+    }
 
     #[test]
     fn delivery_axes_mid_flight_are_not_failed() {
@@ -1584,6 +1862,9 @@ mod status_thread_tests {
         assert_eq!(axes.execution_state, ExecutionState::TimedOut);
         let axes = delivery_axes_for_receipt("interrupted", None, None, None);
         assert_eq!(axes.execution_state, ExecutionState::Interrupted);
+        let axes = delivery_axes_for_receipt("quota_exhausted", None, None, None);
+        assert_eq!(axes.execution_state, ExecutionState::Interrupted);
+        assert!(is_final_state("quota_exhausted"));
         let axes = delivery_axes_for_receipt("failed", None, None, None);
         assert_eq!(axes.execution_state, ExecutionState::Failed);
         let axes = delivery_axes_for_receipt("completed", None, None, None);
@@ -1608,6 +1889,10 @@ mod status_thread_tests {
             agent: "claude".into(),
             root: "/tmp/x".into(),
             status: "running".into(),
+            pid: None,
+            owner_pid: None,
+            launcher_pid: None,
+            updated_at: String::new(),
             await_stages: true,
             parent_run_id: None,
             operator_actions: vec![],
@@ -1638,7 +1923,10 @@ mod status_thread_tests {
         assert_eq!(summary.exit_code, Some(0));
 
         let flat = run.to_run_status("2026-08-03T12:00:00Z".into(), None);
-        assert!(!flat.is_terminal(), "running lifecycle must not be terminal");
+        assert!(
+            !flat.is_terminal(),
+            "running lifecycle must not be terminal"
+        );
         assert_ne!(flat.health, "final");
         assert!(flat.exit_code.is_none());
         assert_ne!(flat.liveness, "terminal");

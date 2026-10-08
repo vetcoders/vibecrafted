@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -13,11 +16,18 @@ import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
-from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
+from vibecrafted_core.runtime_paths import vibecrafted_home
+from vibecrafted_core.workflow import (
+    SUPPORTED_WORKFLOWS,
+    select_plan_effort,
+    select_plan_model,
+)
 
 from .model import (
+    BASE_CUT_PREFIX,
     CRITICAL_FAIL_POLICIES,
     MATCHER_TYPES,
+    NONCRITICAL_DEP_FAIL_POLICIES,
     READ_MUTATIONS,
     SCHEMA_VERSION,
     TIMEOUT_POLICIES,
@@ -31,6 +41,7 @@ from .model import (
     Policy,
     Recovery,
     Verify,
+    classify_base,
 )
 
 FORBIDDEN_COMMAND_NEEDLES = (
@@ -38,8 +49,6 @@ FORBIDDEN_COMMAND_NEEDLES = (
     "git reset --hard",
     "git clean -fd",
     "git clean -xdf",
-    "make release",
-    "release",
     "rm -rf /",
     "vc-release",
     "vibecrafted release",
@@ -78,12 +87,13 @@ def doctor_dispatch(
     try:
         dispatch = parse_dispatch(text, base_dir=base_dir)
         policy_errors = _doctor_policy_errors(dispatch)
+        policy_errors.extend(_base_reachability_errors(dispatch))
         warnings = tuple(
             f"cuts[{index}].model: pin {cut.model!r} will be forwarded to "
             f"{cut.agent}; provider/account availability is not validated"
             for index, cut in enumerate(dispatch.cuts)
             if cut.model
-        )
+        ) + tuple(_bare_interpreter_warnings(dispatch))
         if policy_errors:
             return DispatchDoctorResult(
                 ok=False,
@@ -146,6 +156,7 @@ def parse_dispatch(text: str, *, base_dir: str | Path | None = None) -> Dispatch
 
     _validate_recovery_targets(cuts, phases, errors)
     _validate_cut_dag(cuts, errors)
+    _validate_compile_embargo(cuts, errors)
 
     if errors:
         raise DispatchSchemaError(errors)
@@ -164,7 +175,7 @@ def parse_dispatch(text: str, *, base_dir: str | Path | None = None) -> Dispatch
 
 
 def render_cell_prompt(
-    dispatch: Dispatch, cut: Cut, *, baton: Baton | None = None
+    dispatch: Dispatch, cut: Cut, *, baton: Baton | None = None, run_id: str = ""
 ) -> str:
     """Assemble one cut's worker prompt: common text + brief/prompt + extra + baton JSON."""
     active_baton = baton if baton is not None else dispatch.empty_baton()
@@ -183,7 +194,8 @@ def render_cell_prompt(
     if cut.mode != "read" and dispatch.policy.require_commit:
         slot = cut.id.split("_", 1)[0]
         delivery_contract = (
-            "DELIVERY CONTRACT (supervisor-enforced): commit the verified delivery. "
+            "DELIVERY CONTRACT (supervisor-enforced): commit the owned delivery "
+            "or unverified structural checkpoint when compile embargo applies. "
             f"The commit message must contain the exact cut id '{cut.id}' or slot "
             f"marker '[{slot}]'. If no new commit is needed and "
             "allow_idempotent_existing is enabled, report exactly one proof line "
@@ -197,7 +209,101 @@ def render_cell_prompt(
         delivery_contract,
         active_baton.to_json(),
     ]
-    rendered = [_format_known(part, variables).strip() for part in parts if part]
+    rendered = [
+        part if part is body and cut.brief else _format_known(part, variables).strip()
+        for part in parts
+        if part
+    ]
+    payload = json.dumps(
+        {
+            "run_id": run_id,
+            "cut_id": cut.id,
+            "commit_sha": "<exact full delivery SHA>",
+            "report_path": "$VIBECRAFTED_REPORT_PATH",
+            "measurements": ["<what you actually measured with permitted tools>"],
+        },
+        indent=2,
+    )
+    claim_contract = (
+        "DISPATCH CLAIM CONTRACT (authoritative closing rail):\n"
+        "Finish by POSTing a claim to http://127.0.0.1:3024/api/dispatch/claim. "
+        "This POST is a doorbell: the canonical Python writer records [~], "
+        "never verified delivery. The HTTP handler is a read model and hands "
+        "the claim to that writer; it does not write durable receipts or tracker state.\n"
+        "The dispatch run_id below is distinct from the worker runtime's "
+        "VIBECRAFTED_RUN_ID and report frontmatter run_id. Preserve both runtime "
+        "identities; use only the supplied dispatch run_id in the POST. "
+        "Write the report at the runtime-supplied VIBECRAFTED_REPORT_PATH before "
+        "posting; do not guess an artifact path.\n"
+        "Construct the body with a JSON serializer using the exact full commit "
+        "SHA, the report path's environment value, and actual measurements. "
+        "The JSON below describes the body; replace its placeholders, including "
+        "$VIBECRAFTED_REPORT_PATH, with their values. Never interpolate report "
+        "text or measurements into shell JSON. Use only tools your worker "
+        "shell permits; describe any measurement you could not run honestly.\n"
+        f"```json\n{payload}\n```\n"
+        "Before a normal claim, perform the full applicable VERIFICATION_RULE "
+        "(vibecrafted_core/skills/VERIFICATION_RULE.md): exercise the real artifact "
+        "and runtime path, re-verify upstream evidence, and check that your "
+        "verification instrument can fail. This self-check qualifies the claim; "
+        "it does not settle it. Afterwards the writer independently runs every "
+        "declared verifier in its own shell, in the cut runtime root, against "
+        "the claimed SHA. Only a passed full VERIFICATION_RULE and all green "
+        "matchers allow the writer to set tracker [x]. A unit test, worker "
+        "sentence, report, or HTTP success alone cannot set [x].\n"
+        "Worker shell permissions differ from the verifier shell: measure with "
+        "your permitted tools; the writer executes the declared command. "
+        "Default verifier timeout is 600s. Its sanitized environment drops "
+        "keys such as DEVELOPER_DIR unless the declared command inlines them.\n"
+        "Compile embargo is the only deferral; follow "
+        "vc-scaffold/references/compile-embargo.md. During structural W1/W2 "
+        "do not compile, build, format, lint, type-check, run tests, or select "
+        "gates. Add checkpoint to the same POST: "
+        '{"owned_scope": ["<owned paths>"], "skipped_controls": '
+        '["<exact declared verifier command for every skipped hook/control>"]}. '
+        "Include security and secret controls. Each skipped_controls item must "
+        "map to an exact plan-declared verifier command; the writer never "
+        "executes payload commands. If a skipped hook has no declared command, "
+        "record that unknown obligation honestly: closure remains unverified "
+        "until the plan includes the control. "
+        "The commit_sha is the checkpoint SHA and measurements describe only "
+        "checks actually performed. The writer stores it as unverified [~]. "
+        "A worker cannot close embargo through this POST. "
+        "W2_STRUCTURALLY_CLOSED means assembled and ready to check. The integrator "
+        "alone closes embargo by running the full applicable gates, including "
+        "every skipped control, on the assembled SHA; only that verified result "
+        "may become [x].\n"
+        "Never write tracker [x] or claim settlement by editing brief Acceptance "
+        "checkboxes, even if older brief text requests it. An unflipped [ ] "
+        "cannot skip verifiers or become a failed test. A missing claim means "
+        "'claim not received, verifiers were not run'; resume with "
+        "vibecrafted dispatch <plan.toml> --resume <run_id>. A red matcher stays "
+        "[!] with verifier cwd in the journal. --allow-red-baseline admits "
+        "work and does not count as delivery."
+    )
+    if not run_id:
+        claim_contract += (
+            "\nThis preview has no dispatch run_id. Do not POST an empty or "
+            "guessed identity; obtain the launch-rendered dispatch identity first."
+        )
+    if cut.compile_embargo:
+        claim_contract += (
+            "\nPLAN PHASE: compile_embargo = true. This cut must POST an "
+            "unverified checkpoint with owned_scope and skipped_controls; "
+            "do not perform executable gates or submit a normal delivery claim."
+        )
+    if cut.closes_embargo:
+        claim_contract += (
+            "\nPLAN INTEGRATOR CLOSURE: this cut assembles checkpoint cuts "
+            f"{json.dumps(cut.closes_embargo)}. Record W2_STRUCTURALLY_CLOSED "
+            "and the exact assembled SHA in measurements after inspecting "
+            "scope, dependencies, and interfaces. Restore and run every "
+            "applicable gate, including all controls those checkpoints "
+            "skipped. POST a normal claim. The writer checks assembly and "
+            "independently runs full gates against that SHA before deriving "
+            "embargo closure; this attestation cannot close it by itself."
+        )
+    rendered.append(claim_contract)
     return "\n\n".join(part for part in rendered if part).rstrip() + "\n"
 
 
@@ -227,10 +333,12 @@ def render_cut_verifies(dispatch: Dispatch, cut: Cut) -> Cut:
 
 def _brief_or_prompt(cut: Cut) -> str:
     """Read the cut's brief file if resolvable, else fall back to its inline prompt."""
+    if cut.source_text is not None:
+        return cut.source_text
     if cut.brief:
         path = Path(cut.brief).expanduser()
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            return path.read_bytes().decode("utf-8")
     return cut.prompt
 
 
@@ -307,6 +415,12 @@ def _parse_policy(value: Any, errors: list[str]) -> Policy:
         errors.append(
             f"policy.on_critical_fail: unsupported value {on_critical_fail!r}"
         )
+    on_noncritical_dep_fail = _string(raw.get("on_noncritical_dep_fail")) or "stop"
+    if on_noncritical_dep_fail not in NONCRITICAL_DEP_FAIL_POLICIES:
+        errors.append(
+            "policy.on_noncritical_dep_fail: unsupported value"
+            f" {on_noncritical_dep_fail!r}"
+        )
     concurrency = _int(raw.get("concurrency"), 1)
     if concurrency < 1:
         errors.append("policy.concurrency: must be at least 1")
@@ -324,6 +438,7 @@ def _parse_policy(value: Any, errors: list[str]) -> Policy:
         ),
         require_commit=bool(raw.get("require_commit")),
         allow_idempotent_existing=bool(raw.get("allow_idempotent_existing", True)),
+        on_noncritical_dep_fail=on_noncritical_dep_fail,
     )
 
 
@@ -417,12 +532,48 @@ def _parse_cuts(
         if resolved_workflow not in SUPPORTED_WORKFLOWS:
             errors.append(f"cuts[{index}].workflow: unsupported workflow {workflow!r}")
 
-        prompt = _string(item.get("prompt"))
+        prompt = item.get("prompt") if isinstance(item.get("prompt"), str) else ""
         brief = _string(item.get("brief"))
         if not prompt and not brief:
             errors.append(f"cuts[{index}]: prompt or brief is required")
         if brief:
             _validate_brief_path(brief, base_dir, index, errors)
+
+        plan_text = ""
+        model, model_source = "", "provider_default"
+        raw_model = item.get("model", "")
+        if "model" in item and (
+            not isinstance(raw_model, str) or not raw_model.strip()
+        ):
+            errors.append(f"cuts[{index}].model: expected a non-empty string")
+        else:
+            try:
+                plan_text = (
+                    Path(_resolve_brief(brief, base_dir)).read_bytes().decode("utf-8")
+                    if brief
+                    else prompt
+                )
+                model, model_source = select_plan_model(
+                    _string(item.get("agent")), plan_text, model=raw_model
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"cuts[{index}].model: {exc}")
+
+        effort, effort_source = "", "provider_default"
+        raw_effort = item.get("effort", "")
+        if "effort" in item and (
+            not isinstance(raw_effort, str) or not raw_effort.strip()
+        ):
+            errors.append(f"cuts[{index}].effort: expected a non-empty string")
+        else:
+            try:
+                effort, effort_source = select_plan_effort(
+                    _string(item.get("agent")), effort=raw_effort
+                )
+                if "effort" in item:
+                    effort_source = "plan"
+            except ValueError as exc:
+                errors.append(f"cuts[{index}].effort: {exc}")
 
         mode = _string(item.get("mode")) or "write"
         mutation = _string(item.get("mutation"))
@@ -435,6 +586,21 @@ def _parse_cuts(
         if mode == "read" and mutation and mutation not in READ_MUTATIONS:
             errors.append(f"cuts[{index}].mutation: unsupported value {mutation!r}")
 
+        depends_on = _string_tuple(
+            item.get("depends_on"), f"cuts[{index}].depends_on", errors
+        )
+        integrator = bool(item.get("integrator"))
+        compile_embargo = item.get("compile_embargo", False)
+        if not isinstance(compile_embargo, bool):
+            errors.append(f"cuts[{index}].compile_embargo: expected a boolean")
+            compile_embargo = False
+        closes_embargo = _string_tuple(
+            item.get("closes_embargo"), f"cuts[{index}].closes_embargo", errors
+        )
+        base = _string(item.get("base"))
+        if base:
+            _validate_base_declaration(base, index, depends_on, integrator, errors)
+
         cuts.append(
             Cut(
                 id=cut_id,
@@ -444,7 +610,12 @@ def _parse_cuts(
                 resolved_workflow=resolved_workflow,
                 critical=bool(item.get("critical")),
                 mode=mode,
-                model=_string(item.get("model")),
+                model=model,
+                model_source=model_source,
+                effort=effort,
+                effort_source=effort_source,
+                source_text=plan_text,
+                source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
                 prompt=prompt,
                 brief=_resolve_brief(brief, base_dir),
                 extra=_string(item.get("extra")),
@@ -452,13 +623,37 @@ def _parse_cuts(
                 observational=observational,
                 verify=tuple(verify),
                 recovery=_parse_recovery(item.get("recovery"), index, errors),
-                depends_on=_string_tuple(
-                    item.get("depends_on"), f"cuts[{index}].depends_on", errors
-                ),
-                integrator=bool(item.get("integrator")),
+                depends_on=depends_on,
+                integrator=integrator,
+                compile_embargo=compile_embargo,
+                closes_embargo=closes_embargo,
+                base=base,
             )
         )
     return cuts
+
+
+def _validate_compile_embargo(cuts: list[Cut], errors: list[str]) -> None:
+    """Keep structural phases and their closure authority in the typed plan."""
+    by_id = {cut.id: cut for cut in cuts}
+    for index, cut in enumerate(cuts):
+        prefix = f"cuts[{index}]"
+        if cut.compile_embargo and (cut.integrator or cut.mode == "read"):
+            errors.append(
+                f"{prefix}.compile_embargo: only structural WRITE workers may defer gates"
+            )
+        if cut.closes_embargo and (not cut.integrator or cut.mode == "read"):
+            errors.append(f"{prefix}.closes_embargo: only a WRITE integrator may close")
+        for checkpoint_id in cut.closes_embargo:
+            checkpoint = by_id.get(checkpoint_id)
+            if checkpoint is None or not checkpoint.compile_embargo:
+                errors.append(
+                    f"{prefix}.closes_embargo: {checkpoint_id!r} must name a compile_embargo cut"
+                )
+            if checkpoint_id not in cut.depends_on:
+                errors.append(
+                    f"{prefix}.closes_embargo: {checkpoint_id!r} must be declared in depends_on"
+                )
 
 
 def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
@@ -473,11 +668,7 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
         ("meta.reports_dir", dispatch.meta.reports_dir),
         ("meta.tracker", dispatch.meta.tracker),
     ):
-        normalized = value.replace("\\", "/")
-        if value and any(
-            marker in normalized
-            for marker in ("/.claude/", "/.codex/", "/.gemini/", "/.vibecrafted/")
-        ):
+        if value and _forbidden_runtime_write_root(value):
             errors.append(
                 f"{field}: provider-specific or repo-local runtime roots are recovery-only; new writes use ~/.vibecrafted/artifacts"
             )
@@ -487,6 +678,179 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+# Bare `python3` in a verifier resolves against the supervisor's PATH, not the
+# worker's toolchain. On stock macOS that is 3.9 (no ``tomllib``), which killed
+# a delivered cut on 2026-09-17: the worker ran the same check green under its
+# own 3.13 while supervisor-verify failed purely environmentally.
+_BARE_PYTHON3_RE = re.compile(r"(?<![\w./-])python3(?![.\w-])")
+
+
+def _bare_interpreter_warnings(dispatch: Dispatch) -> list[str]:
+    """Warn on verifier commands that shell out to an unpinned ``python3``."""
+    warnings: list[str] = []
+    for cut_index, cut in enumerate(dispatch.cuts):
+        for verify_index, verify in enumerate(cut.verify):
+            if _BARE_PYTHON3_RE.search(verify.run):
+                warnings.append(
+                    f"cuts[{cut_index}].verify[{verify_index}].run: bare 'python3'"
+                    " resolves to the supervisor host's default interpreter"
+                    " (macOS ships 3.9 without tomllib); pin a version"
+                    " (python3.11+) or invoke the repo toolchain explicitly"
+                )
+    return warnings
+
+
+def _base_reachability_errors(dispatch: Dispatch) -> list[str]:
+    """Falsify declared ``sha``/``branch`` bases against ``meta.repo`` (doctor only).
+
+    ``cut:<id>`` bases resolve at launch from the dependency's settled receipt,
+    so they carry no parse-time reachability check.
+    """
+    errors: list[str] = []
+    for index, cut in enumerate(dispatch.cuts):
+        kind = classify_base(cut.base)
+        if kind not in {"sha", "branch"}:
+            continue
+        ref = cut.base if kind == "sha" else f"refs/heads/{cut.base}"
+        if not _git_resolves(dispatch.meta.repo, ref):
+            errors.append(
+                f"cuts[{index}].base: base not reachable in meta.repo"
+                f" ({cut.base!r} as {kind})"
+            )
+    return errors
+
+
+def _git_resolves(repo: str, ref: str) -> bool:
+    """True when ``ref`` names a commit in ``repo``; any Git failure is False."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+_PROVIDER_RUNTIME_MARKERS = (
+    "/.claude/",
+    "/.codex/",
+    "/.gemini/",
+    "/.cursor/",
+)
+
+
+def _posix(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _resolve_write_path(value: str) -> Path | None:
+    """Follow existing symlink components. ``None`` means resolution failed.
+
+    A failed resolve is not a safe artifacts write. Callers must not treat the
+    lexical fallback as proof that the path stayed inside the artifacts plane.
+    """
+    expanded = Path(value).expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _normalize_write_path(value: str) -> Path:
+    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+
+    ``Path.resolve(strict=False)`` follows existing symlink components and
+    normalizes ``..`` even when the destination file does not yet exist.
+    Resolution errors fall back to a lexical collapse for haystack matching
+    only — that fallback is not canonical-artifacts admission.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is not None:
+        return resolved
+    return Path(os.path.normpath(str(Path(value).expanduser())))
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    path_posix = _posix(path)
+    root_posix = _posix(root)
+    return path_posix == root_posix or path_posix.startswith(root_posix + "/")
+
+
+def _canonical_artifacts_roots() -> tuple[Path, ...]:
+    """Write roots the doctor names in its own refusal: home artifacts plane."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in (
+        Path.home() / ".vibecrafted" / "artifacts",
+        vibecrafted_home() / "artifacts",
+    ):
+        normalized = _normalize_write_path(str(raw))
+        key = _posix(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return tuple(roots)
+
+
+def _lexical_artifacts_roots() -> tuple[Path, ...]:
+    """Artifacts roots with ``..`` collapsed but symlinks not followed."""
+    return tuple(
+        Path(os.path.normpath(str(Path(raw).expanduser())))
+        for raw in (
+            Path.home() / ".vibecrafted" / "artifacts",
+            vibecrafted_home() / "artifacts",
+        )
+    )
+
+
+def _is_canonical_artifacts_write(value: str) -> bool:
+    """True only inside the canonical artifacts *directory*, after symlink resolution.
+
+    An unresolved path is not canonical. Lexical ``normpath`` after ``resolve``
+    raised would keep an escaping symlink looking like ``.../artifacts/escape``.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is None:
+        return False
+    return any(_is_under(resolved, root) for root in _canonical_artifacts_roots())
+
+
+def _lexically_under_artifacts(value: str) -> bool:
+    """True when the non-symlink-resolved path sits inside an artifacts directory."""
+    lexical = Path(os.path.normpath(str(Path(value).expanduser())))
+    return any(_is_under(lexical, root) for root in _lexical_artifacts_roots())
+
+
+def _forbidden_runtime_write_root(value: str) -> bool:
+    """Reject provider-private and repo-local ``.vibecrafted`` write roots.
+
+    Admission is a normalized directory-boundary check: prefix matches such as
+    ``artifacts-typo`` or ``artifacts/../../.codex`` are not the artifacts plane.
+    Existing symlink components are followed even when the leaf does not exist.
+    A path that is lexically inside artifacts but resolves outside is an escape.
+    If resolution raises, the path is not admitted as the artifacts plane.
+    """
+    if _is_canonical_artifacts_write(value):
+        return False
+    if _lexically_under_artifacts(value):
+        return True
+    raw = value.replace("\\", "/")
+    expanded = _posix(Path(value).expanduser())
+    normalized = _posix(_normalize_write_path(value))
+    haystack = f"{raw}/{expanded}/{normalized}/"
+    if any(marker in haystack for marker in _PROVIDER_RUNTIME_MARKERS):
+        return True
+    return "/.vibecrafted/" in haystack or haystack.rstrip("/").endswith(
+        "/.vibecrafted"
+    )
 
 
 def _parse_verify(value: Any, cut_index: int, errors: list[str]) -> list[Verify]:
@@ -578,6 +942,36 @@ def _validate_recovery_targets(
             errors.append(f"cuts[{index}].recovery.goto: unknown target {target!r}")
 
 
+def _validate_base_declaration(
+    base: str,
+    cut_index: int,
+    depends_on: tuple[str, ...],
+    integrator: bool,
+    errors: list[str],
+) -> None:
+    """Validate one cut's declared ``base`` structurally (no Git access)."""
+    prefix = f"cuts[{cut_index}].base"
+    if integrator:
+        errors.append(
+            f"{prefix}: integrators work on the main checkout and cannot declare base"
+        )
+    kind = classify_base(base)
+    if kind != "cut":
+        return
+    target = base[len(BASE_CUT_PREFIX) :].strip()
+    if not target:
+        errors.append(f"{prefix}: 'cut:' requires a cut id")
+    elif target not in depends_on:
+        errors.append(f"{prefix}: {base!r} requires {target!r} in depends_on")
+
+
+def _base_cut_target(base: str) -> str:
+    """Return the cut id a ``cut:<id>`` base names, or "" for other forms."""
+    if classify_base(base) != "cut":
+        return ""
+    return base[len(BASE_CUT_PREFIX) :].strip()
+
+
 def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
     """Validate dependency references and reject cycles before any launch."""
     positions = {cut.id: index for index, cut in enumerate(cuts)}
@@ -587,6 +981,9 @@ def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
                 errors.append(f"cuts[{index}].depends_on: cut cannot depend on itself")
             elif dependency not in positions:
                 errors.append(f"cuts[{index}].depends_on: unknown cut {dependency!r}")
+        base_target = _base_cut_target(cut.base)
+        if base_target and base_target not in positions:
+            errors.append(f"cuts[{index}].base: unknown cut {base_target!r}")
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -599,7 +996,11 @@ def _validate_cut_dag(cuts: list[Cut], errors: list[str]) -> None:
             errors.append(f"cuts: dependency cycle includes {cut_id!r}")
             return
         visiting.add(cut_id)
-        for dependency in by_id[cut_id].depends_on:
+        edges = list(by_id[cut_id].depends_on)
+        base_target = _base_cut_target(by_id[cut_id].base)
+        if base_target and base_target not in edges:
+            edges.append(base_target)
+        for dependency in edges:
             visit(dependency)
         visiting.remove(cut_id)
         visited.add(cut_id)
@@ -660,6 +1061,9 @@ def _validate_command(run: str, prefix: str, errors: list[str]) -> None:
     for needle in FORBIDDEN_COMMAND_NEEDLES:
         if needle in lowered:
             errors.append(f"{prefix}.run: forbidden hard-stop command {needle!r}")
+    tokens = shlex.split(run) if _can_shlex(run) else re.split(r"[\s;&|()]+", lowered)
+    if any(token.lower() == "release" for token in tokens):
+        errors.append(f"{prefix}.run: forbidden hard-stop command 'release'")
 
 
 def _can_shlex(value: str) -> bool:

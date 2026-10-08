@@ -1,16 +1,22 @@
 # config/memex.toml.example — Plan 09 (META_22)
 #
-# Memex cross-session retrieval client configuration template.
-# Copy to ~/.config/vetcoders/memex.toml and edit. Never commit a real
-# token to source control — the file path lives in the operator's
-# private $XDG_CONFIG_HOME (or ~/.config) by convention.
+# Memex cross-session retrieval client configuration: the [memex] table of
+# the one operator config, ${XDG_CONFIG_HOME:-~/.config}/vibecrafted/config.toml
+# (the same file that holds [server]). Paste the table below into that file
+# and edit. Nothing else is read for memex settings.
 #
-# This is OPT-IN. Without this file (or the matching env vars) the
-# memex client stays disabled and /vc-init Sense 1 fallthrough is a
-# no-op. Vibecrafted works without memex; memex enriches agent
-# perception when present.
+# A token makes that file a secret: keep it at mode 0600 (chmod 600) and never
+# commit a real token to source control. MEMEX_TOKEN in the environment fills
+# a token left empty here.
+#
+# This is OPT-IN. Without the table (or the matching env vars) the memex
+# client stays disabled and /vc-init Sense 1 fallthrough is a no-op.
+# Vibecrafted works without memex; memex enriches agent perception when
+# present.
 #
 # See docs/MEMEX.md for the operator guide.
+
+[memex]
 
 # Memex endpoint. Point this at your memex host. Adjust to your
 # deployment; the trailing slash is stripped.

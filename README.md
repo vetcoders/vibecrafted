@@ -20,8 +20,8 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
-  <a href="VERSION"><img alt="Version 3.7.1" src="https://img.shields.io/badge/version-3.7.1-informational.svg"></a>
-  <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows (WSL2)" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(WSL2)-lightgrey.svg"></a>
+  <a href="VERSION"><img alt="Version 4.3.3" src="https://img.shields.io/badge/version-4.3.3-informational.svg"></a>
+  <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows native + WSL2" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20native%20%2B%20WSL2-lightgrey.svg"></a>
 </p>
 
 ---
@@ -137,14 +137,17 @@ preflighted last fallback. Full doctrine: [docs/FOUNDATION.md](docs/FOUNDATION.m
 
 | Foundation           | What it does                                        | Channel                                                                              |
 | -------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| **Loctree** (`loct`) | Structural code perception — maps, impact, findings | `0.14.x` · [npm](https://www.npmjs.com/package/loctree) · GitHub releases            |
+| **Loctree** (`loct`) | Structural code perception — maps, impact, findings | [npm `@loctree/loctree`](https://www.npmjs.com/package/@loctree/loctree)             |
 | **AICX** (`aicx`)    | Agent-session memory — catalog, search, intents     | [npm `@loctree/aicx`](https://www.npmjs.com/package/@loctree/aicx) · GitHub releases |
-| **prview**           | PR review artifact generator                        | [crates.io](https://crates.io/crates/prview)                                         |
+| **prview**           | PR review artifact generator                        | [GitHub Releases](https://github.com/vetcoders/prview-rs/releases/latest)            |
 | **screenscribe**     | Screencast → structured engineering findings        | [PyPI](https://pypi.org/project/screenscribe/)                                       |
 | **vc-frame**         | Operator cockpit (session rail, layouts)            | Embedded inside `Vibecrafted.app`; no separate installer or update channel           |
 
-The installer verifies these foundations on every run (`vibecrafted doctor`)
-and never silently replaces a product-managed binary with a stale copy.
+Foundations are external: the Runtime Pack does not carry `loct`, `aicx`,
+`prview` or `screenscribe`. Each installs through its own channel (npm, GitHub
+releases, PyPI — `scripts/install-foundations.sh` drives them), and
+your own PATH install always wins. `vibecrafted doctor` verifies the ones it
+finds and never silently replaces a product-managed binary with a stale copy.
 
 ---
 
@@ -164,35 +167,143 @@ The `//` is not decoration. It is the mark.
 
 ## Install
 
+Check the [latest GitHub Release](https://github.com/vetcoders/vibecrafted/releases/latest)
+for the assets it actually carries. The latest public release is `v3.5.0` and
+does not include the 4.x DMG, Runtime Packs, portable archive, or native Windows
+installers. For the current public install path, use the bootstrap on macOS or
+Linux, and WSL2 on Windows. Versioned carrier names below describe the 4.x
+release contract and become usable when those assets are published:
+
+- macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
+- macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
+- Portable source: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
+- Windows native: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-windows-x64.msi` or `.exe`, with the matching `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`
+
+Use the adjacent checksums and detached Runtime Pack signatures to verify downloads.
+
 **macOS and Linux:**
 
 ```bash
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
 
-**Windows:** install WSL2 once, then use the same bootstrap inside it:
+The desktop app requires macOS 14+ on Apple Silicon (arm64); every other
+system uses the bootstrap above or the portable tarball below.
+
+**Windows (native):** build or download the win32-x64 Runtime Pack, then:
+
+```powershell
+powershell -NoProfile -File .\install.ps1 -Pack .\build\Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
+```
+
+The MSI/EXE siblings are unsigned Authenticode — SmartScreen will warn; trust
+is `.sha256` + `.sig` provenance (same idea as the portable tarball not being
+Apple-notarized). `install.ps1` updates User PATH or prints the exact
+`%LOCALAPPDATA%\Vibecrafted\bin` directory to add. Then:
+
+```powershell
+vibecrafted doctor
+vibecrafted init
+```
+
+**Windows (POSIX alternative):** install WSL2 once, then use the Linux
+bootstrap inside it:
 
 ```powershell
 wsl --install
 wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'
 ```
 
-**From source** (power users, maintainers, anyone who wants the gates):
+Native Windows and WSL2 are both supported; they are not the same product
+surface. PTY/zsh, flock/rescue, and voc stay on the WSL2/POSIX path.
+
+**macOS CLI Runtime Pack** (power users who do not want the App): download the
+signed binary carrier and both sidecars from the latest release, then point the
+checkout front door at it:
 
 ```bash
 git clone https://github.com/vetcoders/vibecrafted.git
-cd vibecrafted && make install
+cd vibecrafted
+make install RUNTIME_PACK=../Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz
+make uninstall  # same installer, same receipt
+```
+
+An ordinary upgrade preserves local preferences and additional Frame themes
+and layouts. Missing historical generation or backup bytes are recorded as
+unavailable history; the installer captures the present state before replacing
+the selected generation. A modified managed asset or an ambiguous preference
+remains a visible conflict.
+
+For an **existing signed archive with an older installer**, recovery can
+explicitly select a reviewed installer from a trusted checkout. Obtain its SHA
+from the reviewed commit or handoff receipt; do not guess it or modify the
+archive:
+
+```bash
+make install RUNTIME_PACK=/absolute/path/RuntimePack.tar.gz \
+  RUNTIME_PACK_BOOTSTRAP_INSTALLER=/absolute/trusted/checkout/scripts/vetcoders_install.py \
+  RUNTIME_PACK_BOOTSTRAP_SHA256=<reviewed-installer-sha256>
+```
+
+The wrapper verifies the signed payload first, reads and executes only the
+hash-bound installer bytes, and reports the installer path, SHA and signed
+archive SHA alongside the selected runtime root. This is an explicit recovery
+operation. The App uses its delivered installer and does not search checkouts.
+A bootstrap SHA identifies that installer file; its trusted checkout still
+owns relative dependencies. Future packs include the updated installer.
+
+If a browser renamed the archive or sidecars, pass their exact paths using
+`RUNTIME_PACK_CHECKSUM` and `RUNTIME_PACK_SIGNATURE`, plus
+`RUNTIME_PACK_CARRIER_BASENAME` containing the original release archive name.
+The explicit name must agree with the signed payload provenance. These are
+also available as wrapper flags `--checksum`, `--signature`, and
+`--carrier-basename`. Neither checksum nor signature validation is disabled.
+For a read-only recovery plan, invoke the same wrapper and add
+`--rescue --plan`; apply the reported plan with `--rescue --apply
+--plan-digest <digest>` using the same archive and bootstrap identity.
+
+Maintainers who intentionally want local compilation use the explicit source
+lane:
+
+```bash
+make install-source
 make help-dev   # the full target surface
+```
+
+`make install` never compiles a product for a stranger. It selects a closed
+Runtime Pack for the current platform and architecture; Linux and WSL2 use the
+Linux x86_64 or arm64 carrier. `make install-source` is the explicit maintainer
+lane and may require the full build toolchain.
+
+A Runtime Pack install gives you the headless Vibecrafted runtime — `vibecrafted
+doctor`, every skill launcher, `observe`/`await`, reports and transcripts under
+`~/.vibecrafted`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) and agent
+CLIs are not part of the pack; install them through their own channels. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
+it ships inside the desktop app below, and `vibecrafted init <agent>` falls back
+to your current terminal until it is present. First run after install:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+vibecrafted doctor
+vibecrafted implement claude --prompt "describe this repo"
+vibecrafted await claude --last      # waits, then prints the report path
+vibecrafted status                   # today's runs
 ```
 
 **macOS desktop app:** the intended end-user shape is one Developer ID signed
 and notarized `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` carrying matching
 builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete runtime.
-Download it and its adjacent `.dmg.sha256` from the
-[latest release](https://github.com/vetcoders/vibecrafted/releases/latest),
-verify the checksum, then open the DMG. The build path (`make release`) is
-exercised and produces a Developer ID signed, notarized and stapled artifact;
-until the release carrying it is published, use the bootstrap.
+The DMG is an artifact of releases from 4.3.1 on. Check what a release
+actually carries (`gh release view --json assets -q '.assets[].name'`); if it
+lists a DMG, download it and its adjacent `.dmg.sha256`, verify the checksum,
+then open the DMG. The latest published release may not carry one yet — until
+a release with the DMG is published, use the bootstrap above.
+
+The same release also carries
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`, its
+`.sha256`, and detached `.sig`. It contains the exact runtime embedded in the
+App plus the same terminal/frame helpers; the DMG is an optional onboarding
+overlay, not a second runtime authority.
 
 **Every other system** (Linux, WSL2, or macOS without the desktop app): the
 same release carries `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
@@ -240,7 +351,7 @@ See [Docker Runtime](docs/DOCKER.md).
 ## Quick Start
 
 ```bash
-cd $VIBECRAFTED_ROOT/your-project
+cd /path/to/your-project   # any git repository
 vibecrafted init claude
 vibecrafted implement codex --prompt "Add JWT authentication"
 ```
@@ -264,9 +375,9 @@ vibecrafted release codex --prompt "Prepare release steps"
 security gate (`make semgrep`), exposed surface inventory, deployment
 mode decision, and post-release install smoke from the **published**
 artifact. The doctrine lives in
-[`skills/vc-release/SKILL.md`](skills/vc-release/SKILL.md) and the
+[`vibecrafted-core/vibecrafted_core/skills/vc-release/SKILL.md`](vibecrafted-core/vibecrafted_core/skills/vc-release/SKILL.md) and the
 default template lives in
-[`skills/vc-release/references/release-report-template.md`](skills/vc-release/references/release-report-template.md).
+[`vibecrafted-core/vibecrafted_core/skills/vc-release/references/release-report-template.md`](vibecrafted-core/vibecrafted_core/skills/vc-release/references/release-report-template.md).
 
 ---
 

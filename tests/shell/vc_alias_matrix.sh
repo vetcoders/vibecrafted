@@ -13,8 +13,8 @@ OUT="${1:-}"
 # Mappable: public skill-family shortcuts → vibecrafted <verb>
 # (exact name or documented 1:1 map)
 MAPPABLE=(
-  agents audit cron decorate delegate dispatch dou followup guard
-  help hydrate implement init intents justdo loop marbles operator
+  agents audit canary cron decorate delegate dispatch dou followup fork
+  guard help hydrate implement init intents justdo loop marbles operator
   ownership partner polarize prune release research resume review
   scaffold ship start trust workflow dashboard
 )
@@ -58,9 +58,7 @@ for name in "${MAPPABLE[@]}"; do
   deck_out="$(mktemp)"
   vc_err="$(mktemp)"
   deck_err="$(mktemp)"
-  # shellcheck disable=SC2016
   zsh -ic "vc-${name} --help" >"$vc_out" 2>"$vc_err" && vc_rc=0 || vc_rc=$?
-  # shellcheck disable=SC2016
   zsh -ic "command vibecrafted ${verb} --help" >"$deck_out" 2>"$deck_err" && deck_rc=0 || deck_rc=$?
 
   status=OK

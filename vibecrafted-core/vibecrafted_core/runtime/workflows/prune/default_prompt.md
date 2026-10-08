@@ -148,7 +148,9 @@ If any check is uncertain, the verdict is `VERIFY-FIRST` or `SCAFFOLD`, not dele
   not import it.
 - If the repo is dirty at start, record it and do NOT sweep unrelated WIP into a
   prune commit (commit your cuts by explicit pathspec).
-- Never `--no-verify`. Never `git push` — push is an operator button.
+- `--no-verify` only for a declared Founder-authorized local compile-embargo
+  checkpoint with a skipped-gate receipt. Never worker `git push`; push with
+  `--no-verify` is an exclusive Founder button.
 - Commit canonical: `[<agent>/vc-prune] <type>(prune): <subject>` with an
   explanatory body. One coherent vertical deletion per commit; 1-2 commits/run.
 

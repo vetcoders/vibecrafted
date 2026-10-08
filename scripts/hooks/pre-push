@@ -24,8 +24,16 @@ while IFS= read -r file; do
 done <<< "$ALL_FILES"
 
 echo "▸ vc_frame pane targeting guard"
+# The spawn libraries live under the core package. The old root path matched
+# nothing and 2>/dev/null hid it, so this guard passed blind; an empty target
+# now refuses the push instead.
+pane_guard_dir="vibecrafted-core/vibecrafted_core/runtime/scripts/lib"
+if ! compgen -G "$pane_guard_dir/*.sh" >/dev/null; then
+    printf 'pre-push: pane targeting guard found no spawn libraries under %s\n' "$pane_guard_dir" >&2
+    exit 1
+fi
 leaks="$(
-    grep -nE 'vc_frame[^|]*action new-pane' runtime/scripts/lib/*.sh 2>/dev/null \
+    grep -nE 'vc_frame[^|]*action new-pane' "$pane_guard_dir"/*.sh \
         | grep -vE 'tab-id|tab_id|--floating|# OPERATOR_TAB_OK' \
         || true
 )"
@@ -41,6 +49,8 @@ fi
 
 if [ ${#PY_FILES[@]} -gt 0 ]; then
     echo "▸ ruff (full, check-only)"
+    # Pass explicit *.py paths. ruff 0.16+ includes Markdown by default and
+    # would format-check fenced examples in docs (that is a prettier lane).
     if command -v uvx >/dev/null 2>&1; then
         uvx ruff check "${PY_FILES[@]}"
         uvx ruff format --check "${PY_FILES[@]}"
@@ -61,7 +71,7 @@ echo "▸ semgrep (full)"
 # `ModuleNotFoundError: No module named 'rpds.rpds'` and the push fails on a
 # broken gate rather than on a finding. A security gate that crashes is a
 # security gate people learn to --no-verify past, so isolate the interpreter.
-SEMGREP_ARGS=(scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity)
+SEMGREP_ARGS=(scan --config auto --error --quiet --max-target-bytes 3000000 --exclude-rule html.security.audit.missing-integrity.missing-integrity)
 if command -v semgrep >/dev/null 2>&1; then
     env -u PYTHONPATH -u PYTHONHOME semgrep "${SEMGREP_ARGS[@]}"
 elif command -v uvx >/dev/null 2>&1; then

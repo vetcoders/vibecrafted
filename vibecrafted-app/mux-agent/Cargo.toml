@@ -41,7 +41,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 notify = "6"
 bytes = "1"
-rmcp = "1.6"
+rmcp = "2.1"
 serde_yaml = "0.9"
 toml = "0.9.1"
 uuid = { version = "1", features = ["v4"] }

@@ -91,8 +91,8 @@ def test_mvp_fixture_handshake_prompt_update_and_cancel(tmp_path: Path) -> None:
     assert session_id.startswith("impl-")
     assert any(
         message.get("method") == "session/update"
-        and message["params"]["sessionId"] == session_id  # type: ignore[index]
-        and message["params"]["update"]["sessionUpdate"] == "agent_message_chunk"  # type: ignore[index]
+        and message["params"]["sessionId"] == session_id
+        and message["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
         for message in messages
     )
     assert any(_has_stop_reason(message, 2, "end_turn") for message in messages)

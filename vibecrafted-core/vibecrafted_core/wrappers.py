@@ -14,35 +14,37 @@ from pathlib import Path
 from typing import Any
 
 from . import control_plane
+from .env_allowlist import filter_headless_worker_env
 from .events import append_event
-from .package_resources import deck_path as package_deck_path
-from .package_resources import package_root, runtime_path
+from .help_surface import AGENT_SELECTOR
+from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 SKILL_PREFIX = {
     "agents": "agnt",
     "followup": "fwup",
     "implement": "just",
     "marbles": "marb",
+    "partner": "part",
     "prune": "prun",
     "review": "rvew",
     "scaffold": "scaf",
 }
+_JOB_INPUT_FLAGS = frozenset({"-p", "--prompt", "-f", "--file", "--prompt-stdin"})
 
 
-def repo_root() -> Path:
-    """The working directory the CLI was invoked from (the target repo root)."""
+def invocation_root() -> Path:
+    """The directory the CLI was invoked from — the target repo as the operator sees it.
+
+    Not ``loop.repo_root`` (git toplevel); the two answer different questions and
+    carried the same name until 2026-08-23."""
     return Path.cwd()
 
 
 def runtime_root() -> Path:
     return runtime_path()
-
-
-def deck_path() -> Path:
-    return package_deck_path()
 
 
 def _print_workflow_help(workflow_id: str) -> int:
@@ -56,6 +58,35 @@ def _print_workflow_help(workflow_id: str) -> int:
 def _has_flag(args: Sequence[str], name: str) -> bool:
     """True if `name` appears bare or as `name=value` among `args`."""
     return name in args or any(arg.startswith(f"{name}=") for arg in args)
+
+
+PARTNER_INTERACTIVE_ONLY = (
+    "`vc-partner` is available from interactive agent session. "
+    "Use vc-init first, and then trigger the skill from the active session"
+)
+
+
+def _stdio_is_interactive() -> bool:
+    """True when both stdin and stdout are TTYs. Closed stdio is not interactive."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def argv_has_job_input(args: Sequence[str]) -> bool:
+    """True when argv carries explicit --prompt/--file/--prompt-stdin job text.
+
+    Bare init/operator/resume stay an interactive TTY face. On resume these
+    flags are the worker-dispatch payload (tracked headless run). Partner is
+    interactive-only: job flags never select a headless worker.
+    """
+    for arg in args:
+        if arg in _JOB_INPUT_FLAGS:
+            return True
+        if arg.startswith(("--prompt=", "--file=")):
+            return True
+    return False
 
 
 def _help_requested(args: Sequence[str]) -> bool:
@@ -102,7 +133,7 @@ def _env_for_run(run_id: str, skill_code: str) -> dict[str, str]:
     env["PYTHONPATH"] = f"{core_path}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(
         os.pathsep
     )
-    return env
+    return filter_headless_worker_env(env)
 
 
 def _dispatcher_command(
@@ -183,30 +214,18 @@ def _print_completed(run_id: str, payload: dict[str, Any]) -> int:
             print(f"transcript={run['latest_transcript']}")
         if run.get("session_id"):
             print(f"session_id={run['session_id']}")
-        state = str(run.get("state") or "")
-        errors = [str(item) for item in (run.get("artifact_errors") or []) if str(item)]
-        worker_alive = bool(payload.get("worker_alive"))
-        delivered = str(payload.get("reason") or "") == "report_delivered"
-        terminal = control_plane._run_is_terminal(run) and not worker_alive
-        succeeded = (
-            state in SUCCESS_STATES
-            and run.get("artifact_ok") is not False
-            and not errors
-        )
-        if terminal and succeeded:
-            return int(run.get("exit_code") or 0)
-        if delivered and not worker_alive:
-            exit_code = int(run.get("exit_code") or 0)
-            if run.get("artifact_ok") is False or errors:
-                return exit_code or 3
-            return exit_code
-        print(
-            "run_id="
-            f"{run_id} non-terminal completion disagreement "
-            f"reason={payload.get('reason')}",
-            file=sys.stderr,
-        )
-        return 3
+        code = _completion_exit_code(payload)
+        if code and not control_plane._run_is_terminal(run):
+            print(
+                f"run_id={run_id} non-terminal completion disagreement "
+                f"reason={payload.get('reason')}",
+                file=sys.stderr,
+            )
+        elif payload.get("worker_alive"):
+            print(
+                f"run_id={run_id} non-terminal completion disagreement", file=sys.stderr
+            )
+        return code
     print(
         f"run_id={run_id} completed without control-plane payload",
         file=sys.stderr,
@@ -214,17 +233,43 @@ def _print_completed(run_id: str, payload: dict[str, Any]) -> int:
     return 3
 
 
-def _await_run_forever(run_id: str, interval: float = 5.0) -> dict[str, Any]:
-    """Poll the control plane until a run completes, printing a heartbeat each poll."""
+def _completion_exit_code(payload: dict[str, Any]) -> int:
+    """Preserve worker failure codes and reject incomplete or invalid artifacts."""
+    run = payload.get("run") or {}
+    if not payload.get("completed") or payload.get("worker_alive"):
+        return 3
+    if not control_plane._run_is_terminal(run):
+        return 3
+    code = int(run.get("exit_code") or 0)
+    if code:
+        return code
+    if (
+        run.get("state") in SUCCESS_STATES
+        and run.get("artifact_ok") is not False
+        and not run.get("artifact_errors")
+    ):
+        return 0
+    return 3
+
+
+def _await_run_forever(
+    run_id: str, interval: float = 5.0, *, heartbeat: bool = True
+) -> dict[str, Any]:
+    """Join the canonical dispatcher monitor; re-arm only while the run exists."""
     while True:
         payload = control_plane.await_run(
             run_id,
             timeout_seconds=interval,
             interval_seconds=max(min(interval, 1.0), 0.1),
         )
-        if payload.get("completed"):
+        if (
+            payload.get("completed")
+            or not payload.get("worker_alive")
+            or payload.get("reason") == "hard_cap"
+        ):
             return payload
-        print(f"waiting run_id={run_id}", flush=True)
+        if heartbeat:
+            print(f"waiting run_id={run_id}", flush=True)
 
 
 def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
@@ -246,7 +291,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
             " ".join(args),
             skill=skill,
             mode="raw",
-            root=repo_root(),
+            root=invocation_root(),
             command=args,
             env=_env_for_run(run_id, skill_code),
             run_id=run_id,
@@ -256,7 +301,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
         return handle.wait()
     if not args or args[0] not in AGENTS:
         print(
-            f"Usage: vc-{skill} <claude|codex|agy|junie|grok> [--prompt <text>|--file <path>]",
+            f"Usage: vc-{skill} {AGENT_SELECTOR} [--prompt <text>|--file <path>]",
             file=sys.stderr,
         )
         return 2
@@ -272,7 +317,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
     if not _has_flag(rest, "--runtime"):
         command.extend(["--runtime", "headless"])
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         handle = Supervisor().spawn(
             agent,
@@ -309,13 +354,13 @@ def agents_main(argv: Sequence[str] | None = None) -> int:
 def followup_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted followup` (lifecycle stages live under `ship`).
     """CLI entry for `vibecrafted followup`."""
-    return supervised_skill_main("followup", argv)
+    return _single_stage_main("followup", argv)
 
 
 def implement_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted implement` / shell `vc-implement`.
     """CLI entry for `vibecrafted implement`."""
-    return supervised_skill_main("implement", argv)
+    return _single_stage_main("implement", argv)
 
 
 def _lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
@@ -331,19 +376,31 @@ def _lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
     return lifecycle_main(workflow_id, args)
 
 
+def _single_stage_main(skill: str, argv: Sequence[str] | None = None) -> int:
+    """Use the public launch parser for single-stage console aliases.
+
+    The supervised wrapper consumes sandbox flags and always awaits; direct
+    aliases must preserve the deck's provider controls, JSON and optional await.
+    Lifecycle orchestration remains a separate entrypoint.
+    """
+    from .cli import main
+
+    return main([skill, *(sys.argv[1:] if argv is None else argv)])
+
+
 def audit_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted audit` (lifecycle manifest `vc-audit`)."""
-    return _lifecycle_main("vc-audit", argv)
+    """CLI entry for `vc-audit` / `vibecrafted audit`."""
+    return _single_stage_main("audit", argv)
 
 
 def dou_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted dou` (lifecycle manifest `vc-dou`)."""
-    return _lifecycle_main("vc-dou", argv)
+    """CLI entry for `vc-dou` / `vibecrafted dou`."""
+    return _single_stage_main("dou", argv)
 
 
 def hydrate_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted hydrate` (lifecycle manifest `vc-hydrate`)."""
-    return _lifecycle_main("vc-hydrate", argv)
+    """CLI entry for `vc-hydrate` / `vibecrafted hydrate`."""
+    return _single_stage_main("hydrate", argv)
 
 
 def marbles_main(argv: Sequence[str] | None = None) -> int:
@@ -372,13 +429,13 @@ def polarize_main(argv: Sequence[str] | None = None) -> int:
 
 def prune_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted prune`."""
-    return supervised_skill_main("prune", argv)
+    return _single_stage_main("prune", argv)
 
 
 def review_main(argv: Sequence[str] | None = None) -> int:
     # One path with `vibecrafted review` (lifecycle stages live under `ship`).
     """CLI entry for `vibecrafted review`."""
-    return supervised_skill_main("review", argv)
+    return _single_stage_main("review", argv)
 
 
 def scaffold_main(argv: Sequence[str] | None = None) -> int:
@@ -387,42 +444,53 @@ def scaffold_main(argv: Sequence[str] | None = None) -> int:
     # delivery is the cli + dispatcher path. Use `vibecrafted ship` for staged
     # lifecycle orchestration, not a private second scaffold parser.
     """CLI entry for `vibecrafted scaffold`."""
-    return supervised_skill_main("scaffold", argv)
+    return _single_stage_main("scaffold", argv)
 
 
 def decorate_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted decorate`."""
-    return supervised_skill_main("decorate", argv)
+    return _single_stage_main("decorate", argv)
 
 
 def delegate_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted delegate`."""
-    return supervised_skill_main("delegate", argv)
+    return _single_stage_main("delegate", argv)
 
 
 def intents_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted intents`."""
-    return supervised_skill_main("intents", argv)
+    return _single_stage_main("intents", argv)
 
 
 def ownership_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted ownership`."""
-    return supervised_skill_main("ownership", argv)
+    return _single_stage_main("ownership", argv)
 
 
 def partner_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted partner`."""
-    return supervised_skill_main("partner", argv)
+    """CLI entry for `vc-partner`. Interactive skill; never a headless worker.
+
+    `vibecrafted partner <agent>` is the TTY launcher (init routing, seed
+    `/vc-partner`). This wrapper is the in-session skill: refuse without a TTY
+    and tell the caller to `vc-init` first, then trigger the skill there.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if _help_requested(args):
+        return _print_workflow_help("partner")
+    if not _stdio_is_interactive():
+        print(PARTNER_INTERACTIVE_ONLY, file=sys.stderr)
+        return 1
+    return subprocess.call([str(deck_path()), "partner", *args])
 
 
 def release_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted release` (lifecycle manifest `vc-release`)."""
-    return _lifecycle_main("vc-release", argv)
+    """CLI entry for `vc-release` / `vibecrafted release`."""
+    return _single_stage_main("release", argv)
 
 
 def workflow_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted workflow` (lifecycle manifest `vc-workflow`)."""
-    return _lifecycle_main("vc-workflow", argv)
+    """CLI entry for `vc-workflow` / `vibecrafted workflow`."""
+    return _single_stage_main("workflow", argv)
 
 
 def trust_main(argv: Sequence[str] | None = None) -> int:
@@ -446,7 +514,7 @@ def _prepare_research(args: Sequence[str], run_id: str) -> tuple[int, str]:
         command.extend(["--runtime", "headless"])
     proc = subprocess.run(
         command,
-        cwd=str(repo_root()),
+        cwd=str(invocation_root()),
         env=_env_for_run(run_id, "rsch"),
         text=True,
         stdout=subprocess.PIPE,
@@ -498,7 +566,7 @@ def research_main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         supervisor = Supervisor()
         handles = [
@@ -656,7 +724,7 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
-    parser.add_argument("--agent", choices=sorted(AGENTS))
+    parser.add_argument("--agent", choices=sorted(AGENTS | {"swarm"}))
     parser.add_argument("--reason", default="operator stop request")
     parser.add_argument("--grace-seconds", type=float, default=2.0)
     ns = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -694,6 +762,17 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
         reason=ns.reason,
         grace_seconds=ns.grace_seconds,
     )
+    child_codes = [_print_stop_result(child) for child in result.get("children", [])]
+    parent_code = _print_stop_result(result)
+    if result.get("cascade_complete") is False:
+        print(f"run_id={run_id} swarm stop incomplete", file=sys.stderr)
+        return 1
+    return int(bool(parent_code or any(child_codes)))
+
+
+def _print_stop_result(result: dict[str, Any]) -> int:
+    """Print the same receipt for every child and for its coordinator."""
+    run_id = str(result.get("run_id") or "")
     run = dict(result.get("run") or {})
     reason = str(result.get("reason") or "")
     if result.get("accepted"):

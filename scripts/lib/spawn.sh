@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # spawn.sh — Plan 06 model-parity enforcement for native subagent dispatch.
 #
-# Captures kronika 2026-04-10 axiom:
+# Captures doctrine 2026-04-10 axiom:
 #
 #   "Every native delegation must pass the parent's model tier. Mixed-tier
 #   dispatch (Opus parent -> Sonnet child) breaks the Anthropic prompt cache
@@ -26,7 +26,7 @@
 #       Returns 0 if child is at-or-above parent's tier (within the same
 #       family). Returns 1 with a one-line diagnostic on stderr otherwise.
 #       Cross-family pairings (e.g. opus parent, gpt-5.3 child) are treated
-#       as ALLOWED — the kronika axiom is about intra-family downgrade, and
+#       as ALLOWED — the parity axiom is about intra-family downgrade, and
 #       the operator explicitly chose a cross-family agent in vc-why-matrix.
 #
 #   spawn_require_parity <parent_model> <child_model>
@@ -202,7 +202,7 @@ spawn_check_parity() {
         return 0
     fi
 
-    echo "spawn_check_parity: downgrade rejected — parent='$parent_raw' (tier=$parent_tier) child='$child_raw' (tier=$child_tier); see kronika 2026-04-10 (AGENT MODEL PARITY)" >&2
+    echo "spawn_check_parity: downgrade rejected — parent='$parent_raw' (tier=$parent_tier) child='$child_raw' (tier=$child_tier); see doctrine 2026-04-10 (AGENT MODEL PARITY)" >&2
     return 1
 }
 
@@ -231,7 +231,7 @@ spawn_require_parity() {
 spawn_require_parity: BLOCKED.
 
 Native delegation from a higher tier to a lower tier within the same model
-family violates the AGENT MODEL PARITY axiom (kronika 2026-04-10):
+family violates the AGENT MODEL PARITY axiom (doctrine 2026-04-10):
 
   - Anthropic prompt cache is keyed per model. Mixed-tier dispatch breaks
     cache sharing — the subagent re-reads context uncached.

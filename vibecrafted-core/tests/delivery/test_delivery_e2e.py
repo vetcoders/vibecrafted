@@ -403,3 +403,11 @@ def test_completed_receipts_are_explicitly_unverified(tmp_path: Path) -> None:
     assert "- execution_state: exited" in text
     assert "- proof_state: undeclared" in text
     assert "- delivery_state: unverified" in text
+
+
+def test_quota_exhaustion_is_a_user_policy_interruption_not_provider_failure() -> None:
+    assert delivery_axes_for_receipt("quota_exhausted", {"exit_code": 75}) == {
+        "execution_state": "interrupted",
+        "proof_state": "undeclared",
+        "delivery_state": "unverified",
+    }

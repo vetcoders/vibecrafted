@@ -283,7 +283,7 @@ _vetcoders_research_help() {
   cat <<'HELP'
 ⚒  research
 ─────────────────────────────────────────
-Configurable triple-agent research swarm launcher.
+Configurable N-lane research swarm launcher (YAML lanes, including four).
 
   Usage:
     vc-research --prompt "Question to research"
@@ -312,11 +312,12 @@ One invocation is one full swarm. Positional agents override the YAML lane set f
 Agent picking policy (explicit, fail-closed):
   1. positional agents           highest priority, honored exactly as given
   2. VIBECRAFTED_RESEARCH_AGENTS env override
-  3. research.yaml lanes         ~/.vibecrafted/config/research.yaml
+  3. research.yaml lanes         ~/.vibecrafted/config/research.yaml (any N, including four; lane_count truncates)
   4. config.toml default_agents  [runtime.picking.research]
   5. builtin default             claude codex agy
 The resolved lanes and their source are always printed at launch.
-`uno|duo|trio <agents>` declare arity and must match the agent count exactly.
+`uno|duo|trio <agents>` declare exact positional arity and must match the agent count.
+Omitting those keywords uses the YAML roster as-is — help that says "trio only" is stale.
 Unknown tokens abort the launch — nothing is silently rerouted to config defaults.
 HELP
 }
@@ -325,7 +326,7 @@ _vetcoders_research() {
   local first_arg="${1:-}"
   local inherited_run_id inherited_run_lock
   local prompt root run_id run_lock runtime run_dir prompt_file layout_file summary_file
-  local session_name agent launcher cmd_file research_mode requested_research_agent lock_actor launch_label research_synthesizer
+  local session_name agent launcher cmd_file research_mode lock_actor launch_label research_synthesizer
   local -a research_agents launchers launcher_entries command_entries positional_research_agents contract_args
 
   for _arg in "$@"; do
@@ -338,7 +339,6 @@ _vetcoders_research() {
   done
 
   research_mode="swarm"
-  requested_research_agent=""
   positional_research_agents=()
   # Explicit arity keywords. They declare how many positional agents MUST
   # follow — the operator's selection is a contract, never a hint.
@@ -358,7 +358,7 @@ _vetcoders_research() {
         printf 'vc-research: gemini CLI is deprecated (dead upstream). Use agy (Google Antigravity CLI) instead.\n' >&2
         return 1
         ;;
-      claude|codex|agy|junie|grok)
+      claude|codex|agy|junie|grok|cursor|kimi|copilot)
         if [[ " ${positional_research_agents[*]:-} " == *" ${1} "* ]]; then
           printf 'vc-research: agent %s given twice.\n' "${1}" >&2
           return 1
@@ -378,15 +378,15 @@ _vetcoders_research() {
   # silently replaced once — never again.
   if [[ $# -gt 0 && "${1:0:1}" != "-" ]]; then
     printf 'vc-research: unknown agent or token %s.\n' "${1}" >&2
-    printf 'Supported agents: claude codex agy junie grok (gemini is deprecated - use agy).\n' >&2
+    printf 'Supported agents: claude codex agy junie grok cursor (gemini is deprecated - use agy).\n' >&2
     printf 'Usage: vc-research [uno|duo|trio] [agent ...] --prompt "..." | --file /path/to/plan.md\n' >&2
     return 1
   fi
   if (( expected_lane_count > 0 )) && (( ${#positional_research_agents[@]} != expected_lane_count )); then
     printf 'vc-research: %s expects exactly %d agent(s), got %d (%s).\n' \
-      "$([[ $expected_lane_count == 1 ]] && echo uno || { [[ $expected_lane_count == 2 ]] && echo duo || echo trio; })" \
+      "$(case $expected_lane_count in (1) echo uno ;; (2) echo duo ;; (*) echo trio ;; esac)" \
       "$expected_lane_count" "${#positional_research_agents[@]}" "${positional_research_agents[*]:-none}" >&2
-    printf 'Supported agents: claude codex agy junie grok (gemini is deprecated - use agy).\n' >&2
+    printf 'Supported agents: claude codex agy junie grok cursor (gemini is deprecated - use agy).\n' >&2
     return 1
   fi
   if (( ${#positional_research_agents[@]} > 3 )); then
@@ -394,7 +394,6 @@ _vetcoders_research() {
       "${#positional_research_agents[@]}" "${positional_research_agents[*]}" >&2
     return 1
   fi
-  requested_research_agent="${positional_research_agents[0]:-}"
 
   research_synthesizer=""
   contract_args=()
@@ -404,7 +403,7 @@ _vetcoders_research() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --synthesizer" >&2; return 1; }
         _vetcoders_has_agent "$1" || {
-          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok>.\n' >&2
+          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok|cursor|kimi|copilot>.\n' >&2
           return 1
         }
         research_synthesizer="$1"
@@ -476,7 +475,7 @@ _vetcoders_research() {
     while IFS= read -r agent; do
       case "$agent" in
         __source:*) research_agents_source="${agent#__source:}" ;;
-        claude|codex|agy|junie|grok) research_agents+=("$agent") ;;
+        claude|codex|agy|junie|grok|cursor|kimi|copilot) research_agents+=("$agent") ;;
         gemini)
           printf 'vc-research: config selects gemini, but gemini CLI is deprecated (dead upstream).\n' >&2
           printf 'Fix the picking config to use agy (Google Antigravity CLI) - refusing to silently shrink the swarm.\n' >&2
@@ -535,22 +534,14 @@ _vetcoders_research() {
     done
     _vetcoders_write_research_layout "$layout_file" "${command_entries[@]}"
 
-    # Intended exports to env for the vc_frame child process — false-positive SC2031.
-    # shellcheck disable=SC2031
+    # Intended exports to env for the vc_frame child process.
     export VIBECRAFTED_RUN_ID="$run_id"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RUN_LOCK="$run_lock"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_SKILL_CODE="rsch"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_SKILL_NAME="research"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RESEARCH_MODE="1"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_STORE_DIR="$run_dir"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_STORE_ROOT="$root"
-    # shellcheck disable=SC2031
     export VIBECRAFTED_RESEARCH_RUN_DIR="$run_dir"
     local focus_flag=""
     if "$vc_frame_bin" action new-tab --help 2>&1 | command grep -q -- '--no-focus'; then

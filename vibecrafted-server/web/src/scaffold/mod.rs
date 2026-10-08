@@ -1,6 +1,9 @@
 #[cfg(feature = "ssr")]
 pub mod api {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Component, Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use axum::extract::{Form, Query};
     use axum::http::{StatusCode, header};
@@ -8,11 +11,13 @@ pub mod api {
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use control_core::{
-        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactStore, ScaffoldCheckpointPatch,
-        ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary, ScaffoldStatusPatch,
-        ScaffoldWorkspace, vibecrafted_home,
+        ScaffoldArtifact, ScaffoldArtifactPatch, ScaffoldArtifactRole, ScaffoldArtifactStore,
+        ScaffoldCheckpointPatch, ScaffoldDoctorReport, ScaffoldError, ScaffoldPlanSummary,
+        ScaffoldStatusPatch, ScaffoldWorkspace, vibecrafted_home,
     };
     use serde::Deserialize;
+
+    use crate::chrome::{ServerDocument, ServerSection, render_document};
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct ScaffoldQuery {
@@ -48,6 +53,15 @@ pub mod api {
     }
 
     #[derive(Debug, Clone, Deserialize)]
+    pub struct DispatchForm {
+        pub org: String,
+        pub repo: String,
+        pub day: String,
+        pub plan_id: String,
+        pub artifact_id: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
     pub struct SaveStatusForm {
         pub org: String,
         pub repo: String,
@@ -75,6 +89,7 @@ pub mod api {
             .route("/scaffold/", get(editor))
             .route("/scaffold/editor", get(editor))
             .route("/scaffold/library", get(library))
+            .route("/artifacts", get(library))
             .route("/api/scaffold/plans", get(plans))
             .route("/api/scaffold/artifacts", get(artifacts))
             .route("/api/scaffold/export", get(export))
@@ -82,6 +97,7 @@ pub mod api {
             .route("/api/scaffold/artifact", post(save_artifact))
             .route("/api/scaffold/checkpoint", post(save_checkpoint))
             .route("/api/scaffold/status", post(save_status))
+            .route("/api/scaffold/dispatch", post(dispatch_plan))
     }
 
     async fn editor(Query(mut query): Query<ScaffoldQuery>) -> impl IntoResponse {
@@ -325,6 +341,313 @@ pub mod api {
         }
     }
 
+    const DISPATCH_BOOTSTRAP: &str =
+        "from vibecrafted_core.cli import main; import sys; raise SystemExit(main(sys.argv[1:]))";
+
+    async fn dispatch_plan(headers: axum::http::HeaderMap, body: String) -> impl IntoResponse {
+        let is_json = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|content_type| content_type.contains("application/json"))
+            .unwrap_or(false);
+        let form: DispatchForm = if is_json {
+            match serde_json::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            match serde_urlencoded::from_str(&body) {
+                Ok(form) => form,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": error.to_string() })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let store = ScaffoldArtifactStore::new(vibecrafted_home());
+        let workspace = match store.workspace(&form.org, &form.repo, &form.day, Some(&form.plan_id))
+        {
+            Ok(workspace) => workspace,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let artifact = match workspace
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == form.artifact_id)
+        {
+            Some(artifact) => artifact.clone(),
+            None => {
+                return scaffold_error_response(ScaffoldError::ArtifactNotFound {
+                    id: form.artifact_id,
+                });
+            }
+        };
+        let file = match dispatch_artifact_file(&workspace, &artifact) {
+            Ok(file) => file,
+            Err(error) => return scaffold_error_response(error),
+        };
+        let python = match generation_python() {
+            Ok(python) => python,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        };
+
+        let doctor_python = python.clone();
+        let doctor_file = file.clone();
+        let doctor = tokio::time::timeout(
+            Duration::from_secs(45),
+            tokio::task::spawn_blocking(move || {
+                run_dispatch_door(&doctor_python, &doctor_file, true)
+            }),
+        )
+        .await;
+        let doctor_output = match doctor {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(error))) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor failed to start: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("vibecrafted dispatch doctor join failed: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": "vibecrafted dispatch doctor timed out"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        if !doctor_output.status.success() {
+            let detail = [
+                doctor_output.stderr.as_slice(),
+                doctor_output.stdout.as_slice(),
+            ]
+            .into_iter()
+            .find(|bytes| !bytes.is_empty())
+            .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "dispatch doctor refused the plan".to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": detail,
+                    "door": "vibecrafted dispatch",
+                })),
+            )
+                .into_response();
+        }
+
+        let spawn_python = python.clone();
+        let spawn_file = file.clone();
+        match tokio::task::spawn_blocking(move || spawn_dispatch_door(&spawn_python, &spawn_file))
+            .await
+        {
+            Ok(Ok(pid)) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "accepted",
+                    "door": "vibecrafted dispatch",
+                    "artifact_id": artifact.id,
+                    "path": file.display().to_string(),
+                    "pid": pid,
+                })),
+            )
+                .into_response(),
+            Ok(Err(error)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch failed to start: {error}")
+                })),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("vibecrafted dispatch join failed: {error}")
+                })),
+            )
+                .into_response(),
+        }
+    }
+
+    fn generation_python() -> Result<PathBuf, String> {
+        let from_env = std::env::var("VIBECRAFTED_PYTHON")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let from_root = std::env::var("VIBECRAFTED_RUNTIME_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|root| PathBuf::from(root).join("bin/python3"));
+        let path = from_env.or(from_root).ok_or_else(|| {
+            "generation Python is not available (set VIBECRAFTED_PYTHON or VIBECRAFTED_RUNTIME_ROOT)"
+                .to_string()
+        })?;
+        if !path.is_absolute() {
+            return Err("generation Python must be an absolute path".to_string());
+        }
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| format!("generation Python is not available: {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "generation Python is not a file: {}",
+                path.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(format!(
+                    "generation Python is not executable: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(path)
+    }
+
+    fn dispatch_artifact_file(
+        workspace: &ScaffoldWorkspace,
+        artifact: &ScaffoldArtifact,
+    ) -> Result<PathBuf, ScaffoldError> {
+        if artifact.role != ScaffoldArtifactRole::Dispatch {
+            return Err(ScaffoldError::ReadOnly {
+                message: format!(
+                    "artifact is not a dispatch file: {} ({})",
+                    artifact.id,
+                    artifact.role.as_str()
+                ),
+            });
+        }
+        let relative = Path::new(&artifact.relative_path);
+        if artifact.relative_path.is_empty()
+            || relative.is_absolute()
+            || artifact.relative_path.contains('\\')
+            || !artifact.relative_path.ends_with(".dispatch.toml")
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe or non-dispatch scaffold artifact path".into(),
+            });
+        }
+        let declared = PathBuf::from(&artifact.path);
+        if !declared.is_absolute() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe scaffold dispatch path".into(),
+            });
+        }
+        let plan_root = PathBuf::from(&workspace.plan_root)
+            .canonicalize()
+            .map_err(ScaffoldError::from)?;
+        if dispatch_path_has_symlink(&plan_root, &declared) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing symlinked scaffold dispatch path".into(),
+            });
+        }
+        let file = declared.canonicalize().map_err(ScaffoldError::from)?;
+        if !file.starts_with(&plan_root) {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing scaffold dispatch path outside the plan root".into(),
+            });
+        }
+        if !file.is_file() {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing missing scaffold dispatch file".into(),
+            });
+        }
+        Ok(file)
+    }
+
+    fn dispatch_path_has_symlink(root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(root) else {
+            return true;
+        };
+        let mut cursor = root.to_path_buf();
+        if std::fs::symlink_metadata(&cursor)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return true;
+        }
+        for component in relative.components() {
+            cursor.push(component.as_os_str());
+            if std::fs::symlink_metadata(&cursor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn dispatch_command(python: &Path, file: &Path, doctor: bool) -> Command {
+        let mut command = Command::new(python);
+        command.arg("-c").arg(DISPATCH_BOOTSTRAP).arg("dispatch");
+        if doctor {
+            command.arg("--doctor");
+        }
+        command.arg(file);
+        command.env_remove("PYTHONPATH");
+        command.stdin(Stdio::null());
+        command
+    }
+
+    fn run_dispatch_door(
+        python: &Path,
+        file: &Path,
+        doctor: bool,
+    ) -> std::io::Result<std::process::Output> {
+        dispatch_command(python, file, doctor).output()
+    }
+
+    fn spawn_dispatch_door(python: &Path, file: &Path) -> std::io::Result<u32> {
+        let mut command = dispatch_command(python, file, false);
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        let pid = child.id();
+        std::mem::forget(child);
+        Ok(pid)
+    }
+
     fn redirect_after_mutation(
         org: &str,
         repo: &str,
@@ -437,6 +760,94 @@ pub mod api {
             .collect()
     }
 
+    /// One catalog row after alias paths that share `(org, repo, day, plan_id)`
+    /// have been folded. The canonical display path wins; this does not walk
+    /// the filesystem — callers pass `catalog_detailed` plans.
+    pub(crate) struct ProjectShelfGroup {
+        pub org: String,
+        pub repo: String,
+        pub last_activity: String,
+        pub plans: Vec<ScaffoldPlanSummary>,
+    }
+
+    pub(crate) fn project_shelf(plans: &[ScaffoldPlanSummary]) -> Vec<ProjectShelfGroup> {
+        let mut groups: BTreeMap<(String, String), ProjectShelfGroup> = BTreeMap::new();
+        for plan in collapse_catalog(plans) {
+            let key = (plan.org.clone(), plan.repo.clone());
+            let group = groups.entry(key).or_insert_with(|| ProjectShelfGroup {
+                org: plan.org.clone(),
+                repo: plan.repo.clone(),
+                last_activity: plan.day.clone(),
+                plans: Vec::new(),
+            });
+            if plan.day > group.last_activity {
+                group.last_activity = plan.day.clone();
+            }
+            group.plans.push(plan);
+        }
+        let mut rows: Vec<_> = groups.into_values().collect();
+        rows.sort_by(|left, right| {
+            right
+                .last_activity
+                .cmp(&left.last_activity)
+                .then_with(|| left.org.cmp(&right.org))
+                .then_with(|| left.repo.cmp(&right.repo))
+        });
+        for group in &mut rows {
+            group.plans.sort_by(|left, right| {
+                right
+                    .day
+                    .cmp(&left.day)
+                    .then_with(|| left.plan_id.cmp(&right.plan_id))
+            });
+        }
+        rows
+    }
+
+    fn collapse_catalog(plans: &[ScaffoldPlanSummary]) -> Vec<ScaffoldPlanSummary> {
+        let mut best: BTreeMap<(String, String, String, String), ScaffoldPlanSummary> =
+            BTreeMap::new();
+        for plan in plans {
+            let key = (
+                plan.org.clone(),
+                plan.repo.clone(),
+                plan.day.clone(),
+                plan.plan_id.clone(),
+            );
+            match best.get(&key) {
+                Some(current)
+                    if canonical_plan_display(current) || !canonical_plan_display(plan) => {}
+                _ => {
+                    best.insert(key, plan.clone());
+                }
+            }
+        }
+        best.into_values().collect()
+    }
+
+    fn canonical_plan_display(plan: &ScaffoldPlanSummary) -> bool {
+        let root = plan.plan_root.replace('\\', "/");
+        let needle = format!(
+            "/artifacts/{}/{}/{}/plans/{}",
+            plan.org, plan.repo, plan.day, plan.plan_id
+        );
+        root.contains(&needle)
+    }
+
+    pub(crate) fn plan_display_title(plan_id: &str) -> String {
+        humanize_plan_id(plan_id)
+    }
+
+    pub(crate) fn scaffold_document_href(plan: &ScaffoldPlanSummary) -> String {
+        format!(
+            "/scaffold?org={}&repo={}&day={}&plan_id={}",
+            url_component(&plan.org),
+            url_component(&plan.repo),
+            url_component(&plan.day),
+            url_component(&plan.plan_id),
+        )
+    }
+
     fn scaffold_error_response(error: ScaffoldError) -> Response {
         let status = match error {
             ScaffoldError::Conflict { .. } => StatusCode::CONFLICT,
@@ -452,6 +863,22 @@ pub mod api {
             Json(serde_json::json!({"error": error.to_string()})),
         )
             .into_response()
+    }
+
+    /// Every scaffold HTML state mounts inside the shared operator chrome
+    /// (`chrome::ServerFrame`): one global sidebar, one navbar, one `<main>`.
+    /// The studio owns only its canvas, its stylesheet and its scripts, so it
+    /// can never replace the page or grow a second navigation vocabulary.
+    fn studio_document(title: &str, status: &str, canvas: &str, scripts: &str) -> String {
+        let head = format!("<style>{}</style>", editor_css());
+        render_document(&ServerDocument {
+            title,
+            active: ServerSection::Scaffold,
+            status,
+            head_html: &head,
+            body_html: canvas,
+            tail_html: scripts,
+        })
     }
 
     fn render_editor(workspace: &ScaffoldWorkspace) -> String {
@@ -478,36 +905,13 @@ pub mod api {
             .filter(|artifact| artifact.checkpoint.approved)
             .count();
         let total = workspace.artifacts.len();
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold review</title>
-<style>{}</style>
-</head>
-<body>
-<div class="studio-app-shell">
-  <header class="studio-navbar">
-    <a class="studio-navbar-brand" href="/" target="_top">
-      <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-      <span><strong>Vibecrafted server</strong><small>scaffold studio</small></span>
-    </a>
-    <nav class="studio-global-nav" aria-label="Server routes">
-      <a href="/" target="_top">Overview</a>
-      <a href="/runs" target="_top">Runs</a>
-      <a href="/lifecycle" target="_top">Lifecycle</a>
-      <a href="/activity" target="_top">Activity</a>
-      <a href="/structure" target="_top">Structure</a>
-      <a class="is-active" href="/scaffold" target="_top">Scaffold</a>
-    </nav>
-    <a class="studio-back-link" href="/scaffold/library">All plans</a>
-  </header>
-
-<main class="review-shell" data-first-artifact="{}">
+        let canvas = format!(
+            r#"<div class="review-shell" data-first-artifact="{}">
   <nav class="review-sidebar" aria-label="Scaffold artifacts">
-    <div class="brand">Artifact index</div>
+    <div class="review-sidebar-head">
+      <div class="brand">Artifact index</div>
+      <a class="review-library-link" href="/scaffold/library">All plans</a>
+    </div>
     <div class="summary">
       <strong>{}</strong>
       <span>{} / {} checkpointed</span>
@@ -552,20 +956,17 @@ pub mod api {
       <h3>Checkpoint</h3>
       <p class="inspector-hint">Switch artifact to load checkpoint controls.</p>
     </div>
+    <div class="inspector-block" id="inspector-dispatch-slot">
+      <h3>Dispatch</h3>
+      <p class="inspector-hint">Switch to a dispatch artifact to run the real <code>vibecrafted dispatch</code> door.</p>
+    </div>
     <div class="inspector-block">
       <h3>Endpoints</h3>
-      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}">artifact endpoint</a>
-      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}">change endpoint</a>
+      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">artifact endpoint ↗</a>
+      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">change endpoint ↗</a>
     </div>
   </aside>
-</main>
-</div>
-{}
-{}
-{}
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             escape_attr(first_id),
             escape_html(&workspace.repo),
             approved,
@@ -585,9 +986,18 @@ pub mod api {
             url_component(&workspace.repo),
             url_component(&workspace.day),
             url_component(&workspace.plan_id),
+        );
+        let scripts = format!(
+            "{}\n{}\n{}",
             save_on_close_guard(),
             render_mode_script(),
             panel_nav_script()
+        );
+        studio_document(
+            "scaffold review - vc-server",
+            &format!("{approved} / {total} checkpointed"),
+            &canvas,
+            &scripts,
         )
     }
 
@@ -625,19 +1035,17 @@ pub mod api {
                         .as_deref()
                         .unwrap_or("(unknown plan_id)");
                     format!(
-                        r#"<article class="plan-card plan-card-invalid" data-search="{}">
-  <div class="plan-card-top">
-    <span class="plan-number">!</span>
-    <span class="plan-access">invalid</span>
-  </div>
+                        r#"<article class="plan-card plan-card-invalid" data-search="{}" data-ppm="plan" data-copy-id="{}">
+  <span class="plan-number">!</span>
   <div class="plan-card-title">
-    <p>manifest unreadable</p>
     <h3>{}</h3>
+    <p class="plan-skip-reason">{}</p>
   </div>
-  <p class="plan-skip-reason">{}</p>
+  <span class="plan-access">invalid</span>
   <p class="plan-skip-path"><code>{}</code></p>
 </article>"#,
                         escape_attr(&format!("{} {}", id, skip.plan_root).to_ascii_lowercase()),
+                        escape_attr(id),
                         escape_html(&humanize_plan_id(id)),
                         escape_html(&skip.reason),
                         escape_html(&skip.plan_root),
@@ -648,86 +1056,50 @@ pub mod api {
             format!(
                 r#"<section class="plan-field plan-invalid-field" aria-labelledby="plan-invalid-title">
   <div class="plan-toolbar">
-    <div>
-      <p class="eyebrow">Not in index</p>
-      <h2 id="plan-invalid-title">Broken manifests ({})</h2>
-    </div>
+    <h2 id="plan-invalid-title">Broken manifests ({})</h2>
   </div>
-  <p class="library-lede">These packages sit under <code>…/plans/&lt;id&gt;/manifest.json</code> but failed to load. Fix the role enum / schema — illegal values like <code>"mission"</code> must be <code>"other"</code> for MISSION.md.</p>
+  <p class="plan-index-note">Failed to load under <code>…/plans/&lt;id&gt;/manifest.json</code>. Illegal role values like <code>"mission"</code> must be <code>"other"</code>.</p>
   <div class="plan-grid">{}</div>
 </section>"#,
                 skipped.len(),
                 rows
             )
         };
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold plans</title>
-<style>{}</style>
-</head>
-<body>
-<main class="plan-library">
-  <header class="library-header">
-    <nav class="library-nav" aria-label="Scaffold navigation">
-      <a class="studio-navbar-brand" href="/" target="_top">
-        <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-        <span><strong>Vibecrafted server</strong><small>scaffold library</small></span>
-      </a>
-      <div class="library-nav-links">
-        <a href="/" target="_top">Overview</a>
-        <a href="/runs" target="_top">Runs</a>
-        <a href="/lifecycle" target="_top">Lifecycle</a>
-        <a href="/activity" target="_top">Activity</a>
-        <a href="/structure" target="_top">Structure</a>
-        <span class="library-mode">Scaffold</span>
-      </div>
-    </nav>
-    <div class="library-intro">
-      <div>
-        <p class="eyebrow">Plan control room</p>
-        <h1>Choose the truth<br>you want to move.</h1>
-      </div>
-      <p class="library-lede">Every manifest-backed scaffold package available to this runtime. Search the field, open a plan, then edit and checkpoint its actual artifacts. Invalid packages no longer vanish — they surface below as broken manifests.</p>
+        let canvas = format!(
+            r#"<div class="plan-library">
+  <header class="plan-index-head">
+    <div class="plan-index-copy">
+      <p class="eyebrow">Plans / Scaffold</p>
+      <h1>Plans</h1>
     </div>
-    <dl class="library-stats">
+    <dl class="plan-index-stats">
       <div><dt>plans</dt><dd>{}</dd></div>
       <div><dt>repositories</dt><dd>{}</dd></div>
       <div><dt>reviewable</dt><dd>{}</dd></div>
       <div><dt>artifacts</dt><dd>{}</dd></div>
       <div><dt>invalid</dt><dd>{}</dd></div>
     </dl>
+    <label class="plan-search">
+      <span>Find a plan</span>
+      <input id="plan-search" type="search" placeholder="repo, date, plan…" autocomplete="off">
+      <kbd>/</kbd>
+    </label>
   </header>
 
   <section class="plan-field" aria-labelledby="plan-field-title">
     <div class="plan-toolbar">
-      <div>
-        <p class="eyebrow">Manifest index</p>
-        <h2 id="plan-field-title">Scaffold plans</h2>
-      </div>
-      <label class="plan-search">
-        <span>Find a plan</span>
-        <input id="plan-search" type="search" placeholder="repo, date, plan…" autocomplete="off">
-        <kbd>/</kbd>
-      </label>
+      <h2 id="plan-field-title">Manifest index</h2>
+      <p class="result-count" aria-live="polite"><span id="visible-count">{}</span> visible</p>
     </div>
-    <p class="result-count" aria-live="polite"><span id="visible-count">{}</span> plans visible</p>
     <div class="plan-grid" id="plan-grid">{}</div>
     <div class="plan-no-results" id="plan-no-results" hidden>
       <p class="eyebrow">No match</p>
-      <strong>Nothing in the manifest index answers that search.</strong>
+      <strong>No plan matches that search.</strong>
       <button type="button" id="clear-search">Clear search</button>
     </div>
   </section>
   {}
-</main>
-{}
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             plans.len(),
             repositories,
             reviewable_count,
@@ -736,6 +1108,15 @@ pub mod api {
             plans.len(),
             cards,
             invalid_band,
+        );
+        let status = match plans.len() {
+            1 => "1 plan".to_string(),
+            n => format!("{n} plans"),
+        };
+        studio_document(
+            "scaffold plans - vc-server",
+            &status,
+            &canvas,
             plan_picker_script(),
         )
     }
@@ -758,31 +1139,31 @@ pub mod api {
             ("", "open")
         };
         format!(
-            r#"<a class="plan-card{}" href="{}" data-search="{}">
-  <div class="plan-card-top">
-    <span class="plan-number">{:02}</span>
-    <span class="plan-access">{}</span>
-  </div>
+            r#"<a class="plan-card{}" href="{}" data-search="{}" data-ppm="plan" data-copy-id="{}" data-href="{}" data-focus-repo="{}">
+  <span class="plan-number">{:02}</span>
   <div class="plan-card-title">
-    <p>{} / {}</p>
     <h3>{}</h3>
+    <p>{} / {}</p>
   </div>
   <dl class="plan-card-meta">
     <div><dt>day</dt><dd>{}</dd></div>
     <div><dt>artifacts</dt><dd>{}</dd></div>
   </dl>
-  <span class="plan-open">Open plan <b aria-hidden="true">↗</b></span>
+  <span class="plan-access">{}</span>
 </a>"#,
             state_class,
             escape_attr(&href),
             escape_attr(&search.to_ascii_lowercase()),
+            escape_attr(&plan.plan_id),
+            escape_attr(&href),
+            escape_attr(&plan.repo),
             index + 1,
-            access,
+            escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.org),
             escape_html(&plan.repo),
-            escape_html(&humanize_plan_id(&plan.plan_id)),
             escape_html(&plan.day.replace('_', " · ")),
             plan.artifact_count,
+            access,
         )
     }
 
@@ -826,27 +1207,9 @@ pub mod api {
                 )
             });
         let issue_count = report.map_or(1, |report| report.errors.len().max(1));
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold plan blocked</title>
-<style>{}</style>
-</head>
-<body>
-<main class="blocked-plan-shell">
-  <nav class="library-nav">
-    <a class="studio-navbar-brand" href="/" target="_top">
-      <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-      <span><strong>Vibecrafted server</strong><small>blocked scaffold</small></span>
-    </a>
-    <div class="library-nav-links">
-      <a href="/" target="_top">Overview</a>
-      <a class="back-link" href="/scaffold/library">← Scaffold library</a>
-    </div>
-  </nav>
+        let canvas = format!(
+            r#"<div class="blocked-plan-shell">
+  <p class="blocked-plan-nav"><a class="back-link" href="/scaffold/library">← All plans</a></p>
   <header class="blocked-plan-head">
     <div>
       <p class="eyebrow">{}/{}</p>
@@ -856,9 +1219,9 @@ pub mod api {
   </header>
   <div class="blocked-plan-grid">
     <section class="blocked-explainer">
-      <p class="eyebrow">Runtime truth</p>
-      <h2>The plan exists.<br>The editor refuses to lie.</h2>
-      <p>The manifest is indexed, but its current artifact contract cannot be opened safely. Repair these findings and the same card will become reviewable automatically.</p>
+      <p class="eyebrow">Contract</p>
+      <h2>Cannot open this plan</h2>
+      <p>The manifest is indexed, but its artifact contract failed. Repair the findings below and the plan becomes reviewable.</p>
       <dl>
         <div><dt>day</dt><dd>{}</dd></div>
         <div><dt>artifacts</dt><dd>{}</dd></div>
@@ -873,10 +1236,7 @@ pub mod api {
       <ol>{}</ol>
     </section>
   </div>
-</main>
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             escape_html(&plan.org),
             escape_html(&plan.repo),
             escape_html(&humanize_plan_id(&plan.plan_id)),
@@ -886,6 +1246,12 @@ pub mod api {
             escape_html(&plan.plan_root),
             issue_count,
             issues,
+        );
+        studio_document(
+            "scaffold plan blocked - vc-server",
+            &format!("{issue_count} contract issues"),
+            &canvas,
+            "",
         )
     }
 
@@ -893,6 +1259,7 @@ pub mod api {
         plan_id
             .split(['-', '_'])
             .filter(|part| !part.is_empty())
+            .filter(|part| !part.eq_ignore_ascii_case("truth"))
             .map(|part| {
                 let mut chars = part.chars();
                 match chars.next() {
@@ -927,11 +1294,12 @@ pub mod api {
     var visible = 0;
     cards.forEach(function (card) {
       var match = !needle || normalize(card.dataset.search).indexOf(needle) !== -1;
-      card.hidden = !match;
+      card.setAttribute("data-search-hit", match ? "1" : "0");
       if (match) visible += 1;
     });
     count.textContent = String(visible);
     empty.hidden = visible !== 0;
+    document.documentElement.dispatchEvent(new Event("vc-focus-refresh"));
   }
 
   search.addEventListener("input", filterPlans);
@@ -954,15 +1322,32 @@ pub mod api {
 </script>"#
     }
 
+    /// Empty / unavailable state. It is a normal route page inside the shared
+    /// chrome (same header and panel vocabulary as the Leptos pages), so an
+    /// operator with no plans still has the sidebar, Home and the library.
     fn render_empty(message: &str) -> String {
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Scaffold review unavailable</title><style>{}</style></head>
-<body><main class="empty"><a class="back-link" href="/" target="_top">← Back to console</a><h1>Scaffold review</h1><p>{}</p></main></body>
-</html>"#,
-            editor_css(),
+        let canvas = format!(
+            r#"<div class="server-console-shell route-page-shell scaffold-empty">
+  <section class="run-detail-header route-page-header">
+    <div>
+      <p class="section-eyebrow">Plans / Scaffold</p>
+      <h1 class="run-detail-title">Scaffold review</h1>
+      <p class="route-page-description">{}</p>
+    </div>
+  </section>
+  <section class="control-panel control-panel-wide" aria-label="Scaffold empty state">
+    <div class="control-panel-head"><h2>No plan to open</h2><span>scaffold</span></div>
+    <p class="control-empty">Manifest-backed plans appear here as soon as a scaffold package lands under <code>artifacts/&lt;org&gt;/&lt;repo&gt;/&lt;day&gt;/plans/&lt;plan_id&gt;/manifest.json</code> in the runtime home.</p>
+    <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold/library">Open plan library</a><a class="server-console-link" href="/">Back to overview</a></p>
+  </section>
+</div>"#,
             escape_html(message)
+        );
+        studio_document(
+            "scaffold review - vc-server",
+            "no plan selected",
+            &canvas,
+            "",
         )
     }
 
@@ -1002,11 +1387,24 @@ pub mod api {
         };
         let active_class = if active { " is-active" } else { "" };
         let hidden_attr = if active { "" } else { " hidden" };
+        let dispatch_form = if artifact.role == ScaffoldArtifactRole::Dispatch {
+            format!(
+                r#"<form method="post" action="/api/scaffold/dispatch" class="dispatch-form">
+    {}
+    <p class="inspector-hint">Runs the real <code>vibecrafted dispatch</code> door after doctor. Closing this studio does not stop workers.</p>
+    <button type="submit">Dispatch</button>
+    <p class="dispatch-status inspector-meta" aria-live="polite"></p>
+  </form>"#,
+                hidden_context(workspace, artifact)
+            )
+        } else {
+            String::new()
+        };
         // Default view is formatted rich markdown. "Edit" opens the mono
         // source textarea; "Save" persists (if dirty) and returns to rich.
         // Only the active panel is visible (studio shell — one document).
         format!(
-            r#"<article class="artifact-panel{}" id="{}" data-render-mode="rich"{} aria-hidden="{}">
+            r#"<article class="artifact-panel{}" id="{}" data-role="{}" data-render-mode="rich"{} aria-hidden="{}">
   <header class="artifact-head">
     <div>
       <p class="eyebrow">{}</p>
@@ -1032,9 +1430,11 @@ pub mod api {
     <input name="note" value="{}" placeholder="checkpoint note">
     <button type="submit">Update checkpoint</button>
   </form>
+  {}
 </article>"#,
             active_class,
             escape_attr(&artifact.id),
+            escape_attr(artifact.role.as_str()),
             hidden_attr,
             if active { "false" } else { "true" },
             artifact.role.as_str(),
@@ -1045,7 +1445,8 @@ pub mod api {
             escape_html(&artifact.content),
             hidden_context(workspace, artifact),
             checked,
-            escape_attr(&artifact.checkpoint.note)
+            escape_attr(&artifact.checkpoint.note),
+            dispatch_form
         )
     }
 
@@ -1136,7 +1537,7 @@ pub mod api {
   // same rolling-state affordance as Codescribe tray Auto Format.
   var STATUS_CYCLE = [" ", "~", "?", "!", "x"];
   var STATUS_META = {
-    " ": { label: "todo", glyph: " " },
+    " ": { label: "todo", glyph: "\u00a0" },
     "~": { label: "running", glyph: "~" },
     "?": { label: "done?", glyph: "?" },
     "!": { label: "blocked", glyph: "!" },
@@ -1807,6 +2208,54 @@ pub mod api {
       }
     }
 
+    var dispatchSlot = document.getElementById("inspector-dispatch-slot");
+    if (dispatchSlot) {
+      var parkedDispatch = dispatchSlot.querySelector("form.dispatch-form");
+      if (parkedDispatch && parkedDispatch.dataset.homePanel) {
+        var dispatchHome = document.getElementById(parkedDispatch.dataset.homePanel);
+        if (dispatchHome) dispatchHome.appendChild(parkedDispatch);
+      }
+      dispatchSlot.innerHTML = "<h3>Dispatch</h3>";
+      var dispatchForm = panel.querySelector("form.dispatch-form");
+      if (dispatchForm) {
+        dispatchForm.dataset.homePanel = panel.id;
+        dispatchSlot.appendChild(dispatchForm);
+        if (dispatchForm.dataset.dispatchBound !== "1") {
+          dispatchForm.dataset.dispatchBound = "1";
+          dispatchForm.addEventListener("submit", function (ev) {
+            ev.preventDefault();
+            var statusEl = dispatchForm.querySelector(".dispatch-status");
+            var payload = {};
+            Array.prototype.slice.call(dispatchForm.querySelectorAll("input[name]")).forEach(function (input) {
+              payload[input.name] = input.value;
+            });
+            if (statusEl) statusEl.textContent = "Doctoring…";
+            fetch("/api/scaffold/dispatch", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              credentials: "same-origin",
+              body: JSON.stringify(payload)
+            }).then(function (res) {
+              return res.json().then(function (body) { return { res: res, body: body }; });
+            }).then(function (pair) {
+              if (!statusEl) return;
+              if (pair.res.status === 202) {
+                statusEl.textContent = "Accepted. Workers keep running if you close this tab. Watch the tracker.";
+              } else {
+                statusEl.textContent = (pair.body && pair.body.error)
+                  ? pair.body.error
+                  : ("Dispatch refused (" + pair.res.status + ")");
+              }
+            }).catch(function (err) {
+              if (statusEl) statusEl.textContent = "Dispatch unavailable: " + err.message;
+            });
+          });
+        }
+      } else {
+        dispatchSlot.insertAdjacentHTML("beforeend", '<p class="inspector-hint">This artifact is not a dispatch file. Open the dispatch artifact to run <code>vibecrafted dispatch</code>.</p>');
+      }
+    }
+
     bindStats(panel);
     updateStats(panel);
 
@@ -1884,70 +2333,75 @@ pub mod api {
 
     fn editor_css() -> &'static str {
         r#"
-:root{color-scheme:dark;--bg:#0a0a0b;--panel:#121214;--panel-lift:#1a1a1e;--line:#27272a;--text:#f4f4f5;--muted:#a1a1aa;--accent:#d4d4d8;--teal:#d4d4d8;--amber:#d4d4d8;--warn:#fbbf24;--bad:#f87171}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
-a{color:inherit}
-/* Studio editor locks the viewport; plan library / blocked pages still scroll. */
-body:has(.review-shell){height:100vh;overflow:hidden}
-.plan-library{min-height:100vh;background:radial-gradient(circle at 83% 7%,rgba(77,155,142,.13),transparent 31rem),var(--bg)}
-.library-header{padding:26px clamp(24px,5vw,76px) 54px;border-bottom:1px solid var(--line)}
-.library-nav{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:clamp(64px,9vw,130px)}
-.library-nav .brand{text-decoration:none}.library-mode{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.14em}
-.library-intro{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:clamp(28px,6vw,90px);align-items:end}
-.library-intro h1{max-width:850px;margin:12px 0 0;font:400 clamp(48px,7vw,102px)/.89 Georgia,'Times New Roman',serif;letter-spacing:-.055em}
-.library-lede{max-width:540px;margin:0 0 8px;color:var(--muted);font-size:clamp(15px,1.5vw,19px);line-height:1.55}
-.library-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));max-width:920px;margin:54px 0 0;border-top:1px solid var(--line)}
-.plan-card-invalid{border-color:rgba(255,209,102,.35);background:linear-gradient(145deg,#1b1914,#111415);cursor:default}
-.plan-card-invalid:hover{transform:none;border-color:rgba(255,209,102,.45)}
-.plan-skip-reason{margin:0;color:var(--warn);font-size:13px;line-height:1.45}
-.plan-skip-path{margin:8px 0 0;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+/* The studio palette is a projection of the shared chrome tokens (tokens.css),
+ * so every scaffold state follows the navbar theme toggle. Element selectors
+ * are scoped with :where() (zero specificity) so they never leak into the
+ * frame's navbar or sidebar. */
+.server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--amber);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
+:where(.server-route-document) *{box-sizing:border-box}
+:where(.server-route-document) a{color:inherit;cursor:default}
+.plan-library{min-height:100%;height:100%;background:var(--bg);display:flex;flex-direction:column}
+.plan-index-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.plan-index-copy{min-width:0}
+.plan-index-copy h1{margin:3px 0 0;font:650 var(--deck-title)/1.2 var(--font-body);letter-spacing:-.02em}
+.plan-index-stats{display:flex;flex-wrap:wrap;gap:4px 20px;margin:0 0 2px;flex:1 1 auto}
+.plan-index-stats div{display:grid;gap:1px;min-width:4.5rem}
+.plan-index-stats dt,.plan-card-meta dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.plan-index-stats dd{margin:0;color:var(--text);font:13px/1.2 var(--font-mono)}
+.plan-index-note{margin:0 16px 8px;color:var(--muted);font-size:12px;line-height:1.45;max-width:72ch}
+.plan-card-invalid{cursor:default;grid-template-columns:2.25rem minmax(0,1fr) auto}
+.plan-card-invalid:hover{transform:none;background:var(--panel-lift)}
+.plan-skip-reason{margin:2px 0 0;color:var(--warn);font:12px/1.4 var(--font-body);text-transform:none;letter-spacing:0}
+.plan-skip-path{margin:0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere;grid-column:2 / -1}
 .plan-invalid-field{padding-top:8px;border-top:1px solid var(--line)}
-.library-stats div{padding:14px 24px 0 0}.library-stats dt,.plan-card-meta dt{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.library-stats dd{margin:2px 0 0;color:var(--amber);font:28px ui-monospace,SFMono-Regular,Menlo,monospace}
-.plan-field{padding:42px clamp(24px,5vw,76px) 80px}
-.plan-toolbar{display:flex;align-items:end;justify-content:space-between;gap:30px}.plan-toolbar h2{margin:5px 0 0;font:400 34px/1.05 Georgia,'Times New Roman',serif}
-.plan-search{position:relative;display:grid;gap:7px;width:min(100%,390px);color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.plan-search input{width:100%;border:0;border-bottom:1px solid var(--line);outline:0;background:transparent;color:var(--text);padding:8px 34px 10px 0;font:15px Inter,ui-sans-serif,system-ui,sans-serif;text-transform:none;letter-spacing:0}
-.plan-search input:focus{border-color:var(--teal)}.plan-search kbd{position:absolute;right:0;bottom:10px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
-.result-count{margin:32px 0 14px;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
-.plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}
-.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--panel),#111415);text-decoration:none;transition:transform .18s ease,border-color .18s ease,background .18s ease}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift);outline:none}
-.plan-card-blocked{border-color:rgba(255,138,138,.28);background:linear-gradient(145deg,#1b1617,#111415)}.plan-card-blocked .plan-access{border-color:rgba(255,138,138,.35);color:var(--bad)}
-.plan-card[hidden]{display:none}.plan-card-top,.plan-card-meta,.plan-open{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.plan-number{color:var(--amber);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
-.plan-card-title p{margin:0 0 9px;color:var(--teal);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 Georgia,'Times New Roman',serif;letter-spacing:-.025em}
-.plan-card-meta{margin:0;padding-top:14px;border-top:1px solid var(--line)}.plan-card-meta div{display:grid;gap:3px}.plan-card-meta div:last-child{text-align:right}.plan-card-meta dd{margin:0;color:var(--text);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-.plan-open{color:var(--muted);font-weight:700}.plan-open b{color:var(--accent);font-size:18px}.plan-card:hover .plan-open{color:var(--text)}
-.plan-no-results{margin-top:12px;border:1px dashed var(--line);border-radius:9px;padding:50px 24px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:400 24px Georgia,'Times New Roman',serif}.plan-no-results button{justify-self:auto;margin:20px 0 0}
-.blocked-plan-shell{min-height:100vh;padding:26px clamp(24px,5vw,76px) 80px;background:radial-gradient(circle at 85% 5%,rgba(255,138,138,.08),transparent 32rem),var(--bg)}.blocked-plan-shell .library-nav{margin-bottom:clamp(60px,8vw,110px)}.back-link{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
-.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:400 clamp(44px,6.5vw,88px)/.92 Georgia,'Times New Roman',serif;letter-spacing:-.045em}.blocked-pill{flex:0 0 auto;border:1px solid rgba(255,138,138,.35);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
-.blocked-plan-grid{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.28fr);gap:clamp(36px,7vw,110px);padding-top:42px}.blocked-explainer h2{margin:8px 0 18px;font:400 clamp(31px,4vw,52px)/.98 Georgia,'Times New Roman',serif}.blocked-explainer>p:not(.eyebrow){max-width:520px;color:var(--muted);font-size:16px;line-height:1.6}.blocked-explainer dl{display:grid;gap:12px;margin:36px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:16px;padding-top:10px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-.blocked-findings{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:17px 20px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}.blocked-findings li code{color:var(--teal);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
+.plan-field{padding:0 0 40px;width:100%;margin:0}
+.plan-toolbar{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:10px 16px 0}
+.plan-toolbar h2{margin:0;font:650 12px/1.2 var(--font-body);letter-spacing:.02em}
+.plan-search{position:relative;display:grid;gap:4px;width:min(100%,280px);color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.plan-search input{width:100%;border:1px solid var(--line);border-radius:var(--radius-surface);background:var(--panel-lift);color:var(--text);padding:7px 28px 7px 10px;font:13px var(--font-body);text-transform:none;letter-spacing:0}
+.plan-search input:focus{border-color:var(--accent)}.plan-search kbd{position:absolute;right:8px;bottom:7px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--muted);font:10px var(--font-mono)}
+.result-count{margin:0;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.plan-grid{display:flex;flex-direction:column;gap:0;margin:8px 0 0;border-top:1px solid var(--line)}
+.plan-card{min-height:0;display:grid;grid-template-columns:2.25rem minmax(0,1.6fr) 7rem 5.25rem auto;align-items:center;gap:8px 14px;padding:9px 16px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;text-decoration:none;transition:background var(--motion-base) var(--ease-ui),border-color var(--motion-base) var(--ease-ui)}
+.plan-card:hover,.plan-card:focus-visible{transform:none;border-color:var(--line);background:var(--panel-lift)}
+.plan-card-blocked{background:transparent}.plan-card-blocked .plan-access{border-color:color-mix(in srgb,var(--status-danger) 45%,transparent);color:var(--bad)}
+.plan-card[hidden]{display:none}
+.plan-number{color:var(--muted);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:var(--radius-surface);padding:3px 7px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em;justify-self:end}
+.plan-card-title{min-width:0}.plan-card-title p{margin:2px 0 0;color:var(--muted);font:11px var(--font-mono)}.plan-card-title h3{max-width:none;margin:0;font:600 14px/1.25 var(--font-body);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-card-meta{display:contents;margin:0;padding:0;border:0}.plan-card-meta div{display:grid;gap:1px}.plan-card-meta dd{margin:0;color:var(--text);font:12px var(--font-mono)}
+.plan-no-results{margin:12px 16px;border:1px dashed var(--line);border-radius:var(--radius-surface);padding:28px 16px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:600 14px var(--font-body)}.plan-library .plan-no-results button{justify-self:auto;margin:16px auto 0}
+.blocked-plan-shell{min-height:100%;padding:16px 20px 40px;background:var(--bg)}.blocked-plan-nav{margin:0 0 12px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
+.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:16px;padding-bottom:12px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:none;margin:4px 0 0;font:650 var(--deck-title)/1.25 var(--font-body);letter-spacing:-.02em}.blocked-pill{flex:0 0 auto;border:var(--stroke-width) solid color-mix(in srgb,var(--status-danger) 45%,transparent);border-radius:var(--radius-surface);padding:4px 8px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.blocked-plan-grid{display:grid;grid-template-columns:minmax(240px,.7fr) minmax(0,1.3fr);gap:20px;padding-top:16px}.blocked-explainer h2{margin:4px 0 10px;font:650 var(--deck-title)/1.25 var(--font-body)}.blocked-explainer>p:not(.eyebrow){max-width:52ch;color:var(--muted);font-size:13px;line-height:1.5}.blocked-explainer dl{display:grid;gap:8px;margin:16px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:12px;padding-top:8px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px var(--font-mono)}
+.blocked-findings{border:1px solid var(--line);border-radius:var(--radius-surface);background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px var(--font-mono)}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:12px 14px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px var(--font-mono);text-transform:uppercase}.blocked-findings li code{color:var(--accent);font:11px var(--font-mono)}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
 /* --- Scaffold studio shell (GlyphPulse shape: nav | canvas | inspector + stats) --- */
-.review-shell{display:grid;grid-template-columns:280px minmax(0,1fr) 300px;height:100vh;overflow:hidden;background:var(--bg)}
-.review-sidebar{border-right:1px solid var(--line);padding:18px 14px;height:100vh;display:flex;flex-direction:column;gap:14px;background:#101314;min-height:0;overflow:hidden}
-.brand{font:700 12px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+.review-shell{display:grid;grid-template-columns:280px minmax(0,1fr) 300px;height:100%;overflow:hidden;background:var(--bg)}
+.review-sidebar{border-right:1px solid var(--line);padding:18px 14px;height:100%;display:flex;flex-direction:column;gap:14px;background:var(--panel);min-height:0;overflow:hidden}
+.brand{font:700 12px/1.1 var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+/* Plan-level navigation stays inside the studio canvas; global routes live in the frame sidebar. */
+.review-sidebar-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.review-library-link{display:inline-flex;align-items:center;min-height:26px;border:1px solid var(--line);border-radius:999px;padding:0 10px;color:var(--muted);font:550 11px/1 var(--font-body);text-decoration:none;white-space:nowrap}
+.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text)}
 .summary{display:grid;gap:3px;color:var(--muted);flex:0 0 auto}.summary strong{color:var(--text);font-size:16px}
 .tabs{display:flex;flex-direction:column;gap:6px;overflow:auto;padding-right:4px;min-height:0;flex:1 1 auto}
-.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#171b1d}
-.tab:hover,.tab:focus{border-color:var(--accent);outline:none}
-.tab.is-active{border-color:var(--teal);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--accent)}
-.tab small{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.tab-done{border-color:#4d7041}
+.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:0;border-bottom:1px solid var(--line);border-radius:0;padding:8px 4px;background:transparent}
+.tab:hover,.tab:focus{color:var(--text)}
+.tab.is-active{border-color:var(--line);background:transparent;box-shadow:inset 2px 0 0 var(--accent)}
+.tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
 .tab-done.is-active{border-color:var(--accent)}
-.api-link{display:block;color:var(--accent);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;text-decoration:none;margin:6px 0}
+.api-link{display:block;color:var(--accent);font:12px var(--font-mono);text-decoration:none;margin:6px 0}
 .api-link:hover{text-decoration:underline}
 /* Center column: topbar + one document + statusbar */
-.review-workspace{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0;height:100vh;overflow:hidden;border-right:1px solid var(--line)}
-.review-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:#101314;min-height:52px;flex:0 0 auto}
+.review-workspace{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0;height:100%;overflow:hidden;border-right:1px solid var(--line)}
+.review-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);min-height:52px;flex:0 0 auto}
 .review-topbar-id{display:grid;gap:2px;min-width:0}
-.review-topbar-id .mono-cap{color:var(--teal);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.review-topbar-id strong{font:600 15px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.review-topbar-id .mono-cap{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.review-topbar-id strong{font:600 15px/1.2 var(--font-body);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-id .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .review-main{position:relative;min-height:0;overflow:hidden;padding:0;display:block;background:var(--bg)}
 .review-main>.status{position:absolute;z-index:5;left:16px;right:16px;top:12px;margin:0}
-.status{display:none;border:1px solid #4d7041;background:#162114;padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:#2b1717}
+.status{display:none;border:1px solid color-mix(in srgb,var(--status-success) 45%,transparent);background:var(--panel);color:var(--text);padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:var(--panel)}
 /* One active document only — never stack every artifact */
 /* Rows: editor-form fills, trailing forms (pre-JS checkpoint) auto. The
  * .artifact-head is permanently display:none (chrome lives in the topbar) and
@@ -1966,168 +2420,148 @@ body:has(.review-shell){height:100vh;overflow:hidden}
 .render-mode-btn,.checkpoint-state,.inspector-pill{
   display:inline-flex;align-items:center;justify-content:center;align-self:center;
   margin:0;border:1px solid var(--line);border-radius:999px;padding:5px 11px;
-  font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;
-  background:#171b1d;color:var(--muted);white-space:nowrap
+  font:12px/1.2 var(--font-mono);letter-spacing:.02em;
+  background:var(--panel-lift);color:var(--muted);white-space:nowrap
 }
-button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:#1b1f20}
-button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);outline:none;background:var(--panel-lift)}
-button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);color:var(--accent);background:rgba(184,239,125,.08)}
+button.render-mode-btn{cursor:default;font-weight:500;color:var(--text);background:var(--panel-lift)}
+button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);background:var(--panel-lift)}
+button.render-mode-btn[data-next="rich"]{border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .checkpoint-state{color:var(--warn)}.checkpoint-state:empty{display:none}
-.inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--accent);border-color:#4d7041}
-.eyebrow,.path{margin:0;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--status-success);border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
+.eyebrow,.path{margin:0;color:var(--muted);font:12px var(--font-mono)}
 .editor-form{display:grid;grid-template-rows:1fr auto;min-height:0}
 .editor-body{position:relative;min-height:0}
 .editor-form textarea.raw-pane{
   position:absolute;inset:0;box-sizing:border-box;width:100%;height:100%;min-height:0;
   resize:none;border:0;margin:0;outline:none;
-  background:#0f1213;color:var(--text);-webkit-text-fill-color:var(--text);caret-color:var(--accent);
-  padding:16px 18px;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:auto;white-space:pre-wrap
+  background:var(--panel);color:var(--text);-webkit-text-fill-color:var(--text);caret-color:var(--accent);
+  padding:16px 18px;font:13px/1.55 var(--font-mono);overflow:auto;white-space:pre-wrap
 }
-.editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 1px rgba(77,155,142,.35)}
+.editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 2px var(--focus-ring)}
 .rich-pane.md-body{
   position:absolute;inset:0;box-sizing:border-box;min-height:0;
   padding:22px clamp(18px,3vw,36px) 36px;border:0;
-  background:linear-gradient(180deg,#101314 0%,#0c0e0f 100%);color:var(--text);
-  font:14.5px/1.6 Inter,ui-sans-serif,system-ui,sans-serif;overflow:auto
+  background:var(--panel);color:var(--text);
+  font:14.5px/1.6 var(--font-body);overflow:auto
 }
 .rich-pane.md-body h1,.rich-pane.md-body h2,.rich-pane.md-body h3,.rich-pane.md-body h4{margin:1.25em 0 .5em;line-height:1.22;letter-spacing:-.02em;color:var(--text);font-weight:600}
 .rich-pane.md-body h1{font-size:1.65em;padding-bottom:.35em;border-bottom:1px solid var(--line)}
-.rich-pane.md-body h2{font-size:1.32em;padding-bottom:.28em;border-bottom:1px solid rgba(43,48,51,.85)}
+.rich-pane.md-body h2{font-size:1.32em;padding-bottom:.28em;border-bottom:var(--stroke-width) solid var(--line)}
 .rich-pane.md-body h3{font-size:1.12em}
 .rich-pane.md-body p{margin:.65em 0;max-width:78ch}
 .rich-pane.md-body ul.md-list,.rich-pane.md-body ol.md-list{margin:.55em 0;padding-left:1.35em}
 .rich-pane.md-body li{margin:.28em 0}
 .rich-pane.md-body li.md-task{list-style:none;margin-left:-.4em;display:flex;align-items:flex-start;gap:8px}
-.rich-pane.md-body blockquote{margin:.8em 0;padding:.2em 0 .2em 14px;border-left:3px solid rgba(77,155,142,.55);color:var(--muted)}
+.rich-pane.md-body blockquote{margin:.8em 0;padding:.2em 0 .2em 14px;border-left:3px solid color-mix(in srgb,var(--accent) 55%,transparent);color:var(--muted)}
 .rich-pane.md-body hr{border:0;border-top:1px solid var(--line);margin:1.2em 0}
-.rich-pane.md-body code{font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(184,239,125,.08);padding:.1em .35em;border-radius:4px}
-.rich-pane.md-body pre.md-code{margin:.85em 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#0a0c0d;overflow:auto}
+.rich-pane.md-body code{font:12.5px/1.45 var(--font-mono);color:var(--text);background:var(--panel-lift);padding:.1em .35em;border-radius:4px}
+.rich-pane.md-body pre.md-code{margin:.85em 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow:auto}
 .rich-pane.md-body pre.md-code code{background:transparent;padding:0;color:var(--text);font-size:12.5px;line-height:1.5;white-space:pre}
-.rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:#fff;font-weight:650}
+.rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:var(--text);font-weight:650}
 /* Frontmatter as meta card (Notion property table vibe) */
-.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(27,31,32,.85)}
+.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
 .md-fm-row{display:grid;grid-template-columns:minmax(96px,160px) minmax(0,1fr);gap:10px;align-items:baseline;padding:3px 0}
-.md-fm-key{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.06em}
-.md-fm-val{font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text);overflow-wrap:anywhere}
+.md-fm-key{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em}
+.md-fm-val{font:12.5px/1.45 var(--font-mono);color:var(--text);overflow-wrap:anywhere}
 /* GFM tables */
-.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#0f1213}
+.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
 .md-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
 .md-table th,.md-table td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.md-table th{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.06em;background:rgba(255,255,255,.02);position:sticky;top:0}
+.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:var(--bg);position:sticky;top:0}
 .md-table tr:last-child td{border-bottom:0}
-.md-table tr:hover td{background:rgba(255,255,255,.015)}
+.md-table tr:hover td{background:var(--btn-bg-hover)}
 /* Rolling status chips — Codescribe tray Auto Format affordance */
-button.md-status{display:inline-flex;align-items:center;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:#171b1d;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;vertical-align:middle;line-height:1.3;transition:border-color .12s ease,color .12s ease,background .12s ease}
-button.md-status:hover,button.md-status:focus-visible{border-color:var(--teal);color:var(--text);outline:none}
-button.md-status .md-status-glyph{font-weight:700;letter-spacing:.02em}
-button.md-status .md-status-label{opacity:.85;text-transform:lowercase}
-button.md-status.md-status-todo{border-color:rgba(169,177,180,.35);color:var(--muted)}
-button.md-status.md-status-run{border-color:rgba(216,166,64,.55);color:var(--amber);background:rgba(216,166,64,.08)}
-button.md-status.md-status-maybe{border-color:rgba(77,155,142,.5);color:var(--teal);background:rgba(77,155,142,.08)}
-button.md-status.md-status-blocked{border-color:rgba(255,138,138,.55);color:var(--bad);background:rgba(255,138,138,.08)}
-button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--accent);background:rgba(184,239,125,.08)}
-button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#22321f;color:var(--text);border-radius:7px;padding:8px 12px;font-weight:700;cursor:pointer}
+/* The chip is ONE atomic control. Under a narrow tracker column the flex items
+ * used to shrink below their content and the todo glyph broke across lines,
+ * rendering as a stray [ over a stray ]. nowrap + non-shrinking items keep every
+ * state on one line; the table wrap already owns the horizontal scroll, so a
+ * squeezed column scrolls visibly instead of hiding or mangling state. */
+button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:default;vertical-align:middle;line-height:1.3;white-space:nowrap;overflow-wrap:normal;word-break:normal;transition:border-color var(--motion-fast) var(--ease-ui),color var(--motion-fast) var(--ease-ui),background var(--motion-fast) var(--ease-ui)}
+button.md-status:hover,button.md-status:focus-visible{border-color:var(--line-strong);color:var(--text);outline:none}
+button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;font-weight:700;letter-spacing:.02em;font-variant-ligatures:none}
+button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;opacity:.85;text-transform:lowercase}
+/* State rides the glyph, never the label — the same split the native recovery
+ * card uses (colored symbol, ink title). Label text therefore stays readable on
+ * both themes, and state survives without relying on color alone. */
+button.md-status.md-status-todo{border-color:var(--line-strong)}
+button.md-status.md-status-todo .md-status-glyph{color:var(--muted)}
+button.md-status.md-status-run{border-color:color-mix(in srgb,var(--status-warning) 55%,transparent);background:color-mix(in srgb,var(--status-warning) 10%,transparent)}
+button.md-status.md-status-run .md-status-glyph{color:var(--status-warning)}
+button.md-status.md-status-maybe{border-color:color-mix(in srgb,var(--status-info) 50%,transparent);background:color-mix(in srgb,var(--status-info) 10%,transparent)}
+button.md-status.md-status-maybe .md-status-glyph{color:var(--status-info)}
+button.md-status.md-status-blocked{border-color:color-mix(in srgb,var(--status-danger) 55%,transparent);background:color-mix(in srgb,var(--status-danger) 10%,transparent)}
+button.md-status.md-status-blocked .md-status-glyph{color:var(--status-danger)}
+button.md-status.md-status-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 10%,transparent)}
+button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
+/* Native parity: CommandDeckMetrics thickens the stroke at increased contrast
+ * and CommandDeckTheme honours reduced motion; the web chip now matches. */
+@media (prefers-contrast: more){button.md-status{border-width:1.5px}}
+@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}
+:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);border-radius:var(--radius-surface);padding:8px 12px;font-weight:700;cursor:default}
 /* Save sits in the form's bottom auto-row (not floating in the black void). */
 .artifact-panel .save-artifact-btn{
   margin:0;padding:8px 14px;justify-self:start;align-self:center;
-  border-radius:7px;border:1px solid #5e7f47;background:#22321f;color:var(--text);font-weight:700
+  border-radius:var(--radius-surface);border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);font-weight:700
 }
 .artifact-panel.is-active .editor-form>.save-artifact-btn{margin:8px 16px 12px}
-.checkpoint-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
+.checkpoint-form,.dispatch-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
 .checkpoint-form label{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
-.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:#0f1213;color:var(--text);border-radius:7px;padding:8px;font:13px Inter,ui-sans-serif,system-ui,sans-serif}
-.checkpoint-form button{margin:0;width:100%;justify-self:stretch}
+.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:var(--radius-surface);padding:8px;font:13px var(--font-body)}
+.checkpoint-form button,.dispatch-form button{margin:0;width:100%;justify-self:stretch}
 /* Right inspector (tools + status) */
-.review-inspector{height:100vh;min-height:0;overflow:auto;padding:14px 14px 20px;background:#0f1213;display:flex;flex-direction:column;gap:14px}
-.inspector-head{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.inspector-block{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.inspector-block h3{margin:0;font:600 12px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);letter-spacing:.02em}
-.inspector-meta{margin:0;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.review-inspector{height:100%;min-height:0;overflow:auto;padding:14px 14px 20px;background:var(--panel);display:flex;flex-direction:column;gap:14px}
+.inspector-head{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.inspector-block{display:grid;gap:8px;padding:12px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
+.inspector-block h3{margin:0;font:600 12px/1.2 var(--font-body);color:var(--text);letter-spacing:.02em}
+.inspector-meta{margin:0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
 .inspector-hint{margin:0;color:var(--muted);font-size:12px;line-height:1.45}
-.mono-cap{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+.mono-cap{font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
 /* Bottom stats bar */
-.review-statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-top:1px solid var(--line);background:#101314;color:var(--muted);font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;flex:0 0 auto}
+.review-statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-top:1px solid var(--line);background:var(--panel);color:var(--muted);font:11px/1.3 var(--font-mono);flex:0 0 auto}
 .review-statusbar b{color:var(--text);font-weight:600}
-.review-statusbar .stat-plan{margin-left:auto;color:var(--teal)}
-.empty{max-width:720px;margin:12vh auto;border:1px solid var(--line);border-radius:8px;padding:24px;background:var(--panel)}
+.review-statusbar .stat-plan{margin-left:auto;color:var(--text)}
 @media(max-width:1100px){
   .review-shell{grid-template-columns:240px minmax(0,1fr) 260px}
 }
 @media(max-width:820px){
-  .library-intro,.blocked-plan-grid{grid-template-columns:1fr}
-  .library-nav{margin-bottom:64px}.library-stats{max-width:none}
-  .plan-toolbar{align-items:stretch;flex-direction:column}.plan-search{width:100%}
+  .plan-index-head{align-items:stretch;flex-direction:column}
+  .plan-search{width:100%}
+  .plan-card{grid-template-columns:2.25rem minmax(0,1fr) auto}
+  .plan-card-meta{display:flex;gap:16px;grid-column:2 / -1}
+  .blocked-plan-grid{grid-template-columns:1fr}
+  .plan-toolbar{align-items:stretch;flex-direction:column}
   .blocked-plan-head{align-items:start;flex-direction:column}
-  body:has(.review-shell){height:auto;overflow:auto}
-  .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100vh;overflow:visible}
+  .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100%;overflow:visible}
   .review-sidebar{position:relative;height:auto;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
   .review-workspace{height:auto;min-height:60vh;border-right:0}
   .review-inspector{height:auto;border-top:1px solid var(--line)}
   .artifact-panel.is-active{min-height:50vh}
   .review-statusbar .stat-plan{margin-left:0}
 }
-/* Shared vc-server chrome: the scaffold renderer is raw HTML, so it mirrors
- * the Leptos ServerFrame contract without importing a second routing system. */
-.studio-app-shell{display:grid;grid-template-rows:58px minmax(0,1fr);height:100vh;min-height:100vh;overflow:hidden;background:var(--bg)}
-.studio-navbar{position:relative;z-index:30;display:flex;align-items:center;justify-content:space-between;gap:18px;height:58px;padding:0 18px;border-bottom:1px solid var(--line);background:rgba(10,10,11,.94);backdrop-filter:blur(18px)}
-.studio-navbar-brand{display:inline-flex;align-items:center;gap:10px;min-width:0;color:var(--text);text-decoration:none}
-.studio-navbar-brand>span:last-child{display:grid;min-width:0;line-height:1.15}
-.studio-navbar-brand strong{font:650 13px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;white-space:nowrap}
-.studio-navbar-brand small{color:var(--muted);font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
-.studio-brand-mark{display:grid;place-items:center;flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:8px;background:var(--panel-lift);color:var(--muted);font:700 16px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
-.studio-global-nav,.library-nav-links{display:flex;align-items:center;gap:5px}
-.studio-global-nav a,.library-nav-links a,.library-nav-links span,.studio-back-link{min-height:32px;display:inline-flex;align-items:center;padding:0 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font:550 11px/1 Inter,ui-sans-serif,system-ui,sans-serif;text-decoration:none;white-space:nowrap}
-.studio-global-nav a:hover,.studio-global-nav a:focus-visible,.library-nav-links a:hover,.library-nav-links a:focus-visible,.studio-back-link:hover,.studio-back-link:focus-visible{border-color:var(--line);background:var(--panel-lift);color:var(--text);outline:none}
-.studio-global-nav a.is-active,.library-nav-links span{border-color:var(--line);background:var(--panel);color:var(--text)}
-.studio-back-link{border-color:var(--line);background:var(--panel);color:var(--text)}
+/* Zinc restyle layer (kept after the base rules so it wins). */
 .review-shell{height:100%;min-height:0}
 .review-sidebar,.review-workspace,.review-inspector{height:100%}
-.review-sidebar,.review-topbar,.review-statusbar{background:#0f0f11}
-.review-inspector{background:#0d0d0f}
-.tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:#18181b}
-.tab.is-active{border-color:#52525b;background:#202024;box-shadow:inset 2px 0 0 #d4d4d8}
+.review-sidebar,.review-topbar,.review-statusbar{background:var(--panel)}
+.review-inspector{background:var(--panel)}
+.tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:var(--panel-lift)}
+.tab.is-active{border-color:var(--line-strong);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--text)}
 .tab:hover,.tab:focus,.api-link{color:var(--text)}
-.plan-library{background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
-.library-header{padding:0 0 30px;border-bottom:1px solid var(--line)}
-.library-nav{position:sticky;top:0;z-index:20;height:58px;margin:0 0 30px;padding:0 clamp(18px,3vw,38px);border-bottom:1px solid var(--line);background:rgba(10,10,11,.94);backdrop-filter:blur(18px)}
-.library-intro,.library-stats{margin-left:auto;margin-right:auto;width:min(calc(100% - 48px),1152px)}
-.library-intro{grid-template-columns:minmax(0,1fr) minmax(280px,.72fr);gap:40px}
-.library-intro h1{max-width:760px;margin:9px 0 0;font:650 clamp(32px,4.4vw,54px)/.98 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:-.055em}
-.library-lede{font-size:14px;line-height:1.6}
-.library-stats{margin-top:30px;border-top:1px solid var(--line)}
-.library-stats div{padding-top:12px}.library-stats dd{color:var(--text);font-size:22px}
-.plan-field{width:min(100%,1200px);margin:0 auto;padding:28px 24px 68px}
-.plan-toolbar h2{font:650 26px/1.05 ui-monospace,SFMono-Regular,Menlo,monospace}
-.plan-card{min-height:230px;border-radius:16px;background:linear-gradient(145deg,var(--panel),#0f0f11);box-shadow:0 1px 0 rgba(255,255,255,.025)}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-2px);border-color:#52525b;background:var(--panel-lift)}
-.plan-card-title h3{font:600 22px/1.08 Inter,ui-sans-serif,system-ui,sans-serif}
-.plan-card-title p,.plan-number,.plan-open b{color:var(--text)}
-.blocked-plan-shell{padding:0 clamp(24px,5vw,76px) 80px;background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
-.blocked-plan-shell .library-nav{margin-inline:calc(clamp(24px,5vw,76px) * -1);margin-bottom:42px}
-.blocked-plan-head h1,.blocked-explainer h2{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.empty{border-radius:16px}
+.plan-library{height:100%;min-height:0;background:var(--bg)}
+.plan-card:hover,.plan-card:focus-visible{transform:none;border-color:var(--line);background:var(--panel-lift)}
 @media(max-width:820px){
-  .studio-app-shell{height:auto;min-height:100vh;overflow:visible}
-  .studio-navbar{height:auto;min-height:54px;padding:8px 12px}
-  .studio-global-nav{display:none}
-  .review-shell{height:auto;min-height:calc(100vh - 54px)}
+  .server-route-document{height:auto;min-height:100%}
+  .review-shell{height:auto;min-height:100%}
   .review-sidebar{height:auto;max-height:none}
   .tabs{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,72vw);overflow-x:auto;overflow-y:hidden;padding:0 0 5px}
   .review-workspace{min-height:64vh}
   .review-inspector{height:auto}
-  .library-intro{grid-template-columns:1fr}
-  .library-nav{margin-bottom:24px}
+  .plan-index-head{flex-direction:column}
 }
 @media(max-width:620px){
-  .studio-navbar-brand small{display:none}
-  .studio-back-link{padding-inline:8px;font-size:10px}
-  .library-nav-links a:not(.back-link){display:none}
-  .library-intro,.library-stats{width:min(calc(100% - 32px),1152px)}
-  .library-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .library-intro h1{font-size:32px}
-  .plan-grid{grid-template-columns:1fr}
+  .plan-index-stats{gap:8px 14px}
+  .plan-card{grid-template-columns:2.25rem minmax(0,1fr) auto}
 }
-@media(max-width:520px){.library-header,.plan-field{padding-left:18px;padding-right:18px}.library-stats dd{font-size:20px}}
 "#
     }
 
@@ -2345,12 +2779,184 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
                     || html.contains("border-radius:999px"),
                 "Edit control must share pill geometry with checkpoint-state"
             );
-            assert!(html.contains(r#"class="studio-navbar""#));
-            assert!(html.contains(r#"href="/" target="_top""#));
-            assert!(html.contains(r#"href="/scaffold/library""#));
+            // Plan-level "All plans" lives inside the studio canvas; global
+            // routes come from the shared frame, never from a studio navbar.
+            assert!(html.contains(r#"class="review-library-link" href="/scaffold/library""#));
             assert!(html.contains("All plans"));
-            assert!(html.contains(r#"href="/runs" target="_top""#));
             assert!(html.contains(r##""#artifact/" + encodeURIComponent(panel.id)"##));
+            assert_shared_server_frame(&html, "editor");
+        }
+
+        fn count(haystack: &str, needle: &str) -> usize {
+            haystack.matches(needle).count()
+        }
+
+        /// One shared canvas: every scaffold HTML state is a route page inside
+        /// `chrome::ServerFrame` — one navbar, one global sidebar, one `<main>`,
+        /// Plans active, Home reachable, no second chrome vocabulary.
+        fn assert_shared_server_frame(html: &str, state: &str) {
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "{state}: full document"
+            );
+            assert!(
+                html.contains("<title>scaffold "),
+                "{state}: route-owned title"
+            );
+            assert_eq!(
+                count(html, r#"class="server-navbar""#),
+                1,
+                "{state}: one navbar"
+            );
+            assert_eq!(
+                count(html, r#"class="server-sidebar""#),
+                1,
+                "{state}: one global sidebar"
+            );
+            assert_eq!(
+                count(html, r#"class="server-mobile-nav""#),
+                1,
+                "{state}: one mobile nav"
+            );
+            assert_eq!(
+                count(html, "<main"),
+                1,
+                "{state}: the frame owns the only <main>"
+            );
+            assert!(
+                html.contains(
+                    r#"<main class="server-route-main"><div class="server-route-document">"#
+                ),
+                "{state}: canvas mounts inside the frame main"
+            );
+            assert_eq!(
+                count(
+                    html,
+                    r#"href="/artifacts" class="server-nav-link is-active""#
+                ),
+                2,
+                "{state}: Artifacts active in sidebar and mobile nav"
+            );
+            assert!(
+                html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
+                "{state}: brand link is the browser Home"
+            );
+            assert!(
+                html.contains(r#"class="server-theme-toggle""#),
+                "{state}: theme toggle"
+            );
+            assert!(
+                html.contains("server-theme-toggle');"),
+                "{state}: theme control script"
+            );
+            assert!(
+                html.contains(".review-shell{display:grid;grid-template-columns:280px"),
+                "{state}: studio stylesheet is route-owned"
+            );
+            for dead in [
+                "studio-app-shell",
+                "studio-navbar",
+                "studio-global-nav",
+                "studio-back-link",
+                "library-nav",
+                "library-mode",
+                r#"target="_top""#,
+                "<body><main",
+            ] {
+                assert!(
+                    !html.contains(dead),
+                    "{state}: duplicate chrome vocabulary `{dead}`"
+                );
+            }
+        }
+
+        #[test]
+        fn every_scaffold_html_state_shares_the_server_frame() {
+            let plan = ScaffoldPlanSummary {
+                plan_id: "runtime-truth-v1".into(),
+                org: "vetcoders".into(),
+                repo: "vibecrafted".into(),
+                day: "2026_0727".into(),
+                plan_root: "/tmp/runtime-truth-v1".into(),
+                artifact_count: 12,
+                legacy_read_only: false,
+            };
+
+            let editor = render_editor(&fixture());
+            assert_shared_server_frame(&editor, "editor");
+            assert!(editor.contains("1 / 1 checkpointed") || editor.contains("0 / 1 checkpointed"));
+
+            let library = render_plan_picker(
+                &[ScaffoldPlanCard {
+                    plan: plan.clone(),
+                    reviewable: true,
+                }],
+                &[],
+            );
+            assert_shared_server_frame(&library, "library");
+            assert!(library.contains(r#"class="plan-library""#));
+            assert!(library.contains(">1 plan</span>"));
+
+            let empty = render_plan_picker(&[], &[]);
+            assert_shared_server_frame(&empty, "empty");
+            assert!(empty.contains("No manifest-backed scaffold plans are available."));
+            assert!(
+                empty.contains(r#"class="server-console-shell route-page-shell scaffold-empty""#)
+            );
+            assert!(empty.contains(r#"href="/scaffold/library""#));
+
+            let blocked = render_plan_blocked(&plan, None, "invalid manifest");
+            assert_shared_server_frame(&blocked, "blocked");
+            assert!(blocked.contains("Cannot open this plan"));
+            assert!(blocked.contains(r#"class="back-link" href="/scaffold/library""#));
+
+            let unavailable = render_empty("Scaffold artifacts unavailable: <boom>");
+            assert_shared_server_frame(&unavailable, "unavailable");
+            assert!(unavailable.contains("Scaffold artifacts unavailable: &lt;boom&gt;"));
+            assert!(!unavailable.contains("<boom>"));
+        }
+
+        #[test]
+        fn editor_keeps_artifact_index_inside_the_canvas_with_one_active_document() {
+            let mut workspace = fixture();
+            let mut second = workspace.artifacts[0].clone();
+            second.id = "tracker".into();
+            second.title = "Tracker".into();
+            second.role = ScaffoldArtifactRole::Tracker;
+            workspace.artifacts.push(second);
+            let html = render_editor(&workspace);
+
+            // Global sidebar closes before the studio canvas opens, and the
+            // artifact tabs sit inside that canvas — never in the global nav.
+            let sidebar_start = html
+                .find(r#"class="server-sidebar""#)
+                .expect("global sidebar");
+            let sidebar_end =
+                html[sidebar_start..].find("</aside>").expect("sidebar end") + sidebar_start;
+            let canvas = html
+                .find(r#"class="server-route-document""#)
+                .expect("canvas");
+            let tabs = html
+                .find(r#"class="tabs" role="tablist""#)
+                .expect("artifact tabs");
+            assert!(
+                sidebar_end < canvas && canvas < tabs,
+                "artifact index must live inside the canvas"
+            );
+            let sidebar = &html[sidebar_start..sidebar_end];
+            assert!(!sidebar.contains("Master Dispatch") && !sidebar.contains("Tracker"));
+            assert!(!sidebar.contains("Artifact index"));
+
+            // One active document; the second panel stays hidden.
+            assert_eq!(count(&html, r#"class="artifact-panel is-active""#), 1);
+            assert_eq!(count(&html, r#"class="artifact-panel" id="tracker""#), 1);
+            assert_eq!(count(&html, r#"class="review-inspector""#), 1);
+            assert_eq!(count(&html, r#"class="review-statusbar""#), 1);
+            // Machine endpoints open beside the studio (native host reference tab).
+            assert!(
+                html.contains(r#"target="_blank" rel="noopener noreferrer">artifact endpoint"#)
+            );
+            assert!(html.contains(r#"target="_blank" rel="noopener noreferrer">change endpoint"#));
         }
 
         #[test]
@@ -2400,6 +3006,382 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
             );
         }
 
+        /// The supplied regression: in a narrow tracker column the `todo` chip
+        /// rendered `[` and `]` on separate lines. The glyph was the only one
+        /// carrying an internal space, and nothing stopped the flex items from
+        /// shrinking below their content.
+        #[test]
+        fn status_chip_stays_one_unbreakable_control_in_a_narrow_column() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains("white-space:nowrap;overflow-wrap:normal;word-break:normal"),
+                "the chip itself must never wrap, whatever the column width"
+            );
+            assert!(
+                html.contains(
+                    "button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;"
+                ),
+                "the chip must not shrink below its content inside a table cell"
+            );
+            assert!(
+                html.contains("button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;"),
+                "the bracket glyph must be non-shrinking and keep its literal spacing"
+            );
+            assert!(
+                html.contains(
+                    "button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;"
+                ),
+                "the state label must not wrap away from its glyph"
+            );
+            // Belt and braces: even with the stylesheet stripped, the todo glyph
+            // no longer offers a break opportunity between its brackets.
+            assert!(
+                html.contains(r#"" ": { label: "todo", glyph: "\u00a0" }"#),
+                "todo must render a non-breaking space between its brackets"
+            );
+            assert!(
+                !html.contains(r#"" ": { label: "todo", glyph: " " }"#),
+                "a bare space between brackets is what split [ and ] across lines"
+            );
+        }
+
+        /// Every state, not just the one that happened to break, is a cohesive
+        /// control; and state colour rides the glyph so the label stays legible
+        /// on the light theme too.
+        #[test]
+        fn every_status_state_is_a_cohesive_readable_control() {
+            let html = render_editor(&fixture());
+
+            for (state, token) in [
+                ("todo", "var(--muted)"),
+                ("run", "var(--status-warning)"),
+                ("maybe", "var(--status-info)"),
+                ("blocked", "var(--status-danger)"),
+                ("done", "var(--status-success)"),
+            ] {
+                assert!(
+                    html.contains(&format!(
+                        "button.md-status.md-status-{state} .md-status-glyph{{color:{token}}}"
+                    )),
+                    "state {state} must carry its colour on the glyph"
+                );
+            }
+
+            // The old palette coloured the *label*, using accents that collapsed
+            // to a neutral grey — invisible on the light theme.
+            assert!(
+                !html.contains("color:var(--amber);background:rgba(216,166,64,.08)"),
+                "stale chip palette must not come back"
+            );
+            assert!(
+                !html.contains("border-color:rgba(169,177,180,.35)"),
+                "stale chip palette must not come back"
+            );
+        }
+
+        /// Presentation changed; the source markers and the save path did not.
+        #[test]
+        fn status_presentation_change_leaves_the_persistence_contract_intact() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(r#"STATUS_CYCLE = [" ", "~", "?", "!", "x"]"#),
+                "the cycle still moves through the real source markers"
+            );
+            assert!(
+                html.contains("([ xX~!?])"),
+                "the source-marker scanner must still match the raw tracker tokens"
+            );
+            assert!(
+                html.contains("replaceStatusOcc"),
+                "a click still rewrites the matching occurrence in the raw textarea"
+            );
+            assert!(
+                html.contains(r#"chip.getAttribute("data-mark")"#),
+                "the next mark is derived from the real marker, never from the glyph"
+            );
+            assert!(
+                html.contains("markFormDirty"),
+                "checkpoint/save dirty tracking is unchanged"
+            );
+            assert!(
+                html.contains("statusRequestSeq"),
+                "stale-response reconciliation is unchanged"
+            );
+        }
+
+        /// Founder direction: keep the light theme. These surfaces were pinned to
+        /// dark slabs, so light mode rendered near-black text on a dark card.
+        #[test]
+        fn studio_surfaces_follow_the_theme_contract_not_hardcoded_dark_slabs() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                !html.contains("background:rgba(27,31,32,.85)"),
+                "the frontmatter card must not be pinned to a dark slab"
+            );
+            assert!(
+                !html.contains("background:#162114") && !html.contains("background:#2b1717"),
+                "save/error banners must not be pinned to dark fills"
+            );
+            assert!(
+                html.contains("letter-spacing:.06em;background:var(--bg);position:sticky"),
+                "a sticky header needs an opaque surface; --panel is alpha on light"
+            );
+            assert!(
+                html.contains(".md-table tr:hover td{background:var(--btn-bg-hover)}"),
+                "row hover must use the themed hover token, not white alpha"
+            );
+        }
+
+        /// Parity with the native command deck, which already thickens its stroke
+        /// at increased contrast and honours reduced motion.
+        #[test]
+        fn status_chip_honours_reduced_motion_and_increased_contrast() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(
+                    "@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}"
+                ),
+                "chip motion must be opt-out"
+            );
+            assert!(
+                html.contains(
+                    "@media (prefers-contrast: more){button.md-status{border-width:1.5px}}"
+                ),
+                "increased contrast must thicken the chip stroke, as the native deck does"
+            );
+            assert!(
+                html.contains("transition:border-color var(--motion-fast) var(--ease-ui)"),
+                "chip motion must come from the shared motion dictionary"
+            );
+            assert!(
+                html.contains("button.md-status:focus-visible{outline:2px solid var(--focus-ring)"),
+                "keyboard focus must stay visible on both themes"
+            );
+        }
+
+        /// Route-local adoption. The studio used to carry a fossil palette of a
+        /// previous brand (teal glows, lime code, two hand-mixed greens) beside
+        /// the shared tokens. Colour here must now come from the same semantic
+        /// layer the native deck feeds.
+        ///
+        /// Scope: this asserts the stylesheet the studio *owns*. The rendered
+        /// document also embeds `chrome::STYLE_MAIN`, whose first ~1400 lines
+        /// are the marketing site (hero, blog, pricing) and carry one
+        /// `linear-gradient` on `.blog-post-header` — a selector no console
+        /// route ever matches. Asserting over the whole document measured that
+        /// dead sheet instead of this one; the shared layer has its own owner
+        /// in `chrome::tests`.
+        #[test]
+        fn studio_styling_converges_on_the_shared_deck_tokens() {
+            let css = editor_css();
+
+            for fossil in [
+                "#5e7f47",
+                "#22321f",          // hand-mixed checkpoint green
+                "#4d7041",          // hand-mixed done green
+                "rgba(184,239,125", // lime accent of a previous brand
+                "rgba(77,155,142",  // teal accent of a previous brand
+                "rgba(43,48,51",    // slab rule
+                "#1b1914",
+                "#1b1617", // slab card fills
+            ] {
+                assert!(
+                    !css.contains(fossil),
+                    "studio css still carries the fossil literal {fossil}"
+                );
+            }
+
+            assert!(
+                !css.contains("radial-gradient") && !css.contains("linear-gradient"),
+                "the plan library is an index, not a landing page"
+            );
+            assert!(
+                !css.contains("clamp(48px")
+                    && !css.contains("102px")
+                    && !css.contains("translateY(-")
+                    && !css.contains("min-height:290px")
+                    && !css.contains("min-height:230px"),
+                "plan index must not keep landing-page type or magazine-card lift"
+            );
+            assert!(
+                css.contains(".plan-index-copy h1{")
+                    && css.contains("font:650 var(--deck-title)/1.2 var(--font-body)"),
+                "plan index title must use the native deck title scale"
+            );
+            assert!(
+                css.contains("--accent:var(--amber)"),
+                "the studio bridge must point at the live accent, not plain text"
+            );
+            assert!(
+                css.contains("box-shadow:inset 0 0 0 2px var(--focus-ring)"),
+                "the raw editor focus ring must use the corrected global token"
+            );
+            assert!(
+                render_editor(&fixture()).contains(css),
+                "the studio must actually ship the stylesheet this test measures"
+            );
+        }
+
+        /// The shared sheet installs one focus owner —
+        /// `.server-app-shell :focus-visible` (`main.css`) — and the studio
+        /// canvas renders inside that shell, so the ring should reach every
+        /// control here for free. It did not: `editor_css()` is embedded in
+        /// `head_html`, i.e. *after* the shared sheet, and these four rules
+        /// carried `outline:none` at exactly equal specificity (0,2,0), so the
+        /// later declaration won and the ring was suppressed in both themes.
+        /// A border tint is not a focus indicator; `main.css` says so itself.
+        ///
+        /// The two suppressions that remain in the studio are deliberate and
+        /// keep their own replacement: the raw textarea swaps the outline for
+        /// an inset ring, and the tracker chip re-declares a real one.
+        #[test]
+        fn studio_controls_never_suppress_the_shared_focus_ring() {
+            let css = editor_css();
+
+            for control in [
+                ".plan-card:hover,.plan-card:focus-visible{",
+                ".review-library-link:hover,.review-library-link:focus-visible{",
+                ".tab:hover,.tab:focus{",
+                "button.render-mode-btn:hover,button.render-mode-btn:focus-visible{",
+            ] {
+                let mut seen = 0;
+                for (at, _) in css.match_indices(control) {
+                    let rest = &css[at..];
+                    let end = rest.find('}').expect("every studio rule is closed");
+                    assert!(
+                        !rest[..end].contains("outline"),
+                        "{control} suppresses the one focus ring the shell installs"
+                    );
+                    seen += 1;
+                }
+                assert!(seen > 0, "{control} vanished — re-point this contract");
+            }
+
+            // Deliberate, and each still shows focus.
+            assert!(
+                css.contains(
+                    ".editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 2px var(--focus-ring)}"
+                ),
+                "the raw editor must keep its inset focus affordance"
+            );
+            assert!(
+                css.contains(
+                    "button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}"
+                ),
+                "the tracker chip must re-declare the ring it suppressed"
+            );
+        }
+
+        #[test]
+        fn studio_clickable_links_keep_the_arrow_cursor() {
+            let css = editor_css();
+            assert!(
+                !css.contains("cursor:pointer"),
+                "the studio must not transform the pointer into a hand"
+            );
+            assert!(
+                css.contains(":where(.server-route-document) a{color:inherit;cursor:default}"),
+                "studio links inherit the native arrow"
+            );
+        }
+
+        /// Founder named this one directly: the checkpoint button was a pair of
+        /// hand-mixed greens that broke in light theme. It stays green (commit
+        /// semantics) but through --status-success, in the very same color-mix
+        /// shape the status chips already use — one owner, not a second dialect.
+        #[test]
+        fn checkpoint_and_save_actions_read_from_the_semantic_palette() {
+            let css = editor_css();
+            const SUCCESS_EDGE: &str = "color-mix(in srgb,var(--status-success) 55%,transparent)";
+
+            // Named owners, not a pinned total. Three surfaces mark "done" —
+            // the sidebar tab, the inspector pill and the tracker chip — and
+            // two commit actions carry the stroke: checkpoint and save. The
+            // tracker chip joined in 00f03ce6, so a hard-coded "4" described a
+            // studio that no longer existed. Splitting the count by the shape
+            // each owner uses keeps this honest: a new dialect still fails.
+            let done_edge = format!("border-color:{SUCCESS_EDGE}");
+            let action_stroke = format!("border:var(--stroke-width) solid {SUCCESS_EDGE}");
+            assert_eq!(
+                css.matches(done_edge.as_str()).count(),
+                3,
+                "tab, inspector pill and tracker chip mark done with one edge"
+            );
+            assert_eq!(
+                css.matches(action_stroke.as_str()).count(),
+                2,
+                "checkpoint and save carry the same success stroke"
+            );
+            assert_eq!(
+                css.matches(SUCCESS_EDGE).count(),
+                5,
+                "five owners total — nothing else may mint a sixth success dialect"
+            );
+            assert_eq!(
+                css.matches("background:color-mix(in srgb,var(--status-success) 14%,transparent)")
+                    .count(),
+                2,
+                "checkpoint and save carry the same fill weight"
+            );
+            assert!(
+                css.contains(
+                    "border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"
+                ),
+                "the commit action takes the deck's 8px radius"
+            );
+        }
+
+        #[test]
+        fn dispatch_artifact_ships_the_real_door_form() {
+            let mut workspace = fixture();
+            workspace.artifacts[0].id = "wave".into();
+            workspace.artifacts[0].role = ScaffoldArtifactRole::Dispatch;
+            workspace.artifacts[0].relative_path = "plan.dispatch.toml".into();
+            let html = render_editor(&workspace);
+            assert!(
+                html.contains(r#"data-role="dispatch""#),
+                "dispatch panel must declare its role"
+            );
+            assert!(
+                html.contains(r#"action="/api/scaffold/dispatch""#),
+                "inspector must post the real dispatch door"
+            );
+            assert!(
+                html.contains("vibecrafted dispatch"),
+                "copy must name the product CLI, not a fake launch button"
+            );
+            assert!(html.contains("inspector-dispatch-slot"));
+            assert!(html.contains("Closing this studio does not stop workers"));
+        }
+
+        /// The repaint must not have touched a single byte of persistence. This
+        /// asserts the write path end to end: source markers, the cycle, the
+        /// request reconciliation, the save form and the checkpoint note field.
+        #[test]
+        fn the_repaint_left_every_write_path_untouched() {
+            let html = render_editor(&fixture());
+
+            for contract in [
+                "replaceStatusOcc", // rewrites the raw markdown occurrence
+                "statusRequestSeq", // reconciles out-of-order status POSTs
+                "STATUS_CYCLE",     // the state machine, unchanged
+                "data-mark",        // the source marker read back off the DOM
+                "nextMark",
+                "save-artifact-btn",
+                "checkpoint-form",
+                "name=note", // the checkpoint note actually posted
+            ] {
+                assert!(
+                    html.contains(contract),
+                    "presentation change dropped the persistence contract {contract}"
+                );
+            }
+        }
+
         #[test]
         fn selection_renders_searchable_plan_library_with_typed_editor_links() {
             let html = render_plan_picker(
@@ -2418,7 +3400,14 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
                 &[],
             );
 
-            assert!(html.contains("Choose the truth"));
+            assert!(html.contains("<h1>Plans</h1>"));
+            assert!(!html.contains("Choose the truth"));
+            assert!(!html.contains("Runtime Truth"));
+            assert!(!html.contains("you want to move"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-focus-repo=\"vibecrafted\""));
+            assert!(html.contains("vc-focus-refresh"));
+            assert!(!html.contains("Plan control room"));
             assert!(html.contains("id=\"plan-search\""));
             assert!(html.contains(".normalize(\"NFD\")"));
             assert!(html.contains(
@@ -2439,6 +3428,8 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
             assert!(html.contains("vc-server-mcp-slack-gateway"));
             assert!(html.contains("unknown variant `mission`"));
             assert!(html.contains("plan-card-invalid"));
+            assert!(html.contains("data-ppm=\"plan\""));
+            assert!(html.contains("data-copy-id=\"vc-server-mcp-slack-gateway\""));
         }
 
         #[test]
@@ -2467,7 +3458,8 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
             };
             let html = render_plan_blocked(&plan, Some(&report), "invalid manifest");
 
-            assert!(html.contains("The plan exists."));
+            assert!(html.contains("Cannot open this plan"));
+            assert!(!html.contains("The editor refuses to lie"));
             assert!(html.contains("frontmatter_missing · R11"));
             assert!(html.contains("DRIVER.md"));
             assert!(html.contains("frontmatter is required"));

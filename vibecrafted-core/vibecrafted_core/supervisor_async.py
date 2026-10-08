@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,17 +20,29 @@ from .agent_stream import (
 )
 from .artifacts import ArtifactValidation, validate_artifacts
 from .control_plane import (
+    accepted_operator_stop_since,
     control_plane_home,
     ensure_session_id,
-    lookup_run,
+    event_resume_cursor,
     normalize_run_root,
 )
+from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
+from .failure_attribution import attribute_failure
+from .harness_usage import kimi_session_id_from_store
 from .lifecycle import EventKind, RunState
 from .model_overrides import _model_override_receipt
 from .process_control import process_identity_receipt
+from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
+from .telemetry import (
+    RunTelemetry,
+    build_run_telemetry,
+    parent_session_ids,
+    resolve_provider_session_id,
+    usage_record,
+)
 
 STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 # Well under the reconciler's 120s staleness threshold, so an ordinary talking
@@ -81,6 +93,12 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _provider_store_home() -> Path:
+    """User home holding provider session stores; overridable for hermetic tests."""
+    override = str(os.environ.get("VIBECRAFTED_PROVIDER_STORE_HOME") or "").strip()
+    return Path(override).expanduser() if override else Path.home()
+
+
 def transcript_human_path(transcript_path: Path | None) -> Path | None:
     """Sibling human-readable rendering of the raw transcript.
 
@@ -102,7 +120,11 @@ def _infer_agent(command: Sequence[str]) -> str:
     if not command:
         return "agent"
     name = Path(str(command[0])).name
-    if name in {"claude", "codex", "agy", "junie", "grok"}:
+    # Fleet key is `cursor` but the spawned binary is `cursor-agent`
+    # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
+    if name == "cursor-agent":
+        return "cursor"
+    if name in {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -112,6 +134,8 @@ def _infer_agent(command: Sequence[str]) -> str:
 def _json_text_fragment(event: dict[str, object]) -> str:
     """Extract the display text (if any) from one parsed JSON stream event line."""
     event_type = str(event.get("type") or "")
+    if event_type == "assistant.message" and isinstance(event.get("data"), dict):
+        return str(event["data"].get("content") or "")
     if event_type == "thought":
         return ""
     if event_type == "item.completed":
@@ -160,28 +184,51 @@ def _fallback_report_body(transcript_text: str) -> str:
     return "\n".join(plain_lines).strip() + ("\n" if plain_lines else "")
 
 
-def _tokens_total(
-    input_tokens: int, cached_input_tokens: int, output_tokens: int
-) -> int:
-    """Sum usage without double-counting provider-specific cache shapes.
+def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
+    """Usage, cost, failure cause and provider session of a closing run.
 
-    Claude/Codex: ``input`` already includes cache hits (cached ≤ input).
-    Junie-style: ``input`` is non-cached only and ``cached`` is additive
-    (cached can exceed input). Detect by comparing magnitudes.
+    Cached on the handle so meta, report and terminal footer tell one story.
+    The provider session comes from the stream first, then from the launch
+    contract; either is refused when it equals a parent/runtime session id.
     """
-    inp = max(0, int(input_tokens or 0))
-    cached = max(0, int(cached_input_tokens or 0))
-    out = max(0, int(output_tokens or 0))
-    if cached and cached > inp:
-        return inp + cached + out
-    return inp + out
-
-
-def _handle_tokens_total(handle: AsyncRunHandle) -> int:
-    """Total token usage for a run handle, deduplicating cache-shape overlap."""
-    return _tokens_total(
-        handle.tokens_input, handle.tokens_cached_input, handle.tokens_output
+    if handle.telemetry is not None:
+        return handle.telemetry
+    usage = usage_record(
+        handle.usage_events,
+        tokens_input=handle.tokens_input,
+        tokens_cached_input=handle.tokens_cached_input,
+        tokens_cache_write=handle.tokens_cache_write,
+        tokens_output=handle.tokens_output,
+        source="provider_stream",
     )
+    failure = None
+    if not handle.operator_stopped:
+        failure = attribute_failure(
+            handle.transcript_path, handle.exit_code, agent=handle.agent
+        )
+    if handle.stream_session_id:
+        candidate, candidate_source = (
+            handle.stream_session_id,
+            handle.stream_session_source,
+        )
+    else:
+        candidate, candidate_source = handle.agent_session_id, "launch_contract"
+    handle.telemetry = build_run_telemetry(
+        usage=usage,
+        model=handle.agent_model,
+        reported_cost=handle.cost_usd,
+        reported_cost_source=handle.cost_source,
+        session_candidate=candidate,
+        session_source=candidate_source,
+        parents=parent_session_ids(
+            extra={"runtime_session_id": handle.session_id, **handle.parent_sessions}
+        ),
+        failure=failure,
+        agent=handle.agent,
+        started_at=handle.started_at.isoformat(),
+        completed_at=handle.completed_at.isoformat() if handle.completed_at else None,
+    )
+    return handle.telemetry
 
 
 def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -238,20 +285,14 @@ def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, s
     return fields
 
 
-def _accepted_operator_stop(run_id: str) -> dict[str, object] | None:
+def _accepted_operator_stop(run_id: str, since_cursor: str) -> dict[str, object] | None:
     """Read the durable operator-stop authority after the worker exits."""
 
     try:
-        run = lookup_run(run_id)
+        run = accepted_operator_stop_since(run_id, since_cursor)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
-    if (
-        isinstance(run, dict)
-        and str(run.get("state") or "") == "stopped"
-        and run.get("operator_stop_accepted") is True
-    ):
-        return run
-    return None
+    return run
 
 
 def _cache_write_line(prefix: str, value: int | None) -> str:
@@ -279,6 +320,7 @@ def _render_fallback_report(handle: AsyncRunHandle, transcript_text: str) -> str
         or os.environ.get("VIBECRAFTED_SKILL_CODE")
         or "unknown"
     )
+    telemetry = _run_telemetry(handle)
     header = render_minimal_frontmatter(
         run_id=handle.run_id,
         agent=handle.agent or "unknown",
@@ -288,18 +330,10 @@ def _render_fallback_report(handle: AsyncRunHandle, transcript_text: str) -> str
             "claim_status": "completed",
             "claim_kind": skill,
             "session_id": handle.agent_session_id or "unknown",
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd if handle.cost_usd is not None else "unknown",
+            **telemetry.usage.flat(),
+            "cost_usd": telemetry.cost.flat()["cost_usd"],
             "completed_at": now,
             "fallback_report": "true",
-            **(
-                {"tokens_cache_write": handle.tokens_cache_write}
-                if handle.tokens_cache_write is not None
-                else {}
-            ),
         },
     )
     return (
@@ -341,24 +375,32 @@ def _terminal_footer(handle: AsyncRunHandle) -> str:
         if handle.model_requested
         else ""
     )
-    cost_source = f"cost_source: {handle.cost_source}\n" if handle.cost_source else ""
+    telemetry = _run_telemetry(handle)
+    tokens = telemetry.usage.flat()
+    cost = telemetry.cost.flat()
+    failure = (
+        f"failure: {telemetry.failure.summary()}\n"
+        if telemetry.failure is not None
+        else ""
+    )
     return (
         "\n---\n"
         "runner: vibecrafted\n"
         f"run_id: {handle.run_id}\n"
         f"status: {handle.state.value}\n"
         f"exit_code: {handle.exit_code if handle.exit_code is not None else 'unknown'}\n"
+        f"{failure}"
         f"session_id: {handle.agent_session_id or 'unknown'}\n"
         f"model: {handle.agent_model or 'unknown'}\n"
         f"{model_requested}"
         f"{override_skipped}"
-        f"tokens_input: {handle.tokens_input}\n"
-        f"tokens_cached_input: {handle.tokens_cached_input}\n"
-        f"{_cache_write_line('', handle.tokens_cache_write)}"
-        f"tokens_output: {handle.tokens_output}\n"
-        f"tokens_total: {_handle_tokens_total(handle)}\n"
-        f"cost_usd: {handle.cost_usd if handle.cost_usd is not None else 'unknown'}\n"
-        f"{cost_source}"
+        f"tokens_input: {tokens['tokens_input']}\n"
+        f"tokens_cached_input: {tokens['tokens_cached_input']}\n"
+        f"{_cache_write_line('', handle.tokens_cache_write if telemetry.usage.known else None)}"
+        f"tokens_output: {tokens['tokens_output']}\n"
+        f"tokens_total: {tokens['tokens_total']}\n"
+        f"cost_usd: {cost['cost_usd']}\n"
+        f"cost_source: {cost['cost_source']}\n"
         f"resume: {handle.resume_command}\n"
         f"report: {handle.report_path or ''}\n"
         f"transcript: {handle.transcript_path or ''}\n"
@@ -404,12 +446,22 @@ class AsyncRunHandle:
     tokens_cached_input: int = 0
     tokens_cache_write: int | None = None
     tokens_output: int = 0
+    usage_events: int = 0
     cost_usd: float | None = None
     cost_source: str | None = None
+    # Session id the provider stream itself reported (vs. the launch contract's).
+    stream_session_id: str = ""
+    # Where stream_session_id came from: the stream, or the provider's
+    # on-disk session store adopted while the run was live.
+    stream_session_source: str = "provider_stream"
+    # Parent/fork session ids from meta that the provider id must never equal.
+    parent_sessions: dict[str, str] = field(default_factory=dict)
+    telemetry: RunTelemetry | None = None
     resume_command: str = ""
     heartbeat_monotonic: float = 0.0
     worker_identity: dict[str, object] | None = None
     workspace_fields: dict[str, object] = field(default_factory=dict)
+    operator_stop_cursor: str = "0"
     operator_stopped: bool = False
     operator_stop_reason: str = ""
 
@@ -422,9 +474,14 @@ class AsyncRunHandle:
 class AsyncSupervisor:
     """Async orchestrator: spawns one agent process per run, streams and settles it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        signal_sink: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Initialize an empty run-id -> AsyncRunHandle registry."""
         self._runs: dict[str, AsyncRunHandle] = {}
+        self._signal_sink = signal_sink
 
     def get(self, run_id: str) -> AsyncRunHandle | None:
         """Look up a tracked run handle by id, or None if unknown to this instance."""
@@ -456,6 +513,9 @@ class AsyncSupervisor:
             transcript.parent.mkdir(parents=True, exist_ok=True)
         prompt_file = Path(prompt_file_path).expanduser() if prompt_file_path else None
 
+        # Parent identity before the caller overlay replaces VIBECRAFTED_AGENT
+        # with the worker. The child process must not see the parent bus.
+        dispatcher = dispatcher_identity(os.environ)
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
@@ -474,7 +534,9 @@ class AsyncSupervisor:
             merged_env.update(workspace_identity.to_env())
             session_id = workspace_identity.vibecrafted_session_id
             merged_env["VIBECRAFTED_SESSION_ID"] = session_id
-        except Exception:  # noqa: BLE001, S110 — supervisor launch remains fail-open.
+        # Workspace identity projection is advisory to launch; any resolver exception must preserve
+        # the existing environment without inventing a session identity or blocking launch.
+        except Exception:  # noqa: BLE001, S110
             pass
         merged_env["VIBECRAFTED_RUN_ID"] = run_id
         merged_env["SPAWN_RUN_ID"] = run_id
@@ -497,11 +559,21 @@ class AsyncSupervisor:
             or "unknown"
         )
         claim_digest = str(merged_env.get(CLAIM_DIGEST_ENV) or "").strip()
+        # The prompt file stays the human-readable truth (VIBECRAFTED_PROMPT_PATH);
+        # what the worker reads on stdin is the provider's private transport —
+        # verbatim text for most, one stream-json user turn for agy.
+        stdin_source = (
+            materialize_stdin_file(agent, prompt_file)
+            if prompt_file is not None
+            else None
+        )
         agent_model = resolve_default_model(agent, command=command, env=merged_env)
+        launch_env = filter_headless_worker_env(merged_env)
         model_receipt = _model_override_receipt(
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
         )
         started_at = _utc_now()
+        operator_stop_cursor = event_resume_cursor()
         if report_path is not None:
             from .report_contract import materialize_launcher_report_template
 
@@ -524,6 +596,8 @@ class AsyncSupervisor:
                 "report": str(report_path or ""),
                 "transcript": str(transcript_path or ""),
                 "prompt_file": str(prompt_file or ""),
+                "stdin_transport": stdin_transport(agent),
+                "stdin_source": str(stdin_source or ""),
                 "started_at": started_at.isoformat(),
                 "session_id": session_id,
                 "identity_required": True,
@@ -546,12 +620,12 @@ class AsyncSupervisor:
 
         stdin_handle = None
         try:
-            if prompt_file is not None:
-                stdin_handle = prompt_file.open("rb")
+            if stdin_source is not None:
+                stdin_handle = stdin_source.open("rb")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(cwd),
-                env=merged_env,
+                env=launch_env,
                 stdin=stdin_handle,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -584,7 +658,15 @@ class AsyncSupervisor:
             model_override_skip_reason=str(
                 model_receipt.get("model_override_skip_reason") or ""
             ),
+            parent_sessions={
+                source: session
+                for session, source in parent_session_ids(
+                    merged_env,
+                    extra={"runtime_session_id": session_id},
+                ).items()
+            },
             workspace_fields=dict(workspace_fields),
+            operator_stop_cursor=operator_stop_cursor,
         )
         try:
             handle.pgid = os.getpgid(process.pid)
@@ -635,6 +717,7 @@ class AsyncSupervisor:
                     ):
                         if origin.get(field):
                             latest.setdefault(field, origin[field])
+                    latest.setdefault("dispatcher", dict(dispatcher))
                     latest.setdefault("run_id", run_id)
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
@@ -650,6 +733,27 @@ class AsyncSupervisor:
                         latest.setdefault("runtime_session_id", session_id)
                     if claim_digest:
                         latest["claim_digest"] = claim_digest
+                    # Persist the operator pin as soon as the worker exists.
+                    # Completion summary also writes it, but callers (and
+                    # tests) read meta at PROCESS_SPAWNED — before finish.
+                    requested = str(model_receipt.get("model_requested") or "").strip()
+                    if requested:
+                        latest.setdefault("model_requested", requested)
+                        if "model_override_supported" in model_receipt:
+                            latest.setdefault(
+                                "model_override_supported",
+                                model_receipt["model_override_supported"],
+                            )
+                        if "model_override_skipped" in model_receipt:
+                            latest.setdefault(
+                                "model_override_skipped",
+                                model_receipt["model_override_skipped"],
+                            )
+                        skip_reason = str(
+                            model_receipt.get("model_override_skip_reason") or ""
+                        ).strip()
+                        if skip_reason:
+                            latest.setdefault("model_override_skip_reason", skip_reason)
                     return latest
 
                 mutate_run_meta(
@@ -752,10 +856,26 @@ class AsyncSupervisor:
             return handle
 
         handle.exit_code = handle.process.returncode
+        if handle.meta_path is not None:
+            try:
+                fork_meta = json.loads(handle.meta_path.read_text())
+            except (OSError, ValueError):
+                fork_meta = {}
+            if fork_meta.get("native_fork") and (
+                not handle.agent_session_id
+                or handle.agent_session_id == fork_meta.get("fork_source_session_id")
+            ):
+                handle.exit_code = 1
+            handle.parent_sessions = {
+                key: str(fork_meta[key])
+                for key in ("fork_source_session_id", "parent_provider_session_id")
+                if fork_meta.get(key)
+            }
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,
             handle.run_id,
+            handle.operator_stop_cursor,
         )
         if operator_stop is not None:
             handle.operator_stopped = True
@@ -812,6 +932,7 @@ class AsyncSupervisor:
             require_report=require_report,
             require_transcript_output=require_transcript_output,
         )
+        telemetry = _run_telemetry(handle)
         artifact_payload = {
             "event_kind": EventKind.ARTIFACT.value,
             "meta": str(handle.meta_path or ""),
@@ -820,16 +941,13 @@ class AsyncSupervisor:
             "agent": handle.agent,
             "agent_session_id": handle.agent_session_id,
             "agent_model": handle.agent_model,
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd,
+            **telemetry.usage.flat(),
+            **telemetry.cost.flat(),
             "resume_command": handle.resume_command,
             **handle.artifact_validation.as_payload(),
         }
-        if handle.tokens_cache_write is not None:
-            artifact_payload["tokens_cache_write"] = handle.tokens_cache_write
+        if telemetry.failure is not None:
+            artifact_payload["failure"] = telemetry.failure.summary()
         await self._emit(
             handle.run_id,
             RunState.ARTIFACT_SEEN,
@@ -897,6 +1015,7 @@ class AsyncSupervisor:
                             f"no worker output for {silent_for:.0f}s"
                             f" (bound {silence_bound:.0f}s)"
                         )
+                    self._adopt_provider_session_identity(handle)
                     if handle.process.returncode is None:
                         handle.heartbeat_monotonic = time.monotonic()
                         await self._emit(
@@ -922,8 +1041,15 @@ class AsyncSupervisor:
                 if human_path is not None and display_text:
                     with human_path.open("ab") as human:
                         human.write(display_text.encode("utf-8"))
+                self._adopt_provider_session_identity(handle)
                 previous_agent_session_id = handle.agent_session_id
+                previous_stream_session_id = handle.stream_session_id
                 self._sync_stream_summary(handle, parser)
+                if (
+                    handle.stream_session_id
+                    and handle.stream_session_id != previous_stream_session_id
+                ):
+                    self._publish_stream_session_identity(handle)
                 if (
                     handle.report_path is not None
                     and handle.agent_session_id
@@ -944,6 +1070,14 @@ class AsyncSupervisor:
                 if tee_output and display_text:
                     sys.stdout.buffer.write(display_text.encode("utf-8"))
                     sys.stdout.buffer.flush()
+                # Socket heartbeats are ephemeral flow-control signals, not
+                # durable lifecycle events. Pulse on every output line so a
+                # busy worker proves movement without inflating events.jsonl.
+                if self._signal_sink is not None:
+                    try:
+                        self._signal_sink(handle.run_id, handle.state.value)
+                    except (OSError, RuntimeError):
+                        pass
                 if not handle.first_output_seen:
                     handle.first_output_seen = True
                     handle.heartbeat_monotonic = time.monotonic()
@@ -1079,6 +1213,7 @@ class AsyncSupervisor:
             status=status,
             model=handle.agent_model,
             claim_digest=handle.claim_digest,
+            runtime_fields=_run_telemetry(handle).frontmatter_fields(),
         )
 
     def _sync_stream_summary(
@@ -1087,19 +1222,101 @@ class AsyncSupervisor:
         """Copy the parser's latest session/model/token/cost readings onto the handle."""
         if parser.session_id:
             handle.agent_session_id = parser.session_id
+            handle.stream_session_id = parser.session_id
         handle.agent_model = parser.model_id
         handle.tokens_input = parser.tokens_input
         handle.tokens_cached_input = parser.tokens_cached_input
         handle.tokens_cache_write = parser.tokens_cache_write
         handle.tokens_output = parser.tokens_output
+        handle.usage_events = parser.usage_events
         handle.cost_usd = parser.cost_usd
         handle.cost_source = parser.cost_source
         handle.resume_command = parser.resume_command(handle.root)
 
+    def _adopt_provider_session_identity(self, handle: AsyncRunHandle) -> None:
+        """Adopt a session id the provider revealed on disk before its stream does.
+
+        kimi's stream only carries the session id in the trailing
+        ``session.resume_hint`` event, so a run killed before settlement
+        historically froze meta.json with ``provider_session_id: None`` and
+        ``vibecrafted resume`` was impossible. The provider's session store
+        pins the id at spawn; adopt it into the live meta.json as soon as it
+        appears (observed 2026-09-30: run impl-260930-210226-46946 timed out
+        with ``session_0c31a2fe`` on disk from second one, meta id None).
+        """
+        if handle.stream_session_id:
+            return
+        discovered = ""
+        if handle.agent == "kimi":
+            discovered = kimi_session_id_from_store(
+                handle.root,
+                handle.started_at,
+                home=_provider_store_home(),
+            )
+        if not discovered:
+            return
+        handle.stream_session_id = discovered
+        handle.stream_session_source = "provider_session_store"
+        self._publish_stream_session_identity(handle)
+
+    def _publish_stream_session_identity(self, handle: AsyncRunHandle) -> None:
+        """Publish a provider-reported child identity while its run is live.
+
+        The stream parser is the first canonical owner to observe this value.
+        Merge it under the shared run lock so routing readers never need to
+        recover identity from a transcript or race a terminal summary. A value
+        equal to any launch/runtime/fork parent is refused rather than guessed.
+        """
+        if handle.meta_path is None or not handle.stream_session_id.strip():
+            return
+
+        def _enrich(payload: dict[str, object]) -> dict[str, object] | None:
+            parent_fields = dict(handle.parent_sessions)
+            for key in (
+                "runtime_session_id",
+                "vibecrafted_session_id",
+                "parent_provider_session_id",
+                "fork_source_session_id",
+            ):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    parent_fields.setdefault(key, value)
+            resolved, source = resolve_provider_session_id(
+                handle.stream_session_id,
+                source=handle.stream_session_source,
+                parents=parent_session_ids({}, extra=parent_fields),
+            )
+            if not isinstance(resolved, str):
+                return None
+            payload.update(
+                {
+                    "session_id": resolved,
+                    "agent_session_id": resolved,
+                    "provider_session_id": resolved,
+                    "provider_session_source": source,
+                }
+            )
+            return payload
+
+        try:
+            mutate_run_meta(
+                control_plane_home(),
+                meta_path=handle.meta_path,
+                mutation_root=handle.meta_path.parent,
+                run_id=handle.run_id,
+                mutator=_enrich,
+            )
+        except (OSError, RunMetaMutationError, TypeError):
+            # Durable metadata is observational: losing it must not terminate
+            # an otherwise healthy provider process. Terminal settlement gets
+            # one final merge attempt through `_write_meta_summary`.
+            pass
+
     def _write_meta_summary(self, handle: AsyncRunHandle) -> None:
-        """Merge a full run-state summary (status, tokens, cost, origin) into meta.json."""
+        """Merge a full run-state summary (status, usage, cost, failure, origin) into meta.json."""
         if handle.meta_path is None:
             return
+        telemetry = _run_telemetry(handle)
         summary = {
             "run_id": handle.run_id,
             "agent": handle.agent,
@@ -1110,14 +1327,10 @@ class AsyncSupervisor:
             "root": str(handle.root),
             "report": str(handle.report_path or ""),
             "transcript": str(handle.transcript_path or ""),
-            "tokens_input": handle.tokens_input,
-            "tokens_cached_input": handle.tokens_cached_input,
-            "tokens_output": handle.tokens_output,
-            "tokens_total": _handle_tokens_total(handle),
-            "cost_usd": handle.cost_usd if handle.cost_usd is not None else "unknown",
-            "cost_source": handle.cost_source or "unknown",
+            **telemetry.meta_fields(),
             "resume_command": handle.resume_command,
             "exit_code": handle.exit_code,
+            "started_at": handle.started_at.isoformat(),
             "completed_at": handle.completed_at.isoformat()
             if handle.completed_at
             else "",
@@ -1151,8 +1364,6 @@ class AsyncSupervisor:
                 summary["model_override_skip_reason"] = (
                     handle.model_override_skip_reason
                 )
-        if handle.tokens_cache_write is not None:
-            summary["tokens_cache_write"] = handle.tokens_cache_write
         handle.meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         def _merge_summary(payload: dict[str, object]) -> dict[str, object]:
@@ -1175,8 +1386,11 @@ class AsyncSupervisor:
                 and not str(payload.get("origin_pane_id") or "").strip()
             ):
                 summary["origin_pane_id"] = origin["origin_pane_id"]
-            if handle.tokens_cache_write is None:
-                payload.pop("tokens_cache_write", None)
+            # Keys this close does not assert must not survive from an earlier
+            # close: a stale cache-write count or a previous run's failure.
+            for stale in ("tokens_cache_write", "failure"):
+                if stale not in summary:
+                    payload.pop(stale, None)
             payload.update(summary)
             return payload
 
@@ -1256,3 +1470,10 @@ class AsyncSupervisor:
             message=message,
             payload=event_payload,
         )
+        if self._signal_sink is not None:
+            try:
+                self._signal_sink(run_id, state.value)
+            except (OSError, RuntimeError):
+                # Durable files own truth. A broken wake transport must never
+                # corrupt or abort the supervised lifecycle.
+                pass

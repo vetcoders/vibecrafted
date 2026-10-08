@@ -53,6 +53,10 @@ python -m vibecrafted_core.guard check --sha <sha>
 ```
 
 `launch_workflow` woła `enforce_continuation`, chyba że `VIBECRAFTED_GUARD=0`.
+Autoryzowana naprawa/admission idzie przez flagi publicznego launchera
+`--remediate-trust-block --remediation-task repair|admission --remediation-reason TEXT`.
+Nadpisanie ląduje na receipcie i nigdy nie przepisuje journala trust.
+`python -m vibecrafted_core.guard check` zostaje BLOCK.
 
 ## Doktryna (twarda)
 

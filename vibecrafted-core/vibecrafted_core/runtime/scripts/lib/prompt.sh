@@ -7,7 +7,6 @@ spawn_write_command_script() {
 
   shell_bin="$(spawn_preferred_shell)"
   mkdir -p "$(dirname "$script_path")"
-  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash
 set -euo pipefail
 %s -lc %s
@@ -22,7 +21,7 @@ spawn_frontmatter_field() {
   local source_file="$1"
   local field_name="$2"
 
-  python3 - "$source_file" "$field_name" <<'PY'
+  "$(spawn_python_bin)" - "$source_file" "$field_name" <<'PY'
 import pathlib
 import sys
 
@@ -96,7 +95,7 @@ spawn_strip_frontmatter_to_file() {
   local source_file="$1"
   local target_file="$2"
 
-  python3 - "$source_file" "$target_file" <<'PY'
+  "$(spawn_python_bin)" - "$source_file" "$target_file" <<'PY'
 import pathlib
 import sys
 
@@ -249,12 +248,14 @@ spawn_build_runtime_prompt() {
   # Strip existing frontmatter (so we don't have double) and append the plan
   spawn_append_prompt_body "$source_file" "$runtime_file"
 
+  # These appended sections use different quoted/unquoted heredoc delimiters; retaining separate
+  # redirections preserves their different expansion contracts.
   # shellcheck disable=SC2129
   cat >> "$runtime_file" <<EOF_LABEL
 ---
 ## VC Agents Worker Charter
 - You are a spawned vc-agents worker: an execution unit, not orchestration authority.
-- **Native in-process delegation is allowed.** You MAY use the Task tool (and the \`vc-delegate\` skill that wraps it) to spawn local subagents inside your current process — for parallelization, self-review, bounded research, or splitting independent work streams. Those subagents run in your context window, on the same model tier, and return their results to you. They are productivity, not escalation.
+- **Native in-process fan-out is your right and your default for parallel work.** Workerhood constrains run scope and lifecycle, not native delegation rights (Delegation Matrix). When the plan contains disjoint subcuts — files, tests, probes, research questions — spawn local subagents through your runtime's native mechanism: Claude's Task tool (the \`vc-delegate\` skill wraps it), Kimi's swarm/subagents, or your runtime's own sub-session lane. A plan that parallelizes but gets executed serially is a slower, worse delivery, not a safer one. Pick each subagent's tier by the subtask's economics (Founder rule, 2026-10-03): mechanical fan-out rides a fast or cheap tier, load-bearing reasoning stays on your tier; same-family tiers keep cache locality. Subagents return results to you and never report upstream on their own.
 - **External fleet escalation is forbidden.** Do NOT invoke vc-agents from inside the worker, do NOT launch another claude/codex/gemini fleet, and do NOT reopen frontier selection. That escalation path is operator-only.
 - The operator already made the vc-why-matrix choice for this mission; do not reinterpret it.
 - Implementation scope (architecture, refactor, new modules, broad cuts) is bounded by the dispatched plan, not by this charter. If the plan calls for deep architectural work, do it. If it calls for a surgical fix, stay surgical. Read the plan, not the charter, for scope.

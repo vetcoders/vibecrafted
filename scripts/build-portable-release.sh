@@ -28,7 +28,13 @@ ARCHIVE_ROOT_NAME="vibecrafted-${VERSION}"
 MANIFEST="$REPO_ROOT/scripts/distribution_manifest.py"
 
 log() { printf '\n==> %s\n' "$*"; }
-die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+die() {
+  # Dual-stream FATAL: interactive zsh -ic and redirected logs have eaten
+  # stderr while stdout still reached the operator (HAK-28/HAK-72 class).
+  printf 'FATAL: %s\n' "$*" >&2
+  printf 'FATAL: %s\n' "$*"
+  exit 1
+}
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 [[ "$RELEASE_DATE" =~ ^[0-9]{8}$ ]] || die "VIBECRAFTED_RELEASE_DATE must be YYYYMMDD"
@@ -45,6 +51,20 @@ test -z "$(git -C "$REPO_ROOT" status --porcelain)" \
 mkdir -p "$DIST_DIR"
 rm -f "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"
 
+# A failed hygiene/self-verify must not leave a tarball in dist/ that a
+# wildcard publish would ship. PORTABLE_READY flips only after every gate.
+PORTABLE_READY=0
+WORK_DIR=""
+cleanup_failed_portable() {
+  if [[ -n "${WORK_DIR:-}" ]]; then
+    rm -rf "$WORK_DIR"
+  fi
+  if [[ "${PORTABLE_READY:-0}" != 1 ]]; then
+    rm -f "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"
+  fi
+}
+trap cleanup_failed_portable EXIT
+
 # The packer publishes the candidate with os.replace(), which cannot cross a
 # filesystem boundary — and on this project the checkout commonly lives on a
 # different volume than TMPDIR. Stage beside the repository instead: outside the
@@ -54,7 +74,6 @@ WORK_PARENT="${VIBECRAFTED_PORTABLE_WORKDIR:-$(dirname "$REPO_ROOT")}"
 test -w "$WORK_PARENT" \
   || die "portable work parent is not writable: $WORK_PARENT (set VIBECRAFTED_PORTABLE_WORKDIR)"
 WORK_DIR="$(mktemp -d "$WORK_PARENT/.vibecrafted-portable.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
 VERIFY_DIR="$WORK_DIR/verify"
 mkdir -p "$VERIFY_DIR"
 
@@ -163,5 +182,6 @@ Path(os.environ["PORTABLE_OUTPUT"]).write_text(
 )
 PY
 
+PORTABLE_READY=1
 printf '\nPortable channel built\n  archive:  %s\n  checksum: %s\n  manifest: %s\n' \
   "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"

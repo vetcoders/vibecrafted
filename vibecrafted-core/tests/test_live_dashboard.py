@@ -204,19 +204,19 @@ def test_pending_human_notice_never_falls_back_to_raw() -> None:
 
 def test_stream_prefix_carries_agent_repo_and_run(tmp_path: Path) -> None:
     state = _state_with(
-        tmp_path, [("run-260812-010000-1", "/tmp/ws/vista")], current="/tmp/ws/vista"
+        tmp_path, [("run-260812-010000-1", "/tmp/ws/demo")], current="/tmp/ws/demo"
     )
     card = state.visible_rows()[0]
-    assert state.stream_prefix(card) == "claude/vista/run-260812-010000-1"
+    assert state.stream_prefix(card) == "claude/demo/run-260812-010000-1"
 
 
 def test_detail_header_names_agent_repo_run_and_mode(tmp_path: Path) -> None:
     state = _state_with(
-        tmp_path, [("run-260812-010000-1", "/tmp/ws/vista")], current="/tmp/ws/vista"
+        tmp_path, [("run-260812-010000-1", "/tmp/ws/demo")], current="/tmp/ws/demo"
     )
     card = state.visible_rows()[0]
     assert state.detail_header(card) == (
-        "claude · vista · run-260812-010000-1 · running · HUMAN"
+        "claude · demo · run-260812-010000-1 · running · HUMAN"
     )
     state.raw_transcript = True
     assert state.detail_header(card).endswith("· RAW")

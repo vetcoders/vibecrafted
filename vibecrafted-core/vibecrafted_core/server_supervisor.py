@@ -4,13 +4,21 @@ coordination, identity-verified launchd service management, and CLI entrypoint."
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
-import fcntl
+
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
+import http.client
 import json
+import math
 import os
 import plistlib
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -38,23 +46,37 @@ SUPERVISOR_LOCK_SCHEMA = "vibecrafted.server-supervisor-lock.v1"
 LAUNCH_AGENT_LABEL = "io.vetcoders.vibecrafted.server"
 EX_TEMPFAIL = 75
 EX_CONFIG = 78
+# Match the installer's bounded retirement/history document contract. Only
+# install-receipt.json uses this budget; status, locks and active.json keep
+# the descriptor reader's small default limit.
+_INSTALL_RECEIPT_MAX_BYTES = 128 * 1024 * 1024
 _TOOLS_INSTALL_LEASE_ENV = "VIBECRAFTED_INSTALL_LEASE_FD"
 _TOOLS_INSTALL_LOCK_NAME = ".vibecrafted-install.lock"
+_SERVICE_MUTATION_LOCK_TIMEOUT_ENV = "VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT"
 _HOST_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 _MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-_PASSTHROUGH_ENVIRONMENT = (
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "VIBECRAFTED_GUARDIAN_READY_TICKS",
-    "VIBECRAFTED_LIFECYCLE_LOCK_TICKS",
-    "VIBECRAFTED_PYTHON",
-    "VIBECRAFTED_STOP_KILL_WAIT_TICKS",
-    "VIBECRAFTED_STOP_TERM_WAIT_TICKS",
-    "VIBECRAFTED_TRIAGE_RUN",
-    "VIBECRAFTED_TEST_LIFECYCLE_LOG",
-    "VIBECRAFTED_TEST_SERVER_STOP_DELAY",
+# Child environments start from the operator's full environment — the product
+# is a guest in the user's shell, not a landlord (AGENTS.md). This deny-list is
+# the only scrub, and every entry names why it must not cross into a child.
+_CHILD_ENV_DENYLIST = frozenset(
+    {
+        # Repoints child imports at whatever runtime or test harness spawned
+        # the supervisor; children must import from the installed generation,
+        # never from a foreign runtime's module tree.
+        "PYTHONPATH",
+        # Relocates the interpreter's stdlib and breaks any bundled python
+        # a child resolves.
+        "PYTHONHOME",
+        # Generation-bootstrap posture: our own python bootstrap sets it for
+        # itself; imposing it on children overrides the user's site setup.
+        "PYTHONNOUSERSITE",
+        # Same bootstrap posture as PYTHONNOUSERSITE — runtime state, not the
+        # operator's choice.
+        "PYTHONDONTWRITEBYTECODE",
+        # macOS framework-python breadcrumb pinning children to the parent
+        # interpreter's launcher instead of their own resolution.
+        "__PYVENV_LAUNCHER__",
+    }
 )
 
 
@@ -66,6 +88,35 @@ class SupervisorError(RuntimeError):
 
         super().__init__(message)
         self.exit_code = exit_code
+
+
+@dataclass(frozen=True)
+class _ChildResult:
+    """Captured child streams plus an explicit supervisor-side abort reason."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    abort_reason: str | None = None
+
+    @property
+    def detail(self) -> str:
+        """Render receipt text without changing the captured raw streams."""
+
+        raw_detail = self.stderr or self.stdout
+        if self.abort_reason == "stopping":
+            return (
+                f"supervisor stopping: {raw_detail[-3800:]}"
+                if raw_detail
+                else "supervisor stopping"
+            )
+        if self.abort_reason == "timeout":
+            return (
+                f"command timed out: {raw_detail[-3800:]}"
+                if raw_detail
+                else "command timed out"
+            )
+        return raw_detail
 
 
 @dataclass(frozen=True)
@@ -125,7 +176,7 @@ class SupervisorConfig:
     port: int
     public_url: str = ""
     config_file: Path | None = None
-    interval: float = 1.0
+    interval: float = 15.0
     maximum_backoff: float = 30.0
     command_timeout: float = 60.0
 
@@ -363,18 +414,29 @@ def _supervisor_identity(
     )
 
 
+_LAUNCHER_STAT_CACHE: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
+
+
 def _launcher_sha256(
     launcher: Path,
     *,
     expected_sha256: str | None = None,
 ) -> str:
     """Hash the launcher, requiring the path to already be canonical and, if
-    `expected_sha256` is given, matching it exactly."""
+    `expected_sha256` is given, matching it exactly. Caches hash across loop ticks
+    as long as (mtime, ctime, size, inode) remain unchanged."""
 
     canonical = _validate_owned_regular_file(launcher, executable=True)
     if canonical != launcher:
         raise SupervisorError("launcher path must already be canonical", EX_CONFIG)
-    digest = _sha256_file(canonical)
+    st = canonical.stat()
+    stat_key = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+    cached = _LAUNCHER_STAT_CACHE.get(canonical)
+    if cached is not None and cached[0] == stat_key:
+        digest = cached[1]
+    else:
+        digest = _sha256_file(canonical)
+        _LAUNCHER_STAT_CACHE[canonical] = (stat_key, digest)
     if expected_sha256 and digest != expected_sha256:
         raise SupervisorError(
             "Vibecrafted launcher hash differs from the installed LaunchAgent",
@@ -581,8 +643,8 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def _active_generation_bin(runtime_home: Path) -> Path | None:
-    """`<generation>/bin` for the runtime generation the app published, read from
+def _active_generation_root(runtime_home: Path) -> Path | None:
+    """Runtime generation the app published, read from
     `runtime_home/active.json`; None when that receipt is missing, malformed, or
     names a root outside `runtime_home`."""
 
@@ -593,18 +655,30 @@ def _active_generation_bin(runtime_home: Path) -> Path | None:
         payload = json.loads(encoded)
     except (ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(payload, dict):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "vibecrafted.active-runtime.v1"
+    ):
+        return None
+    version = payload.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version):
         return None
     runtime_root = payload.get("runtime_root")
-    if not isinstance(runtime_root, str) or not runtime_root:
+    expected = runtime_home / "releases" / version
+    if runtime_root != str(expected):
         return None
     try:
         generation = _absolute_path(Path(runtime_root))
-    except SupervisorError:
+    except (SupervisorError, OSError, ValueError):
         return None
-    if not generation.is_relative_to(runtime_home):
+    if generation != expected or generation.parent != runtime_home / "releases":
         return None
-    return generation / "bin"
+    return generation
+
+
+def _active_generation_bin(runtime_home: Path) -> Path | None:
+    generation = _active_generation_root(runtime_home)
+    return generation / "bin" if generation is not None else None
 
 
 def _service_path(paths: SupervisorPaths) -> str:
@@ -648,12 +722,15 @@ def _sane_path_entries(value: str | None) -> list[str]:
 
 
 def _child_environment(paths: SupervisorPaths) -> dict[str, str]:
-    """Build the sanitized environment for spawned launcher subprocesses: a
-    passthrough allowlist plus fixed HOME/PATH/VIBECRAFTED_* overrides so the
-    child can never inherit an operator's arbitrary shell environment."""
+    """Build the environment for spawned launcher subprocesses: the operator's
+    full environment minus `_CHILD_ENV_DENYLIST` (guest, not landlord — the
+    user's SSH agent, tokens and tools flow through), with the supervisor's
+    HOME/PATH/VIBECRAFTED_* pins overlaid on top."""
 
     environment = {
-        key: os.environ[key] for key in _PASSTHROUGH_ENVIRONMENT if os.environ.get(key)
+        key: value
+        for key, value in os.environ.items()
+        if key not in _CHILD_ENV_DENYLIST
     }
     environment.update(
         {
@@ -664,6 +741,9 @@ def _child_environment(paths: SupervisorPaths) -> dict[str, str]:
             "VIBECRAFTED_SERVER_SUPERVISOR_CHILD": "1",
         }
     )
+    generation = _active_generation_root(paths.runtime_home)
+    if generation is not None:
+        environment["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
     return environment
 
 
@@ -690,8 +770,8 @@ def _child_path(paths: SupervisorPaths) -> str:
     return os.pathsep.join(ordered)
 
 
-def _read_owned_bytes(path: Path) -> bytes | None:
-    """Read up to 64KiB from an owned, non-symlinked, single-hardlink regular
+def _read_owned_bytes(path: Path, *, max_bytes: int = 64 * 1024) -> bytes | None:
+    """Read bounded bytes from an owned, non-symlinked, single-hardlink regular
     file, verifying descriptor identity matches the named path; None on any
     trust failure or OS error."""
 
@@ -714,7 +794,8 @@ def _read_owned_bytes(path: Path) -> bytes | None:
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino):
             return None
-        return os.read(descriptor, 64 * 1024)
+        encoded = os.read(descriptor, max_bytes + 1)
+        return encoded if len(encoded) <= max_bytes else None
     except OSError:
         return None
     finally:
@@ -1039,6 +1120,33 @@ def _validate_tools_install_descriptor(descriptor: int, lock_path: Path) -> None
         )
 
 
+def _service_mutation_lock_wait_seconds() -> float:
+    """Bounded wait for a foreign install lease before refusing a service
+    mutation: `VIBECRAFTED_SERVICE_MUTATION_LOCK_TIMEOUT` seconds, default 0
+    (the historical fail-fast contract). Non-interactive post-install
+    reconciles opt into a bounded queue so a transient concurrent install
+    finishes instead of failing the whole install."""
+
+    raw = os.environ.get(_SERVICE_MUTATION_LOCK_TIMEOUT_ENV)
+    if not raw:
+        return 0.0
+    try:
+        wait = float(raw)
+    except ValueError as exc:
+        raise SupervisorError(
+            f"{_SERVICE_MUTATION_LOCK_TIMEOUT_ENV} must be a finite "
+            f"non-negative number of seconds, got {raw!r}",
+            EX_CONFIG,
+        ) from exc
+    if not math.isfinite(wait) or wait < 0:
+        raise SupervisorError(
+            f"{_SERVICE_MUTATION_LOCK_TIMEOUT_ENV} must be a finite "
+            f"non-negative number of seconds, got {raw!r}",
+            EX_CONFIG,
+        )
+    return wait
+
+
 class _ToolsInstallMutationLease:
     """Serialize service mutations with runtime publication and uv replacement."""
 
@@ -1087,6 +1195,7 @@ class _ToolsInstallMutationLease:
                 f"tools directory is not an owned regular directory: {lock_path.parent}",
                 EX_CONFIG,
             )
+        wait_seconds = _service_mutation_lock_wait_seconds()
         descriptor = os.open(
             lock_path,
             os.O_RDWR
@@ -1097,15 +1206,59 @@ class _ToolsInstallMutationLease:
         )
         try:
             _validate_tools_install_descriptor(descriptor, lock_path)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+            deadline = time.monotonic() + wait_seconds
+            notified = False
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise
+                    # Re-read the payload on every pass: a current-generation
+                    # holder writes its metadata after acquiring, so later
+                    # passes attribute the owner better than the first.
+                    owner = _read_lock_payload(descriptor) or {}
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        pid = owner.get("pid", "unknown")
+                        alive = (
+                            _process_alive(pid)
+                            if type(pid) is int and 1 < pid <= 2**31 - 1
+                            else "unknown"
+                        )
+                        raise SupervisorError(
+                            "runtime install is active; refusing concurrent service mutation: "
+                            f"{lock_path} (pid={pid}, alive={alive}, "
+                            f"operation={owner.get('operation', owner.get('role', 'unknown'))}, "
+                            f"started_at={owner.get('started_at', owner.get('acquired_at', 'unknown'))}). "
+                            f"Inspect holders with lsof {shlex.quote(str(lock_path))} "
+                            "and ps -p <pid> -o pid,ppid,etime,command. "
+                            "A child may retain the lease after its recorded owner exits; "
+                            "do not remove the lock file.",
+                            EX_TEMPFAIL,
+                        ) from exc
+                    if not notified:
+                        print(
+                            "vc-server-supervisor: runtime install is active at "
+                            f"{lock_path} (pid={owner.get('pid', 'unknown')}, "
+                            f"operation={owner.get('operation', owner.get('role', 'unknown'))}); "
+                            f"waiting up to {wait_seconds:g}s for it to finish "
+                            "before refusing the service mutation",
+                            file=sys.stderr,
+                        )
+                        notified = True
+                    time.sleep(min(0.1, remaining))
+        except BaseException:
             os.close(descriptor)
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
-                raise SupervisorError(
-                    "runtime install is active; refusing concurrent service mutation",
-                    EX_TEMPFAIL,
-                ) from exc
             raise
+        try:
+            _write_lock_payload(
+                descriptor,
+                role="service-mutation",
+                service_managed=False,
+                identity=None,
+            )
         except BaseException:
             os.close(descriptor)
             raise
@@ -1118,9 +1271,15 @@ class _ToolsInstallMutationLease:
 
         if self.descriptor < 0 or self.inherited:
             return
-        fcntl.flock(self.descriptor, fcntl.LOCK_UN)
-        os.close(self.descriptor)
-        self.descriptor = -1
+        try:
+            os.ftruncate(self.descriptor, 0)
+            os.fsync(self.descriptor)
+        finally:
+            try:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(self.descriptor)
+                self.descriptor = -1
 
 
 def _receipt(
@@ -1179,11 +1338,11 @@ def _run_child(
     env: dict[str, str],
     timeout: float,
     stop_event: threading.Event,
-) -> tuple[int, str]:
+) -> _ChildResult:
     """Run `argv` to completion (or until `timeout`/`stop_event`), capturing
-    output into temp files rather than pipes; returns (exit_code, tail-of-
-    stderr-or-stdout detail, clipped to 4000 chars). Exit code 143 signals a
-    stop-event abort, 124 a timeout."""
+    output into temp files rather than pipes. Raw streams remain distinct and
+    clipped to 4000 chars; `abort_reason` distinguishes supervisor aborts from
+    children that independently exit 143 or 124."""
 
     # Pipes make ``communicate`` wait for EOF from every descendant that inherited
     # them, even after the direct launcher has exited. The shell deck deliberately
@@ -1218,22 +1377,170 @@ def _run_child(
                 process.wait(timeout=5)
         stdout_file.seek(0)
         stderr_file.seek(0)
-        stdout = stdout_file.read()
-        stderr = stderr_file.read()
-        detail = (stderr or stdout).strip()
+        stdout = stdout_file.read().strip()[-4000:]
+        stderr = stderr_file.read().strip()[-4000:]
         if stop_event.is_set():
-            return 143, (
-                f"supervisor stopping: {detail[-3800:]}"
-                if detail
-                else "supervisor stopping"
-            )
+            return _ChildResult(143, stdout, stderr, "stopping")
         if timed_out:
-            return 124, (
-                f"command timed out: {detail[-3800:]}"
-                if detail
-                else "command timed out"
-            )
-        return int(process.returncode or 0), detail[-4000:]
+            return _ChildResult(124, stdout, stderr, "timeout")
+        return _ChildResult(int(process.returncode or 0), stdout, stderr)
+
+
+_STDERR_ROTATE_BYTES = 1024 * 1024
+_STDERR_ROTATE_AGE_SECONDS = 30 * 24 * 60 * 60
+_STDERR_ROTATE_GENERATIONS = 3
+
+
+def _owned_regular_stat(path: Path) -> os.stat_result | None:
+    """Stat a unique regular file owned by this user. Symlinks are rejected."""
+
+    try:
+        visible = path.lstat()
+    except OSError:
+        return None
+    if (
+        stat.S_ISLNK(visible.st_mode)
+        or not stat.S_ISREG(visible.st_mode)
+        or visible.st_uid != os.getuid()
+        or visible.st_nlink != 1
+    ):
+        return None
+    return visible
+
+
+def _stderr_fd_is(expected: os.stat_result) -> bool:
+    try:
+        current = os.fstat(2)
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+def _log_generation(path: Path, index: int) -> Path:
+    return path.with_name(f"{path.name}.{index}")
+
+
+def _shift_log_generations(path: Path) -> bool:
+    oldest = _log_generation(path, _STDERR_ROTATE_GENERATIONS)
+    try:
+        if oldest.exists() or oldest.is_symlink():
+            if _owned_regular_stat(oldest) is None:
+                return False
+            oldest.unlink()
+        for index in range(_STDERR_ROTATE_GENERATIONS - 1, 0, -1):
+            source = _log_generation(path, index)
+            if not source.exists() and not source.is_symlink():
+                continue
+            if _owned_regular_stat(source) is None:
+                return False
+            os.replace(source, _log_generation(path, index + 1))
+    except OSError:
+        return False
+    return True
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while rotating supervisor stderr")
+        view = view[written:]
+
+
+def _copy_log(src: Path, dst: Path) -> None:
+    src_fd = os.open(src, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    dst_fd = -1
+    try:
+        src_stat = os.fstat(src_fd)
+        dst_fd = os.open(
+            dst,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        copied = 0
+        while True:
+            chunk = os.read(src_fd, 1024 * 1024)
+            if not chunk:
+                break
+            _write_all(dst_fd, chunk)
+            copied += len(chunk)
+        grown = os.fstat(src_fd).st_size
+        if grown > copied:
+            os.lseek(src_fd, copied, os.SEEK_SET)
+            extra = os.read(src_fd, grown - copied)
+            if extra:
+                _write_all(dst_fd, extra)
+        mode = stat.S_IMODE(src_stat.st_mode) & 0o666
+        os.fchmod(dst_fd, mode or 0o600)
+        os.fsync(dst_fd)
+    except OSError:
+        if dst_fd >= 0:
+            os.close(dst_fd)
+            dst_fd = -1
+            with contextlib.suppress(OSError):
+                os.unlink(dst)
+        raise
+    finally:
+        os.close(src_fd)
+        if dst_fd >= 0:
+            os.close(dst_fd)
+
+
+def _truncate_live_log(path: Path, expected: os.stat_result) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError("stderr log changed during rotation")
+        os.ftruncate(descriptor, 0)
+    finally:
+        os.close(descriptor)
+    if not _stderr_fd_is(expected):
+        return
+    os.ftruncate(2, 0)
+    os.lseek(2, 0, os.SEEK_SET)
+
+
+def rotate_supervisor_stderr_log(path: Path, *, now: float | None = None) -> bool:
+    """Rotate an owned stderr log larger than 1 MiB or older than 30 days.
+
+    Previous bytes, including a crash tail, move to ``path.1``. Older copies
+    shift up to ``.3`` and the oldest is dropped. When this process already
+    has the log open as stderr, the live inode is truncated after the copy so
+    later appends stay on the same path. Otherwise the file is renamed and the
+    next opener creates a fresh log. Symlinks and other untrusted paths are
+    left untouched.
+    """
+
+    visible = _owned_regular_stat(path)
+    if visible is None or visible.st_size <= 0:
+        return False
+    moment = time.time() if now is None else now
+    oversized = visible.st_size > _STDERR_ROTATE_BYTES
+    stale = (moment - visible.st_mtime) >= _STDERR_ROTATE_AGE_SECONDS
+    if not oversized and not stale:
+        return False
+    live_stderr = _stderr_fd_is(visible)
+    if not _shift_log_generations(path):
+        return False
+    destination = _log_generation(path, 1)
+    try:
+        if live_stderr:
+            _copy_log(path, destination)
+            _truncate_live_log(path, visible)
+        else:
+            os.replace(path, destination)
+    except OSError:
+        return False
+    return True
 
 
 def run_supervisor(
@@ -1243,12 +1550,14 @@ def run_supervisor(
     service_managed: bool = False,
     identity: SupervisorIdentity | None = None,
 ) -> int:
-    """Foreground supervisor loop: acquire the coordination lease, then
-    repeatedly launch `<launcher> server start`, verify canonical pair health,
-    and back off exponentially on failure, until `stop_event` fires — at which
-    point it runs `<launcher> server stop` and writes a final receipt. Always
-    returns 0; failures are recorded in the receipt, not the return value."""
+    """Foreground supervisor loop: acquire the coordination lease, then probe
+    canonical pair health, invoke `<launcher> server start` only when proof is
+    absent, and back off exponentially on failure until `stop_event` fires — at
+    which point it runs `<launcher> server stop` and writes a final receipt.
+    Always returns 0; failures are recorded in the receipt, not the return
+    value."""
 
+    rotate_supervisor_stderr_log(config.paths.stderr_log)
     event = stop_event or threading.Event()
     if (
         config.interval <= 0
@@ -1334,34 +1643,60 @@ def run_supervisor(
                     )
                     event.wait(delay)
                     continue
-                return_code, detail = _run_child(
-                    [
-                        str(config.launcher),
-                        "server",
-                        "start",
-                        "--host",
-                        config.host,
-                        "--port",
-                        str(config.port),
-                    ],
-                    env=child_environment,
-                    timeout=config.command_timeout,
-                    stop_event=event,
-                )
-                last_exit_code = return_code
-                if event.is_set():
-                    break
                 managed_pair = _managed_pair_snapshot(config.paths)
                 managed_pair_live = _managed_pair_healthy(managed_pair)
-                canonical_pair_healthy = (
-                    return_code == 0
-                    and managed_pair_live
-                    and _pair_healthy(
-                        config.launcher,
-                        child_environment,
-                        timeout=config.command_timeout,
-                    )
+                canonical_pair_healthy = managed_pair_live and _pair_healthy(
+                    config.launcher,
+                    child_environment,
+                    timeout=config.command_timeout,
+                    stop_event=event,
+                    paths=config.paths,
+                    host=config.host,
+                    port=config.port,
                 )
+                if event.is_set():
+                    break
+                return_code = 0
+                detail = ""
+                if not canonical_pair_healthy:
+                    child_result = _run_child(
+                        [
+                            str(config.launcher),
+                            "server",
+                            "start",
+                            "--host",
+                            config.host,
+                            "--port",
+                            str(config.port),
+                        ],
+                        env=child_environment,
+                        timeout=config.command_timeout,
+                        stop_event=event,
+                    )
+                    return_code = child_result.exit_code
+                    detail = child_result.detail
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
+                    managed_pair = _managed_pair_snapshot(config.paths)
+                    managed_pair_live = _managed_pair_healthy(managed_pair)
+                    canonical_pair_healthy = (
+                        return_code == 0
+                        and managed_pair_live
+                        and _pair_healthy(
+                            config.launcher,
+                            child_environment,
+                            timeout=config.command_timeout,
+                            stop_event=event,
+                            paths=config.paths,
+                            host=config.host,
+                            port=config.port,
+                        )
+                    )
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
+                last_exit_code = return_code
                 if canonical_pair_healthy:
                     consecutive_failures = 0
                     last_success_at = _utc_now()
@@ -1388,7 +1723,8 @@ def run_supervisor(
                     state = "backoff"
                     delay = min(
                         config.maximum_backoff,
-                        config.interval * (2 ** min(consecutive_failures - 1, 6)),
+                        min(2.0, config.interval)
+                        * (2 ** min(consecutive_failures - 1, 6)),
                     )
                 _atomic_json(
                     config.paths.receipt_file,
@@ -1440,12 +1776,14 @@ def run_supervisor(
                 config.launcher,
                 expected_sha256=runtime_identity.launcher_sha256,
             )
-            stop_code, stop_detail = _run_child(
+            stop_result = _run_child(
                 [str(config.launcher), "server", "stop"],
                 env=stop_environment,
                 timeout=config.command_timeout,
                 stop_event=cleanup_event,
             )
+            stop_code = stop_result.exit_code
+            stop_detail = stop_result.detail
             if stop_code != 0:
                 total_failures += 1
                 consecutive_failures += 1
@@ -1494,8 +1832,29 @@ def render_launch_agent_plist(
         config.paths.launch_agent_file.parent,
     ):
         _ensure_owned_directory(directory)
+    service_environment = {
+        "HOME": str(config.paths.operator_home),
+        "PATH": _service_path(config.paths),
+        "VIBECRAFTED_HOME": str(config.paths.home),
+        "VIBECRAFTED_RUNTIME_HOME": str(config.paths.runtime_home),
+        "VC_SERVER_PUBLIC_URL": config.public_url or config.endpoint,
+        "VIBECRAFTED_SERVER_CONFIG": str(config.config_file or ""),
+        "VIBECRAFTED_SERVER_SERVICE": "launchd",
+        "VIBECRAFTED_SERVER_SUPERVISOR_PATH": str(supervisor),
+        "VIBECRAFTED_SERVER_SUPERVISOR_SHA256": supervisor_sha256,
+        "VIBECRAFTED_SERVER_SUPERVISOR_RUNTIME_SHA256": runtime_sha256,
+        "VIBECRAFTED_SERVER_SUPERVISOR_VERSION": PACKAGE_VERSION,
+        "VIBECRAFTED_SERVER_LAUNCHER_SHA256": launcher_sha256,
+        "VIBECRAFTED_TRIAGE_RUN": os.environ.get("VIBECRAFTED_TRIAGE_RUN", "1"),
+    }
+    generation = _active_generation_root(config.paths.runtime_home)
+    if generation is not None:
+        service_environment["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
     payload: dict[str, Any] = {
         "Label": LAUNCH_AGENT_LABEL,
+        # Attribute this legacy LaunchAgent to the signed product in Login Items.
+        # The packaged executable and App must share the release signing team.
+        "AssociatedBundleIdentifiers": ["io.vetcoders.vibecrafted"],
         "ProgramArguments": [
             str(supervisor),
             "run",
@@ -1525,21 +1884,7 @@ def render_launch_agent_plist(
         "ProcessType": "Background",
         "StandardOutPath": str(config.paths.stdout_log),
         "StandardErrorPath": str(config.paths.stderr_log),
-        "EnvironmentVariables": {
-            "HOME": str(config.paths.operator_home),
-            "PATH": _service_path(config.paths),
-            "VIBECRAFTED_HOME": str(config.paths.home),
-            "VIBECRAFTED_RUNTIME_HOME": str(config.paths.runtime_home),
-            "VC_SERVER_PUBLIC_URL": config.public_url or config.endpoint,
-            "VIBECRAFTED_SERVER_CONFIG": str(config.config_file or ""),
-            "VIBECRAFTED_SERVER_SERVICE": "launchd",
-            "VIBECRAFTED_SERVER_SUPERVISOR_PATH": str(supervisor),
-            "VIBECRAFTED_SERVER_SUPERVISOR_SHA256": supervisor_sha256,
-            "VIBECRAFTED_SERVER_SUPERVISOR_RUNTIME_SHA256": runtime_sha256,
-            "VIBECRAFTED_SERVER_SUPERVISOR_VERSION": PACKAGE_VERSION,
-            "VIBECRAFTED_SERVER_LAUNCHER_SHA256": launcher_sha256,
-            "VIBECRAFTED_TRIAGE_RUN": os.environ.get("VIBECRAFTED_TRIAGE_RUN", "1"),
-        },
+        "EnvironmentVariables": service_environment,
     }
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
 
@@ -1804,7 +2149,7 @@ def _launchctl_start_diagnostics() -> tuple[str, bool]:
 
 def _launchctl_job_owns_paths(paths: SupervisorPaths) -> bool:
     """Cross-check the loaded launchd job's plist path, program path, and
-    environment (supervisor/home/runtime_home/operator_home) against `paths`,
+    environment (supervisor, home, runtime_home, operator_home) against `paths`,
     to detect a stale job definition pointed at a different install."""
 
     result = _launchctl(["print", _launch_target()])
@@ -1909,19 +2254,137 @@ def _wait_for_managed_supervisor(
     return probe
 
 
+def _server_http_healthy(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 1.0,
+) -> bool:
+    """In-process HTTP health probe for the server; True when HTTP 200 is returned."""
+    connection: http.client.HTTPConnection | None = None
+    try:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        connection.request("GET", "/api/health", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        status = response.status
+        response.read(1024)
+        return status == 200
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return False
+    finally:
+        if connection is not None:
+            with contextlib.suppress(OSError, http.client.HTTPException):
+                connection.close()
+
+
+def _managed_pair_in_process_healthy(
+    paths: SupervisorPaths,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 3024,
+    timeout: float = 1.0,
+) -> bool:
+    """Verify managed pair health in-process: validates server and guardian pids,
+    identities, guardian readiness receipt, and server HTTP health endpoint."""
+    snapshot = _managed_pair_snapshot(paths)
+    if not _managed_pair_healthy(snapshot):
+        return False
+
+    server_pid = snapshot.get("server_pid")
+    guardian_pid = snapshot.get("guardian_pid")
+    if not server_pid or not guardian_pid:
+        return False
+
+    rendered_host = f"[{host}]" if ":" in host else host
+    target_url = f"http://{rendered_host}:{port}"
+
+    # Verify guardian URL matches managed server endpoint
+    raw_guardian_url = _read_owned_text(paths.server_dir / "guardian.url")
+    if not raw_guardian_url:
+        return False
+    url_lines = raw_guardian_url.splitlines()
+    if not url_lines or url_lines[0].strip() != target_url:
+        return False
+
+    # Read and verify guardian identity nonce
+    raw_guardian_id = _read_owned_text(paths.server_dir / "guardian.identity.json")
+    if not raw_guardian_id:
+        return False
+    try:
+        guardian_identity = json.loads(raw_guardian_id)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(guardian_identity, dict):
+        return False
+    nonce = guardian_identity.get("nonce")
+    if not nonce:
+        return False
+
+    # Verify guardian readiness receipt
+    raw_ready_pointer = _read_owned_text(paths.server_dir / "guardian.ready-path")
+    if not raw_ready_pointer:
+        return False
+    ready_lines = raw_ready_pointer.splitlines()
+    if not ready_lines or not ready_lines[0].strip():
+        return False
+    ready_path = Path(ready_lines[0].strip())
+    raw_ready_payload = _read_owned_text(ready_path)
+    if not raw_ready_payload:
+        return False
+    try:
+        ready_payload = json.loads(raw_ready_payload)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(ready_payload, dict):
+        return False
+    if ready_payload != {
+        "schema": "vibecrafted.guardian-ready.v1",
+        "nonce": nonce,
+        "pid": guardian_pid,
+        "server_url": target_url,
+    }:
+        return False
+
+    # Verify server HTTP health endpoint answers 200
+    return _server_http_healthy(host, port, timeout=timeout)
+
+
 def _pair_healthy(
     launcher: Path,
     environment: dict[str, str],
     *,
     timeout: float = 60.0,
+    stop_event: threading.Event | None = None,
+    paths: SupervisorPaths | None = None,
+    host: str = "127.0.0.1",
+    port: int = 3024,
 ) -> bool:
-    """Run `<launcher> server status` and require both "Server: RUNNING" and
-    "Guardian: RUNNING" in stdout with exit code 0; False on any subprocess
-    error."""
+    """Verify supervisor pair health. When `paths` is provided, performs an
+    in-process PID+HTTP health check (zero child processes). Falls back to the
+    launcher's supervisor-pair-health subprocess probe when paths is None or
+    when in-process probe indicates failure."""
 
+    if paths is not None and _managed_pair_in_process_healthy(
+        paths, host=host, port=port, timeout=min(timeout, 2.0)
+    ):
+        return True
+
+    argv = [str(launcher), "server", "supervisor-pair-health"]
+    if stop_event is not None:
+        result = _run_child(
+            argv,
+            env=environment,
+            timeout=timeout,
+            stop_event=stop_event,
+        )
+        return (
+            result.exit_code == 0
+            and "Server: RUNNING" in result.stdout
+            and "Guardian: RUNNING" in result.stdout
+        )
     try:
         result = subprocess.run(
-            [str(launcher), "server", "status"],
+            argv,
             check=False,
             capture_output=True,
             text=True,
@@ -1957,14 +2420,16 @@ def service_status(config: SupervisorConfig) -> ServiceStatus:
     environment = _child_environment(config.paths)
     pair_snapshot = _managed_pair_snapshot(config.paths)
     launcher_current = _launcher_matches_identity(config.launcher, identity)
-    pair_healthy = (
-        launcher_current
-        and _managed_pair_healthy(pair_snapshot)
-        and _pair_healthy(
-            config.launcher,
-            environment,
-            timeout=config.command_timeout,
-        )
+    # Generation handoff: a live Server/Guardian pair is reconcilable even
+    # when the PATH launcher SHA no longer matches the installed LaunchAgent.
+    # SHA drift belongs on build_current; pair_healthy is process+HTTP truth.
+    pair_healthy = _managed_pair_healthy(pair_snapshot) and _pair_healthy(
+        config.launcher,
+        environment,
+        timeout=config.command_timeout,
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
     )
     return ServiceStatus(
         installed=installed,
@@ -1992,6 +2457,7 @@ def start_service(config: SupervisorConfig) -> None:
     the way (unowned lease, foreground supervisor already active, etc.)."""
 
     _require_macos_service()
+    rotate_supervisor_stderr_log(config.paths.stderr_log)
     if not config.paths.launch_agent_file.is_file():
         raise SupervisorError(
             "server service is not installed; run "
@@ -2232,36 +2698,63 @@ def restart_service(
     return probe
 
 
+# Reconcile races launchd by construction: `bootout` frees the label and a
+# KeepAlive respawn can reclaim it before the cleanup lease lands, which
+# surfaces as an EX_TEMPFAIL refusal.  That class is transient, so reconcile
+# re-probes the live state and retries instead of leaving the service stopped
+# for an operator to rediscover.
+_RECONCILE_MAX_ATTEMPTS = 3
+_RECONCILE_RETRY_DELAY_SECONDS = 1.0
+
+
 def install_and_reconcile_service(
     config: SupervisorConfig,
     *,
     supervisor_binary: Path,
+    attempts: int = _RECONCILE_MAX_ATTEMPTS,
 ) -> tuple[bool, bool]:
     """Install/refresh the LaunchAgent plist, then restart it if it changed or
     the running supervisor no longer matches the installed identity, or start
-    it fresh if launchd wasn't loaded. Returns (plist_changed, restarted)."""
+    it fresh if launchd wasn't loaded. Returns (plist_changed, restarted).
+
+    Transient (EX_TEMPFAIL) failures — the launchd reactivation race above —
+    are retried against freshly probed state so a startup or post-upgrade
+    reconcile converges without operator intervention; persistent or
+    non-transient failures still raise."""
 
     _require_macos_service()
-    loaded = _launchctl_loaded()
-    previous = probe_supervisor(config.paths)
     changed = install_service(config, supervisor_binary=supervisor_binary)
     installed_identity = _installed_service_identity(config.paths)
-    current = _probe_matches_identity(
-        previous,
-        installed_identity,
-        service_managed=True,
-    )
+    needs_restart = changed
     restarted = False
-    if loaded and (changed or not current):
-        restart_service(config, previous_pid=previous.pid)
-        restarted = True
-    elif not loaded:
-        # `service install` is the canonical install/reconcile entrypoint used by
-        # make install and doctor remediation.  A fresh definition is not a
-        # running service, so always finish the contract by bootstrapping and
-        # verifying the installed identity.
-        start_service(config)
-    return changed, restarted
+    for attempt in range(attempts):
+        loaded = _launchctl_loaded()
+        previous = probe_supervisor(config.paths)
+        current = _probe_matches_identity(
+            previous,
+            installed_identity,
+            service_managed=True,
+        )
+        try:
+            if loaded and (needs_restart or not current):
+                restart_service(config, previous_pid=previous.pid)
+                restarted = True
+            elif not loaded:
+                # `service install` is the canonical install/reconcile entrypoint
+                # used by make install and doctor remediation.  A fresh definition
+                # is not a running service, so always finish the contract by
+                # bootstrapping and verifying the installed identity.
+                start_service(config)
+            return changed, restarted
+        except SupervisorError as exc:
+            if exc.exit_code != EX_TEMPFAIL or attempt + 1 >= attempts:
+                raise
+            # The plist write already landed; the next pass converges on the
+            # freshly probed identity alone instead of re-entering a restart
+            # the respawn may have made unnecessary.
+            needs_restart = False
+            time.sleep(_RECONCILE_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable: retry loop returns or raises")
 
 
 def uninstall_service(config: SupervisorConfig) -> bool:
@@ -2539,7 +3032,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--launcher", required=True)
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument("--interval", type=float, default=15.0)
     parser.add_argument("--maximum-backoff", type=float, default=30.0)
     parser.add_argument("--command-timeout", type=float, default=60.0)
 
@@ -2572,6 +3065,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "start",
             "stop",
             "status",
+            "logs",
             "uninstall",
         ),
     )
@@ -2732,14 +3226,121 @@ def _runtime_status(paths: SupervisorPaths) -> int:
     return 0
 
 
+def _admit_service_mutation(
+    config: SupervisorConfig,
+    *,
+    supervisor_binary: Path | None,
+    inherited: bool,
+) -> None:
+    """Admit this caller only while holding the tools-install mutation lease.
+
+    The active receipt selects the generation; the install receipt binds public
+    wrappers to that selection. The loaded owner must also belong to it, even
+    when two generations contain identical launcher bytes. Standalone service
+    installs without a runtime publication keep their existing semantics.
+    """
+
+    paths = config.paths
+    active = paths.runtime_home / "active.json"
+    receipt_path = paths.runtime_home / "install-receipt.json"
+    current = paths.runtime_home / "tools/vibecrafted-current"
+    module = Path(__file__).resolve()
+    candidates = [config.launcher, module]
+    if supervisor_binary is not None:
+        candidates.append(supervisor_binary)
+    generation = _active_generation_root(paths.runtime_home)
+    if generation is None:
+        # Absence is a standalone install only when there is no publication
+        # evidence at all. Unreadable, symlinked and partial state is not absent.
+        try:
+            for path in (active, receipt_path, current):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                break
+            else:
+                if not any(
+                    path.is_relative_to(paths.runtime_home / "releases")
+                    for path in candidates
+                ):
+                    return
+        except OSError:
+            pass
+        raise SupervisorError(
+            "runtime publication is absent or invalid; repair it before service mutation",
+            EX_CONFIG,
+        )
+
+    # Owned projections and preserved settlement history share this receipt.
+    # Keep the same descriptor/ownership checks and a finite document ceiling.
+    encoded = _read_owned_bytes(receipt_path, max_bytes=_INSTALL_RECEIPT_MAX_BYTES)
+    try:
+        receipt = json.loads(encoded) if encoded is not None else None
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("schema") != "vibecrafted.runtime-install.v1"
+            or receipt.get("version") != generation.name
+            or receipt.get("owned_files", {}).get(str(active)) != _sha256_file(active)
+            or not current.is_symlink()
+            or current.resolve(strict=True) != generation
+            or receipt.get("owned_symlinks", {}).get(str(current)) != str(generation)
+            or "config_transaction" in receipt
+            or any(
+                receipt.get(key)
+                for key in ("config_pending", "config_conflicts", "uninstall_pending")
+            )
+            or (receipt.get("install_pending") and not inherited)
+        ):
+            raise ValueError("incomplete or conflicting selection")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise SupervisorError(
+            "runtime publication has no coherent install identity; repair it before service mutation",
+            EX_CONFIG,
+        ) from exc
+
+    if (
+        module != generation / "vibecrafted-core/vibecrafted_core/server_supervisor.py"
+        or PACKAGE_VERSION != generation.name
+    ):
+        raise SupervisorError(
+            "service caller differs from the selected runtime; retry using the current launcher",
+            EX_TEMPFAIL,
+        )
+    for candidate, name in (
+        (config.launcher, "vibecrafted"),
+        (supervisor_binary, "vc-server-supervisor"),
+    ):
+        if candidate is None or candidate == generation / "bin" / name:
+            continue
+        if candidate.is_relative_to(paths.runtime_home / "releases"):
+            raise SupervisorError(
+                "service entrypoint differs from the selected runtime; retry using the current launcher",
+                EX_TEMPFAIL,
+            )
+        roots = receipt.get("roots")
+        launcher_home = roots.get("launcher_home") if isinstance(roots, dict) else None
+        if (
+            not isinstance(launcher_home, str)
+            or candidate != Path(launcher_home) / name
+            or receipt["owned_files"].get(str(candidate)) != _sha256_file(candidate)
+        ):
+            raise SupervisorError(
+                "service entrypoint is not bound to the runtime publication",
+                EX_CONFIG,
+            )
+    _supervisor_identity(supervisor_binary, launcher=config.launcher)
+
+
 def _service_command(args: argparse.Namespace) -> int:
-    """Dispatch the `service` subcommand's action (status/install/reconcile/
-    restart/start/stop/uninstall), serializing mutating actions behind the
-    tools-install lease; prints a confirmation line and returns an exit code
+    """Dispatch the `service` subcommand's action (status/logs/install/
+    reconcile/restart/start/stop/uninstall), serializing mutating actions behind
+    the tools-install lease; prints a confirmation line and returns an exit code
     (status returns 1 unless every health field is green)."""
 
     _require_macos_service()
-    config = _config_from_args(args)
+    if args.action in {"status", "logs"}:
+        config = _config_from_args(args)
     if args.action == "status":
         status = service_status(config)
         _print_service_status(status, as_json=args.json)
@@ -2756,11 +3357,40 @@ def _service_command(args: argparse.Namespace) -> int:
             )
             else 1
         )
-    with _ToolsInstallMutationLease(config.paths):
+    if args.action == "logs":
+        payload = {
+            "directory": str(config.paths.server_dir),
+            "stdout": str(config.paths.stdout_log),
+            "stderr": str(config.paths.stderr_log),
+        }
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(f"Directory: {payload['directory']}")
+            print(f"Stdout: {payload['stdout']}")
+            print(f"Stderr: {payload['stderr']}")
+        return 0
+    with _ToolsInstallMutationLease(_paths_from_args(args)) as lease:
+        try:
+            config = _config_from_args(args)
+            supervisor_binary = (
+                _install_requires_supervisor_binary(args)
+                if args.action in {"install", "reconcile"} or args.supervisor_bin
+                else None
+            )
+            _admit_service_mutation(
+                config, supervisor_binary=supervisor_binary, inherited=lease.inherited
+            )
+        except (OSError, ValueError) as exc:
+            raise SupervisorError(
+                "service selection is unavailable or invalid; refusing service mutation",
+                EX_CONFIG,
+            ) from exc
         if args.action in {"install", "reconcile"}:
+            assert supervisor_binary is not None
             changed, restarted = install_and_reconcile_service(
                 config,
-                supervisor_binary=_install_requires_supervisor_binary(args),
+                supervisor_binary=supervisor_binary,
             )
             print(
                 f"LaunchAgent {'installed' if changed else 'already current'} at "

@@ -10,13 +10,18 @@ order: 40
 Every dispatch creates a run in the control plane, identified by a run id
 such as `impl-<timestamp>-<id>` or `scaf-<timestamp>-<id>`. The run — not the
 terminal tab, not the process — is the unit of truth. Two verbs follow it:
-`observe` reads what a run produced; `await` blocks until it lands.
+`observe` reads what a run produced; `await` blocks until it lands. `observe`
+may read through `vc-server`. `await` subscribes to the dispatcher-owned Unix
+stream for that run; it does not start a private filesystem poller and does
+not require `vc-server` for wake delivery.
 
 ## The two verbs
 
 ```bash
-vibecrafted observe <agent> --last            # last report/transcript
-vibecrafted observe <agent> --run-id <id>     # a specific run
+vibecrafted observe <agent> --last            # watch the last run live
+vibecrafted observe <agent> --run-id <id>     # watch a specific run live
+vibecrafted observe <agent> --run-id <id> --tail 30   # one-shot: last 30 lines
+vibecrafted observe <agent> --run-id <id> --head 30   # one-shot: first 30 lines
 vibecrafted await <agent> --last              # wait for the last run
 vibecrafted await <agent> --run-id <id>       # wait for a specific run
 ```
@@ -29,11 +34,38 @@ vibecrafted implement codex --prompt "Ship <task>"
 vibecrafted await codex --run-id impl-<timestamp>-<id>
 ```
 
-`await` is liveness-aware: it aggregates child-run movement for looping
-workflows (a marbles parent freezes between rounds while its children work),
-and it returns `completed` with reason `report_delivered` as soon as a
-non-empty report exists — a worker that wrote its report and exited is done
-even if metadata lags.
+Bare `observe` is a live watch — the default mode. It prints the run status
+and a short rendered backlog, then follows appended transcript events
+(rendered through the agent's stream parser, so per-token streams coalesce
+into sentences) until the run turns terminal. Exit code is 0 when the run
+terminates in a success state, 1 on a terminal failure; Ctrl-C detaches and
+never touches the run. `--interval SECONDS` sets the poll cadence (default
+1.0); `--watch` names the default explicitly. `--tail [N]` and `--head [N]`
+are the bounded one-shot reads (N defaults to 40). With `--json`, one-shot
+reads add a `transcript_tail`/`transcript_head` array to the observation
+payload, and the watch emits one JSON event per rendered line
+(`vibecrafted.observe-event.v1`) between `begin` and `terminal` markers
+(`vibecrafted.observe-watch.v1`). `observe` never creates an await monitor.
+`await` connects to the one dispatcher Unix
+stream for that run id. Twenty CLI clients still share that one socket:
+heartbeats and the terminal line fan out to every connected awaiter, and a
+late client receives the last event replay while the dispatcher is up. Files
+remain the durable triad; the socket only wakes.
+
+`--timeout` is an **idle window**, not a wall-clock deadline. It resets while
+the dispatcher stream moves or qualified worker ownership remains live. Use
+`--hard-cap` when the caller needs an absolute bound:
+
+```bash
+vibecrafted await codex --run-id <id> --timeout 25 --hard-cap 120
+```
+
+JSON names the two outcomes separately as `idle_stall` and `hard_cap`. Human
+output uses the same names. `await` is `control_plane.await_run` over the
+dispatcher socket. A missing, refused, or broken socket is a wake that reads
+the file triad once — it is not permission to poll, and it is not a
+requirement to start `vc-server`. Dashboards may still use the server HTTP
+`/await` projection; that eye is optional and is not the CLI wake path.
 
 Do not hedge `await` with manual sleep/poll/process monitors. If you feel the
 need to double-guard it, that is a bug report against the runtime contract,
@@ -64,10 +96,13 @@ delivery.
 
 Before declaring a run done, reconcile:
 
-1. **The await verdict** — `await` returned success for the run id.
+1. **The await verdict** — the dispatcher socket woke `await` and the file
+   triad produced a terminal verdict for the run id.
 2. **Terminal state in run meta** — the run record shows a terminal state
    (`completed`, `failed`), not `active` or `stalled`.
-3. **Worker process death** — the worker pid is gone.
+3. **Qualified process truth** — PID, PGID, start token, command identity and
+   run id agree, or the canonical PGID contains a child explicitly owned by
+   that run. PID existence alone is never enough.
 
 When a report path was promised, add a fourth check: the report file exists
 and is non-empty.
@@ -86,7 +121,7 @@ vibecrafted await codex --run-id impl-<timestamp>-<id>
 cat ~/.vibecrafted/control_plane/runs/impl-<timestamp>-<id>.json
 
 # 3. report delivered and non-empty
-vibecrafted observe codex --run-id impl-<timestamp>-<id>
+vibecrafted observe codex --run-id impl-<timestamp>-<id> --tail
 ```
 
 Failure signatures worth knowing:
@@ -96,8 +131,10 @@ Failure signatures worth knowing:
   same brief; briefs are idempotent.
 - **Mid-flight death**: transcript frozen, pid gone — stop and refire; the
   run record stays as evidence.
-- **Meta lag**: report written but state stuck `active` — the delivered
-  report wins; `await` recognizes it as `report_delivered`.
+- **Evidence disagreement**: canonical state and current qualified process
+  evidence disagree — `await` fails closed and names the disagreement;
+  neither the dispatcher socket nor the optional server projection
+  fabricates settlement.
 
 ## Settled runs
 

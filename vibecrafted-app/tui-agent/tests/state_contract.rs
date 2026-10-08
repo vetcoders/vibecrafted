@@ -1,178 +1,18 @@
-use std::collections::BTreeMap;
-use std::env;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tempfile::tempdir;
 use voc::app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
-use voc::config::{AppConfig, CliOptions, build_config, default_terminal_binary};
-use voc::launch::{LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command};
-use voc::skills_catalog::CATALOG;
+use voc::config::AppConfig;
+use voc::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
 use voc::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot, classify_run};
+mod support;
+use support::fixture_catalog;
+use voc::catalog::CatalogState;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-
-fn env_lock() -> &'static Mutex<()> {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[test]
-fn default_terminal_binary_prefers_vc_frame_when_available() {
-    let _guard = env_lock().lock().unwrap();
-    let previous_path = env::var_os("PATH");
-    let previous_override = env::var_os("VIBECRAFTED_TERMINAL_BINARY");
-    unsafe {
-        env::remove_var("VIBECRAFTED_TERMINAL_BINARY");
-    }
-
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("vc-frame"), "#!/bin/sh\n").unwrap();
-    fs::write(dir.path().join("vc-frame"), "#!/bin/sh\n").unwrap();
-    let path = previous_path
-        .as_ref()
-        .map(|value| {
-            let mut paths = vec![dir.path().to_path_buf()];
-            paths.extend(env::split_paths(value));
-            env::join_paths(paths).expect("join PATH")
-        })
-        .unwrap_or_else(|| PathBuf::from(dir.path()).into_os_string());
-    unsafe {
-        env::set_var("PATH", path);
-    }
-
-    assert_eq!(default_terminal_binary(), Path::new("vc-frame"));
-
-    match previous_path {
-        Some(value) => unsafe {
-            env::set_var("PATH", value);
-        },
-        None => unsafe {
-            env::remove_var("PATH");
-        },
-    }
-    match previous_override {
-        Some(value) => unsafe {
-            env::set_var("VIBECRAFTED_TERMINAL_BINARY", value);
-        },
-        None => unsafe {
-            env::remove_var("VIBECRAFTED_TERMINAL_BINARY");
-        },
-    }
-}
-
-#[tokio::test]
-async fn operator_console_launch_uses_vc_frame_top_level_layout_flags() {
-    let _guard = env_lock().lock().unwrap();
-    let previous_path = env::var_os("PATH");
-    let previous_override = env::var_os("VIBECRAFTED_TERMINAL_BINARY");
-    let previous_config_dir = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VIBECRAFTED_TERMINAL_BINARY");
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-
-    let dir = tempdir().unwrap();
-    let bin_dir = dir.path().join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    fs::write(bin_dir.join("vc-frame"), "#!/bin/sh\n").unwrap();
-    fs::write(bin_dir.join("vc-frame"), "#!/bin/sh\n").unwrap();
-
-    let repo_root = dir.path().join("repo");
-    fs::create_dir_all(repo_root.join("config/vc-frame")).unwrap();
-    fs::write(repo_root.join("config/vc-frame/config.kdl"), "layout {}\n").unwrap();
-
-    let path = previous_path
-        .as_ref()
-        .map(|value| {
-            let mut paths = vec![bin_dir.clone()];
-            paths.extend(env::split_paths(value));
-            env::join_paths(paths).expect("join PATH")
-        })
-        .unwrap_or_else(|| bin_dir.into_os_string());
-    unsafe {
-        env::set_var("PATH", path);
-    }
-
-    let config = build_config(CliOptions {
-        state_root: Some(dir.path().join("state")),
-        command_deck: Some(PathBuf::from("/usr/bin/vibecrafted")),
-        launch_root: Some(repo_root.clone()),
-        launch_runtime: Some(LaunchRuntime::Terminal),
-        terminal_binary: None,
-        tick_ms: 250,
-        no_verify_gate: true,
-        ..CliOptions::default()
-    });
-    assert_eq!(config.terminal_binary, Path::new("vc-frame"));
-
-    let app = App::new(config).unwrap();
-    let command = app.launch_command();
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    assert_eq!(command.program, Path::new("vc-frame"));
-    assert_eq!(
-        command.env.get("VC_FRAME_CONFIG_DIR"),
-        Some(&repo_root.join("config/vc-frame").into_os_string())
-    );
-    assert!(
-        !args.iter().any(|value| value == "--config-dir"),
-        "operator console must not pass --config-dir after a vc_frame subcommand: args={args:?}"
-    );
-    assert!(
-        !args.iter().any(|value| value == "options"),
-        "operator console must not emit the stale vc_frame options subcommand: args={args:?}"
-    );
-    let session_idx = args
-        .iter()
-        .position(|value| value == "--session")
-        .expect("operator console launch should carry a named session");
-    let layout_idx = args
-        .iter()
-        .position(|value| value == "--layout-string")
-        .expect("operator console launch should pass a top-level layout string");
-    assert!(
-        session_idx < layout_idx,
-        "session must be a top-level runtime flag before layout payload: args={args:?}"
-    );
-
-    let layout = args.get(layout_idx + 1).expect("layout payload");
-    assert!(layout.contains("pane name=\"launch\""));
-    assert!(layout.contains("export VC_FRAME_CONFIG_DIR="));
-    assert!(layout.contains("exec '/usr/bin/vibecrafted' 'workflow'"));
-
-    match previous_path {
-        Some(value) => unsafe {
-            env::set_var("PATH", value);
-        },
-        None => unsafe {
-            env::remove_var("PATH");
-        },
-    }
-    match previous_override {
-        Some(value) => unsafe {
-            env::set_var("VIBECRAFTED_TERMINAL_BINARY", value);
-        },
-        None => unsafe {
-            env::remove_var("VIBECRAFTED_TERMINAL_BINARY");
-        },
-    }
-    match previous_config_dir {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
 
 #[test]
 fn loads_runs_and_events_from_control_plane_state() {
@@ -343,398 +183,6 @@ fn classify_run_success_evidence_beats_stale_last_error() {
 }
 
 #[test]
-fn builds_existing_command_deck_launches() {
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Research,
-        agent: "claude".to_string(),
-        prompt: "Investigate the state format.".to_string(),
-        runtime: LaunchRuntime::Headless,
-        root: Some("/tmp/vibecrafted".into()),
-        terminal_binary: Some("vc-frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: None,
-    };
-    let command = build_launch_command(deck, &request);
-    assert_eq!(command.program, deck);
-    assert_eq!(command.args[0], "research");
-    assert_eq!(command.args[1], "--prompt");
-    assert_eq!(command.args[3], "--runtime");
-    assert_eq!(command.args[4], "headless");
-    assert_eq!(command.args[5], "--root");
-    assert_eq!(command.args[6], "/tmp/vibecrafted");
-}
-
-#[test]
-fn marbles_launches_keep_runtime_root_and_loop_controls() {
-    // Process env is shared across tests, so pin access while we mutate vc_frame config.
-    let _guard = env_lock().lock().unwrap();
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-    let dir = tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join("config/vc-frame")).unwrap();
-    fs::write(root.join("config/vc-frame/config.kdl"), "layout {}\n").unwrap();
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Marbles,
-        agent: "codex".to_string(),
-        prompt: "Converge on the operator surface.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some(root.to_path_buf()),
-        terminal_binary: Some("vc-frame".into()),
-        env: BTreeMap::new(),
-        count: Some(4),
-        depth: Some(7),
-        session_name: None,
-    };
-    let command = build_launch_command(deck, &request);
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let expected_deck_cmd = format!(
-        "exec '/usr/bin/vibecrafted' 'marbles' 'codex' '--count' '4' '--depth' '7' '--prompt' 'Converge on the operator surface.' '--runtime' 'terminal' '--root' '{}'",
-        root.to_string_lossy()
-    );
-
-    assert_eq!(command.program, Path::new("vc-frame"));
-
-    assert_eq!(
-        command.env.get("VC_FRAME_CONFIG_DIR"),
-        Some(&root.join("config/vc-frame").into_os_string()),
-        "repo-local vc_frame config should be passed through env so vc-frame does not parse it as a stale subcommand flag"
-    );
-    assert!(args.iter().any(|value| value == "--layout-string"));
-    let layout_idx = args
-        .iter()
-        .position(|value| value == "--layout-string")
-        .expect("layout string flag should be present");
-    assert!(
-        !args.iter().any(|value| value == "--config-dir"),
-        "terminal launch must not pass --config-dir as argv; vc-frame/vc_frame version skew rejects it in this context: args={args:?}"
-    );
-    assert!(
-        !args.iter().any(|value| value == "options"),
-        "terminal launch must not put --config-dir after the stale vc_frame options subcommand: args={args:?}"
-    );
-
-    let layout = args.get(layout_idx + 1).expect("layout string");
-    assert!(layout.contains("pane name=\"launch\""));
-    assert!(layout.contains("command=\"bash\""));
-    assert!(layout.contains(&format!("cwd=\"{}\"", root.to_string_lossy())));
-    assert!(layout.contains("export VC_FRAME_CONFIG_DIR="));
-    assert!(layout.contains(&expected_deck_cmd));
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
-fn terminal_launches_preserve_explicit_vc_frame_config_dir() {
-    // Process env is shared across tests, so pin access while we mutate vc_frame config.
-    let _guard = env_lock().lock().unwrap();
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let explicit = Path::new("/tmp/custom-vc_frame");
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    // This test temporarily pins process env to verify that operator-tui
-    // respects an already configured frontier location.
-    unsafe {
-        env::set_var("VC_FRAME_CONFIG_DIR", explicit);
-    }
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "codex".to_string(),
-        prompt: "Ship the launcher.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some("/tmp/workspace".into()),
-        terminal_binary: Some("vc-frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: None,
-    };
-
-    let command = build_launch_command(deck, &request);
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let layout = args
-        .iter()
-        .position(|value| value == "--layout-string")
-        .and_then(|index| args.get(index + 1))
-        .expect("layout string");
-
-    assert!(layout.contains("export VC_FRAME_CONFIG_DIR='/tmp/custom-vc_frame'"));
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
-fn terminal_launch_carries_named_session_as_top_level_flag() {
-    let _guard = env_lock().lock().unwrap();
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "claude".to_string(),
-        prompt: "Ship the launcher.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some("/tmp/workspace".into()),
-        terminal_binary: Some("vc-frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: Some("vc-op-workflow-42".to_string()),
-    };
-
-    let command = build_launch_command(deck, &request);
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    let session_idx = args
-        .iter()
-        .position(|value| value == "--session")
-        .expect("--session flag present when session_name is provided");
-    assert_eq!(
-        args.get(session_idx + 1).map(String::as_str),
-        Some("vc-op-workflow-42")
-    );
-
-    assert!(
-        !args.iter().any(|value| value == "options"),
-        "--session must stay a top-level launch flag; stale options subcommand found: args={args:?}"
-    );
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
-fn terminal_launch_exposes_named_session_readiness_probe() {
-    let _guard = env_lock().lock().unwrap();
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "claude".to_string(),
-        prompt: "Ship the launcher.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some("/tmp/workspace".into()),
-        terminal_binary: Some("/opt/bin/vc_frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: Some("vc-op-workflow-42".to_string()),
-    };
-
-    let command = build_launch_command(deck, &request);
-    let probe = command
-        .readiness_probe()
-        .expect("named terminal launch should expose a readiness probe");
-    let probe_args = probe
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    assert_eq!(probe.program, Path::new("/opt/bin/vc_frame"));
-    assert_eq!(probe.session_name, "vc-op-workflow-42");
-    assert_eq!(
-        probe_args,
-        vec!["list-sessions", "--short", "--no-formatting"]
-    );
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
-fn terminal_launch_omits_session_flag_when_session_name_is_none() {
-    let _guard = env_lock().lock().unwrap();
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "claude".to_string(),
-        prompt: "Ship the launcher.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some("/tmp/workspace".into()),
-        terminal_binary: Some("vc-frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: None,
-    };
-
-    let command = build_launch_command(deck, &request);
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    assert!(
-        !args.iter().any(|value| value == "--session"),
-        "no --session flag expected when session_name is None: args={args:?}"
-    );
-    assert!(
-        command.readiness_probe().is_none(),
-        "anonymous terminal launches cannot be healthchecked by name"
-    );
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
-fn terminal_launch_probe_inherits_config_dir_env_from_launch_command() {
-    let _guard = env_lock().lock().unwrap();
-    let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
-    let workspace = tempdir().unwrap();
-    let vc_frame_dir = workspace.path().join("config/vc-frame");
-    fs::create_dir_all(&vc_frame_dir).unwrap();
-    fs::write(vc_frame_dir.join("config.kdl"), "// repo-local vc_frame\n").unwrap();
-    let canonical_vc_frame_dir = vc_frame_dir.canonicalize().unwrap_or(vc_frame_dir.clone());
-
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "claude".to_string(),
-        prompt: "Ship the launcher.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some(workspace.path().to_path_buf()),
-        terminal_binary: Some("/opt/bin/vc_frame".into()),
-        env: BTreeMap::new(),
-        count: Some(3),
-        depth: Some(3),
-        session_name: Some("vc-op-workflow-77".to_string()),
-    };
-
-    let command = build_launch_command(deck, &request);
-    let launch_args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let launch_layout_idx = launch_args
-        .iter()
-        .position(|value| value == "--layout-string")
-        .expect("launch should carry --layout-string for terminal runtime");
-    let launch_config_dir = command
-        .env
-        .get("VC_FRAME_CONFIG_DIR")
-        .expect("launch should carry repo-local config through VC_FRAME_CONFIG_DIR")
-        .to_string_lossy()
-        .into_owned();
-
-    let probe = command
-        .readiness_probe()
-        .expect("named terminal launch should expose a readiness probe");
-    let probe_args = probe
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    let probe_config_dir = probe
-        .env
-        .get("VC_FRAME_CONFIG_DIR")
-        .expect("probe must inherit VC_FRAME_CONFIG_DIR to match launch namespace")
-        .to_string_lossy()
-        .into_owned();
-
-    assert_eq!(probe_config_dir, launch_config_dir);
-    assert_eq!(
-        probe_args,
-        vec!["list-sessions", "--short", "--no-formatting"]
-    );
-    assert!(
-        !launch_args.iter().any(|value| value == "options"),
-        "named operator launch must not use the stale `options --config-dir` ordering from the screenshot: args={launch_args:?}"
-    );
-    assert!(
-        !launch_args.iter().any(|value| value == "--config-dir"),
-        "launch config must travel through VC_FRAME_CONFIG_DIR, not argv: args={launch_args:?}"
-    );
-    assert!(
-        !probe_args.iter().any(|value| value == "--config-dir"),
-        "readiness probe config must travel through VC_FRAME_CONFIG_DIR, not argv: args={probe_args:?}"
-    );
-    assert!(
-        launch_layout_idx < launch_args.len() - 1,
-        "--layout-string must be followed by a layout payload: args={launch_args:?}"
-    );
-    assert!(
-        probe_config_dir.contains(&canonical_vc_frame_dir.to_string_lossy().into_owned())
-            || probe_config_dir == vc_frame_dir.to_string_lossy(),
-        "probe config dir should match the repo-local namespace: probe={probe_config_dir:?} expected={canonical_vc_frame_dir:?}"
-    );
-
-    match previous {
-        Some(value) => unsafe {
-            env::set_var("VC_FRAME_CONFIG_DIR", value);
-        },
-        None => unsafe {
-            env::remove_var("VC_FRAME_CONFIG_DIR");
-        },
-    }
-}
-
-#[test]
 fn mux_health_deep_actions_surface_per_known_service() {
     use std::path::PathBuf;
     use voc::mux::{MuxStatusSnapshot, MuxSummary};
@@ -802,10 +250,8 @@ fn mux_health_deep_actions_surface_per_known_service() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -818,7 +264,14 @@ fn mux_health_deep_actions_surface_per_known_service() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -838,6 +291,10 @@ fn mux_health_deep_actions_surface_per_known_service() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     // No mux summaries → only per-run actions. Existing surface preserved.
@@ -849,8 +306,8 @@ fn mux_health_deep_actions_surface_per_known_service() {
         "no MuxHealth without summaries: {actions_no_mux:?}"
     );
 
-    // With one healthy + one failed summary → one MuxHealth action per service,
-    // appended after the per-run actions.
+    // Healthy mux daemons stay off the action deck. A failed service is the
+    // contextual MCP action, appended after the per-run actions.
     app.mux_summaries = vec![
         MuxSummary::from_path_and_result(
             PathBuf::from("/tmp/memory.json"),
@@ -866,7 +323,11 @@ fn mux_health_deep_actions_surface_per_known_service() {
         .iter()
         .filter(|action| matches!(action, DeepAction::MuxHealth { .. }))
         .collect();
-    assert_eq!(mux_actions.len(), 2, "one MuxHealth per service");
+    assert_eq!(
+        mux_actions.len(),
+        1,
+        "only unhealthy mux services are actions"
+    );
 
     let services: Vec<&str> = actions
         .iter()
@@ -875,7 +336,7 @@ fn mux_health_deep_actions_surface_per_known_service() {
             _ => None,
         })
         .collect();
-    assert!(services.contains(&"general-memory"));
+    assert!(!services.contains(&"general-memory"));
     assert!(services.contains(&"brave-search"));
 
     // Label must surface the rmcp-mux invocation so the operator knows
@@ -895,8 +356,8 @@ fn mux_health_deep_actions_surface_per_known_service() {
         .collect();
     assert_eq!(
         mux_only.len(),
-        2,
-        "MuxHealth should not depend on selected_run"
+        1,
+        "unhealthy MuxHealth should not depend on selected_run"
     );
 }
 
@@ -944,10 +405,8 @@ fn mux_status_lines_render_healthy_and_attention_headers() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -960,7 +419,14 @@ fn mux_status_lines_render_healthy_and_attention_headers() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -980,6 +446,10 @@ fn mux_status_lines_render_healthy_and_attention_headers() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     // No mux services → empty render, never a misleading "0 healthy" header.
@@ -1050,54 +520,6 @@ fn mux_status_lines_render_healthy_and_attention_headers() {
 }
 
 #[test]
-fn launch_commands_propagate_operator_env_and_custom_terminal_binary() {
-    let deck = Path::new("/usr/bin/vibecrafted");
-    let mut env = BTreeMap::new();
-    env.insert("VIBECRAFTED_ROOT".to_string(), "/tmp/repo".into());
-    env.insert(
-        "VIBECRAFT_OPERATOR_STATE_ROOT".to_string(),
-        "/tmp/state".into(),
-    );
-    let request = LaunchRequest {
-        kind: LaunchKind::Workflow,
-        agent: "codex".to_string(),
-        prompt: "Ship launch env.".to_string(),
-        runtime: LaunchRuntime::Terminal,
-        root: Some("/tmp/repo".into()),
-        terminal_binary: Some("/opt/bin/vc_frame".into()),
-        env,
-        count: Some(3),
-        depth: Some(3),
-        session_name: None,
-    };
-
-    let command = build_launch_command(deck, &request);
-    let args = command
-        .args
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let layout = args
-        .iter()
-        .position(|value| value == "--layout-string")
-        .and_then(|index| args.get(index + 1))
-        .expect("layout string");
-
-    assert_eq!(command.program, Path::new("/opt/bin/vc_frame"));
-    assert_eq!(
-        command
-            .env
-            .get("VIBECRAFTED_ROOT")
-            .map(|value| value.as_os_str()),
-        Some(std::ffi::OsStr::new("/tmp/repo"))
-    );
-    assert!(layout.contains("export VIBECRAFTED_ROOT='/tmp/repo'"));
-    assert!(layout.contains("starship init bash"));
-    assert!(layout.contains("zoxide init bash"));
-    assert!(layout.contains("atuin init bash --disable-up-arrow"));
-}
-
-#[test]
 fn deep_controls_expose_attach_resume_and_artifacts() {
     let snapshot = RunSnapshot {
         run_id: "run-42".to_string(),
@@ -1128,10 +550,8 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1144,7 +564,14 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -1164,6 +591,10 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let actions = app.deep_actions();
@@ -1180,7 +611,15 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
             DeepAction::OpenRoot("/tmp/repo".into()),
         ]
     );
-    assert_eq!(actions.len(), 5 + CATALOG.len());
+    assert!(
+        actions.len() < 12,
+        "Controls lists contextual actions, not the full skill catalog: {}",
+        actions.len()
+    );
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        DeepAction::SkillLaunch { skill, .. } if skill == "vc-workflow"
+    )));
 }
 
 #[test]
@@ -1217,10 +656,8 @@ fn native_artifact_viewer_reads_files_and_clipboard_payload_prefers_resume_comma
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1233,7 +670,14 @@ fn native_artifact_viewer_reads_files_and_clipboard_payload_prefers_resume_comma
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -1253,6 +697,10 @@ fn native_artifact_viewer_reads_files_and_clipboard_payload_prefers_resume_comma
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     assert_eq!(
@@ -1271,10 +719,8 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1287,7 +733,14 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -1307,6 +760,10 @@ fn empty_state_detail_lines_offer_human_quick_start() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let lines = app.detail_lines();
@@ -1322,10 +779,8 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1338,7 +793,14 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         launch_kind: LaunchKind::Research,
         launch_agent: 1,
         launch_prompt: "Research the launcher surface.".to_string(),
-        launch_runtime: LaunchRuntime::Visible,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
         status_line: String::new(),
@@ -1357,13 +819,23 @@ fn prompt_lines_include_human_kind_copy_and_command_preview() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let lines = app.prompt_lines();
     assert!(lines.iter().any(|line| line.contains("Research swarm")));
+    // The preview is the canonical launcher's own argv — VOC no longer builds a
+    // vc-frame invocation of its own.
     assert!(lines.iter().any(|line| line.contains("command:")
-        && line.contains("vc-frame")
-        && line.contains("research")));
+        && line.contains("research")
+        && line.contains("--json")));
+    assert!(
+        !lines.iter().any(|line| line.contains("--layout-string")),
+        "VOC must not compose a frame layout of its own: {lines:?}"
+    );
     assert!(lines.iter().any(|line| line.contains("Arrows:")));
 }
 
@@ -1374,10 +846,8 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1390,7 +860,14 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 0,
         launch_prompt: "Ship it".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
@@ -1410,6 +887,10 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     app.previous_tab();
@@ -1421,7 +902,16 @@ fn tab_navigation_wraps_and_dispatch_focus_tracks_selected_field() {
     app.move_dispatch_selection(1);
     assert_eq!(app.dispatch_focus(), DispatchFocus::Agent);
 
-    app.move_dispatch_selection(2);
+    // Execution environment and presentation are separate declaration rows,
+    // between the agent and the prompt.
+    app.move_dispatch_selection(1);
+    assert_eq!(app.dispatch_focus(), DispatchFocus::Model);
+    app.move_dispatch_selection(1);
+    assert_eq!(app.dispatch_focus(), DispatchFocus::Environment);
+    app.move_dispatch_selection(1);
+    assert_eq!(app.dispatch_focus(), DispatchFocus::Presentation);
+
+    app.move_dispatch_selection(3);
     assert_eq!(app.dispatch_focus(), DispatchFocus::Prompt);
 }
 
@@ -1456,10 +946,8 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1472,8 +960,15 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         launch_kind: LaunchKind::Marbles,
         launch_agent: 2,
         launch_prompt: "Converge".to_string(),
-        launch_runtime: LaunchRuntime::Visible,
-        dispatch_selected: DispatchFocus::Runtime as usize,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
+        dispatch_selected: DispatchFocus::Presentation as usize,
         focus: LaunchFocus::Browse,
         status_line: String::new(),
         launch_history: Vec::new(),
@@ -1491,16 +986,29 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     let labels = app.tab_labels();
     assert_eq!(labels[0], "Monitor live 1");
-    assert_eq!(labels[1], "Dispatch marbles/gemini");
-    assert_eq!(labels[2], format!("Controls {}", 5 + CATALOG.len()));
+    assert_eq!(labels[1], "Usage 0");
+    // The agent shown is whatever the launcher catalog offers at this index —
+    // never the retired gemini launcher that used to sit here.
+    assert_eq!(
+        labels[2],
+        format!("Dispatch marbles/{}", app.selected_agent())
+    );
+    assert_ne!(app.selected_agent(), "gemini");
+    assert_eq!(labels[3], format!("Controls {}", app.deep_actions().len()));
+    assert!(app.deep_actions().len() < 12);
 
     app.selected = 1;
     let labels = app.tab_labels();
-    assert_eq!(labels[2], format!("Controls {}", CATALOG.len()));
+    assert_eq!(labels[3], format!("Controls {}", app.deep_actions().len()));
+    assert!(app.deep_actions().len() < 12);
 }
 
 #[tokio::test]
@@ -1536,10 +1044,8 @@ async fn queue_scope_and_search_filter_the_visible_run_list() {
     let mut app = App::new(AppConfig {
         state_root: root.into(),
         command_deck: "/usr/bin/vibecrafted".into(),
-        launch_root: "/tmp/repo".into(),
-        launch_runtime: LaunchRuntime::Terminal,
-
-        terminal_binary: "vc-frame".into(),
+        repo: "/tmp/repo".into(),
+        presentation: Presentation::Terminal,
         tick_rate: Duration::from_millis(250),
         server: "http://127.0.0.1:3024".into(),
         view: voc::observe::ConsoleView::Full,
@@ -1570,10 +1076,8 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         config: AppConfig {
             state_root: "/tmp/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/tmp/repo".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-
-            terminal_binary: "vc-frame".into(),
+            repo: "/tmp/repo".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -1586,9 +1090,16 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         launch_kind: LaunchKind::Workflow,
         launch_agent: 2,
         launch_prompt: "custom prompt".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
 
-        dispatch_selected: DispatchFocus::Runtime as usize,
+        dispatch_selected: DispatchFocus::Presentation as usize,
         focus: LaunchFocus::Help,
         status_line: String::new(),
         launch_history: Vec::new(),
@@ -1606,6 +1117,10 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
         mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
+        repo_edit: Default::default(),
+        refresh: Default::default(),
+        home_rows_memo: Default::default(),
     };
 
     app.set_launch_kind(LaunchKind::Review);
@@ -1616,75 +1131,80 @@ fn changing_launch_kind_reorients_the_operator_into_dispatch() {
     assert!(app.launch_prompt.contains("Review"));
 }
 
-/// `AppTab` contract — Mission Control is a first-class fourth tab and
+/// `AppTab` contract — Usage and Mission Control are first-class tabs and
 /// must be reachable through the standard Tab/Shift+Tab rotation, with a
 /// stable index and label. This locks PLAN_23 Wave A acceptance.
 #[test]
 fn mission_control_tab_is_addressable_and_reachable_via_rotation() {
-    assert_eq!(AppTab::TITLES.len(), 4);
+    assert_eq!(AppTab::TITLES.len(), 5);
+    assert_eq!(AppTab::Usage.label(), "Usage");
+    assert_eq!(AppTab::Usage.index(), 1);
     assert_eq!(AppTab::MissionControl.label(), "Mission Control");
-    assert_eq!(AppTab::MissionControl.index(), 3);
-    assert_eq!(AppTab::from_index(3), AppTab::MissionControl);
-    assert_eq!(AppTab::from_index(7), AppTab::MissionControl);
+    assert_eq!(AppTab::MissionControl.index(), 4);
+    assert_eq!(AppTab::from_index(4), AppTab::MissionControl);
+    assert_eq!(AppTab::from_index(9), AppTab::MissionControl);
 }
 
-/// Mission Control aggregation over a fixture artifact tree: agent and
-/// skill stats hydrate from `*.meta.json`, the wave atlas groups by
-/// `prompt_id`, and the action queue surfaces the freshly completed
-/// report. Mirror of PLAN_23 §4 acceptance for the seven-panel surface.
+/// Mission Control aggregation over derived control-plane snapshots: agent
+/// and skill stats hydrate from retained ∪ live runs, leftover artifact
+/// `*.meta.json` is ignored, the wave atlas groups by `prompt_id`, and the
+/// action queue surfaces the freshly completed report.
 #[test]
-fn mission_control_aggregates_real_meta_json_fixtures() {
+fn mission_control_aggregates_real_derived_snapshots() {
     use voc::mission_control::{ActionQueueKind, MissionControlState};
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
     let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
     fs::create_dir_all(&bucket).unwrap();
-
     fs::write(
-        bucket.join("just-001.meta.json"),
-        r#"{
-            "run_id": "just-001",
-            "agent": "claude",
-            "skill_code": "just",
-            "exit_code": 0,
-            "model": "claude-opus-4-7",
-            "duration_s": 90.0,
-            "completed_at": "2026-05-19T12:30:00Z",
-            "prompt_id": "wave-a",
-            "report": "/tmp/just-001/report.md"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("just-002.meta.json"),
-        r#"{
-            "run_id": "just-002",
-            "agent": "codex",
-            "skill_code": "marb",
-            "exit_code": 1,
-            "model": "unknown",
-            "completed_at": "2026-05-19T12:45:00Z",
-            "prompt_id": "wave-a"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("just-003.meta.json"),
-        r#"{
-            "run_id": "just-003",
-            "agent": "claude",
-            "skill_code": "just",
-            "exit_code": 0,
-            "model": "claude-opus-4-7",
-            "duration_s": 45.5,
-            "completed_at": "2026-05-19T12:50:00Z",
-            "prompt_id": "wave-b",
-            "report": "/tmp/just-003/report.md"
-        }"#,
+        bucket.join("leftover.meta.json"),
+        r#"{"run_id":"leftover-meta","agent":"gemini","skill_code":"rev","exit_code":2}"#,
     )
     .unwrap();
 
-    let state = ControlPlaneState::empty(dir.path());
+    let runs = vec![
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-001",
+            agent: "claude",
+            skill: "just",
+            exit_code: Some(0),
+            model: Some("claude-opus-4-7"),
+            duration_s: Some(90.0),
+            completed_at: "2026-05-19T12:30:00Z",
+            prompt_id: Some("wave-a"),
+            report: Some("/tmp/just-001/report.md"),
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-002",
+            agent: "codex",
+            skill: "marb",
+            exit_code: Some(1),
+            model: Some("unknown"),
+            duration_s: None,
+            completed_at: "2026-05-19T12:45:00Z",
+            prompt_id: Some("wave-a"),
+            report: None,
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "just-003",
+            agent: "claude",
+            skill: "just",
+            exit_code: Some(0),
+            model: Some("claude-opus-4-7"),
+            duration_s: Some(45.5),
+            completed_at: "2026-05-19T12:50:00Z",
+            prompt_id: Some("wave-b"),
+            report: Some("/tmp/just-003/report.md"),
+        }),
+    ];
+    let state = ControlPlaneState {
+        root: dir.path().to_path_buf(),
+        retained_runs: runs.clone(),
+        runs,
+        events: Vec::new(),
+        archived_run_ids: Default::default(),
+        usage: Default::default(),
+    };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -1813,41 +1333,48 @@ fn mission_control_action_queue_includes_polarize_intents_with_band_priority() {
     }
 }
 
-/// Failure board windowing: meta entries older than the 24h cutoff must
-/// be excluded from the failure panel even when their exit_code is
+/// Failure board windowing: derived snapshots older than the 24h cutoff
+/// must be excluded from the failure panel even when their exit_code is
 /// non-zero. Mirrors PLAN_23 §4 "Failure board (24h)".
 #[test]
 fn mission_control_failure_board_respects_24h_window() {
     use voc::mission_control::MissionControlState;
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
-    let bucket = artifact.join("vetcoders/vc-tui/2026_0519/reports");
-    fs::create_dir_all(&bucket).unwrap();
+    fs::create_dir_all(&artifact).unwrap();
 
-    fs::write(
-        bucket.join("old-fail.meta.json"),
-        r#"{
-            "run_id": "old-fail",
-            "agent": "gemini",
-            "skill_code": "rev",
-            "exit_code": 2,
-            "completed_at": "2026-05-15T08:00:00Z"
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        bucket.join("fresh-fail.meta.json"),
-        r#"{
-            "run_id": "fresh-fail",
-            "agent": "gemini",
-            "skill_code": "rev",
-            "exit_code": 2,
-            "completed_at": "2026-05-19T11:00:00Z"
-        }"#,
-    )
-    .unwrap();
-
-    let state = ControlPlaneState::empty(dir.path());
+    let runs = vec![
+        derived_stats_snapshot(StatsRow {
+            run_id: "old-fail",
+            agent: "gemini",
+            skill: "rev",
+            exit_code: Some(2),
+            model: None,
+            duration_s: None,
+            completed_at: "2026-05-15T08:00:00Z",
+            prompt_id: None,
+            report: None,
+        }),
+        derived_stats_snapshot(StatsRow {
+            run_id: "fresh-fail",
+            agent: "gemini",
+            skill: "rev",
+            exit_code: Some(2),
+            model: None,
+            duration_s: None,
+            completed_at: "2026-05-19T11:00:00Z",
+            prompt_id: None,
+            report: None,
+        }),
+    ];
+    let state = ControlPlaneState {
+        root: dir.path().to_path_buf(),
+        retained_runs: runs.clone(),
+        runs,
+        events: Vec::new(),
+        archived_run_ids: Default::default(),
+        usage: Default::default(),
+    };
     let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T13:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -1857,11 +1384,10 @@ fn mission_control_failure_board_respects_24h_window() {
     assert_eq!(mission.failures[0].run_id, "fresh-fail");
 }
 
-/// Malformed `*.meta.json` files must be skipped without poisoning the
-/// dashboard, and the count must surface in `data_quality.parse_failures`
-/// so the operator sees the truth instead of a false-success aggregate.
+/// Leftover artifact `*.meta.json` — including broken JSON — must not
+/// feed Mission Control stats. The dashboard reads derived snapshots.
 #[test]
-fn mission_control_skips_malformed_meta_json_without_panic() {
+fn mission_control_ignores_leftover_artifact_meta_json() {
     use voc::mission_control::MissionControlState;
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("artifacts");
@@ -1886,9 +1412,68 @@ fn mission_control_skips_malformed_meta_json_without_panic() {
         .with_timezone(&chrono::Utc);
     let mission = MissionControlState::build_at(&state, &artifact, now);
 
-    assert_eq!(mission.data_quality.scanned_meta_files, 1);
-    assert_eq!(mission.data_quality.parse_failures, 1);
-    assert_eq!(mission.agent_stats.len(), 1);
+    assert_eq!(mission.data_quality.scanned_meta_files, 0);
+    assert_eq!(mission.data_quality.parse_failures, 0);
+    assert!(mission.agent_stats.is_empty());
+}
+
+/// One finished run as the derived stats panels see it.
+struct StatsRow<'a> {
+    run_id: &'a str,
+    agent: &'a str,
+    skill: &'a str,
+    exit_code: Option<i64>,
+    model: Option<&'a str>,
+    duration_s: Option<f64>,
+    completed_at: &'a str,
+    prompt_id: Option<&'a str>,
+    report: Option<&'a str>,
+}
+
+fn derived_stats_snapshot(row: StatsRow<'_>) -> RunSnapshot {
+    let StatsRow {
+        run_id,
+        agent,
+        skill,
+        exit_code,
+        model,
+        duration_s,
+        completed_at,
+        prompt_id,
+        report,
+    } = row;
+    let mut extra = HashMap::new();
+    if let Some(code) = exit_code {
+        extra.insert("exit_code".into(), serde_json::json!(code));
+    }
+    if let Some(model) = model {
+        extra.insert("model".into(), serde_json::json!(model));
+    }
+    if let Some(duration) = duration_s {
+        extra.insert("duration_s".into(), serde_json::json!(duration));
+    }
+    extra.insert("completed_at".into(), serde_json::json!(completed_at));
+    if let Some(prompt) = prompt_id {
+        extra.insert("prompt_id".into(), serde_json::json!(prompt));
+    }
+    RunSnapshot {
+        run_id: run_id.to_string(),
+        session_id: None,
+        agent: Some(agent.to_string()),
+        skill: Some(skill.to_string()),
+        mode: None,
+        state: None,
+        status: None,
+        started_at: None,
+        updated_at: Some(completed_at.to_string()),
+        last_heartbeat: None,
+        root: None,
+        operator_session: None,
+        latest_report: report.map(ToOwned::to_owned),
+        latest_transcript: None,
+        last_error: None,
+        extra,
+    }
 }
 
 #[test]
@@ -1948,6 +1533,7 @@ fn mission_control_defaults_to_live_runs_across_roots_with_root_labels() {
         ],
         events: Vec::new(),
         archived_run_ids: Default::default(),
+        usage: Default::default(),
     };
 
     let mission = MissionControlState::build_at(&state, &artifact_root, now);
@@ -1976,9 +1562,8 @@ async fn mission_control_focus_wraps_across_seven_panels() {
     let mut app = App::new(AppConfig {
         state_root: std::path::PathBuf::from("/tmp/vc-op-mission-nav"),
         command_deck: "/usr/bin/vibecrafted".into(),
-        launch_root: "/tmp/repo".into(),
-        launch_runtime: LaunchRuntime::Terminal,
-        terminal_binary: "vc-frame".into(),
+        repo: "/tmp/repo".into(),
+        presentation: Presentation::Terminal,
         tick_rate: Duration::from_millis(250),
         server: "http://127.0.0.1:3024".into(),
         view: voc::observe::ConsoleView::Full,
@@ -2008,9 +1593,8 @@ async fn mission_queue_preselects_matching_deep_action_for_controls_handoff() {
     let mut app = App::new(AppConfig {
         state_root: std::path::PathBuf::from("/tmp/vc-op-mission-handoff"),
         command_deck: "/usr/bin/vibecrafted".into(),
-        launch_root: "/tmp/repo".into(),
-        launch_runtime: LaunchRuntime::Terminal,
-        terminal_binary: "vc-frame".into(),
+        repo: "/tmp/repo".into(),
+        presentation: Presentation::Terminal,
         tick_rate: Duration::from_millis(250),
         server: "http://127.0.0.1:3024".into(),
         view: voc::observe::ConsoleView::Full,

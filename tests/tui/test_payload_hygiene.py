@@ -13,9 +13,13 @@ reaches exactly one of them.
 
 from __future__ import annotations
 
+import hashlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
@@ -149,6 +153,7 @@ def test_the_literal_set_covers_home_checkout_donors_and_snapshots() -> None:
 
     for variable in (
         "${HOME:-}",
+        "${SOURCE_ROOT:-}",
         "${TERMINAL_DONOR:-}",
         "${FRAME_DONOR:-}",
         "${TERMINAL_REPO:-}",
@@ -198,6 +203,136 @@ def test_make_exposes_the_gate_for_an_artifact_already_on_disk() -> None:
     assert "payload-hygiene:" in makefile
     assert "ARTIFACT" in makefile
     assert "scripts/payload-hygiene-artifact.sh" in makefile
+
+
+def test_scanner_accepts_only_exact_pinned_upstream_digests(tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    (payload / "bin").mkdir(parents=True)
+    upstream = payload / "bin/aicx"
+    first_party = payload / "bin/voc"
+    needle = b"/Users/someone"
+    upstream.write_bytes(b"\x00" + needle + b"\x00upstream")
+    first_party.write_bytes(b"\x00" + needle + b"\x00local")
+    digest = hashlib.sha256(upstream.read_bytes()).hexdigest()
+
+    refused = run_scanner("--root", str(payload), "--forbid", "/Users/someone")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "bin/aicx" in refused.stderr
+    assert "bin/voc" in refused.stderr
+
+    scoped = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        "/Users/someone",
+        "--accept-digest",
+        digest,
+    )
+    assert scoped.returncode == 1, scoped.stdout + scoped.stderr
+    assert "bin/voc" in scoped.stderr
+    assert "upstream" in scoped.stderr
+    assert "bin/aicx" in scoped.stderr
+
+
+def test_scanner_passes_when_only_pinned_upstream_bytes_name_the_host(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload"
+    (payload / "bin").mkdir(parents=True)
+    upstream = payload / "bin/aicx"
+    needle = b"/Users/someone"
+    upstream.write_bytes(b"\x00" + needle + b"\x00upstream")
+    digest = hashlib.sha256(upstream.read_bytes()).hexdigest()
+
+    result = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        "/Users/someone",
+        "--accept-digest",
+        digest,
+        "--json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "upstream_provenance" in result.stdout
+    assert "bin/aicx" in result.stdout
+
+
+def test_hygiene_library_accepts_no_upstream_digest_for_the_pack() -> None:
+    # The Runtime Pack no longer carries channel foundations, so the release
+    # gate has no published third-party bytes to excuse: every literal is fatal.
+    library = LIBRARY.read_text(encoding="utf-8")
+    assert "published-foundation-digests.json" not in library
+    assert "--accept-digest" not in library
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="codesign is macOS-only")
+def test_scanner_accepts_a_re_signed_pinned_upstream_binary(tmp_path: Path) -> None:
+    """A pinned foundation re-signed by the release keeps its provenance.
+
+    sign_macho_tree re-signs the published foundation bytes with the
+    operator's identity and a fresh timestamp, so the shipped digest can never
+    equal the published one. The digest over signature-stripped bytes is the
+    stable pin: published and re-signed copies converge to it.
+    """
+    clang = shutil.which("clang")
+    codesign = shutil.which("codesign")
+    if not clang or not codesign:
+        pytest.skip("clang and codesign are required to build a signed probe")
+
+    needle = "/Users/someone"
+    probe = tmp_path / "probe-bin"
+    (tmp_path / "probe.c").write_text(
+        f'const char *marker = "{needle}";\nint main(void) {{ return marker[0] == 0; }}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [clang, "-o", str(probe), str(tmp_path / "probe.c")],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run([codesign, "-s", "-", str(probe)], check=True, capture_output=True)
+
+    unsigned = tmp_path / "probe-unsigned"
+    unsigned.write_bytes(probe.read_bytes())
+    subprocess.run(
+        [codesign, "--remove-signature", str(unsigned)], check=True, capture_output=True
+    )
+    unsigned_digest = hashlib.sha256(unsigned.read_bytes()).hexdigest()
+    # The test only proves something if the signed bytes hash differently.
+    assert hashlib.sha256(probe.read_bytes()).hexdigest() != unsigned_digest
+
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "probe-bin").write_bytes(probe.read_bytes())
+
+    refused = run_scanner("--root", str(payload), "--forbid", needle)
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+
+    accepted = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        needle,
+        "--accept-digest",
+        unsigned_digest,
+        "--json",
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "upstream_provenance" in accepted.stdout
+    assert "probe-bin" in accepted.stdout
+
+
+def test_scanner_unsigned_digest_ignores_non_macho(tmp_path: Path) -> None:
+    probe = tmp_path / "plain.bin"
+    probe.write_bytes(b"\x00\x01/Users/someone\x00")
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import payload_hygiene
+
+        assert payload_hygiene.sha256_file_without_signature(probe) == ""
+    finally:
+        sys.path.remove(str(REPO_ROOT / "scripts"))
 
 
 def run_library(snippet: str, **environment: str) -> str:
@@ -250,6 +385,20 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
     assert (
         run_library('payload_hygiene_topmost_host_root "/Volumes/ws/a/b"').strip()
         == "/Volumes/ws"
+    )
+    # `/private/tmp` is the realpath of `/tmp` on macOS — a directory every box
+    # has. A checkout built from under it must forbid its own scratch root, not
+    # the generic tmp: otherwise committed `/private/tmp` literals (test
+    # fixtures, tmp-normalization docs) flag every scratchpad build as a leak.
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/private/tmp/solo"').strip()
+        == ""
+    )
+    assert (
+        run_library(
+            'payload_hygiene_topmost_host_root "/private/tmp/scratch/repo"'
+        ).strip()
+        == "/private/tmp/scratch"
     )
 
 
@@ -315,3 +464,145 @@ def test_no_shipping_file_names_the_workshop_above_the_checkout() -> None:
         f"tracked shipping files name the workshop {workshop} and would reach "
         f"customers in the portable tarball: {offenders}"
     )
+
+
+def test_host_paths_mode_flags_account_homes_not_generic_roots(tmp_path: Path) -> None:
+    """Commit-time gate: /Users/<name> and /home/<name>, never the root alone."""
+    (tmp_path / "ok.md").write_text(
+        "generic roots only: /Users and /home\n", encoding="utf-8"
+    )
+    (tmp_path / "shared.md").write_text(
+        "public dir /Users/Shared/Public is not an account\n", encoding="utf-8"
+    )
+    (tmp_path / "mac.py").write_text(
+        "checkout = '/Users/alice/src'\n", encoding="utf-8"
+    )
+    (tmp_path / "linux.c").write_text('home = "/home/bob/.cargo"\n', encoding="utf-8")
+
+    clean = run_scanner(
+        "--host-paths",
+        "--no-skip-unshipped",
+        str(tmp_path / "ok.md"),
+        str(tmp_path / "shared.md"),
+    )
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    leak = run_scanner(
+        "--host-paths",
+        "--no-skip-unshipped",
+        str(tmp_path / "mac.py"),
+        str(tmp_path / "linux.c"),
+    )
+    assert leak.returncode == 1, leak.stdout + leak.stderr
+    assert "alice" in leak.stderr
+    assert "bob" in leak.stderr
+
+
+def test_host_paths_mode_skips_unshipped_tests_tree(tmp_path: Path) -> None:
+    planted = tmp_path / "tests" / "leak.md"
+    planted.parent.mkdir()
+    planted.write_text("/Users/alice/secret\n", encoding="utf-8")
+    skipped = run_scanner("--host-paths", str(planted))
+    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
+    forced = run_scanner("--host-paths", "--no-skip-unshipped", str(planted))
+    assert forced.returncode == 1, forced.stdout + forced.stderr
+
+
+def test_host_paths_mode_skips_binaries(tmp_path: Path) -> None:
+    blob = tmp_path / "a.bin"
+    blob.write_bytes(b"\x00/Users/alice\x00")
+    result = run_scanner("--host-paths", "--no-skip-unshipped", str(blob))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_pre_commit_hook_runs_the_host_path_gate() -> None:
+    hook = (REPO_ROOT / "scripts/hooks/pre-commit").read_text(encoding="utf-8")
+    assert "payload_hygiene.py" in hook
+    assert "--host-paths" in hook
+    assert "--null" in hook
+
+
+def test_pre_commit_refuses_host_path_introduced_in_a_staged_rename(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        )
+
+    git("init", "-q")
+    original = repo / "old.txt"
+    original.write_text("anonymous line\n" * 50, encoding="utf-8")
+    git("add", "old.txt")
+    git(
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@vetcoders.io",
+        "commit",
+        "-qm",
+        "baseline",
+    )
+    git("mv", "old.txt", "renamed.txt")
+    renamed = repo / "renamed.txt"
+    renamed.write_text(
+        renamed.read_text() + "/Users/fixture-account/private\n", encoding="utf-8"
+    )
+    git("add", "renamed.txt")
+    assert git("diff", "--cached", "--name-status").stdout.startswith("R")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copy2(SCANNER, scripts / "payload_hygiene.py")
+    shutil.copy2(REPO_ROOT / "scripts/project-python", scripts / "project-python")
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/hooks/pre-commit")],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "staged text names a host account path" in result.stdout + result.stderr
+    assert "renamed.txt" in result.stdout + result.stderr
+
+
+def test_pre_commit_uses_project_python_instead_of_old_host(tmp_path: Path) -> None:
+    import os
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("payload_hygiene.py", "project-python"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "staged.txt").write_text(
+        "/Users/fixture-account/private\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
+    old_bin = tmp_path / "old-host-bin"
+    old_bin.mkdir()
+    old_python = old_bin / "python3"
+    old_python.write_text(
+        "#!/bin/sh\necho old-host-python >&2\nexit 93\n", encoding="utf-8"
+    )
+    old_python.chmod(0o755)
+    env = {
+        **os.environ,
+        "PYTHON": sys.executable,
+        "PATH": str(old_bin) + os.pathsep + os.environ["PATH"],
+    }
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/hooks/pre-commit")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "staged.txt" in result.stdout + result.stderr
+    assert "host-account hit(s)" in result.stdout
+    assert "old-host-python" not in result.stderr

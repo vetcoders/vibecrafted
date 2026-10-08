@@ -15,6 +15,7 @@ MATCHER_TYPES = {"contains", "equals", "matches", "not_contains", "exit_code"}
 READ_MUTATIONS = {"forbid", "allow-report-only", "allow"}
 TIMEOUT_POLICIES = {"repair", "fail", "continue"}
 CRITICAL_FAIL_POLICIES = {"break", "continue"}
+NONCRITICAL_DEP_FAIL_POLICIES = {"continue", "stop"}
 STATE_PENDING = "[ ]"
 STATE_WORKER_DONE = "[~]"
 STATE_UNKNOWN = "[?]"
@@ -31,6 +32,23 @@ SCHEDULER_STATES = {
     "failed",
     "stopped",
 }
+
+BASE_CUT_PREFIX = "cut:"
+BASE_SOURCES = {"plan", "sha", "branch", "cut"}
+_BASE_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def classify_base(declared: str) -> str:
+    """Classify a declared ``base`` value: ``plan`` (absent), ``cut:<id>``,
+    a full commit ``sha``, or a local ``branch`` name."""
+    value = declared.strip()
+    if not value:
+        return "plan"
+    if value.startswith(BASE_CUT_PREFIX):
+        return "cut"
+    if _BASE_SHA_RE.fullmatch(value):
+        return "sha"
+    return "branch"
 
 
 @dataclass(frozen=True)
@@ -58,6 +76,10 @@ class Policy:
     allow_concurrency: bool = False
     require_commit: bool = False
     allow_idempotent_existing: bool = True
+    # An unverified non-critical contract fences all queued cuts by default.
+    # Plans that explicitly declare an expendable cut may opt into "continue";
+    # its failure remains visible in the downstream baton.
+    on_noncritical_dep_fail: str = "stop"
 
 
 @dataclass(frozen=True)
@@ -148,6 +170,11 @@ class Cut:
     critical: bool = False
     mode: str = "write"
     model: str = ""
+    model_source: str = "provider_default"
+    effort: str = ""
+    effort_source: str = "provider_default"
+    source_text: str | None = None
+    source_digest: str = ""
     prompt: str = ""
     brief: str = ""
     extra: str = ""
@@ -157,11 +184,22 @@ class Cut:
     recovery: Recovery | None = None
     depends_on: tuple[str, ...] = ()
     integrator: bool = False
+    # Plan-owned phase obligations; worker payloads cannot close an embargo.
+    compile_embargo: bool = False
+    closes_embargo: tuple[str, ...] = ()
+    # Optional per-cut checkout base declaration: "<sha>", "<branch>", or
+    # "cut:<cut-id>". Absent = the plan baseline (today's behavior).
+    base: str = ""
     # Runtime-resolved fields are never accepted from dispatch TOML. The
     # supervisor stamps them after it has created and validated the linked
     # checkout for this specific run.
     runtime_root: str = ""
     runtime_branch: str = ""
+    # Durable execution-runtime declaration ("local-worktrees"/"living-tree").
+    # Stamped together with the geometry so repair/resume relaunches inherit
+    # the initial launch's runtime even when transient geometry fields are
+    # empty — a worktree cut must never fall back to Living Tree admission.
+    runtime_class: str = ""
     baseline_sha: str = ""
     target_path: str = ""
     artifact_path: str = ""

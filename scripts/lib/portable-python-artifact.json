@@ -1,0 +1,40 @@
+{
+  "schema": "io.vetcoders.vibecrafted.portable-python-artifact.v1",
+  "publisher": "astral-sh/python-build-standalone",
+  "publisher_url": "https://github.com/astral-sh/python-build-standalone",
+  "cpython": "3.14.7",
+  "tag": "20260901",
+  "flavor": "install_only",
+  "macos_minimum": "14.0",
+  "notes": "Current stable CPython feature series as of 2026-09-14 is 3.14 (python.org Download Python 3.14.7). 3.15.0 is not a published stable: python.org /downloads/release/python-3150/ is 404 and ftp/python/3.15.0/ contains only a1–rc2. python-build-standalone 20260901 publishes matching 3.14.7 install_only archives and only 3.15.0rc2. Launcher and dylib names are derived from this pin (python3.14 / libpython3.14.dylib). Published prebuilt install_only archives only — never compile CPython.",
+  "artifacts": [
+    {
+      "platform": "darwin-arm64",
+      "triple": "aarch64-apple-darwin",
+      "archive": "cpython-3.14.7+20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "30daa970c7d223530120f1693cd3c6fa4c0c0d31ef158710b0dd77f286a5b23e"
+    },
+    {
+      "platform": "darwin-x86_64",
+      "triple": "x86_64-apple-darwin",
+      "archive": "cpython-3.14.7+20260901-x86_64-apple-darwin-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-x86_64-apple-darwin-install_only.tar.gz",
+      "sha256": "dd8841a2e8ef94bd1a02b52f92843120942140f112145d4e0199abab56f120b1"
+    },
+    {
+      "platform": "linux-arm64",
+      "triple": "aarch64-unknown-linux-gnu",
+      "archive": "cpython-3.14.7+20260901-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "30f1cc489be654477d895b441e196bb080738bf0456da82080ad4ab66a22d80f"
+    },
+    {
+      "platform": "linux-x64",
+      "triple": "x86_64-unknown-linux-gnu",
+      "archive": "cpython-3.14.7+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "0ab3305457051cd3e7c031857e005f1bda17c218a1990567dacaaac6dd1d14f0"
+    }
+  ]
+}

@@ -121,7 +121,7 @@ def test_t02_oracle_compared_with_itself_is_invalid_subject_not_consumed(
             "expected": str(oracle_output),
         },
     )
-    oracle_script = Path(str(contract.oracle["argv"][0]))  # type: ignore[index]
+    oracle_script = Path(str(contract.oracle["argv"][0]))
     oracle_script.write_text(
         "#!/bin/sh\nprintf '%s\\n' 'oracle-only value' > \"$1\"\n",
         encoding="utf-8",

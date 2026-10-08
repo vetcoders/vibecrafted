@@ -1,0 +1,452 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Build the Windows EXE (Burn) and MSI installers for one Runtime Pack.
+
+.DESCRIPTION
+    Thin adapters over scripts/install-runtime-pack.ps1. Fetches WiX Toolset
+    3.14 binaries into packaging/windows/.cache (uncommitted). Fails closed when
+    -Pack is missing. Does not install into the operator %LOCALAPPDATA%\Vibecrafted.
+    Limit: the voc radio is not in this installer cut because tokio's Unix socket
+    types are cfg(unix) and this cut does not switch mux-agent to a Windows AF_UNIX
+    transport.
+
+.PARAMETER Pack
+    Path to the win32-x64 Runtime Pack .tar.gz. Required; must exist with .sha256 and .sig.
+
+.PARAMETER OutDir
+    Directory for WiX intermediates (Vibecrafted.msi / Vibecrafted.exe) and the
+    canonical release siblings Vibecrafted_<ver>-<date>-<sha>-windows-x64.{msi,exe}
+    plus .sha256. Default: packaging/windows/out.
+
+.PARAMETER SourceRevision
+    Full Git SHA stamped into the canonical artifact basename. Defaults to
+    VIBECRAFTED_SOURCE_REVISION or HEAD.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$Pack,
+    [string]$OutDir = "",
+    [string]$SourceRevision = $env:VIBECRAFTED_SOURCE_REVISION
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+function Die([string]$Message) {
+    Write-Error "Windows installer build failed: $Message"
+    exit 1
+}
+
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $encoding = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Assert-NonEmptyFile([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Die "$Label missing after WiX link: $Path"
+    }
+    $info = Get-Item -LiteralPath $Path
+    if ($info.Length -lt 1) {
+        Die "$Label is empty after WiX link: $Path"
+    }
+}
+
+function Get-FileSha256Hex([string]$Path) {
+    return ([BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+            [System.IO.File]::ReadAllBytes($Path)
+        )
+    ) -replace '-', '').ToLowerInvariant()
+}
+
+function Write-SiblingSha256([string]$Path) {
+    $hash = Get-FileSha256Hex $Path
+    $name = [System.IO.Path]::GetFileName($Path)
+    $checksumPath = "$Path.sha256"
+    Set-Content -LiteralPath $checksumPath -Value "$hash  $name" -Encoding ascii
+    return $checksumPath
+}
+
+function Invoke-OptionalAuthenticodeSign([string]$Path) {
+    # Founder-owned Authenticode hook. No-ops without a real cert; never
+    # invents, buys, or self-signs a distribution certificate in CI.
+    $thumbprint = $env:VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT
+    if ([string]::IsNullOrWhiteSpace($thumbprint)) {
+        Write-Host "Authenticode: skipped (no VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT)"
+        return
+    }
+    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if (-not $signtool) {
+        Die "Authenticode thumbprint set but signtool.exe is missing on PATH"
+    }
+    & $signtool.Source sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $Path
+    if ($LASTEXITCODE -ne 0) {
+        Die "Authenticode sign failed for $Path (exit $LASTEXITCODE)"
+    }
+}
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$packagingRoot = Join-Path $repoRoot "packaging\windows"
+$cacheRoot = Join-Path $packagingRoot ".cache\wix314"
+$stagingRoot = Join-Path $packagingRoot "staging"
+$wixObjRoot = Join-Path $packagingRoot ".cache\obj"
+$stableUpgradeCode = "B7E4C2A1-9F3D-4B8E-A6C1-2D5E8F0A1B3C"
+if (-not $OutDir) { $OutDir = Join-Path $packagingRoot "out" }
+if (-not $SourceRevision) {
+    $SourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
+}
+if ($SourceRevision -notmatch '^[0-9a-f]{40}$') {
+    Die "source revision must be a full Git SHA"
+}
+$releaseDate = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+$shortSha = $SourceRevision.Substring(0, 8)
+
+if ([string]::IsNullOrWhiteSpace($Pack)) {
+    Die "Runtime Pack tarball is missing: (empty -Pack) (build the win32-x64 pack first; refusing to invent one)"
+}
+if (-not (Test-Path -LiteralPath $Pack -PathType Leaf)) {
+    Die "Runtime Pack tarball is missing: $Pack (build the win32-x64 pack first; refusing to invent one)"
+}
+$Pack = (Resolve-Path -LiteralPath $Pack).Path
+if ($Pack -notlike "*.tar.gz") {
+    Die "Runtime Pack must be the canonical .tar.gz carrier: $Pack"
+}
+$checksum = "$Pack.sha256"
+$signature = "$Pack.sig"
+if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) { Die "missing checksum beside pack: $checksum" }
+if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) { Die "missing signature beside pack: $signature" }
+
+$versionRaw = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
+if ($versionRaw -notmatch '^\d+\.\d+\.\d+') {
+    Die "VERSION must be SemVer major.minor.patch: $versionRaw"
+}
+$versionParts = $versionRaw.Split(".")
+while ($versionParts.Count -lt 4) { $versionParts += "0" }
+$productVersion = ($versionParts[0..3] -join ".")
+$packBasename = [System.IO.Path]::GetFileName($Pack)
+
+function Get-BaseSemVer([string]$Value) {
+    $trimmed = ($Value -replace '[\r\n]+', '').Trim()
+    if ($trimmed -match '^(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return $null
+}
+
+$repoVersion = Get-BaseSemVer $versionRaw
+if (-not $repoVersion) {
+    Die "VERSION must be SemVer major.minor.patch: $versionRaw"
+}
+# Carrier identity: basename SemVer and payload VibecraftedRuntime/VERSION must
+# both agree with repo VERSION. Never stamp ProductVersion onto a skew carrier.
+if ($packBasename -notmatch '^Vibecrafted_RuntimePack_(\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?)-') {
+    Die "Runtime Pack basename must carry SemVer after Vibecrafted_RuntimePack_: $packBasename"
+}
+$packNameVersion = Get-BaseSemVer $Matches[1]
+if (-not $packNameVersion) {
+    Die "Runtime Pack basename SemVer unreadable: $packBasename"
+}
+$tar = Get-Command tar -ErrorAction SilentlyContinue
+if (-not $tar) {
+    Die "tar is required to read Runtime Pack payload VERSION (VibecraftedRuntime/VERSION)"
+}
+$payloadVersionRaw = & $tar.Source -xOf $Pack "VibecraftedRuntime/VERSION" 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$payloadVersionRaw)) {
+    Die "Runtime Pack payload VERSION missing or unreadable: VibecraftedRuntime/VERSION in $Pack"
+}
+$payloadVersion = Get-BaseSemVer ([string]$payloadVersionRaw)
+if (-not $payloadVersion) {
+    Die "Runtime Pack payload VERSION must be SemVer major.minor.patch: $payloadVersionRaw"
+}
+if ($packNameVersion -ne $payloadVersion) {
+    Die "Runtime Pack basename version ($packNameVersion) disagrees with payload VERSION ($payloadVersion)"
+}
+if ($payloadVersion -ne $repoVersion) {
+    Die "Runtime Pack VERSION ($payloadVersion) disagrees with repo VERSION ($repoVersion); refusing to stamp ProductVersion=$productVersion onto a $payloadVersion carrier"
+}
+
+function Resolve-WindowsPackVerifyKey {
+    param([string]$PackPath)
+    # Prefer the key that actually signed this carrier. CI rehearsal packs do
+    # not verify with vibecrafted-signing-v1.pub (openssl: invalid padding).
+    $packDirectory = Split-Path -Parent $PackPath
+    $ciSigningPub = Join-Path $packDirectory "ci-signing.pub"
+    $rehearsalPub = "$PackPath.rehearsal.pub"
+    $productPub = Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub"
+    if (Test-Path -LiteralPath $ciSigningPub -PathType Leaf) {
+        Write-Host "Pack verify key: ci-signing.pub (rehearsal artifact)"
+        return (Resolve-Path -LiteralPath $ciSigningPub).Path
+    }
+    if (Test-Path -LiteralPath $rehearsalPub -PathType Leaf) {
+        Write-Host "Pack verify key: rehearsal.pub beside pack"
+        return (Resolve-Path -LiteralPath $rehearsalPub).Path
+    }
+    Write-Host "Pack verify key: vibecrafted-signing-v1.pub (product key)"
+    return (Resolve-Path -LiteralPath $productPub).Path
+}
+
+$verifyKeySource = Resolve-WindowsPackVerifyKey -PackPath $Pack
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "scripts\install-runtime-pack.ps1") `
+    -Pack $Pack -PublicKey $verifyKeySource -VerifyOnly
+$verifyExit = $LASTEXITCODE
+if ($verifyExit -ne 0) {
+    Die "Runtime Pack does not verify with the key staged as pack-verify.pub ($verifyKeySource), exit $verifyExit"
+}
+
+$identityTemplate = Join-Path $packagingRoot "Identity.wxi"
+$identityText = Get-Content -LiteralPath $identityTemplate -Raw
+if ($identityText -notmatch [regex]::Escape($stableUpgradeCode)) {
+    Die "Identity.wxi UpgradeCode drifted from stable lineage $stableUpgradeCode"
+}
+if ($identityText -notmatch 'ProductCode = "REPLACE_PRODUCT_CODE"') {
+    Die "Identity.wxi must keep ProductCode placeholder for the versioned builder stamp"
+}
+
+$wixZip = Join-Path (Split-Path $cacheRoot) "wix314-binaries.zip"
+$wixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
+if (-not (Test-Path -LiteralPath (Join-Path $cacheRoot "candle.exe"))) {
+    New-Item -ItemType Directory -Path (Split-Path $cacheRoot) -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $wixZip -PathType Leaf)) {
+        Write-Host "Fetching WiX 3.14 binaries..."
+        try {
+            Invoke-WebRequest -Uri $wixUrl -OutFile $wixZip
+        }
+        catch {
+            Die "WiX 3.14 download failed from $wixUrl : $($_.Exception.Message)"
+        }
+    }
+    $zipInfo = Get-Item -LiteralPath $wixZip -ErrorAction SilentlyContinue
+    if (-not $zipInfo -or $zipInfo.Length -lt 1) {
+        Die "WiX 3.14 zip missing or empty: $wixZip"
+    }
+    if (Test-Path -LiteralPath $cacheRoot) {
+        Remove-Item -LiteralPath $cacheRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+    try {
+        Expand-Archive -LiteralPath $wixZip -DestinationPath $cacheRoot -Force
+    }
+    catch {
+        Die "WiX 3.14 zip extract failed: $($_.Exception.Message)"
+    }
+}
+$candle = Join-Path $cacheRoot "candle.exe"
+$light = Join-Path $cacheRoot "light.exe"
+if (-not (Test-Path -LiteralPath $candle -PathType Leaf)) { Die "WiX candle.exe missing under $cacheRoot" }
+if (-not (Test-Path -LiteralPath $light -PathType Leaf)) { Die "WiX light.exe missing under $cacheRoot" }
+
+$requiredStaging = @(
+    (Join-Path $repoRoot "VERSION"),
+    (Join-Path $repoRoot "scripts\install-runtime-pack.ps1"),
+    (Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub")
+)
+foreach ($required in $requiredStaging) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        Die "required installer payload missing: $required"
+    }
+}
+
+if (Test-Path -LiteralPath $stagingRoot) {
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Path (Join-Path $stagingRoot "scripts") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stagingRoot "pack") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stagingRoot "vibecrafted-core\vibecrafted_core\trust") -Force | Out-Null
+Copy-Item (Join-Path $repoRoot "VERSION") (Join-Path $stagingRoot "VERSION")
+Copy-Item (Join-Path $repoRoot "scripts\install-runtime-pack.ps1") (Join-Path $stagingRoot "scripts\install-runtime-pack.ps1")
+Copy-Item (Join-Path $repoRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub") `
+    (Join-Path $stagingRoot "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub")
+Copy-Item -LiteralPath $verifyKeySource `
+    (Join-Path $stagingRoot "vibecrafted-core\vibecrafted_core\trust\pack-verify.pub")
+Copy-Item $Pack (Join-Path $stagingRoot "pack\$packBasename")
+Copy-Item $checksum (Join-Path $stagingRoot "pack\$packBasename.sha256")
+Copy-Item $signature (Join-Path $stagingRoot "pack\$packBasename.sig")
+
+$productTemplate = Join-Path $packagingRoot "Product.wxs"
+$bundleTemplate = Join-Path $packagingRoot "Bundle.wxs"
+$licenseRtf = Join-Path $packagingRoot "License.rtf"
+$licenseGenerator = Join-Path $repoRoot "scripts\windows_license_rtf.py"
+if (-not (Test-Path -LiteralPath $licenseGenerator -PathType Leaf)) {
+    Die "missing license RTF generator: $licenseGenerator"
+}
+# LICENSE is the only legal source. Plain text in License.rtf makes the MSI
+# ScrollableText box empty, so render RTF before candle even if a stale copy exists.
+$licenseRendered = $false
+$renderPython = $null
+$renderPythonArgs = @()
+$python3 = Get-Command python3 -ErrorAction SilentlyContinue
+if ($python3) {
+    & $python3.Source $licenseGenerator --write
+    if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $python3.Source }
+}
+if (-not $licenseRendered) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        & $python.Source $licenseGenerator --write
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $python.Source }
+    }
+}
+if (-not $licenseRendered) {
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        & $pyLauncher.Source -3 $licenseGenerator --write
+        if ($LASTEXITCODE -eq 0) { $licenseRendered = $true; $renderPython = $pyLauncher.Source; $renderPythonArgs = @("-3") }
+    }
+}
+if (-not $licenseRendered) {
+    Die "python is required to render License.rtf from LICENSE"
+}
+# Reuse the interpreter that rendered the license, including the Windows py launcher.
+$identityGenerator = Join-Path $repoRoot "scripts\windows_product_code.py"
+$productCode = & $renderPython @renderPythonArgs $identityGenerator --version $repoVersion
+if ($LASTEXITCODE -ne 0 -or $productCode -notmatch '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$') {
+    Die "versioned ProductCode generator failed"
+}
+foreach ($path in @($productTemplate, $bundleTemplate, $identityTemplate, $licenseRtf)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Die "missing WiX source: $path" }
+}
+$licenseText = Get-Content -LiteralPath $licenseRtf -Raw
+if (-not $licenseText.StartsWith("{\rtf1")) {
+    Die "License.rtf is not RTF; WixUI ScrollableText would show an empty license"
+}
+if ($licenseText -notmatch "Business Source License" -or $licenseText -notmatch "Individual developers and small teams") {
+    Die "License.rtf must carry the repo BUSL-1.1 LICENSE text (refusing a placeholder)"
+}
+$repoLicense = Get-Content -LiteralPath (Join-Path $repoRoot "LICENSE") -Raw
+if ($repoLicense -notmatch "Licensor:\s+Libraxis AI Sp\. z o\.o\.") {
+    Die "repo LICENSE Licensor must remain Libraxis AI Sp. z o.o."
+}
+
+$work = Join-Path $packagingRoot ".cache\work"
+if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+New-Item -ItemType Directory -Path $wixObjRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+
+# Stamp ProductVersion into Identity only. Do not also redefine it on the candle command line.
+$identityWork = Join-Path $work "Identity.wxi"
+$identityBody = Get-Content -LiteralPath $identityTemplate -Raw
+if ($identityBody -notmatch 'ProductVersion = "0\.0\.0\.0"') {
+    Die "Identity.wxi must keep ProductVersion placeholder 0.0.0.0 for the builder stamp"
+}
+$identityBody = $identityBody -replace 'ProductVersion = "0\.0\.0\.0"', ("ProductVersion = `"{0}`"" -f $productVersion)
+$identityBody = $identityBody -replace 'ProductCode = "REPLACE_PRODUCT_CODE"', ("ProductCode = `"{0}`"" -f $productCode)
+Write-Utf8NoBom -Path $identityWork -Content $identityBody
+
+$productWork = Join-Path $work "Product.wxs"
+$productBody = Get-Content -LiteralPath $productTemplate -Raw
+if ($productBody -notmatch "REPLACE_PACK_BASENAME") {
+    Die "Product.wxs missing REPLACE_PACK_BASENAME placeholders"
+}
+if ($productBody -notmatch 'InstallScope="perUser"') {
+    Die "Product.wxs must stay InstallScope=perUser for portable installs"
+}
+if ($productBody -notmatch "LocalAppDataFolder") {
+    Die "Product.wxs must install under LocalAppDataFolder (per-user portable)"
+}
+if ($productBody -notmatch "WixUILicenseRtf" -or $productBody -notmatch "WixUI_Minimal") {
+    Die "Product.wxs must wire WixUI_Minimal + WixUILicenseRtf for the BUSL license dialog"
+}
+if ($productBody -notmatch "WixUIBannerBmp" -or $productBody -notmatch "WixUIDialogBmp") {
+    Die "Product.wxs must override WixUIBannerBmp and WixUIDialogBmp (no stock red-CD face)"
+}
+if ($productBody -notmatch "LaunchVcTerminal") {
+    Die "Product.wxs must launch vc-terminal after install"
+}
+if ($productBody -notmatch "VC_SKIP_TERMINAL_LAUNCH" -or $productBody -notmatch "UILevel") {
+    Die "Product.wxs must gate LaunchVcTerminal for silent UILevel and VC_SKIP_TERMINAL_LAUNCH"
+}
+if ($productBody -notmatch 'Name="PATH"' -or $productBody -notmatch 'System="no"' -or $productBody -notmatch 'Part="last"' -or $productBody -notmatch '\[INSTALLDIR\]bin') {
+    Die "Product.wxs must append the per-user launcher bin to the HKCU PATH"
+}
+if ($productBody -match 'System="yes"') {
+    Die "Product.wxs must not write the machine PATH"
+}
+if ($productBody -notmatch "pack-verify.pub" -or $productBody -notmatch "-PublicKey") {
+    Die "Product.wxs must pass -PublicKey pack-verify.pub into InstallRuntimePack"
+}
+$productBody = $productBody.Replace("REPLACE_PACK_BASENAME", $packBasename)
+Write-Utf8NoBom -Path $productWork -Content $productBody
+$bundleWork = Join-Path $work "Bundle.wxs"
+$bundleBody = Get-Content -LiteralPath $bundleTemplate -Raw
+if ($bundleBody -notmatch "LogoFile=`"burn-logo\.bmp`"") {
+    Die "Bundle.wxs must set LogoFile=burn-logo.bmp (no stock Burn logo)"
+}
+if (-not $bundleBody.Contains('MsiProperty Name="VC_BURN_UILEVEL" Value="[WixBundleUILevel]"')) {
+    Die "Bundle.wxs must pass WixBundleUILevel so the EXE wizard still launches vc-terminal"
+}
+if ($bundleBody -notmatch 'Name="VC_SKIP_TERMINAL_LAUNCH" Type="string" Value="0" bal:Overridable="yes"') {
+    Die "Bundle.wxs must expose VC_SKIP_TERMINAL_LAUNCH as an overridable string defaulting to 0"
+}
+if (-not $bundleBody.Contains('MsiProperty Name="VC_SKIP_TERMINAL_LAUNCH" Value="[VC_SKIP_TERMINAL_LAUNCH]"')) {
+    Die "Bundle.wxs must forward VC_SKIP_TERMINAL_LAUNCH into the chained MSI"
+}
+Write-Utf8NoBom -Path $bundleWork -Content $bundleBody
+Copy-Item $licenseRtf (Join-Path $work "License.rtf")
+$assetsRoot = Join-Path $packagingRoot "assets"
+foreach ($bmpName in @("banner.bmp", "dialog.bmp", "burn-logo.bmp")) {
+    $bmpSrc = Join-Path $assetsRoot $bmpName
+    if (-not (Test-Path -LiteralPath $bmpSrc -PathType Leaf)) {
+        Die "missing installer chrome bitmap: $bmpSrc (refusing stock WixUI red-CD defaults)"
+    }
+    Copy-Item $bmpSrc (Join-Path $work $bmpName)
+}
+
+$msiOut = Join-Path $OutDir "Vibecrafted.msi"
+$exeOut = Join-Path $OutDir "Vibecrafted.exe"
+$canonicalStem = "Vibecrafted_${repoVersion}-${releaseDate}-${shortSha}-windows-x64"
+$msiCanonical = Join-Path $OutDir "$canonicalStem.msi"
+$exeCanonical = Join-Path $OutDir "$canonicalStem.exe"
+foreach ($stale in @($msiOut, $exeOut, $msiCanonical, $exeCanonical, "$msiCanonical.sha256", "$exeCanonical.sha256")) {
+    if (Test-Path -LiteralPath $stale) {
+        Remove-Item -LiteralPath $stale -Force
+    }
+}
+
+Push-Location $work
+try {
+    # Bindpaths are light-only: use spaced binder path args (name=path).
+    # WixUIExtension supplies the MSI license dialog; BalExtension supplies Burn RtfLicense.
+    & $candle -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
+        Product.wxs Bundle.wxs -out "$wixObjRoot\"
+    if ($LASTEXITCODE -ne 0) { Die "candle failed (exit $LASTEXITCODE)" }
+
+    & $light -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
+        -b "staging=$stagingRoot" `
+        -b "out=$OutDir" `
+        (Join-Path $wixObjRoot "Product.wixobj") `
+        -out $msiOut
+    if ($LASTEXITCODE -ne 0) { Die "light MSI failed (exit $LASTEXITCODE)" }
+    Assert-NonEmptyFile -Path $msiOut -Label "MSI"
+
+    & $light -nologo -ext WixUtilExtension -ext WixBalExtension -ext WixUIExtension `
+        -b "staging=$stagingRoot" `
+        -b "out=$OutDir" `
+        (Join-Path $wixObjRoot "Bundle.wixobj") `
+        -out $exeOut
+    if ($LASTEXITCODE -ne 0) { Die "light Burn EXE failed (exit $LASTEXITCODE)" }
+    Assert-NonEmptyFile -Path $exeOut -Label "Burn EXE"
+}
+finally {
+    Pop-Location
+}
+
+# Burn SourceFile still binds Vibecrafted.msi. Publish the release-shaped
+# siblings beside it so distribution never ships an ambiguous short name alone.
+Copy-Item -LiteralPath $msiOut -Destination $msiCanonical -Force
+Copy-Item -LiteralPath $exeOut -Destination $exeCanonical -Force
+Invoke-OptionalAuthenticodeSign -Path $msiCanonical
+Invoke-OptionalAuthenticodeSign -Path $exeCanonical
+$msiSha = Write-SiblingSha256 -Path $msiCanonical
+$exeSha = Write-SiblingSha256 -Path $exeCanonical
+
+Write-Host "MSI (WiX bind): $msiOut"
+Write-Host "EXE (WiX bind): $exeOut"
+Write-Host "MSI (canonical): $msiCanonical"
+Write-Host "EXE (canonical): $exeCanonical"
+Write-Host "MSI sha256: $msiSha"
+Write-Host "EXE sha256: $exeSha"
+Write-Host "ProductVersion=$productVersion UpgradeCode=$stableUpgradeCode ProductCode=$productCode"
+Write-Host "SourceRevision=$SourceRevision ($shortSha) ReleaseDate=$releaseDate"
+Write-Host "Authenticode: unsigned unless VIBECRAFTED_WINDOWS_AUTHENTICODE_THUMBPRINT is set (SmartScreen will warn)."
+Write-Host "Adapter: scripts/install-runtime-pack.ps1 (no install performed by this build)."

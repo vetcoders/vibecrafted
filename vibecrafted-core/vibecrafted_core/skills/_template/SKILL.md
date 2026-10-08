@@ -67,6 +67,12 @@ The bar from `CONTRIBUTING-SKILLS.md`: one sharp axis, not a Swiss-army knife.
 
 ---
 
+## Goal
+
+**Proposal — Founder owns the final wording.** {{SKILL_NAME}} produces TODO concrete result and is done when TODO verifiable endpoint can be checked independently of this run. The agent drafts this one-paragraph goal as the entry point after Purpose; Founder confirms or rewrites it in human language before the skill is canonical. Do not treat this paragraph as a second checklist — keep Acceptance Criteria below as the separate falsifier.
+
+---
+
 ## When To Use
 
 Trigger conditions (replace all bullets):

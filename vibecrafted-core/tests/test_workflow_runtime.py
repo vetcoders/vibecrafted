@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 from vibecrafted_core import workflow_runtime
 
 
-def _fake_agent(bin_dir: Path, name: str) -> None:
+def _fake_agent(bin_dir: Path, name: str, *, status: str = "completed") -> None:
     path = bin_dir / name
+    if status == "missing-frontmatter":
+        report_writer = (
+            'printf "report without frontmatter\\n" > "$VIBECRAFTED_REPORT_PATH"\n'
+        )
+    else:
+        report_writer = (
+            'printf "%s\\n" "---" "run_id: ${VIBECRAFTED_RUN_ID:-unknown}" '
+            f'"agent: {name}" "skill: test" "status: {status}" '
+            f'"claim_status: {status}" "---" "report for $0" '
+            '> "$VIBECRAFTED_REPORT_PATH"\n'
+        )
     path.write_text(
         "#!/usr/bin/env bash\n"
         "printf '%s\\n' \"$@\"\n"
@@ -17,11 +30,7 @@ def _fake_agent(bin_dir: Path, name: str) -> None:
         f"printf '[12:00:00] session: {name}-session\\n'\n"
         "printf '[12:00:01] tokens: 10 in (3 cached) / 5 out\\n'\n"
         "printf 'cost_usd: $0.015\\n'\n"
-        "printf 'fake worker ok\\n'\n"
-        'printf "%s\\n" "---" "run_id: ${VIBECRAFTED_RUN_ID:-unknown}" '
-        f'"agent: {name}" "skill: test" "status: completed" '
-        '"claim_status: completed" "---" "report for $0" '
-        '> "$VIBECRAFTED_REPORT_PATH"\n',
+        "printf 'fake worker ok\\n'\n" + report_writer,
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -45,6 +54,9 @@ def _runtime_env(monkeypatch, tmp_path: Path, run_id: str) -> Path:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(bin_dir))
+    monkeypatch.setenv(
+        "PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', os.defpath)}"
+    )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_RUN_ID", run_id)
@@ -52,6 +64,62 @@ def _runtime_env(monkeypatch, tmp_path: Path, run_id: str) -> Path:
     monkeypatch.setenv("VIBECRAFTED_TRANSCRIPT_PATH", str(home / "parent.log"))
     monkeypatch.setenv("VIBECRAFTED_META_PATH", str(home / "parent.meta.json"))
     return home
+
+
+def _write_generation_command(root: Path, name: str, generation: str) -> Path:
+    command = root / "bin" / name
+    command.parent.mkdir(parents=True, exist_ok=True)
+    command.write_text(
+        "#!/bin/sh\n"
+        f'printf \'%s|%s|%s|%s\\n\' \'{generation}\' "$VIBECRAFTED_RUNTIME_ROOT" "$VIBECRAFTED_RUNTIME_BIN" "$VIBECRAFTED_PYTHON"\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o755)
+    return command
+
+
+def test_child_env_keeps_selected_generation_over_stale_inherited_bin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    selected = tmp_path / "releases" / "new"
+    stale = tmp_path / "releases" / "old"
+    selected_bin = selected / "bin"
+    stale_bin = stale / "bin"
+    for root, version in ((selected, "4.3.0+g16425e69"), (stale, "4.3.0+gf861d136")):
+        (root / "bin").mkdir(parents=True, exist_ok=True)
+        (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+        python = root / "bin" / "python3"
+        python.write_text("#!/bin/sh\n", encoding="utf-8")
+        python.chmod(0o755)
+    _write_generation_command(selected, "codex", "new")
+    _write_generation_command(stale, "codex", "old")
+    home = tmp_path / "home"
+    provider_bin = home / ".local" / "bin"
+    _write_generation_command(home / ".local", "codex", "provider")
+
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(selected))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(stale_bin))
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", str(stale_bin / "python3"))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(tmp_path / "rogue-bin"))
+
+    environment = workflow_runtime._child_env(
+        "codex",
+        tmp_path / "report.md",
+        tmp_path / "transcript.log",
+        tmp_path / "meta.json",
+    )
+    command = workflow_runtime._resolve_agent_command("codex", ["codex"], environment)
+    result = subprocess.run(
+        command, env=environment, text=True, capture_output=True, check=True
+    )
+
+    assert command[0] == str(provider_bin / "codex")
+    assert (
+        result.stdout.strip()
+        == f"provider|{selected}|{selected_bin}|{selected_bin / 'python3'}"
+    )
+    assert str(provider_bin) in environment["PATH"]
 
 
 def _write_finished_lane_meta(
@@ -125,6 +193,24 @@ def _write_finished_lane_meta(
                 "/dev/stdin",
             ],
         ),
+        (
+            "agy",
+            [
+                "agy",
+                "--conversation",
+                "native-123",
+                "--dangerously-skip-permissions",
+                "--add-dir",
+                ".",
+                "--print-timeout",
+                "30m",
+                "--print=",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ],
+        ),
     ],
 )
 def test_native_resume_argv_is_provider_specific_and_shell_free(
@@ -137,7 +223,7 @@ def test_native_resume_argv_is_provider_specific_and_shell_free(
     assert "-c" not in command
 
 
-@pytest.mark.parametrize("agent", ["gemini", "agy", "junie", "swarm"])
+@pytest.mark.parametrize("agent", ["gemini", "junie", "swarm"])
 def test_native_resume_argv_fails_closed_for_unverified_agents(agent: str) -> None:
     with pytest.raises(ValueError, match="native_resume_unsupported"):
         workflow_runtime.native_resume_argv(agent, "native-123")
@@ -243,14 +329,14 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     home = _runtime_env(monkeypatch, tmp_path, "rsch-yaml")
     legacy_dir = tmp_path / "xdg" / "vibecrafted"
     legacy_dir.mkdir(parents=True)
-    (legacy_dir / "config.toml").write_text(
+    (tmp_path / "install.toml").write_text(
         '[runtime.picking.research]\ndefault_agents = ["claude", "agy"]\n',
         encoding="utf-8",
     )
     config_dir = home / "config"
     config_dir.mkdir(parents=True)
     (config_dir / "research.yaml").write_text(
-        "lanes:\n  - agent: codex\n    model: gpt-yaml\n    enabled: true\n  - agent: agy\n    model: agy-yaml\n    enabled: true\n  - agent: claude\n    enabled: false\nsynthesizer:\n  agent: codex\n  model: gpt-synth\n",
+        "lanes:\n  - agent: codex\n    model: gpt-yaml\n    enabled: true\n  - agent: agy\n    model: agy-yaml\n    enabled: true\n  - agent: claude\n    enabled: false\nsynthesizer:\n  agent: agy\n  model: agy-synth\n",
         encoding="utf-8",
     )
 
@@ -263,8 +349,8 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
     assert f"source: {config_dir / 'research.yaml'}" in report
     assert "agents: codex, agy" in report
-    assert "synthesizer: codex" in report
-    assert "synthesizer_model: gpt-synth" in report
+    assert "synthesizer: agy" in report
+    assert "synthesizer_model: agy-synth" in report
     assert "research-claude" not in report
     codex_transcript = (
         home / "rsch-yaml-children" / "research-codex.transcript.log"
@@ -272,18 +358,42 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     agy_transcript = (
         home / "rsch-yaml-children" / "research-agy.transcript.log"
     ).read_text(encoding="utf-8")
+    synthesis_transcript = (
+        home / "rsch-yaml-children" / "research-synthesis.transcript.log"
+    ).read_text(encoding="utf-8")
     assert "exec\n-m\ngpt-yaml\n--json" in codex_transcript
-    assert "\nagy-yaml\n" not in agy_transcript
+    assert agy_transcript.splitlines()[:8] == [
+        "--model",
+        "agy-yaml",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print=",
+    ]
+    assert synthesis_transcript.splitlines()[:8] == [
+        "--model",
+        "agy-synth",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print=",
+    ]
     children = {child["agent"]: child for child in meta["children"]}
     assert children["codex"]["model_requested"] == "gpt-yaml"
     assert children["codex"]["model_override_supported"] is True
     assert children["agy"]["model_requested"] == "agy-yaml"
-    assert children["agy"]["model_override_supported"] is False
-    assert children["agy"]["model_override_skip_reason"] == (
-        "unsupported_agent_model_flag"
-    )
-    assert meta["research_synthesizer"] == "codex"
-    assert meta["research_synthesizer_model"] == "gpt-synth"
+    assert children["agy"]["model_override_supported"] is True
+    assert children["agy"]["model_override_skipped"] is False
+    assert "model_override_skip_reason" not in children["agy"]
+    assert meta["research_synthesizer"] == "agy"
+    assert meta["research_synthesizer_model"] == "agy-synth"
+    assert meta["synthesis"]["model_requested"] == "agy-synth"
+    assert meta["synthesis"]["model_override_supported"] is True
+    assert meta["synthesis"]["model_override_skipped"] is False
 
 
 def test_research_runtime_applies_model_request_per_child_runner(
@@ -323,7 +433,16 @@ def test_research_runtime_applies_model_request_per_child_runner(
     assert "--model\nfrontier\n-p" in claude_transcript
     assert "exec\n-m\nfrontier\n--json" in codex_transcript
     assert "yaml-codex" not in codex_transcript
-    assert "\nfrontier\n" not in agy_transcript
+    assert agy_transcript.splitlines()[:8] == [
+        "--model",
+        "frontier",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print=",
+    ]
 
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
     assert meta["model_requested"] == "frontier"
@@ -332,11 +451,9 @@ def test_research_runtime_applies_model_request_per_child_runner(
     assert children["claude"]["model_override_supported"] is True
     assert children["claude"]["model_override_skipped"] is False
     assert children["codex"]["model_override_supported"] is True
-    assert children["agy"]["model_override_supported"] is False
-    assert children["agy"]["model_override_skipped"] is True
-    assert (
-        children["agy"]["model_override_skip_reason"] == "unsupported_agent_model_flag"
-    )
+    assert children["agy"]["model_override_supported"] is True
+    assert children["agy"]["model_override_skipped"] is False
+    assert "model_override_skip_reason" not in children["agy"]
 
 
 def test_research_runtime_writes_canonical_named_lane_artifacts(
@@ -927,6 +1044,86 @@ def test_polarize_runtime_reuses_loop_with_polarize_identity(
     assert "marbles-L1.md" not in transcript
 
 
+@pytest.mark.parametrize(
+    ("child_status", "expected_children", "expected_rc", "expected_parent_status"),
+    [
+        ("blocked", 1, 1, "blocked"),
+        ("failed", 1, 1, "failed"),
+        ("completed", 3, 0, "completed"),
+    ],
+)
+def test_marbles_loop_stops_on_child_report_status(
+    monkeypatch,
+    tmp_path: Path,
+    child_status: str,
+    expected_children: int,
+    expected_rc: int,
+    expected_parent_status: str,
+) -> None:
+    """Exit-0 + artifact_ok is not enough: blocked/failed report status stops L1.
+
+    A completed child still walks the full count (regression of the pre-fix loop).
+    """
+    home = _runtime_env(monkeypatch, tmp_path, f"marb-status-{child_status}")
+    _fake_agent(tmp_path / "bin", "codex", status=child_status)
+
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "codex",
+            "--root",
+            str(tmp_path),
+            "--prompt",
+            "converge",
+            "--count",
+            "3",
+            "--depth",
+            "3",
+        ]
+    )
+
+    assert rc == expected_rc
+    meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
+    assert len(meta["children"]) == expected_children
+    assert meta["status"] == expected_parent_status
+    report = (home / "parent.md").read_text(encoding="utf-8")
+    assert report.splitlines()[1] == f"status: {expected_parent_status}"
+    child_dir = home / f"marb-status-{child_status}-children"
+    assert (child_dir / "marbles-L1.md").is_file()
+    assert (child_dir / "marbles-L2.md").is_file() is (expected_children > 1)
+    assert (child_dir / "marbles-L3.md").is_file() is (expected_children > 2)
+
+
+def test_marbles_loop_missing_frontmatter_is_not_a_stop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Unreadable/absent frontmatter must not invent a blocked stop."""
+    home = _runtime_env(monkeypatch, tmp_path, "marb-status-missing")
+    _fake_agent(tmp_path / "bin", "codex", status="missing-frontmatter")
+
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "codex",
+            "--root",
+            str(tmp_path),
+            "--prompt",
+            "converge",
+            "--count",
+            "3",
+            "--depth",
+            "3",
+        ]
+    )
+
+    assert rc == 0
+    meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
+    assert len(meta["children"]) == 3
+    assert meta["status"] == "completed"
+
+
 def test_child_prompt_carries_worker_signal_discipline() -> None:
     prompt = workflow_runtime._child_prompt("marbles", "L1", "/repo", "find gaps")
 
@@ -936,3 +1133,47 @@ def test_child_prompt_carries_worker_signal_discipline() -> None:
     assert "background-task completions will NEVER wake" in prompt
     assert "Never end your turn waiting" in prompt
     assert "intentionally blind to prior marbles runs" in prompt
+
+
+def test_research_report_and_stderr_expose_ignored_yaml(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "rsch-ignored")
+    config_dir = home / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "research.yaml").write_text("lanes:\n  - codex\n  - 42\n  - gemini\n")
+    assert (
+        workflow_runtime.main(
+            ["research", "--root", str(tmp_path), "--prompt", "map it"]
+        )
+        == 0
+    )
+    report = (home / "parent.md").read_text()
+    assert "## Research Lane Selection" in report
+    assert "ignored:" in report and "lanes: 42" in report and "gemini" in report
+    assert "warnings: Deprecated research config" in report
+    assert "research.yaml -> config.toml" in report
+    stderr = capsys.readouterr().err
+    assert "Ignored research config element: lanes: 42" in stderr
+    assert "Ignored research config element: gemini" in stderr
+
+
+def test_research_invalid_roster_fails_with_selection_report(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "rsch-invalid")
+    config_dir = home / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "research.yaml").write_text("lanes:\n  - 42\n")
+    assert (
+        workflow_runtime.main(
+            ["research", "--root", str(tmp_path), "--prompt", "map it"]
+        )
+        == 1
+    )
+    report = (home / "parent.md").read_text()
+    assert "status: failed" in report
+    assert "ignored: lanes: 42" in report
+    assert "- agents: none" in report
+    assert "no supported research agents" in capsys.readouterr().err
+    assert not (home / "rsch-invalid-children").exists()

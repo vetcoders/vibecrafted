@@ -12,7 +12,7 @@ lifecycle. Phase marks the Read–Write cadence: READ skills observe and judge,
 WRITE skills mutate the tree or its packaging, and posture/meta/foundation
 skills shape how the others run. Example invocations use the skill-first
 grammar `vibecrafted <skill> <agent>` with any fleet agent
-(claude · codex · agy · junie · grok); each core launcher also has an
+(claude · codex · agy · junie · grok · cursor); each core launcher also has an
 interactive `/vc-<skill>` form.
 
 ## Pipeline stages

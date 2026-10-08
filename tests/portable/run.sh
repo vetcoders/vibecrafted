@@ -98,23 +98,6 @@ if any(line.strip().endswith(needle) for line in result.stdout.splitlines()):
 PY
 }
 
-print_installer_logs() {
-  local home="$1"
-  local log_dir="$home/.vibecrafted/logs/installer"
-  local log_file
-
-  if [[ ! -d "$log_dir" ]]; then
-    printf '[portable] no installer logs found under %s\n' "$log_dir" >&2
-    return 0
-  fi
-
-  while IFS= read -r log_file; do
-    [[ -f "$log_file" ]] || continue
-    printf '\n[portable] installer log: %s\n' "$log_file" >&2
-    sed -n '1,220p' "$log_file" >&2 || true
-  done < <(find "$log_dir" -type f -name '*.log' -print | sort)
-}
-
 log "syntax checks"
 bash -n \
   "$repo_root/install.sh" \
@@ -148,20 +131,19 @@ cleanup_workspace() {
 }
 trap cleanup_workspace EXIT
 bootstrap_home="$workspace/bootstrap-home"
-bootstrap_config_dir="$bootstrap_home/.config"
 home_dir="$workspace/home"
 config_dir="$home_dir/.config"
 work_repo="$workspace/workrepo"
 fake_bin="$home_dir/.local/bin"
 bootstrap_archive="$workspace/vibecrafted-bootstrap.tar.gz"
-mkdir -p "$bootstrap_home" "$bootstrap_config_dir" "$home_dir" "$config_dir" "$work_repo" "$fake_bin"
+mkdir -p "$bootstrap_home" "$home_dir" "$config_dir" "$work_repo" "$fake_bin"
 
 # Product spawns intentionally detach one perception watcher per durable repo.
 # This test repo is ephemeral and deleted by the EXIT trap, so keep that
 # orthogonal daemon disabled here; perception lifecycle has its own core suite.
 export VIBECRAFTED_PERCEPTION_WATCH=0
 
-log "bootstrap smoke via root install.sh"
+log "materialize the provenance-bound portable source carrier"
 read -r bootstrap_source_owner bootstrap_source_revision < <(
   python3 - "$repo_root" <<'PY'
 from pathlib import Path
@@ -185,47 +167,50 @@ python3 "$repo_root/scripts/distribution_manifest.py" archive \
   --root-name vibecrafted-bootstrap \
   --owner-repo "$bootstrap_source_owner" \
   --source-revision "$bootstrap_source_revision"
-# The portable sandbox shares the operator's launchd user domain. Install the
-# complete payload without claiming or mutating the host's fixed service label.
-if ! HOME="$bootstrap_home" XDG_CONFIG_HOME="$bootstrap_config_dir" VIBECRAFTED_HOME="$bootstrap_home/.vibecrafted" INSTALL_SERVER_SERVICE_POLICY=isolated \
-  bash "$repo_root/install.sh" --archive-file "$bootstrap_archive"; then
-  print_installer_logs "$bootstrap_home"
-  die "root install.sh bootstrap failed"
-fi
-
-require_symlink "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current"
+bootstrap_source="$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current"
+mkdir -p "$bootstrap_source"
+tar -xzf "$bootstrap_archive" --strip-components=1 -C "$bootstrap_source"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/Makefile"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
-# Runtime contract (test_install_all_paths_do_not_install_shell_helpers_by_default):
-# the default install lane (install.sh -> make install-auto -> make install) installs
+# Source-lane contract (test_install_all_paths_do_not_install_shell_helpers_by_default):
+# the explicit portable maintainer lane (install.sh -> make install-source) installs
 # tools and views but does NOT wire the legacy shell helpers or touch shell rc files.
 # Shell-helper generation is an explicit opt-in, exercised by the `--with-shell`
 # install smoke below, so the bootstrap does not assert vc-skills.sh here.
 
 log "install smoke into clean HOME"
+stable_source="$home_dir/.local/share/vibecrafted/tools/vibecrafted-current"
+mkdir -p "$stable_source"
+tar -xzf "$bootstrap_archive" --strip-components=1 -C "$stable_source"
 HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
-  bash "$repo_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh" \
-  --source "$repo_root" \
+  bash "$stable_source/vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh" \
+  --source "$stable_source" \
   --tool codex --tool claude --tool agy \
-  --with-shell --write-shell-rc
+  --skills-only --with-shell --write-shell-rc
 
-# Stage the uv-tool launcher shim. The granular installer wires
-# ~/.local/bin/vibecrafted as a symlink onto the uv-tool shim (the live launcher
-# contract — see test_keys), but only `make install-python-tools` actually
-# materializes that shim via `uv tool install`. The bootstrap above runs the
-# full `make install` (which includes it); this clean-HOME smoke uses the
-# granular installer, so create the shim here too — otherwise the launcher
-# symlink dangles and the resume smoke below cannot exec it.
+# Skills-only installs no product launchers. Python entry points are staged by
+# the explicit uv-tool step below and Runtime Pack wrappers remain out of scope.
+[[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "skills-only published vc-help"
+[[ ! -e "$home_dir/.local/bin/vc-marbles" ]] || die "skills-only published vc-marbles"
+
+# Stage the source-carrier Python launchers without pretending this archive is
+# a closed Runtime Pack. Full product installation is exercised by the Runtime
+# Pack workflows; this portable lane owns source extraction and agent scripts.
 log "stage python launcher tools (uv-tool shim)"
-HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" INSTALL_TOOLS_SERVICE_POLICY=isolated \
-  make --no-print-directory -C "$repo_root" install-python-tools
+HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
+  uv tool install --force --reinstall --editable "$stable_source/vibecrafted-core"
+HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
+  uv tool install --force --reinstall --editable "$stable_source/vibecrafted-mcp" \
+    --with-editable "$stable_source/vibecrafted-core"
 
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/claude_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/agy_spawn.sh"
 require_file "$home_dir/.local/bin/vibecrafted"
-require_symlink "$home_dir/.local/bin/vc-help"
-require_symlink "$home_dir/.local/bin/vc-marbles"
+# vc-marbles is an owned Python entry point; vc-help remains a Runtime Pack
+# wrapper and must not be synthesized by the source-carrier lane.
+require_file "$home_dir/.local/bin/vc-marbles"
+[[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "source lane published vc-help"
 # Explicit --tool selections keep their requested compatibility views.
 require_symlink "$home_dir/.agents/skills/vc-agents"
 require_symlink "$home_dir/.codex/skills/vc-agents"
@@ -233,13 +218,16 @@ require_symlink "$home_dir/.claude/skills/vc-agents"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/claude_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/agy_spawn.sh"
-# Canonical + compat helper locations
-require_file "$config_dir/vetcoders/vc-skills.sh"
-require_file "$config_dir/zsh/vc-skills.zsh"
-assert_contains "$config_dir/vetcoders/vc-skills.sh" '𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper shim'
+# The helper shim has one home: the product shell tree under the one config
+# home. Nothing lands in a sibling or private config directory.
+helper_shim="$config_dir/vibecrafted/shell/vc-skills.sh"
+require_file "$helper_shim"
+[[ ! -e "$config_dir/zsh" ]] || die "install wrote into the private zsh config directory"
+[[ ! -e "$config_dir/vetcoders" ]] || die "install wrote into a retired sibling config directory"
+assert_contains "$helper_shim" '𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper shim'
 bad_helper_candidate="\${VIBECRAFTED_ROOT:-}/runtime/shell/vetcoders.sh"
-assert_not_contains "$config_dir/vetcoders/vc-skills.sh" "$bad_helper_candidate"
-assert_not_contains "$config_dir/vetcoders/vc-skills.sh" "vibecrafted-current/runtime/shell/vetcoders.sh"
+assert_not_contains "$helper_shim" "$bad_helper_candidate"
+assert_not_contains "$helper_shim" "vibecrafted-current/runtime/shell/vetcoders.sh"
 # Host-shell helper sourcing is intentionally retired (install-shell.sh:
 # the helper is loaded by vc-start, never by the ordinary host shell).
 # --write-shell-rc now means: PATH-only launcher guard in an rcfile, and any
@@ -250,13 +238,20 @@ for rcfile in "$home_dir/.zshrc" "$home_dir/.bashrc"; do
   if grep -Fq 'vc-skills' "$rcfile"; then
     die "rcfile $rcfile still sources vc-skills (retired host-shell contract)"
   fi
-  # shellcheck disable=SC2016  # literal $HOME is the rc line's actual text
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
+  # shellcheck disable=SC2016
   grep -Fq '$HOME/.local/bin' "$rcfile" && rc_found=1
 done
 (( rc_found )) || die "No rcfile carries the PATH-only launcher guard"
 
 log "prepare fake repo and fake agent CLIs"
 git -C "$work_repo" init -q
+# Explicit continuation resolves HEAD to a real baseline commit. This sandbox
+# owns its fixture identity; host signing and hooks are outside the smoke.
+git -C "$work_repo" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  -c user.name='Portable smoke' -c user.email='portable@example.invalid' \
+  commit --allow-empty -qm 'Seed portable smoke baseline'
 mkdir -p "$work_repo/.vibecrafted/plans"
 cat > "$work_repo/.vibecrafted/plans/test.md" <<'PLAN'
 # Test plan
@@ -278,8 +273,16 @@ case "${1:-}" in
 esac
 report=""
 json_mode=0
-if [[ -n "${FAKE_CODEX_CAPTURE:-}" ]]; then
-  printf "%s\n" "$@" > "$FAKE_CODEX_CAPTURE"
+argv_capture=""
+stdin_capture=""
+# The real headless boundary drops arbitrary fixture environment variables.
+# A marker beside this disposable stub binds capture paths only for resume.
+if [[ -f "${BASH_SOURCE[0]}.resume-capture" ]]; then
+  {
+    IFS= read -r argv_capture
+    IFS= read -r stdin_capture
+  } < "${BASH_SOURCE[0]}.resume-capture"
+  printf "%s\n" "$@" > "$argv_capture"
 fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -293,8 +296,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift || true
 done
-if [[ -n "${FAKE_CODEX_STDIN_CAPTURE:-}" ]]; then
-  cat > "$FAKE_CODEX_STDIN_CAPTURE"
+if [[ -n "$stdin_capture" ]]; then
+  cat > "$stdin_capture"
 else
   cat >/dev/null || true
 fi
@@ -438,15 +441,14 @@ jq -e '.liveness == "terminal"' "$codex_meta" >/dev/null || die "codex meta miss
 log "launcher resume smoke"
 resume_capture="$workspace/resume-codex.txt"
 resume_prompt_capture="$workspace/resume-codex-prompt.txt"
+printf '%s\n' "$resume_capture" "$resume_prompt_capture" > "$fake_bin/codex.resume-capture"
 resume_output="$(
   env -u VIBECRAFTED_RUN_ID -u VIBECRAFTED_OPERATOR_SESSION \
     -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
     -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
     HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" \
-    FAKE_CODEX_CAPTURE="$resume_capture" \
-    FAKE_CODEX_STDIN_CAPTURE="$resume_prompt_capture" \
     "$home_dir/.local/bin/vibecrafted" resume codex \
-      --session fake-session-001 --prompt "resume smoke"
+      --repo "$work_repo" --session fake-session-001 --prompt "resume smoke"
 )"
 printf '%s\n' "$resume_output"
 resume_run_id="$(
@@ -466,17 +468,22 @@ require_file "$resume_prompt_capture"
 assert_contains "$resume_capture" 'resume'
 assert_contains "$resume_capture" 'fake-session-001'
 assert_contains "$resume_prompt_capture" 'resume smoke'
+rm -f "$fake_bin/codex.resume-capture"
 
 log "helper bash smoke"
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
 # shellcheck disable=SC2016
 env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
-  bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
+  bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
   | grep -Fq 'helper-ok' || die 'bash helper layer not loaded'
 log "skill helper telemetry smoke"
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
 # shellcheck disable=SC2016
 skill_output="$(
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" VETCODERS_SPAWN_RUNTIME=headless \
-    bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
+    bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
 )"
 skill_report="$(printf '%s\n' "$skill_output" | sed -n 's/^Agent launched\. Report will land at: //p' | tail -n 1)"
 [[ -n "$skill_report" ]] || die "skill helper did not report output path"
@@ -493,12 +500,14 @@ jq -e '.run_id | startswith("marb-")' "$skill_meta" >/dev/null || die "skill hel
 jq -e '.liveness == "terminal"' "$skill_meta" >/dev/null || die "skill helper did not finish with terminal liveness"
 assert_no_perception_watcher "$work_repo"
 
-# If zsh is available, also smoke test zsh loading via compat symlink
+# If zsh is available, also smoke test zsh loading of the same shim
 if command -v zsh >/dev/null 2>&1; then
   log "helper zsh smoke (bonus)"
+  # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+  # dollar expressions in the producing shell would change the emitted contract.
   # shellcheck disable=SC2016
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
-    zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/zsh/vc-skills.zsh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
+    zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
     | grep -Fq 'helper-ok' || die 'zsh helper layer not loaded'
 fi
 
@@ -522,13 +531,19 @@ sync_output="$(env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bi
 grep -q "Syncing skills from" <<<"$sync_output" || die "Sync dry-run failed to start"
 grep -q '^  rsync ' <<<"$sync_output" || die "Sync dry-run didn't print planned rsync commands"
 ! grep -q '^rsync ' <<<"$sync_output" || die "Sync dry-run executed rsync instead of printing it"
-# shellcheck disable=SC2016 # matching literal $HOME in sync output, not expanding
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 grep -q '\$HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills' <<<"$sync_output" || die "Sync dry-run didn't target the package-owned canonical skill store"
-# shellcheck disable=SC2016 # matching literal $HOME in sync output, not expanding
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 ! grep -q '\$HOME/.vibecrafted/skills' <<<"$sync_output" || die "Sync dry-run still targets the legacy state-home skill store"
 
 log "docs truth checks"
-# shellcheck disable=SC2016 # backticks are literal content we're matching, not command substitution
+# This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
+# dollar expressions in the producing shell would change the emitted contract.
+# shellcheck disable=SC2016
 assert_not_contains "$repo_root/vibecrafted-core/vibecrafted_core/skills/vc-followup/SKILL.md" 'Use canonical Terminal spawn (`osascript`)'
 assert_not_contains "$repo_root/vibecrafted-core/vibecrafted_core/skills/vc-workflow/SKILL.md" 'osascript preferred'
 assert_not_contains "$repo_root/docs/FRONTIER.md" 'vetcoders.zsh'

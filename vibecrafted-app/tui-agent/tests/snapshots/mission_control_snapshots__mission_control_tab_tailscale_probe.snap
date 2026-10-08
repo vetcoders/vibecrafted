@@ -2,20 +2,20 @@
 source: tui-agent/tests/mission_control_snapshots.rs
 expression: buffer_text(&buffer)
 ---
-Vibecrafted Operator Console  no live runs loaded
-mission root: /fixture/repo  |  active runs: 0  |  scope: live  |  focus: Mission Control
+Vibecrafted operator  Console  no live runs loaded
+workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Monitor live 0 │ Dispatch workflow/claude │ Controls 25 │ Mission 0|0                                                │
+│ Monitor live 0 │ Usage 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 0|0                                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Active dispatches─────────────────────┐┌History (30d)─────────────────────────┐┌Mission posture───────────────────────┐
-│0 running                             ││0 meta.json scanned                   ││model parity 0/1                      │
+┌ Active dispatches ───────────────────┐┌ History (30d) ───────────────────────┐┌ Mission posture ─────────────────────┐
+│0 running                             ││0 derived runs scanned                ││model parity 0/1                      │
 │0 stalled queue items                 ││0 agents · 0 skills                   ││duration parity 0/1                   │
 │                                      ││                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Active dispatches (0) ───────────────────────────────────┐┌ Wave atlas (0) ──────────────────────────────────────────┐
 │no live dispatches                                        ││no waves in the last 30d                                  │
 │                                                          ││                                                          │
-│Launch a worker from the Dispatch tab to populate this    ││Waves emerge from prompt_id groups in meta.json.          │
+│Launch a worker from the Dispatch tab to populate this    ││Waves emerge from prompt_id groups on derived runs.       │
 │panel.                                                    ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
@@ -27,10 +27,10 @@ mission root: /fixture/repo  |  active runs: 0  |  scope: live  |  focus: Missio
 │                                                                ││                                                    │
 └────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────┘
 ┌ Fleet health (4) ─────────────────────┐┌ Failure board 24h (0) ──────────────┐┌ Operator action queue (0) ───────────┐
-│✗ tailscale dragon  dispatch target of…││no failures in window                ││nothing to press                      │
+│✗ tailscale host-a  dispatch target of…││no failures in window                ││nothing to press                      │
 │! tailscale blacky  peer offline (100.…││                                     ││                                      │
 │? tailscale status  tailscaled is not …││                                     ││                                      │
-│✓ tailscale div0    online (100.73.193…││                                     ││                                      │
+│✓ tailscale host-b  online (100.64.0.1…││                                     ││                                      │
 │                                       ││                                     ││                                      │
 └───────────────────────────────────────┘└─────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Mission Control receipt ─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -39,6 +39,6 @@ mission root: /fixture/repo  |  active runs: 0  |  scope: live  |  focus: Missio
 │artifact root missing — only live runs feed this dashboard                                                            │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-Mission Control: ↑/↓ panel focus  r refresh  Tab next tab
+Mission Control: click a panel  wheel that pane  ↑/↓ focus  r refresh
 Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
 state root: /fixture/state

@@ -41,8 +41,8 @@ from typing import Any
 
 try:
     import iterm2
-except ImportError:  # pragma: no cover - sandbox path
-    iterm2 = None  # type: ignore[assignment]
+except ImportError:  # sandbox path
+    iterm2 = None
 
 from . import (
     DEFAULT_RECONNECT_BACKOFF,
@@ -161,19 +161,21 @@ async def _post_notification(
     surfaces; we degrade silently instead of crashing the AutoLaunch.
     """
     try:
-        await iterm2.async_post_notification(connection, title=title, body=body)  # type: ignore[attr-defined]
+        await iterm2.async_post_notification(connection, title=title, body=body)
         return
     except AttributeError:
         pass
     try:
-        app = await iterm2.async_get_app(connection)  # type: ignore[union-attr]
+        app = await iterm2.async_get_app(connection)
         if app is not None and getattr(app, "current_terminal_window", None):
             window = app.current_terminal_window
             tab = window.current_tab if window else None
             session = tab.current_session if tab else None
             if session is not None:
                 await session.async_inject(f"\x1b]9;{title}: {body}\x07".encode())
-    except Exception:  # pragma: no cover - best-effort path  # noqa: BLE001
+    # iTerm RPC and session injection can raise API-specific exceptions; notification failure must
+    # leave the plugin running and be recorded in its debug log.
+    except Exception:  # noqa: BLE001
         _LOG.debug("notification fallback failed", exc_info=True)
 
 
@@ -237,7 +239,7 @@ async def _run_with_reconnect(
     Loops forever with exponential backoff (per `backoff`, holding at the
     last value once exhausted); a clean iteration resets the attempt count.
     """
-    if iterm2 is None:  # pragma: no cover - sandbox import guard
+    if iterm2 is None:  # sandbox import guard
         raise RuntimeError(
             "iterm2 package is not available; this script must run inside "
             "iTerm2's vendored Python sandbox."
@@ -246,9 +248,11 @@ async def _run_with_reconnect(
     attempt = 0
     while True:
         try:
-            await iterm2.async_main(_main_loop)  # type: ignore[attr-defined]
+            await iterm2.async_main(_main_loop)
         except KeyboardInterrupt:
             raise
+        # The iTerm connection loop must reconnect after any RPC implementation failure;
+        # KeyboardInterrupt is re-raised separately and reconnect failures retain tracebacks.
         except Exception:  # noqa: BLE001
             attempt += 1
             delay = delays[min(attempt - 1, len(delays) - 1)]
@@ -276,11 +280,11 @@ def main() -> int:
         )
         return 2
     try:
-        iterm2.run_until_complete(_run_with_reconnect)  # type: ignore[attr-defined]
+        iterm2.run_until_complete(_run_with_reconnect)
         return 0
     except KeyboardInterrupt:
         return 130
 
 
-if __name__ == "__main__":  # pragma: no cover - script entry point
+if __name__ == "__main__":  # script entry point
     raise SystemExit(main())

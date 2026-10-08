@@ -23,6 +23,7 @@ pub fn client_label(kind: &ClientKind) -> String {
         ClientKind::Codex => "Codex".to_string(),
         ClientKind::Gemini => "Gemini".to_string(),
         ClientKind::Junie => "Junie".to_string(),
+        ClientKind::Cursor => "Cursor".to_string(),
         ClientKind::Generic { name } => name.clone(),
     }
 }

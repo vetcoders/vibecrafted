@@ -11,8 +11,6 @@ from vibecrafted_core.frontier_assets import vc_frame_config_kdl, vc_frame_confi
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = CORE_ROOT.parent
-# uv build may emit to monorepo dist/ or vibecrafted-core/dist/
-DIST_CANDIDATES = (CORE_ROOT / "dist", REPO_ROOT / "dist")
 
 REQUIRED_MEMBERS = (
     "vibecrafted_core/config/vc-frame/config.kdl",
@@ -63,41 +61,14 @@ def test_repo_root_config_is_canonical_source() -> None:
     )
 
 
-def _latest_artifacts() -> tuple[list[Path], list[Path]]:
-    wheels: list[Path] = []
-    sdists: list[Path] = []
-    for dist in DIST_CANDIDATES:
-        if not dist.is_dir():
-            continue
-        wheels.extend(dist.glob("vibecrafted-*.whl"))
-        wheels.extend(dist.glob("*.whl"))
-        sdists.extend(dist.glob("vibecrafted-*.tar.gz"))
-        sdists.extend(dist.glob("*.tar.gz"))
-    # Prefer newest by mtime
-    wheels = sorted(set(wheels), key=lambda p: p.stat().st_mtime)
-    sdists = sorted(set(sdists), key=lambda p: p.stat().st_mtime)
-    return wheels, sdists
-
-
-def _ensure_build_artifacts() -> tuple[Path, Path | None]:
-    """Build wheel/sdist if missing; return (wheel, sdist|None)."""
-    wheels, sdists = _latest_artifacts()
-    # Prefer 3.6+ artifacts that contain package data
-    if wheels:
-        try:
-            import zipfile
-
-            names = zipfile.ZipFile(wheels[-1]).namelist()
-            if "vibecrafted_core/config/vc-frame/config.kdl" in names:
-                return wheels[-1], sdists[-1] if sdists else None
-        except OSError:
-            pass
+def _ensure_build_artifacts(dist: Path) -> tuple[Path, Path]:
+    """Build this checkout into an isolated directory; require wheel and sdist."""
     import subprocess
     import sys
 
     cmds = [
-        ["uv", "build", "--directory", str(CORE_ROOT)],
-        [sys.executable, "-m", "build", str(CORE_ROOT)],
+        ["uv", "build", "--directory", str(CORE_ROOT), "--out-dir", str(dist)],
+        [sys.executable, "-m", "build", str(CORE_ROOT), "--outdir", str(dist)],
     ]
     last_err = ""
     for cmd in cmds:
@@ -117,26 +88,32 @@ def _ensure_build_artifacts() -> tuple[Path, Path | None]:
             break
         last_err = (proc.stderr or proc.stdout or "")[-500:]
     else:
-        pytest.skip(f"could not build wheel/sdist: {last_err}")
+        pytest.fail(f"could not build wheel/sdist: {last_err}")
 
-    wheels, sdists = _latest_artifacts()
-    if not wheels:
-        pytest.skip("build produced no wheel")
-    return wheels[-1], sdists[-1] if sdists else None
+    wheels = sorted(dist.glob("vibecrafted-*.whl"))
+    sdists = sorted(dist.glob("vibecrafted-*.tar.gz"))
+    if len(wheels) != 1:
+        pytest.fail(f"build produced no wheel or ambiguous wheels: {wheels}")
+    if len(sdists) != 1:
+        pytest.fail(f"build produced no sdist or ambiguous sdists: {sdists}")
+    return wheels[0], sdists[0]
 
 
-def test_wheel_contains_vc_frame_tree() -> None:
-    wheel, _ = _ensure_build_artifacts()
+@pytest.fixture(scope="module")
+def artifacts(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    return _ensure_build_artifacts(tmp_path_factory.mktemp("core-config-carriers"))
+
+
+def test_wheel_contains_vc_frame_tree(artifacts: tuple[Path, Path]) -> None:
+    wheel, _ = artifacts
     with zipfile.ZipFile(wheel) as zf:
         names = set(zf.namelist())
     missing = [n for n in REQUIRED_MEMBERS if n not in names]
     assert not missing, f"wheel {wheel.name} missing: {missing}"
 
 
-def test_sdist_contains_vc_frame_tree() -> None:
-    _, sdist = _ensure_build_artifacts()
-    if sdist is None:
-        pytest.skip("no sdist produced")
+def test_sdist_contains_vc_frame_tree(artifacts: tuple[Path, Path]) -> None:
+    _, sdist = artifacts
     with tarfile.open(sdist, "r:gz") as tf:
         names = set(tf.getnames())
     # sdist prefixes with package-version/
@@ -147,9 +124,30 @@ def test_sdist_contains_vc_frame_tree() -> None:
         ):
             # also allow top-level without vibecrafted- prefix quirks
             missing.append(member)
-    # stricter: any path ending with config/vc-frame/config.kdl
+    assert not missing, f"sdist {sdist.name} missing: {missing}"
+    # Require the same config members as the wheel, then inspect the source prefix.
     assert any(n.endswith("config/vc-frame/config.kdl") for n in names), (
         f"sdist {sdist.name} has no config.kdl; sample={sorted(names)[:20]}"
     )
     assert any("auto-theme.sh" in n for n in names)
     assert any("operator.kdl" in n for n in names)
+
+
+@pytest.mark.parametrize("build_returns_success", [False, True])
+def test_build_failure_is_failure_not_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build_returns_success: bool
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0 if build_returns_success else 7, "", "broken builder"
+        ),
+    )
+    try:
+        with pytest.raises(pytest.fail.Exception, match="could not build|no wheel"):
+            _ensure_build_artifacts(tmp_path)
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"builder hid failure as skip: {exc}")

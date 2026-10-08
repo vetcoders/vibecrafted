@@ -38,23 +38,23 @@ def fake_iterm2(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
     class _PartialProfile:
         @classmethod
-        async def async_query(cls, _conn: Any) -> list[Any]:  # pragma: no cover
+        async def async_query(cls, _conn: Any) -> list[Any]:
             return []
 
-    def _rpc(fn: Any) -> Any:  # pragma: no cover - decorator surface
+    def _rpc(fn: Any) -> Any:  # decorator surface
         return fn
 
-    def _status_bar_rpc(fn: Any) -> Any:  # pragma: no cover
+    def _status_bar_rpc(fn: Any) -> Any:
         fn.async_redraw = lambda *a, **k: None
         return fn
 
-    stub.StatusBarComponent = _StatusBarComponent  # type: ignore[attr-defined]
-    stub.PartialProfile = _PartialProfile  # type: ignore[attr-defined]
-    stub.RPC = _rpc  # type: ignore[attr-defined]
-    stub.StatusBarRPC = _status_bar_rpc  # type: ignore[attr-defined]
-    stub.async_get_app = lambda _conn: None  # type: ignore[attr-defined]
-    stub.run_until_complete = lambda _coro: None  # type: ignore[attr-defined]
-    stub.async_main = lambda _coro: asyncio.sleep(0)  # type: ignore[attr-defined]
+    stub.StatusBarComponent = _StatusBarComponent
+    stub.PartialProfile = _PartialProfile
+    stub.RPC = _rpc
+    stub.StatusBarRPC = _status_bar_rpc
+    stub.async_get_app = lambda _conn: None
+    stub.run_until_complete = lambda _coro: None
+    stub.async_main = lambda _coro: asyncio.sleep(0)
 
     monkeypatch.setitem(sys.modules, "iterm2", stub)
     # Force-reload any plugin module that may have cached the missing import.
@@ -235,7 +235,7 @@ def test_tail_events_uses_wide_stdio_limit(
         stdout = _FakeStdout()
         returncode = 0
 
-        def terminate(self) -> None:  # pragma: no cover - not reached
+        def terminate(self) -> None:  # not reached
             raise AssertionError("process should not need termination")
 
     async def _fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProc:

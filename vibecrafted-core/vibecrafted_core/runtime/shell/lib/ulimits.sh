@@ -5,13 +5,15 @@
 
 _vetcoders_source_launcher_ulimits() {
   local candidate
+  # The sourced facade/parser initializes this shared result before the consuming function runs;
+  # assigning a local default here would mask missing ownership initialization.
+  # shellcheck disable=SC2154
   for candidate in \
     "${_vetcoders_shell_lib_dir%/shell/lib}/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/runtime/scripts/lib/ulimits.sh"; do
     [[ -n "$candidate" && -r "$candidate" ]] || continue
-    # shellcheck disable=SC1090
     source "$candidate"
     vc_raise_launcher_limits
     return 0

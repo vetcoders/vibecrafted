@@ -158,14 +158,17 @@ def test_presence_i18n_en_keys_all_have_pl_counterparts() -> None:
     assert not missing, f"EN i18n keys without a PL counterpart: {missing}"
 
 
-def test_presence_pl_phase_overrides_match_html_phases() -> None:
+def test_presence_pl_phase_overrides_match_js_phases() -> None:
+    # framework.js merges phaseOverrides by PHASES[].name; framework.html never
+    # carried data-phase markers, so the old HTML leg skipped on every host.
     i18n = _framework_i18n()
     overrides = i18n.get("pl", {}).get("phaseOverrides", {})
-    html = (PRESENCE / "framework.html").read_text(encoding="utf-8")
-    html_phases = set(re.findall(r'data-phase="([a-z0-9-]+)"', html))
-    if not html_phases:
-        pytest.skip("framework.html carries no data-phase markers")
-    missing = sorted(html_phases - set(overrides))
-    dead = sorted(set(overrides) - html_phases)
-    assert not missing, f"HTML phases without PL overrides: {missing}"
-    assert not dead, f"PL phase overrides for phases absent from HTML: {dead}"
+    source = (PRESENCE / "framework.js").read_text(encoding="utf-8")
+    block = re.search(r"var PHASES = \[(.*?)\n\s*\];", source, re.DOTALL)
+    assert block, "PHASES literal not found in framework.js"
+    phases = set(re.findall(r'\bname: "([a-z0-9-]+)"', block.group(1)))
+    assert phases, "PHASES literal carries no phase names"
+    missing = sorted(phases - set(overrides))
+    dead = sorted(set(overrides) - phases)
+    assert not missing, f"PHASES without PL overrides: {missing}"
+    assert not dead, f"PL phase overrides for phases absent from PHASES: {dead}"

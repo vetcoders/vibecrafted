@@ -8,6 +8,7 @@ the stable uno|duo|trio public arity contract remains supported by core.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -19,6 +20,14 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core.cli import _normalize_research_arity_args
+
+# --import-mode=importlib: the shared fixture module is loaded by file.
+_FIXTURES_SPEC = importlib.util.spec_from_file_location(
+    "declaration_fixtures", Path(__file__).with_name("_declaration_fixtures.py")
+)
+assert _FIXTURES_SPEC is not None and _FIXTURES_SPEC.loader is not None
+_fixtures = importlib.util.module_from_spec(_FIXTURES_SPEC)
+_FIXTURES_SPEC.loader.exec_module(_fixtures)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER_SCRIPT = (
@@ -342,8 +351,9 @@ def test_vc_research_shell_matches_deck_help_text() -> None:
 
 def test_vc_research_launch_emits_control_plane_receipt(tmp_path: Path) -> None:
     """Sourced vc-research launches via core receipt (rese-*), not legacy rsch layout."""
-    root = tmp_path / "repo"
-    root.mkdir()
+    # A launch root is a Git work tree with a commit (repo_selection
+    # require_git, 36614036); a bare directory is refused before any receipt.
+    root = _fixtures.commit_fixture_repo(tmp_path / "repo")
     crafted_home = tmp_path / "home" / ".vibecrafted"
     env = _env(tmp_path, crafted_home=crafted_home)
 
@@ -376,8 +386,7 @@ def test_vc_research_launch_emits_control_plane_receipt(tmp_path: Path) -> None:
 
 
 def test_vc_research_and_deck_launch_same_skill(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
+    root = _fixtures.commit_fixture_repo(tmp_path / "repo")
     env = _env(tmp_path)
 
     shell = _run_vc_research(
@@ -459,8 +468,7 @@ def test_vc_research_requires_prompt_or_file(tmp_path: Path) -> None:
 
 
 def test_vc_research_file_plan_launches(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
+    root = _fixtures.commit_fixture_repo(tmp_path / "repo")
     crafted_home = tmp_path / "home" / ".vibecrafted"
     plan = tmp_path / "research-plan.md"
     plan.write_text(

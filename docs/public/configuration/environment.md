@@ -15,7 +15,7 @@ Vibecrafted reads a small set of stable environment variables. They split into t
 | ---------------------------- | -------------------- | ----------------------------------------------------------------------------------------- |
 | `VIBECRAFTED_HOME`           | `$HOME/.vibecrafted` | State root for artifacts, logs, backups, and control-plane state                          |
 | `XDG_DATA_HOME`              | `$HOME/.local/share` | Parent of the installed runtime root (`…/vibecrafted/tools/`)                             |
-| `XDG_CONFIG_HOME`            | `$HOME/.config`      | Parent of the `vetcoders/` config layer                                                   |
+| `XDG_CONFIG_HOME`            | `$HOME/.config`      | Parent of `vibecrafted/`, the one product config home                                     |
 | `VIBECRAFTED_RUNTIME`        | `none`               | Runtime horse to stage at install time (`wezterm`, `vc-apprt`, `locterm`, `microsandbox`) |
 | `HTTPS_PROXY` / `HTTP_PROXY` | unset                | Honored by the curl download path and by `uv` during install                              |
 
