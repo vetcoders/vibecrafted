@@ -57,7 +57,9 @@ spawn_release_run_lock() {
   # meta and control-plane snapshot. Release only a lock this run owns.
   local lock_file="${1:-}" run_id="${2:-}"
   [[ -n "$lock_file" && -f "$lock_file" ]] || return 0
-  if [[ -n "$run_id" ]] && ! grep -q "^run_id=${run_id}\$" "$lock_file" 2>/dev/null; then
+  # Safe run ids include '.' (spawn_is_safe_run_id). Match the ownership
+  # line as a fixed whole line so run.a cannot delete a lock for run-a.
+  if [[ -n "$run_id" ]] && ! grep -F -x -q -- "run_id=${run_id}" "$lock_file" 2>/dev/null; then
     return 0
   fi
   rm -f -- "$lock_file"
