@@ -10,8 +10,11 @@ lagged their channels and blocked the platforms the channels do not publish.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import platform
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -543,3 +546,50 @@ def test_required_failure_remains_named_after_later_agent_success(
         "A failed required foundation must remain identifiable after a later "
         f"successful phase; final diagnostic was {retained!r}"
     )
+
+
+def test_runtime_install_retains_early_failure_evidence(tmp_path: Path) -> None:
+    generation = tmp_path / "payload"
+    marker = "required-foundation-root-cause-before-later-success"
+    _executable(
+        generation / "scripts/install-foundations.sh",
+        "#!/bin/sh\n"
+        f"echo '{marker}'\n"
+        "i=0; while [ $i -lt 40 ]; do echo 'later successful optional phase'; "
+        "i=$((i+1)); done\nexit 1\n",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, sys; from pathlib import Path; "
+                "from scripts.vetcoders_install import _ensure_foundations_installed; "
+                "print(json.dumps(_ensure_foundations_installed(Path(sys.argv[1]), skip=False)))"
+            ),
+            str(generation),
+        ],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path / "home"),
+            "VIBECRAFTED_HOME": str(tmp_path / "state"),
+            "VIBECRAFTED_RUNTIME_HOME": str(tmp_path / "runtime"),
+            "TMPDIR": str(tmp_path),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt["status"] == "failed"
+    assert receipt["exit_code"] == 1
+    evidence = result.stdout + result.stderr
+    diagnostic_log = receipt.get("diagnostic_log")
+    if diagnostic_log:
+        log = Path(diagnostic_log).resolve()
+        assert log.is_relative_to(tmp_path.resolve())
+        assert not log.is_relative_to(generation.resolve())
+        evidence += log.read_text()
+    assert marker in evidence, "The caller discarded the actual early failure evidence"
