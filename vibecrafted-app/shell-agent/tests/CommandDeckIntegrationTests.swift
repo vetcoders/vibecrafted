@@ -172,6 +172,12 @@ struct CommandDeckIntegrationTests {
       try await waitFor { session.navigation.currentURL?.path == path }
       try await requireMountedDocument(path)
     }
+    let retainedWebView = session.webView
+    controller.close()
+    controller.showWindow(nil)
+    try await requireMountedDocument("window reopen")
+    try require(session.webView === retainedWebView && controller.window === window,
+      "Window reopen recreated the native document session")
     print("Witness: native document remains mounted across inspector eligibility changes")
     print("Witness: existing native inspector defaults open, toolbar and menu toggle it, actual routes govern eligibility, window preference survives navigation at 800×600 and 1200×800")
   }
@@ -751,6 +757,7 @@ struct CommandDeckIntegrationTests {
     controller.close()
     controller.showWindow(nil)
     try require(controller.window === window && session.webView === original, "Reopen recreated native or web window")
+
     print("Witness: remount, reconnect, query/fragment, HTTP failure/retry and close/reopen identity")
     controller.close()
   }
