@@ -1,16 +1,16 @@
-name: Release toolchain probe (bounded repair)
+name: Release Apple toolchain smoke
 
-# Temporary no-secret evidence lane for the release-toolchain repair branch.
-# This compiles a tiny native fixture, never a product or release carrier.
+# No-secret release-toolchain regression gate on affected pull requests.
+# Compile tiny native fixtures through the same pinned release wrapper.
 on:
-  push:
-    branches:
-      - "agent/ci-release-toolchain-*"
+  pull_request:
     paths:
       - ".github/workflows/release-toolchain-probe.yml"
       - "scripts/lib/release-toolchain-contract.sh"
       - "scripts/lib/rust-linker-darwin-classic.sh"
       - "Makefile"
+      - ".github/workflows/release-dmg.yml"
+      - "tests/tui/test_release_contract.py"
 permissions:
   contents: read
 jobs:

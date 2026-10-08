@@ -92,14 +92,19 @@ That image's CLT pair, clang `1700.0.13.5` / ld-classic `955.13`, remains
 unadmitted. The initial native fixture lacked a sysroot and failed to find
 `-lSystem`; the final probe passes the selected macOS SDK explicitly.
 
-The temporary `release-toolchain-probe.yml` runs only for pushes to
-`agent/ci-release-toolchain-*`. It records image/source identity, CLT and
-selected-Xcode versions, verifies prerequisites, and executes tiny C and Rust `1.96.0` fixtures through
-the production wrapper with the selected SDK, without secrets.
-That receipt proves the pair and wrapper path; a signed, notarized product
-build and artifact execution remain separate acceptance obligations. Retire
-this bounded probe after the repair has been admitted and hosted evidence is
-recorded.
+The admitted profile then passed the no-secret C/Rust wrapper probe in
+[run 37804589573](https://github.com/vetcoders/vibecrafted/actions/runs/37804589573),
+bound to source `8c4a8060e744c4b513795b3fc88134af7773b950`.
+
+`release-toolchain-probe.yml` preserves that narrow regression gate for pull
+requests affecting the release helper, wrapper, hosted workflow, Makefile,
+smoke workflow or nearest release-contract tests. It records image/source
+identity and CLT/selected-Xcode versions, verifies prerequisites, and executes
+tiny C and Rust `1.96.0` fixtures through the production wrapper with the
+selected SDK, without secrets. It has no branch-push trigger.
+
+These receipts prove the selected pair and wrapper path. A signed, notarized
+product build and artifact execution remain separate acceptance obligations.
 
 ### In-flight rehearsal — no publish button
 

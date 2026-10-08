@@ -533,7 +533,7 @@ def test_hosted_profile_preflight_has_no_downloads_and_prereqs_use_exact_rust(
     assert "Rust 1.96.0" in result.stdout
 
 
-def test_hosted_release_and_bounded_probe_use_same_explicit_profile() -> None:
+def test_hosted_release_and_pr_smoke_use_same_explicit_profile() -> None:
     workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
     probe = (REPO_ROOT / ".github/workflows/release-toolchain-probe.yml").read_text()
     assert "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3" in workflow
@@ -548,7 +548,18 @@ def test_hosted_release_and_bounded_probe_use_same_explicit_profile() -> None:
     assert workflow.index("make release-toolchain-preflight") < workflow.index(
         "Materialize signing keys"
     )
-    assert '"agent/ci-release-toolchain-*"' in probe
+    assert "name: Release Apple toolchain smoke" in probe
+    assert "  pull_request:" in probe
+    assert "  push:" not in probe
+    for owned_path in (
+        "scripts/lib/release-toolchain-contract.sh",
+        "scripts/lib/rust-linker-darwin-classic.sh",
+        ".github/workflows/release-dmg.yml",
+        ".github/workflows/release-toolchain-probe.yml",
+        "tests/tui/test_release_contract.py",
+        "Makefile",
+    ):
+        assert f'      - "{owned_path}"' in probe
     assert "secrets." not in probe
     assert "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE: hosted-macos15-xcode26.3" in probe
     assert "DEVELOPER_DIR: /Applications/Xcode_26.3.0.app/Contents/Developer" in probe
