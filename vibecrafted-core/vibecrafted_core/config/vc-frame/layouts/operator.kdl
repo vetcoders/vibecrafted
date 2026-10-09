@@ -59,7 +59,7 @@ layout {
 
     tab name="Agents" {
         pane command="bash" name="Agent Workspaces" {
-            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\" home; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\" home; fi; exec \"$launcher\" home; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\" launcher; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\" launcher; fi; exec \"$launcher\" launcher; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

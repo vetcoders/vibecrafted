@@ -459,7 +459,7 @@ def test_successful_launch_opens_destination_tab_and_keeps_workshop(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert "exec" not in calls
     pane = calls[0]
@@ -498,7 +498,7 @@ def test_same_project_launch_still_opens_a_new_tab_without_attach(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert len(calls) == 1
     pane = calls[0]
@@ -522,7 +522,7 @@ def test_existing_target_session_is_used_when_already_live(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     pane = calls[0]
     assert isinstance(pane, list)
     assert pane[2] == "vibecrafted"
@@ -654,7 +654,7 @@ def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destinati
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert launched.notice == ""
     assert calls[0][0] == str(generation / "bin" / "vc-start")
@@ -811,7 +811,7 @@ def test_registered_live_project_preserves_its_catalog_destination(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert len(calls) == 1
     assert calls[0][:5] == ["vc-frame", "--session", destination, "action", "new-tab"]

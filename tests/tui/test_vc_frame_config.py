@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -245,6 +248,8 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "vc-agent-workshop.py" in payload
     assert "pane-python" in payload
     assert "VIBECRAFTED_PYTHON" in payload
+    assert '\\"$launcher\\" launcher' in payload
+    assert "vibecrafted tui" not in payload
     assert "session-manager" in payload
     assert "rail true" in payload
     assert "default_tab_template" in payload
@@ -266,6 +271,30 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "workspace_surface" not in active
     for kind in ("compact-bar", "session-manager", "status-bar"):
         assert active.count(f'session_canvas_kind "{kind}"') == 1
+
+
+def test_operator_agents_uses_interactive_launcher(tmp_path: Path) -> None:
+    payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
+    line = next(
+        line for line in payload.splitlines() if "/vc-agent-workshop.py" in line
+    )
+    match = re.search(r'args "-lc" (".*")', line)
+    assert match is not None
+    command = json.loads(match.group(1))
+    config = tmp_path / "frame"
+    config.mkdir()
+    runner = config / "pane-python"
+    runner.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    runner.chmod(0o755)
+    env = dict(os.environ, VC_FRAME_CONFIG_DIR=str(config))
+    result = subprocess.run(
+        ["bash", "-c", command], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        str(config / "vc-agent-workshop.py"),
+        "launcher",
+    ]
 
 
 def test_operator_layout_has_one_global_voc_entry_and_native_shell_titles() -> None:
