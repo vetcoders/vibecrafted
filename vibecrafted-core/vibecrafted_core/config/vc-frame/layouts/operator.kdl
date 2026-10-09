@@ -1,14 +1,14 @@
 // operator — ordinary project session for vc-start
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
 // Operator Frame session 00 is embedded in the vc-frame binary.
-// This layout gives each project its own Start here, Agents, Shell and Voc
+// This layout gives each project its own Start here, Agents and Shell
 // tabs with one session canvas, shared by any number of attached clients.
 //
 // Tabs:
 //   "Start here"  — first-run product map
 //   "Agents"      — one workspace, interactive Agent faces and New agent card
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
-//   "Voc"         — eyes for the current workspace, not a launcher
+// Voc is the single global console entry beside Composer in the topbar.
 //
 // Contract: Screen owns one session canvas (session_layer, tagged
 // session_canvas); tab templates and swaps below carry content only —
@@ -65,14 +65,8 @@ layout {
 
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
-        pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Start here | Agents | Shell | Voc\\n    Ctrl+t 1    back to Start here\\n\\n'; exec zsh -l"
-        }
-    }
-
-    tab name="Voc" hide_floating_panes=true {
-        pane command="bash" name="Voc" {
-            args "-lc" "for c in \"${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin/vc-o}\" \"${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/vc-o}\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/vc-o\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\"; fi; done; if command -v voc >/dev/null 2>&1; then exec voc; fi; for c in \"$HOME/.local/bin/voc\" \"${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc\" \"${VIBECRAFTED_RUNTIME_ROOT:-}/bin/voc\" \"${VIBECRAFTED_RUNTIME_BIN:-}/voc\"; do if [ -n \"$c\" ] && [ -x \"$c\" ]; then exec \"$c\"; fi; done; if command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\\n  voc is not installed in this Runtime Pack.\\n  Install: make install-app-binaries\\n\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
+        pane command="bash" {
+            args "-lc" "printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Start here | Agents | Shell · Voc beside Composer\\n    Ctrl+t 1    back to Start here\\n\\n'; exec zsh -l"
         }
     }
 
