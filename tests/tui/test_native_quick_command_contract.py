@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_POLICY = REPO_ROOT / "config/vc-terminal/vibecrafted.toml"

@@ -10,7 +10,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from collections import namedtuple
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -504,7 +504,7 @@ class _FrozenUtcDateTime(datetime):
 
     @classmethod
     def now(cls, tz=None):
-        pinned = datetime(2026, 9, 10, 0, 35, 51, tzinfo=timezone.utc)
+        pinned = datetime(2026, 9, 10, 0, 35, 51, tzinfo=UTC)
         return pinned if tz is not None else pinned.replace(tzinfo=None)
 
 

@@ -47,7 +47,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Tests load this file by path. The deck wrappers put this directory on
@@ -120,7 +120,7 @@ def fmt_tokens(value: int) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _as_int(value: object) -> int:
@@ -200,7 +200,7 @@ def _day_from_iso(value: object, fallback_mtime: float) -> str:
         and value[7] == "-"
     ):
         return value[:10]
-    return datetime.fromtimestamp(fallback_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(fallback_mtime, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _day_from_epoch(value: object, fallback_mtime: float) -> str:
@@ -208,7 +208,7 @@ def _day_from_epoch(value: object, fallback_mtime: float) -> str:
     if number > 10_000_000_000:
         number = int(number / 1000)
     if number > 1_000_000_000:
-        return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(number, tz=UTC).strftime("%Y-%m-%d")
     return _day_from_iso(None, fallback_mtime)
 
 
@@ -1016,7 +1016,7 @@ def render_sessions(agent: str, records: list[dict], snapshot: dict) -> str:
         "-" * 64,
     ]
     for record in ordered:
-        stamp = datetime.fromtimestamp(float(record.get("mtime") or 0), tz=timezone.utc)
+        stamp = datetime.fromtimestamp(float(record.get("mtime") or 0), tz=UTC)
         when = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
         processed = fmt_tokens(_as_int(record.get("processed_total")))
         lines.append(f"{when:<20} {processed:>14}  {record.get('id')}")

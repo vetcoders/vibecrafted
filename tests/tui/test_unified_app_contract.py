@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 

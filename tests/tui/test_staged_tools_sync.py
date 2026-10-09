@@ -16,7 +16,7 @@ import threading
 import time
 from argparse import Namespace
 from contextlib import contextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1490,7 +1490,7 @@ def test_legacy_service_mutator_argv_classifier(
 def test_legacy_mutator_wait_ignores_post_publication_contender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    published_at = datetime.now(timezone.utc)
+    published_at = datetime.now(UTC)
     old = installer._LegacyServiceMutator(
         pid=41,
         start_token="darwin:1:1",
@@ -2703,8 +2703,8 @@ def test_rollback_recognizes_exact_old_pair_resurrected_by_launchd(
             "state": "prepared",
             "old_target": str(old_target),
             "new_target": str(new_target),
-            "prepared_at": datetime.now(timezone.utc).isoformat(),
-            "published_at": datetime.now(timezone.utc).isoformat(),
+            "prepared_at": datetime.now(UTC).isoformat(),
+            "published_at": datetime.now(UTC).isoformat(),
         },
     )
     monkeypatch.setenv("HOME", str(home))
@@ -5160,8 +5160,8 @@ def test_stale_complete_handoff_cannot_suppress_payload_rollback(
             "state": "complete",
             "old_target": "",
             "new_target": str(old_target),
-            "prepared_at": datetime.now(timezone.utc).isoformat(),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "prepared_at": datetime.now(UTC).isoformat(),
+            "completed_at": datetime.now(UTC).isoformat(),
         },
     )
     monkeypatch.setattr(installer.sys, "platform", "linux")

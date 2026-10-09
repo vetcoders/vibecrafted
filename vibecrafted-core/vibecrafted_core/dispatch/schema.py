@@ -8,11 +8,10 @@ import os
 import re
 import shlex
 import subprocess
+import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope

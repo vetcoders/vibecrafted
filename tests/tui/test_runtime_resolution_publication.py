@@ -11,12 +11,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import tomllib
 from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
 from vibecrafted_core.vc_frame_staging import (
     resolve_clipboard_command,

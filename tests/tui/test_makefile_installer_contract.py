@@ -7,10 +7,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 from scripts import distribution_manifest as distribution
 from scripts import vetcoders_install as installer

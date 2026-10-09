@@ -19,7 +19,7 @@ import stat
 import sys
 import threading
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -34,7 +34,7 @@ _DARWIN_SUN_PATH_LIMIT = 104
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _owner_path(path: Path) -> Path:

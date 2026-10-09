@@ -16,7 +16,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 CONFIRM_TOKEN = "DELETE-REGENERABLE-VIBECRAFTED-STATE"
@@ -39,7 +39,7 @@ class Candidate:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def resolve_home(raw: str | None) -> Path:

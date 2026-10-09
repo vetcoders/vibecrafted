@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 THEME_COMMAND = REPO_ROOT / "bin/vc-theme"

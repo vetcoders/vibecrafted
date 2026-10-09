@@ -1657,7 +1657,7 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     # test_aicx_resume_fallback_refuses_basename_union_without_origin).
     _git_origin_checkout(repo, "https://github.com/Fixture/repo.git")
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     fresh = now.isoformat().replace("+00:00", "Z")
     pruned_src = tmp_path / "pruned-session.jsonl"  # deliberately absent
     live_src = tmp_path / "live-session.jsonl"

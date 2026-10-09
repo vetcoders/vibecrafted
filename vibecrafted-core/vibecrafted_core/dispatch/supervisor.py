@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -452,7 +452,7 @@ class DispatchSupervisor:
                     resume_sequence = self._receipt_store.request_resume()
                 lifted = self._receipt_store.clear_stop_fence(
                     resume_sequence=resume_sequence,
-                    scheduler_resumed_at=datetime.now(timezone.utc).isoformat(
+                    scheduler_resumed_at=datetime.now(UTC).isoformat(
                         timespec="seconds"
                     ),
                 )
@@ -817,7 +817,7 @@ class DispatchSupervisor:
             run_id=self.run_id,
             session_id=self._mutation_claim_session_id,
         )
-        released_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        released_at = datetime.now(UTC).isoformat(timespec="seconds")
         for cut in self.dispatch.cuts:
             self._receipt_store.update(
                 cut.id,
@@ -2549,7 +2549,7 @@ class DispatchSupervisor:
     def _journal(self, message: str) -> None:
         """Append one timestamped line to journal.md."""
         with self._io_lock:
-            timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            timestamp = datetime.now(UTC).isoformat(timespec="seconds")
             with self.journal_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"- {timestamp} {message}\n")
 
@@ -2559,7 +2559,7 @@ class DispatchSupervisor:
         project = _artifact_plane_project(
             meta.reports_dir, self.tracker_path, self.artifacts_dir
         ) or _repo_checkout_project(meta.repo)
-        written = datetime.now(timezone.utc)
+        written = datetime.now(UTC)
         # session_id repeats run_id: R11 requires a non-empty session_id and
         # the dispatcher has no agent session of its own.
         lines = [

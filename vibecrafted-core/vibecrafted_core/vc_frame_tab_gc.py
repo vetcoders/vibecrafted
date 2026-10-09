@@ -465,7 +465,7 @@ def _gc_result(
         ),
         settlement_revision=tab.settlement_revision,
         receipt_sha256=tab.receipt_sha256,
-        recorded_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        recorded_at=dt.datetime.now(dt.UTC).isoformat(),
         detail=detail[:500],
         returncode=returncode,
     )

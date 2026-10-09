@@ -962,7 +962,7 @@ def test_sync_state_never_projects_interactive_run_live_when_either_role_is_dead
             "agent": "codex",
             "mode": "interactive",
             "root": str(tmp_path),
-            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "updated_at": dt.datetime.now(dt.UTC).isoformat(),
             "skill_code": "init",
             "owner_pid": owner_pid,
             "worker_pid": worker_pid,
@@ -987,7 +987,7 @@ def test_sync_state_gc_terminalizes_old_stalled_dead_launcher(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "60")
     monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "3600")
-    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     _write_meta(
         home,
@@ -1030,7 +1030,7 @@ def test_sync_state_separates_stalled_dead_launcher_before_gc_grace(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "60")
     monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "3600")
-    now = dt.datetime(2026, 5, 19, 0, 30, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 5, 19, 0, 30, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     _write_meta(
         home,
@@ -1064,7 +1064,7 @@ def test_sync_state_active_truth_quarantines_pytest_events_and_separates_stalls(
 ) -> None:
     import tempfile
 
-    now = dt.datetime(2026, 7, 23, 10, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 7, 23, 10, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     with tempfile.TemporaryDirectory(prefix="vibecrafted-production-home-") as raw_home:
         home = Path(raw_home) / ".vibecrafted"
@@ -1152,7 +1152,7 @@ def test_sync_state_never_resurrects_guardian_settlement_as_stalled(
 ) -> None:
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    now = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     events = home / "control_plane" / "events.jsonl"
     events.parent.mkdir(parents=True)
@@ -1195,7 +1195,7 @@ def test_projection_notification_cannot_regress_newer_lifecycle_state(
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     run_id = "parity-projection-race"
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     control_plane._append_event(
         {
             "ts": now.isoformat(),
@@ -1361,7 +1361,7 @@ def test_sync_state_reconciles_dead_launcher_with_missing_report_to_terminal_fai
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "1")
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     _write_meta(
         home,
         {
@@ -1772,7 +1772,7 @@ def test_sync_state_archives_old_terminal_snapshots_only(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_RUN_SNAPSHOT_RETENTION_SECONDS", "3600")
     monkeypatch.setenv("VIBECRAFTED_RUN_SNAPSHOT_RETENTION_COUNT", "100")
-    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     runs_dir = home / "control_plane" / "runs"
     runs_dir.mkdir(parents=True)
@@ -1847,7 +1847,7 @@ def test_await_run_completes_when_dead_worker_missing_report_is_terminal(
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "1")
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     _write_meta(
         home,
         {
@@ -2307,7 +2307,7 @@ def test_sync_state_projects_event_stream_lifecycle(
 ) -> None:
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     events = home / "control_plane" / "events.jsonl"
     events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text(
@@ -2517,7 +2517,7 @@ def test_drain_settles_then_archives_old_terminals_and_keeps_recent(
 ) -> None:
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     old_stamp = (now - dt.timedelta(days=3)).isoformat()
     fresh_stamp = now.isoformat()
     # Parked gc run without a settlement terminal — must settle before archive.
@@ -2637,7 +2637,7 @@ def test_sync_state_keeps_retained_snapshot_only_runs_on_board(
     """After event rotation a retained snapshot is the only trace of a run."""
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    stamp = dt.datetime.now(dt.UTC).isoformat()
     _write_snapshot(
         home,
         {
@@ -3181,7 +3181,7 @@ def test_sync_state_keeps_run_alive_while_transcript_is_still_growing(
     )
     # Mirrors the live record exactly: projection kept updated_at fresh while
     # heartbeat_at stayed frozen at the run's first output 43 minutes earlier.
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     _write_meta(
         home,
         {

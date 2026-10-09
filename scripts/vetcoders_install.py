@@ -68,7 +68,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from xml.parsers.expat import ExpatError
@@ -943,7 +943,7 @@ def write_start_here_guide(
     lines = [
         "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Start Here",
         "",
-        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
         f"Framework version: {framework_version}",
         f"Health: {health_line}",
         "",
@@ -1682,7 +1682,7 @@ def create_teardown_backup(
     records = _teardown_backup_records(inventory)
     if not records:
         return None
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     if dry_run:
         return timestamp
 
@@ -1705,7 +1705,7 @@ def create_teardown_backup(
 
     manifest = {
         "version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "items": manifest_items,
     }
     (backup_dir / RESTORE_MANIFEST_FILE).write_text(
@@ -2152,7 +2152,7 @@ def create_backup(
     dry_run: bool = False,
 ) -> str | None:
     """Snapshot existing state before install. Returns backup timestamp or None."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     backup_dir = _backup_root(store_path) / ts
     anything_backed = False
 
@@ -4089,7 +4089,7 @@ def _write_tools_lease_owner(descriptor: int, operation: str) -> None:
             {
                 "pid": os.getpid(),
                 "operation": operation,
-                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": datetime.now(UTC).isoformat(),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -6601,7 +6601,7 @@ def _legacy_service_mutator_census() -> tuple[_LegacyServiceMutator, ...]:
                     start_token=first_birth[0],
                     started_at=datetime.fromtimestamp(
                         int(seconds) + int(microseconds) / 1_000_000,
-                        tz=timezone.utc,
+                        tz=UTC,
                     ),
                     argv=first_argv,
                 )
@@ -6620,7 +6620,7 @@ def _wait_for_legacy_service_mutator_quiescence(
     """
     if published_at.tzinfo is None:
         raise OSError("runtime publication boundary has no timezone")
-    published_at = published_at.astimezone(timezone.utc)
+    published_at = published_at.astimezone(UTC)
     deadline = time.monotonic() + timeout_seconds
     empty_observations = 0
     last_records: tuple[_LegacyServiceMutator, ...] = ()
@@ -9154,7 +9154,7 @@ def _tools_handoff_publication_boundary(shared_home: Path) -> datetime:
         raise OSError("runtime publication boundary is malformed") from exc
     if boundary.tzinfo is None:
         raise OSError("runtime publication boundary has no timezone")
-    return boundary.astimezone(timezone.utc)
+    return boundary.astimezone(UTC)
 
 
 def _tools_handoff_is_complete_current(
@@ -10462,12 +10462,12 @@ def _sync_control_plane_tree_locked(
             "state": "prepared",
             "old_target": str(old_target) if old_target is not None else "",
             "new_target": str(generation),
-            "prepared_at": datetime.now(timezone.utc).isoformat(),
+            "prepared_at": datetime.now(UTC).isoformat(),
         }
         _atomic_json_file(_tools_handoff_path(dst), handoff)
         _atomic_symlink(generation, dst)
         pointer_swapped = True
-        handoff["published_at"] = datetime.now(timezone.utc).isoformat()
+        handoff["published_at"] = datetime.now(UTC).isoformat()
         _atomic_json_file(_tools_handoff_path(dst), handoff)
         return generation
     except Exception:
@@ -10560,7 +10560,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
         old_target = Path(old_raw)
         if current_target == old_target.resolve(strict=False):
             payload["state"] = "rolled-back"
-            payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            payload["rolled_back_at"] = datetime.now(UTC).isoformat()
             _atomic_json_file(_tools_handoff_file(shared_home), payload)
             return False
     else:
@@ -10569,7 +10569,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
             current_link.exists() or current_link.is_symlink()
         ):
             payload["state"] = "rolled-back"
-            payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            payload["rolled_back_at"] = datetime.now(UTC).isoformat()
             _atomic_json_file(_tools_handoff_file(shared_home), payload)
             return False
     if current_target != new_target.resolve(strict=False):
@@ -10590,7 +10590,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
                 "runtime pointer changed while rolling back the first generation"
             )
     payload["state"] = "rolled-back"
-    payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+    payload["rolled_back_at"] = datetime.now(UTC).isoformat()
     _atomic_json_file(_tools_handoff_file(shared_home), payload)
     if old_target is None:
         try:
@@ -10634,7 +10634,7 @@ def _complete_current_tools_handoff_locked(shared_home: Path) -> bool:
             "at the prepared generation"
         )
     payload["state"] = "complete"
-    payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+    payload["completed_at"] = datetime.now(UTC).isoformat()
     _atomic_json_file(_tools_handoff_file(shared_home), payload)
     _prune_tools_generations_locked(shared_home)
     return True
@@ -10845,7 +10845,7 @@ def _append_layout_transfer(
             "target": str(target),
             "copied": str(len(copied)),
             "conflicts": ",".join(str(path) for path in conflicts),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
     )
 
@@ -10917,7 +10917,7 @@ def transfer_agents_layout(
             copied=copied_names,
             conflicts=conflicts,
         )
-        state.updated_at = datetime.now(timezone.utc).isoformat()
+        state.updated_at = datetime.now(UTC).isoformat()
         state.save(store_path)
     return 0, {
         "source": source,
@@ -11035,7 +11035,7 @@ def prune_orphaned_skills(
         return 0
 
     quarantine_root = _backup_root(store_path) / (
-        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        SHADOW_QUARANTINE_PREFIX + datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     )
     removed = 0
     for location, entry in removable:
@@ -11424,7 +11424,7 @@ def reconcile_shadowed_skill_dirs(
 
     canonical_root = runtime_skills_dir("agents")
     quarantine_root = _backup_root(store_path) / (
-        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        SHADOW_QUARANTINE_PREFIX + datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     )
 
     for shadow in detected:
@@ -12159,7 +12159,7 @@ def _available_quarantine_path(dst: Path) -> Path:
     """
     if not (dst.exists() or dst.is_symlink()):
         return dst
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     candidate = dst.with_name(f"{dst.name}-{stamp}-{os.getpid()}")
     counter = 1
     while candidate.exists() or candidate.is_symlink():
@@ -14971,7 +14971,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
     _configure_gemini_plans(dry_run)
 
     # --- Save state ---
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     state = InstallState(
         installed_at=now,
         updated_at=now,
@@ -15239,7 +15239,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         # Log header
         print(f"𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Installer v{fw_ver} — compact mode")
         print(f"Source: {repo_root}")
-        print(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        print(f"Timestamp: {datetime.now(UTC).isoformat()}")
         print()
         _compact_checkpoint(
             out,
@@ -15513,7 +15513,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         _configure_gemini_plans(dry_run)
 
         # Save state
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         state = InstallState(
             installed_at=now,
             updated_at=now,
@@ -22174,9 +22174,7 @@ def _runtime_rescue_allocate_evidence_token(
     occupants; a second snapshot then fails before publication.
     """
     prefix = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-"
-        + str(receipt_sha256)[:12]
+        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + str(receipt_sha256)[:12]
     )
     suffix = 0
     while True:
@@ -23268,7 +23266,7 @@ def _build_runtime_rescue_plan(
                 else "target pack installer already includes --rescue"
             ),
         },
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     input_digest = _canonical_digest(
         {
@@ -24959,7 +24957,7 @@ def _install_runtime_agent_projections(
                     mode=0o644,
                 )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     repo_commit, repo_url, repo_origin = pack_install_identity(generation)
     state = InstallState(
         installed_at=now,
@@ -25715,7 +25713,7 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
         "rolled_back": False,
         "files": [],
         "receipt": "",
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     descriptor: int | None = None
     try:
@@ -26982,7 +26980,7 @@ def _install_runtime_pack(
         "install_pending": True,
         "install_phase": "preparing",
         "preparing_previous_receipt": _recovery_receipt_snapshot(previous),
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": datetime.now(UTC).isoformat(),
         "version": version,
         "payload_root": str(payload_root),
         "app_root": str(app_root) if app_root else "",
@@ -27871,7 +27869,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
             )
     archive = backup_root / (
         "uninstalled-"
-        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        + datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         + "-"
         + os.urandom(6).hex()
         + ".json"

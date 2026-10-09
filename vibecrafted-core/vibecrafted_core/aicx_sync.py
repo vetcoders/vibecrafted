@@ -81,7 +81,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -337,7 +337,7 @@ DEFAULT_CONFLICT_LOG = Path.home() / ".frontier-vault" / "conflict-log.jsonl"
 
 def _iso_now() -> str:
     """RFC 3339 timestamp with seconds precision in UTC."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _safe_load_chunk(path: Path) -> AicxChunk | None:

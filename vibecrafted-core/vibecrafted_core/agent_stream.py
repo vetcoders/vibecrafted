@@ -7,12 +7,11 @@ import os
 import re
 import shlex
 import time
+import tomllib
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from .telemetry import estimate_cost_usd
 

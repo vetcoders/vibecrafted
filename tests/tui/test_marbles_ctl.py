@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +52,7 @@ def test_marbles_delete_archives_run_directory(tmp_path: Path) -> None:
         text=True,
     )
 
-    archive_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    archive_day = datetime.now(UTC).strftime("%Y-%m-%d")
     archived_dir = crafted_home / "marbles" / "_archived" / archive_day / "marb-424242"
     archived_state = json.loads(
         (archived_dir / "state.json").read_text(encoding="utf-8")
@@ -98,7 +98,7 @@ def test_marbles_delete_refuses_live_session(tmp_path: Path) -> None:
         text=True,
     )
 
-    archive_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    archive_day = datetime.now(UTC).strftime("%Y-%m-%d")
     archived_dir = crafted_home / "marbles" / "_archived" / archive_day / "marb-live"
 
     assert result.returncode != 0
@@ -208,7 +208,7 @@ def test_marbles_gc_auto_archive_moves_stale_state_dir(tmp_path: Path) -> None:
         text=True,
     )
 
-    archive_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    archive_day = datetime.now(UTC).strftime("%Y-%m-%d")
     archived_dir = crafted_home / "marbles" / "_archived" / archive_day / "marb-stale"
     archived_state = json.loads(
         (archived_dir / "state.json").read_text(encoding="utf-8")

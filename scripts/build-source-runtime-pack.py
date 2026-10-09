@@ -9,9 +9,8 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PINS = ROOT / "config/source-components.json"

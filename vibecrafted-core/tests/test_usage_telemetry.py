@@ -666,7 +666,7 @@ def test_usage_json_for_the_two_fixture_runs_is_deterministic(
 def test_usage_totals_never_add_credits_to_dollars(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    now = dt.datetime.now(dt.UTC).isoformat()
     for run_id, cost in (
         (
             "w3-usd",

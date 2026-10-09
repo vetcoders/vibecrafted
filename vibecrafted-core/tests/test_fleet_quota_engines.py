@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ENGINE_PATH = (
@@ -583,8 +583,8 @@ def test_kimi_archive_keeps_rotated_wire_days(tmp_path: Path, monkeypatch) -> No
     root = tmp_path / "sessions"
     first = root / "one" / "wire.jsonl"
     second = root / "two" / "wire.jsonl"
-    stamp = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000)
-    later = int(datetime(2026, 10, 2, tzinfo=timezone.utc).timestamp() * 1000)
+    stamp = int(datetime(2026, 10, 1, tzinfo=UTC).timestamp() * 1000)
+    later = int(datetime(2026, 10, 2, tzinfo=UTC).timestamp() * 1000)
 
     def _event(
         kind: str, when: int, fresh: int, output: int, create: int, read: int

@@ -18,7 +18,7 @@ import struct
 import subprocess
 import termios
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
@@ -113,9 +113,7 @@ def _write_fixtures(state_root: Path, alpha: Path, beta: Path) -> None:
             None,
             {
                 "mode": "headless",
-                "started_at": (
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
-                ).isoformat(),
+                "started_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
             },
         ),
     ]

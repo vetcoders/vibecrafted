@@ -1987,7 +1987,7 @@ def prepare_interactive_workspace_launch(
         identity = resolve_run_workspace_identity(
             root=parent, env={}, create_if_missing=True
         )
-        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_iso = dt.datetime.now(dt.UTC).isoformat()
         run_dir = control_plane_home() / "runtime_runs" / effective_run_id
         prompt_path = run_dir / "prompt.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2317,7 +2317,7 @@ def launch_interactive_workspace(
             prompt=prompt,
         )
     except ValueError as exc:
-        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_iso = dt.datetime.now(dt.UTC).isoformat()
         failed = {
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -2592,7 +2592,7 @@ def launch_interactive_workspace(
         )
         raise
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     receipt = {
         **launch.receipt,
         "updated_at": now_iso,
@@ -2662,7 +2662,7 @@ def launch_interactive_workspace(
             measured_usage = usage_reader.poll()
             if measured_usage != receipt["measured_usage"]:
                 receipt["measured_usage"] = measured_usage
-                receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                 _write_meta(launch.meta_path, receipt)
             # Owned recovery of a deferred ACTIVE publication: same owner,
             # same poll loop, no observer required while the provider idles.
@@ -2847,7 +2847,7 @@ def _launch_supervised_interactive_workspace(
         _cleanup_unspawned_interactive_launch(launch)
         raise
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     relation = {
         "relation_id": relation_id,
         "operator_run_id": operator_run_id,
@@ -3065,7 +3065,7 @@ def _launch_supervised_interactive_workspace(
         )
         return 1
 
-    active_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    active_at = dt.datetime.now(dt.UTC).isoformat()
     active_relation = {**relation, "state": "active"}
     child_receipt.update(
         updated_at=active_at,
@@ -3198,9 +3198,7 @@ def _launch_supervised_interactive_workspace(
             measured_usage = usage_reader.poll()
             if measured_usage != child_receipt["measured_usage"]:
                 child_receipt["measured_usage"] = measured_usage
-                child_receipt["updated_at"] = dt.datetime.now(
-                    dt.timezone.utc
-                ).isoformat()
+                child_receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                 _write_meta(launch.meta_path, child_receipt)
             child_projection.pump()
             operator_projection.pump()
@@ -3222,12 +3220,10 @@ def _launch_supervised_interactive_workspace(
                             "child_status": child_receipt["status"],
                             "child_worker_pid": child.pid,
                             "measured_usage": child_receipt["measured_usage"],
-                            "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "observed_at": dt.datetime.now(dt.UTC).isoformat(),
                         },
                     }
-                    operator_receipt["updated_at"] = dt.datetime.now(
-                        dt.timezone.utc
-                    ).isoformat()
+                    operator_receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                     _write_meta(operator_meta_path, operator_receipt)
                 elif current_returncode is None:
                     stop_actor_run_id = operator_run_id
@@ -3364,9 +3360,7 @@ def _launch_supervised_interactive_workspace(
                                 "child_status": child_terminal["status"],
                                 "child_worker_pid": child.pid,
                                 "measured_usage": child_terminal["measured_usage"],
-                                "observed_at": dt.datetime.now(
-                                    dt.timezone.utc
-                                ).isoformat(),
+                                "observed_at": dt.datetime.now(dt.UTC).isoformat(),
                             },
                         }
                         _write_meta(operator_meta_path, operator_receipt)
@@ -3383,7 +3377,7 @@ def _launch_supervised_interactive_workspace(
     operator_log.close()
     settled_worktree_cleanup = _cleanup_settled_interactive_launch(launch)
     child_terminal["settled_worktree_cleanup"] = settled_worktree_cleanup
-    child_terminal["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    child_terminal["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
     _write_meta(launch.meta_path, child_terminal)
     if settled_worktree_cleanup != "not-applicable":
         append_event(
@@ -3531,7 +3525,7 @@ def _terminalize_related_receipt(
     error: str = "",
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    completed_at = dt.datetime.now(dt.UTC).isoformat()
     terminal = {
         **receipt,
         "updated_at": completed_at,
@@ -4037,7 +4031,7 @@ def _terminalize_interactive_launch(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically terminalize the same interactive receipt and event identity."""
-    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    completed_at = dt.datetime.now(dt.UTC).isoformat()
     terminal = {
         **receipt,
         "updated_at": completed_at,
@@ -4697,12 +4691,14 @@ def _parse_dt(value: object) -> dt.datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = value.replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(normalized_timestamp)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.astimezone(dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return parsed.astimezone(dt.UTC)
 
 
 def _resolve_duration(
@@ -4760,7 +4756,7 @@ def write_meta(
     except (ValueError, TypeError):
         loop_nr_value = loop_nr
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     payload: dict[str, Any] = {
         "created_at": now_iso,
         "updated_at": now_iso,
@@ -4854,7 +4850,7 @@ def finish_meta(
     if launcher_claim_digest:
         payload["claim_digest"] = launcher_claim_digest
 
-    completed_at = dt.datetime.now(dt.timezone.utc)
+    completed_at = dt.datetime.now(dt.UTC)
     started_dt = _parse_dt(payload.get("created_at") or payload.get("updated_at"))
     duration_s = (
         round((completed_at - started_dt).total_seconds(), 3)
@@ -5204,9 +5200,7 @@ def finalize_artifacts(
     )
     flat_tokens = usage.flat()
     cost = _extract_cost(combined_text)
-    completed_at = (
-        payload.get("completed_at") or dt.datetime.now(dt.timezone.utc).isoformat()
-    )
+    completed_at = payload.get("completed_at") or dt.datetime.now(dt.UTC).isoformat()
     artifact_time = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     root = payload.get("root") or os.getcwd()
     resume_hint = (
@@ -5318,7 +5312,7 @@ def finalize_artifacts(
     if payload.get("model_requested"):
         payload["artifact_footer"]["model_requested"] = payload.get("model_requested")
     payload.setdefault("completed_at", completed_at)
-    payload["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    payload["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
 
     target_meta = Path(str(payload.get("meta") or meta))
     target_meta.write_text(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from vibecrafted_core import cron
@@ -49,7 +49,7 @@ def test_tick_runs_then_command_after_idle_window(
     root.mkdir()
     state = root / ".vibecrafted" / "operator-loop.local.md"
     journal = tmp_path / "journal.jsonl"
-    write_state(state, updated_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+    write_state(state, updated_at=datetime.now(UTC) - timedelta(minutes=15))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
 
     rc = cron.main(
@@ -87,7 +87,7 @@ def test_tick_refuses_hard_stop_then_command(
     root = tmp_path / "repo"
     root.mkdir()
     state = root / ".vibecrafted" / "operator-loop.local.md"
-    write_state(state, updated_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+    write_state(state, updated_at=datetime.now(UTC) - timedelta(minutes=15))
 
     rc = cron.main(
         [
@@ -118,7 +118,7 @@ def test_tick_allows_non_destructive_feature_branch_push(
     root = tmp_path / "repo"
     root.mkdir()
     state = root / ".vibecrafted" / "operator-loop.local.md"
-    write_state(state, updated_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+    write_state(state, updated_at=datetime.now(UTC) - timedelta(minutes=15))
 
     cron.main(
         [
@@ -151,7 +151,7 @@ def test_tick_default_prints_human_summary_not_json(
     root.mkdir()
     state = root / ".vibecrafted" / "operator-loop.local.md"
     journal = tmp_path / "journal.jsonl"
-    write_state(state, updated_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+    write_state(state, updated_at=datetime.now(UTC) - timedelta(minutes=15))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
 
     rc = cron.main(

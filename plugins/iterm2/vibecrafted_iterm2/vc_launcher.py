@@ -146,7 +146,7 @@ async def _tail_events(
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
 
 
