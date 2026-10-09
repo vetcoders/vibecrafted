@@ -63,24 +63,57 @@ def _generation_python_candidates() -> list[str]:
 
 
 def ensure_generation_python() -> None:
-    """Re-exec a generation interpreter when host python3 lacks vibecrafted_core."""
+    """Admit Python 3.11+ and core from the selected generation before imports.
+
+    An importable ambient core is not generation evidence. A materialized pane
+    must re-enter the selected interpreter; an in-tree pane owns its source core.
+    """
+    source_tree = Path(__file__).resolve().parents[3]
+    in_tree = (source_tree / "vibecrafted_core" / "__init__.py").is_file()
+    if in_tree:
+        sys.path.insert(0, str(source_tree))
+    selected = os.environ.get("VIBECRAFTED_RUNTIME_ROOT") or os.environ.get(
+        "VIBECRAFTED_ROOT", ""
+    )
     try:
-        __import__("vibecrafted_core")
-    except ImportError:
+        if sys.version_info < (3, 11):
+            raise ImportError("Python 3.11+ with tomllib is required")
+        __import__("tomllib")
+        core = __import__("vibecrafted_core")
+        core_path = Path(core.__file__).resolve()
+        if (
+            not in_tree
+            and selected
+            and Path(selected).resolve() not in core_path.parents
+        ):
+            raise ImportError("core belongs to a different Runtime Pack")
+    except (ImportError, SyntaxError):
         pass
     else:
         return
-    here = os.path.realpath(sys.executable)
-    for wanted in _generation_python_candidates():
-        if not os.access(wanted, os.X_OK):
-            continue
-        if os.path.realpath(wanted) == here:
-            continue
-        os.execv(wanted, [wanted, *sys.argv])
+    # A wrapper can exec the same underlying Python. Bound the retry rather
+    # than comparing executable paths and looping on a broken generation.
+    attempt = os.environ.get("VIBECRAFTED_PANE_PYTHON_ATTEMPT", "")
+    if attempt != str(Path(__file__).resolve()):
+        here = os.path.realpath(sys.executable)
+        for wanted in _generation_python_candidates():
+            if not os.access(wanted, os.X_OK) or os.path.realpath(wanted) == here:
+                continue
+            if (
+                selected
+                and not in_tree
+                and Path(selected).resolve() not in Path(wanted).resolve().parents
+            ):
+                continue
+            os.environ["VIBECRAFTED_PANE_PYTHON_ATTEMPT"] = str(
+                Path(__file__).resolve()
+            )
+            os.execv(wanted, [wanted, *sys.argv])
     raise SystemExit(
-        "vc-start-here: no module named 'vibecrafted_core'; "
-        "set VIBECRAFTED_PYTHON to the generation python3 "
-        "(or run through vc-start so the Runtime Pack is on PATH)"
+        "vc-start-here: incompatible Python or Runtime Pack. "
+        "Repair: set VIBECRAFTED_PYTHON to the selected Runtime Pack's bin/python3 "
+        "and reopen this project through vc-start resume --repo <project-path>. "
+        "Existing sessions can remain open."
     )
 
 
@@ -137,7 +170,24 @@ def action_argv(action: str, *, project_path: str | None = None) -> list[str]:
             return ["vc-start", "resume", "--repo", project_path]
         return project_chooser_argv()
     if action == "agents":
-        return ["vc-frame", "action", "go-to-tab-name", "Agents"]
+        session = next(
+            (
+                os.environ[key].strip()
+                for key in (
+                    "VC_FRAME_SESSION_NAME",
+                    "ZELLIJ_SESSION_NAME",
+                    "VIBECRAFTED_FRAME_SESSION",
+                )
+                if os.environ.get(key, "").strip()
+            ),
+            "",
+        )
+        if os.environ.get("VIBECRAFTED_WORKSPACE_ROOT") and not session:
+            raise ValueError(
+                "Workspace session is unknown — reopen this project through vc-start"
+            )
+        target = ["--session", session] if session else []
+        return ["vc-frame", *target, "action", "go-to-tab-name", "Agents"]
     if action == "shell":
         return ["vc-frame", "action", "go-to-tab-name", "Shell"]
     if action == "console":
@@ -534,7 +584,7 @@ class StartHere:
                 self.error = ""
                 if action == "project":
                     self.readiness = probe_readiness()
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             self.error = f"Could not open {action}: {error}"
 
     def handle_mouse(self) -> None:

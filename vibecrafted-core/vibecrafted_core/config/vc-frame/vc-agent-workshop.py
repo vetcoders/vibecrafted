@@ -65,41 +65,59 @@ def _generation_python_candidates() -> list[str]:
 
 
 def ensure_generation_python() -> None:
-    """Re-exec a generation/uv interpreter when host python3 lacks core.
+    """Admit Python 3.11+ and core from the selected generation before imports.
 
-    vc-frame panes often run ``#!/usr/bin/env python3`` (Homebrew 3.14 on this
-    host).  Generation ``bin/python3`` is a wrapper that sets PYTHONPATH onto
-    the receipted ``vibecrafted-core``.  Source-lane tools installs have no
-    ``bin/python3``; the uv tool venv does.
+    An importable ambient core is not generation evidence. A materialized pane
+    must re-enter the selected interpreter; an in-tree pane owns its source core.
     """
+    source_tree = Path(__file__).resolve().parents[3]
+    in_tree = (source_tree / "vibecrafted_core" / "__init__.py").is_file()
+    if in_tree:
+        sys.path.insert(0, str(source_tree))
+    selected = os.environ.get("VIBECRAFTED_RUNTIME_ROOT") or os.environ.get(
+        "VIBECRAFTED_ROOT", ""
+    )
     try:
-        __import__("vibecrafted_core")
-    except ImportError:
+        if sys.version_info < (3, 11):
+            raise ImportError("Python 3.11+ with tomllib is required")
+        __import__("tomllib")
+        core = __import__("vibecrafted_core")
+        core_path = Path(core.__file__).resolve()
+        if (
+            not in_tree
+            and selected
+            and Path(selected).resolve() not in core_path.parents
+        ):
+            raise ImportError("core belongs to a different Runtime Pack")
+    except (ImportError, SyntaxError):
         pass
     else:
         return
-    here = os.path.realpath(sys.executable)
-    for wanted in _generation_python_candidates():
-        if not os.access(wanted, os.X_OK):
-            continue
-        if os.path.realpath(wanted) == here:
-            continue
-        os.execv(wanted, [wanted, *sys.argv])
+    # A wrapper can exec the same underlying Python. Bound the retry rather
+    # than comparing executable paths and looping on a broken generation.
+    attempt = os.environ.get("VIBECRAFTED_PANE_PYTHON_ATTEMPT", "")
+    if attempt != str(Path(__file__).resolve()):
+        here = os.path.realpath(sys.executable)
+        for wanted in _generation_python_candidates():
+            if not os.access(wanted, os.X_OK) or os.path.realpath(wanted) == here:
+                continue
+            if (
+                selected
+                and not in_tree
+                and Path(selected).resolve() not in Path(wanted).resolve().parents
+            ):
+                continue
+            os.environ["VIBECRAFTED_PANE_PYTHON_ATTEMPT"] = str(
+                Path(__file__).resolve()
+            )
+            os.execv(wanted, [wanted, *sys.argv])
     raise SystemExit(
-        "vc-agent-workshop: no module named 'vibecrafted_core'; "
-        "set VIBECRAFTED_PYTHON to the generation python3 "
-        "(or run through vc-start so the Runtime Pack is on PATH)"
+        "vc-agent-workshop: incompatible Python or Runtime Pack. "
+        "Repair: set VIBECRAFTED_PYTHON to the selected Runtime Pack's bin/python3 "
+        "and reopen this project through vc-start resume --repo <project-path>. "
+        "Existing sessions can remain open."
     )
 
-
-# Self-consistency: when this script runs from inside a core source tree
-# (worktree or installed generation), the core must come from the SAME tree.
-# Ambient PYTHONPATH can otherwise resolve an older/newer installed generation
-# while the launcher UI is this tree's — the "unsupported provider" crash class.
-# Materialized frame-config copies fail the guard and keep the re-exec path.
-_SCRIPT_CORE_TREE = Path(__file__).resolve().parents[3]
-if (_SCRIPT_CORE_TREE / "vibecrafted_core" / "__init__.py").is_file():
-    sys.path.insert(0, str(_SCRIPT_CORE_TREE))
 
 ensure_generation_python()
 
@@ -950,7 +968,11 @@ class Workshop:
         self.parent_sessions: list[SessionRecord] = []
         self.parent_index = -1
         self.parent_error = ""
-        self.path = str(Path.cwd())
+        self.path = str(
+            Path(os.environ.get("VIBECRAFTED_WORKSPACE_ROOT") or Path.cwd())
+            .expanduser()
+            .resolve()
+        )
         self.error = ""
         self.notice = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
@@ -1112,7 +1134,9 @@ class Workshop:
                 curses.A_DIM,
             )
             list_row += 1
-        buttons = ("New agent", "Voc")
+        # Voc has one global entry beside Composer in the topbar; the Agents
+        # home offers only what belongs to this project.
+        buttons = ("New agent",)
         col = left
         button_row = min(height - 3, list_row + (0 if compact else 1))
         for index, label in enumerate(buttons):
@@ -1145,9 +1169,9 @@ class Workshop:
                     curses.A_DIM,
                 )
         hint = (
-            "n New  v Voc  o other sessions"
+            "n New  o other sessions"
             if compact
-            else "n New agent · v Voc · o other sessions · click a row to open its tab"
+            else "n New agent · o other sessions · click a row to open its tab"
         )
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
@@ -1343,21 +1367,15 @@ class Workshop:
             _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
 
     def handle_home_key(self, key: int) -> None:
-        if key in (curses.KEY_LEFT, ord("h")):
-            self.home_choice = (self.home_choice - 1) % 2
-        elif key in (curses.KEY_RIGHT, ord("l"), ord("\t")):
-            self.home_choice = (self.home_choice + 1) % 2
-        elif key in (ord("n"), ord("N")):
+        if key in (ord("n"), ord("N")):
             self.open_launcher()
-        elif key in (ord("v"), ord("V")):
-            self.open_voc()
         elif key in (ord("o"), ord("O")):
             self._toggle_other_sessions()
         elif key in (10, 13, curses.KEY_ENTER):
             if self.show_other and self.other_sessions:
                 self._attach_session(self.other_sessions[0])
             else:
-                (self.open_launcher, self.open_voc)[self.home_choice]()
+                self.open_launcher()
 
     def handle_launcher_key(self, key: int) -> None:
         self.error = ""
@@ -1565,7 +1583,7 @@ class Workshop:
                 continue
             if kind == "home":
                 self.home_choice = index
-                (self.open_launcher, self.open_voc)[index]()
+                self.open_launcher()
                 return
             if kind == "face":
                 self._focus_face(index)
@@ -1592,22 +1610,6 @@ class Workshop:
         self.row = 0
         self.advanced = False
         self.error = ""
-
-    def open_voc(self) -> None:
-        try:
-            result = subprocess.run(
-                ["vc-frame", "action", "go-to-tab-name", "Voc"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            self.error = "vc-frame is not available in this Runtime Pack"
-            return
-        if result.returncode != 0:
-            self.error = (
-                result.stderr or result.stdout or "Voc tab is unavailable"
-            ).strip()
 
     def _focus_face(self, index: int) -> None:
         if index < 0 or index >= len(self.face_records):
@@ -1747,7 +1749,8 @@ class Workshop:
                     or f"Agent opened in {destination}, but that session could not be shown"
                 ).strip()
                 return
-        self.mode = "home"
+        # Product entry remains a launcher when Start here focuses it again.
+        self.mode = "launcher" if self.standalone_launcher else "home"
         self.presence_schedule.last_at = None
         self.presence_schedule.request()
 

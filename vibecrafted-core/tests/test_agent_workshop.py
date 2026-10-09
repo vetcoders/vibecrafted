@@ -459,7 +459,7 @@ def test_successful_launch_opens_destination_tab_and_keeps_workshop(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert "exec" not in calls
     pane = calls[0]
@@ -498,7 +498,7 @@ def test_same_project_launch_still_opens_a_new_tab_without_attach(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert len(calls) == 1
     pane = calls[0]
@@ -522,7 +522,7 @@ def test_existing_target_session_is_used_when_already_live(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     pane = calls[0]
     assert isinstance(pane, list)
     assert pane[2] == "vibecrafted"
@@ -654,7 +654,7 @@ def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destinati
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert launched.notice == ""
     assert calls[0][0] == str(generation / "bin" / "vc-start")
@@ -811,7 +811,7 @@ def test_registered_live_project_preserves_its_catalog_destination(
 
     launched.launch()
 
-    assert launched.mode == "home"
+    assert launched.mode == "launcher"
     assert launched.error == ""
     assert len(calls) == 1
     assert calls[0][:5] == ["vc-frame", "--session", destination, "action", "new-tab"]
@@ -1877,6 +1877,55 @@ def test_provider_click_then_keyboard_and_launch_keep_exact_project(
     command = argv[argv.index("--") + 1 :]
     assert command[:3] == ["vibecrafted", "init", provider]
     assert command[command.index("--root") + 1] == str(project)
+
+
+def test_agents_home_has_no_second_voc_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voc has one global entry beside Composer; the Agents home must not
+    offer another one (and no longer has a Voc tab to jump to)."""
+    workshop = _load()
+    writes: list[str] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (14, 90)
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            writes.append(text)
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        workshop,
+        "current_agent_presence",
+        lambda: workshop.AgentPresence((), (), status="ok"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        workshop.subprocess,
+        "run",
+        lambda argv, **_kwargs: (
+            calls.append(argv) or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    home = workshop.Workshop(FakeWindow(), mode="home")
+    home.draw_home()
+    home_text = "\n".join(writes)
+    assert "[ New agent ]" in home_text
+    assert "Voc" not in home_text
+    assert [kind for *_, kind in home.mouse_targets].count("home") == 1
+    assert not hasattr(home, "open_voc")
+
+    home.handle_home_key(ord("v"))
+    assert home.mode == "home"
+    home.handle_home_key(10)
+    assert home.mode == "launcher"
+    assert not any("Voc" in argv for argv in calls)
 
 
 def test_small_home_and_launcher_render_without_nested_frame(
