@@ -45,6 +45,7 @@ isolated sandbox; fixture success does not prove keyboard or client focus.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shlex
@@ -2815,6 +2816,97 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         leftover = frame("list-sessions", "--no-formatting").stdout
         shutil.rmtree(sandbox, ignore_errors=True)
     assert session not in leftover, leftover
+
+
+@pytest.mark.parametrize("switch_failure", [False, True])
+def test_workshop_missing_destination_runs_real_resume_and_keeps_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switch_failure: bool
+) -> None:
+    """Workshop -> source vc-start resume -> owned create -> client switch.
+
+    Frame is a file-backed engine double in an isolated home. The source
+    developer lane runs the real shell owner without admitting an installed
+    generation or starting the host server service.
+    """
+    from vibecrafted_core.workspace_catalog import (
+        read_workspace_session,
+        resolve_run_workspace_identity,
+    )
+
+    scene = Scene(
+        tmp_path, project="selected", live=["workday-440"], clients=["workday-440"]
+    )
+    env = scene.env(
+        {
+            "VC_FRAME": "0",
+            "VC_FRAME_SESSION_NAME": "workday-440",
+            "VC_FRAME_PANE_ID": "terminal_1",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin" / "vc-frame"),
+            "VIBECRAFTED_RUNTIME_ROOT": str(scene.generation),
+        }
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    identity = resolve_run_workspace_identity(root=scene.root)
+    for key, value in identity.to_env().items():
+        monkeypatch.setenv(key, value)
+    (scene.generation / "VERSION").write_text("4.4.0+g00000000\n")
+    (scene.generation / "bin" / "python3").symlink_to(sys.executable)
+    _write(
+        scene.owner,
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
+        "if sys.argv[1:2] == ['workspace']:\n"
+        "    from vibecrafted_core.cli import main\n"
+        "    sys.exit(main(sys.argv[1:]))\n"
+        "sys.exit(0)\n",
+    )
+    _write(
+        scene.generation / "bin" / "vc-start",
+        "#!/bin/bash\n"
+        f"export VIBECRAFTED_CORE_DIR={shlex.quote(str(SOURCE_CORE_DIR))}\n"
+        f"source {shlex.quote(str(SHELL_SH))}\n"
+        f"_vetcoders_vc_frame_loaded_root={shlex.quote(str(REPO_ROOT))}\n"
+        'vc-start "$@"\n',
+    )
+    if switch_failure:
+        _write(
+            scene.generation / "bin" / "vc-frame",
+            VC_FRAME_STUB.replace(
+                'if verb == "switch-session":',
+                'if verb == "switch-session":\n'
+                '        print("Frame refused the client switch: incompatible session contract.")\n'
+                '        print("Open a current-generation seat from the Sessions rail.")\n'
+                "        sys.exit(4)",
+            ),
+        )
+    script = SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame/vc-agent-workshop.py"
+    spec = importlib.util.spec_from_file_location("workshop_resume_route", script)
+    assert spec is not None and spec.loader is not None
+    workshop = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workshop)
+
+    if switch_failure:
+        with pytest.raises(ValueError) as refused:
+            workshop.ensure_live_destination(scene.root, "selected", ["workday-440"])
+        assert "incompatible session contract" in str(refused.value)
+        assert "Open a current-generation seat" in str(refused.value)
+        assert "checking your workspace" in str(refused.value)
+    else:
+        admitted = workshop.ensure_live_destination(
+            scene.root, "selected", ["workday-440"]
+        )
+        assert admitted.session == "selected"
+        assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
+    receipt = read_workspace_session(identity.vibecrafted_session_id)
+    assert any(
+        a.runtime_session_id == "selected" and a.state == "live"
+        for a in receipt.attachments
+    )
+    assert scene.live() == ["selected", HOST_SESSION, "workday-440"]
+    assert not any("new-tab" in c["argv"] for c in scene.calls())
 
 
 _PTY_ATTACH_PY = r"""
