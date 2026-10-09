@@ -58,6 +58,22 @@ class EditorPTY:
                 shutil.copy2(source, config / source.name)
         bin_dir = root / "bin"
         bin_dir.mkdir()
+        # Provide only the utilities these actual scripts use. Keeping the
+        # host bin directories off PATH lets the viewer discover the selected
+        # editor stub without rewriting any part of the shipped script.
+        for name in (
+            "sh",
+            "dirname",
+            "mktemp",
+            "rm",
+            "cat",
+            "base64",
+            "basename",
+            "python3",
+        ):
+            utility = shutil.which(name, path="/usr/bin:/bin")
+            assert utility
+            (bin_dir / name).symlink_to(utility)
         (root / "seed").write_bytes(draft)
         (root / "panes.json").write_text(
             json.dumps(panes if panes is not None else [{"id": 1, "is_focused": True}])
@@ -99,7 +115,7 @@ class EditorPTY:
             f"os.execv({real_editor!r}, [{real_editor!r}, '-i', 'NONE', '-n', *sys.argv[1:]])\n",
         )
         env = {
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PATH": str(bin_dir),
             "HOME": str(root / "home"),
             "XDG_CONFIG_HOME": str(root / "home/.config"),
             "VIBECRAFTED_HOME": str(root / "runtime"),
@@ -114,14 +130,6 @@ class EditorPTY:
         }
         if remote:
             env[remote] = "synthetic-ssh"
-        # The viewer prefers nvim; force the requested real editor in this
-        # isolated config so both generated-profile launch paths get exercised.
-        if script == "scrollback-select.sh" and editor == "vim":
-            self.executable(bin_dir / "nvim", "import sys\nsys.exit(127)\n")
-            viewer = config / script
-            viewer.write_text(
-                viewer.read_text().replace('editor_bin="nvim"', 'editor_bin="vim"')
-            )
         self.master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 80, 0, 0))
         self.process = subprocess.Popen(
@@ -321,46 +329,48 @@ def test_no_local_clipboard_provider_still_emits_host_payload(
     assert pane.clipboard.read_bytes() == b"untouched"
 
 
+PANE_SELECTION_CASES = [
+    (
+        [
+            {"id": 1, "is_plugin": False, "is_focused": False},
+            {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+            {"id": 2, "is_plugin": False, "is_focused": True},
+        ],
+        "2",
+    ),
+    (
+        [
+            {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+            {"id": 7, "is_plugin": True, "is_focused": False},
+            {"id": 2, "is_plugin": False, "is_focused": False},
+        ],
+        "2",
+    ),
+    (
+        [
+            {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+            {"id": 7, "is_plugin": True, "is_focused": True},
+            {"id": 2, "is_plugin": False, "is_focused": False},
+        ],
+        "plugin_7",
+    ),
+    ([{"id": 0, "is_plugin": False, "is_focused": True}], "0"),
+    ([{"id": 9, "is_plugin": False, "is_focused": True}], None),
+    ([], None),
+]
+PANE_SELECTION_IDS = [
+    "focused-underlying",
+    "first-terminal-fallback",
+    "plugin-prefix",
+    "zero-id",
+    "viewer-only",
+    "empty",
+]
+
+
 @pytest.mark.parametrize("editor", EDITORS)
 @pytest.mark.parametrize(
-    "panes, expected",
-    [
-        (
-            [
-                {"id": 1, "is_plugin": False, "is_focused": False},
-                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
-                {"id": 2, "is_plugin": False, "is_focused": True},
-            ],
-            "2",
-        ),
-        (
-            [
-                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
-                {"id": 7, "is_plugin": True, "is_focused": False},
-                {"id": 2, "is_plugin": False, "is_focused": False},
-            ],
-            "2",
-        ),
-        (
-            [
-                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
-                {"id": 7, "is_plugin": True, "is_focused": True},
-                {"id": 2, "is_plugin": False, "is_focused": False},
-            ],
-            "plugin_7",
-        ),
-        ([{"id": 0, "is_plugin": False, "is_focused": True}], "0"),
-        ([{"id": 9, "is_plugin": False, "is_focused": True}], None),
-        ([], None),
-    ],
-    ids=[
-        "focused-underlying",
-        "first-terminal-fallback",
-        "plugin-prefix",
-        "zero-id",
-        "viewer-only",
-        "empty",
-    ],
+    "panes, expected", PANE_SELECTION_CASES, ids=PANE_SELECTION_IDS
 )
 def test_scrollback_selector_targets_other_pane(editor_pty, editor, panes, expected):
     # list-panes uses integer ids plus is_plugin (as the existing physical
@@ -378,3 +388,76 @@ def test_scrollback_selector_targets_other_pane(editor_pty, editor, panes, expec
     else:
         assert dumps[0][dumps[0].index("--pane-id") + 1] == expected
     pane.finish()
+
+
+@pytest.mark.parametrize(
+    "panes, expected", PANE_SELECTION_CASES, ids=PANE_SELECTION_IDS
+)
+def test_copy_scrollback_uses_selected_pane_bytes(tmp_path, panes, expected):
+    config = tmp_path / "config"
+    config.mkdir()
+    shutil.copy2(CONFIG / "copy-scrollback.sh", config)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "panes.json").write_text(json.dumps(panes))
+    payloads = {
+        "2": "Terminal 2 — pełny akapit Ω.\n",
+        "plugin_7": "Plugin 7 — zażółć gęślą jaźń.\n",
+        "0": "Terminal zero — valid ID.\n",
+        "fallback": "No candidate — untargeted fallback.\n",
+    }
+    (tmp_path / "payloads.json").write_text(json.dumps(payloads))
+    EditorPTY.executable(
+        bin_dir / "vc-frame",
+        "import json, os, pathlib, sys\n"
+        "r = pathlib.Path(os.environ['PTY_ROOT'])\n"
+        "a = sys.argv[1:]\n"
+        "with (r/'frame-calls').open('a') as f: f.write(json.dumps(a)+'\\n')\n"
+        "if 'list-panes' in a: print((r/'panes.json').read_text())\n"
+        "if 'dump-screen' in a:\n"
+        "    key = a[a.index('--pane-id')+1] if '--pane-id' in a else 'fallback'\n"
+        "    payload = json.loads((r/'payloads.json').read_text())[key]\n"
+        "    pathlib.Path(a[a.index('--path')+1]).write_bytes(payload.encode())\n",
+    )
+    EditorPTY.executable(
+        bin_dir / "pbcopy",
+        "import os, pathlib, sys\n"
+        "pathlib.Path(os.environ['PTY_ROOT'], 'clipboard').write_bytes(sys.stdin.buffer.read())\n",
+    )
+    EditorPTY.executable(
+        config / "paste-stack.sh",
+        "import os, pathlib, sys\n"
+        "assert sys.argv[1] == 'push'\n"
+        "pathlib.Path(os.environ['PTY_ROOT'], 'stack').write_bytes(pathlib.Path(sys.argv[2]).read_bytes())\n",
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(config / "copy-scrollback.sh")],
+        check=False,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+            "TMPDIR": str(tmp_path / "tmp"),
+            "VIBECRAFTED_HOME": str(tmp_path / "runtime"),
+            "VC_FRAME_PANE_ID": "9",
+            "PTY_ROOT": str(tmp_path),
+        },
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"SyntaxError" not in result.stderr
+    calls = [
+        json.loads(line) for line in (tmp_path / "frame-calls").read_text().splitlines()
+    ]
+    dumps = [call for call in calls if "dump-screen" in call]
+    assert len(dumps) == 1
+    if expected is None:
+        assert "--pane-id" not in dumps[0]
+    else:
+        assert dumps[0][dumps[0].index("--pane-id") + 1] == expected
+    payload = payloads[expected if expected is not None else "fallback"].encode()
+    assert (tmp_path / "clipboard").read_bytes() == payload
+    assert (tmp_path / "stack").read_bytes() == payload
