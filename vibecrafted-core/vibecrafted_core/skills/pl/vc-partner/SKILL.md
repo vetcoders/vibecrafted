@@ -110,9 +110,11 @@ Partner pisze brief; użytkownik nie musi układać komend ani obsługiwać flot
 
 ### Przykład „pstryk”
 
-Gdy użytkownik zatwierdza przygotowany brief słowem „pstryk”, partner uruchamia
-zadanie i wraca do rozmowy. Dla uzgodnionego zadania Codex / `gpt-6-sol`
-w osobnym worktree wykonaj:
+„Pstryk” oznacza: oddeleguj przygotowane zadanie i od razu wracaj do rozmowy.
+Działanie synchroniczne trwa tylko tyle, ile uruchomienie workera, zachowanie
+receiptu i uzbrojenie odbioru ukończenia. Worker wykonuje zadanie, a partner
+pozostaje obecny i zachowuje odpowiedzialność za odbiór oraz domknięcie wyniku.
+Dla uzgodnionego zadania Codex / `gpt-6-sol` w osobnym worktree wykonaj:
 
 ```bash
 PROMPT="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts/<org>/<repo>/$(date +%Y_%m%d)/plans/<plan_file>.md"
