@@ -1645,13 +1645,15 @@ if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
   done
 
   export VIBECRAFTED_RUNTIME="$runtime"
+  make_pack_args=()
   if [[ -n "$selected_runtime_pack" ]]; then
-    run_candidate_command env \
-      VIBECRAFTED_RUNTIME_PACK="$selected_runtime_pack" \
-      bash "$candidate_root/scripts/install-runtime-pack.sh" \
-      --expected-source-revision "$expected_revision"
+    make_pack_args=(
+      "RUNTIME_PACK=$selected_runtime_pack"
+      "RUNTIME_PACK_EXPECTED_SOURCE_REVISION=$expected_revision"
+    )
   fi
-  run_candidate_command make --no-print-directory -C "$candidate_root" install-auto RUNTIME="$runtime"
+  run_candidate_command make --no-print-directory -C "$candidate_root" install-auto \
+    RUNTIME="$runtime" ${make_pack_args[@]+"${make_pack_args[@]}"}
 fi
 
 # Interactive terminal session: default target is the built-in

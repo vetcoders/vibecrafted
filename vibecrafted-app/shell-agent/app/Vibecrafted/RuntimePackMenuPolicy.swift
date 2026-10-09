@@ -5,8 +5,8 @@ import Foundation
 /// After the dmg-first eradication the Runtime Pack is the product carrier and
 /// the App consumes it: the tray's supervision duty is to show which generation
 /// is live and whether it still matches the carrier this signed App shipped.
-/// Drift is expected when the runtime moves ahead of the App (runtime-first
-/// upgrades install straight from a tarball), so it surfaces as amber, not red.
+/// A verified source install may differ from the App's bundled carrier. The
+/// resolver decides whether that active installation is usable.
 struct RuntimePackMenuState {
   let header: String
   let detail: String
@@ -73,8 +73,8 @@ func deriveRuntimePackMenuState(
   }
   return RuntimePackMenuState(
     header: "Runtime Pack: \(generation)",
-    detail: "Carrier expects \(String(signed.prefix(8))) — the installed runtime moved; update the App to re-sync",
-    health: .transitioning,
+    detail: "Verified installed runtime from another build; this App uses the active generation",
+    health: .healthy,
     actionsEnabled: true)
 }
 
