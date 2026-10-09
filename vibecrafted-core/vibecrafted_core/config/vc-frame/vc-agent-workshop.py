@@ -210,6 +210,7 @@ def launch_argv(
     workspace: str | os.PathLike[str] = "",
     *,
     model: str = "",
+    effort: str = "",
     purpose: int | None = None,
     session: str = "",
 ) -> list[str]:
@@ -226,6 +227,10 @@ def launch_argv(
             raise ValueError("Model selection is unavailable for this provider")
     if purpose is not None and purpose not in range(len(PURPOSES)):
         raise ValueError("unsupported purpose")
+    if effort:
+        validate_agent_pin(effort, "effort")
+        if agent not in EFFORT_OVERRIDE_STYLES:
+            raise ValueError("Effort is unavailable for this provider")
     root = str(Path(workspace).expanduser().resolve()) if workspace else ""
     if mode != "resume":
         decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
@@ -266,6 +271,8 @@ def launch_argv(
             command.extend(["--continuity-parent", continuity_parent])
         if model:
             command.extend(["--model", model])
+        if effort:
+            command.extend(["--effort", effort])
         if purpose is not None:
             command.extend(["--prompt", PURPOSE_PROMPTS[purpose]])
         elif mode in MODE_PROMPTS:
@@ -284,6 +291,8 @@ def launch_argv(
         command.extend(["--session", session])
     if model:
         command.extend(["--model", model])
+    if effort:
+        command.extend(["--effort", effort])
     return command
 
 
@@ -2122,16 +2131,10 @@ class Workshop:
                 continuity_parent=self.continuity_parent,
                 workspace=workspace,
                 model=self.model,
+                effort=self.effort,
                 purpose=self.purpose if self.launch_mode == 0 else None,
                 session=self.session,
             )
-            if self.effort:
-                validate_agent_pin(self.effort, "effort")
-                if AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES:
-                    raise ValueError("Effort is unavailable for this provider")
-                raise ValueError(
-                    "Interactive effort transport needs the bounded spawn contract extension"
-                )
         except ValueError as exc:
             self.error = public_reason(str(exc)) or str(exc)
             return

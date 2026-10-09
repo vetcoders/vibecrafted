@@ -25,11 +25,13 @@ def _three(tmp_path, monkeypatch):
             for name in workshop.CONTINUITY_MODES
         },
     )
-    for provider in ("claude", "grok"):
+    picker.model, picker.effort = "exact-codex-model", "low"
+    for provider, effort in (("claude", "medium"), ("grok", "high")):
         picker.add_agent()
         picker._select_agent(workshop.AGENTS.index(provider))
         picker.runtime = workshop.RUNTIME_POLICIES.index("local-native")
         picker.continuity = workshop.CONTINUITY_MODES.index("fresh")
+        picker.model, picker.effort = f"exact-{provider}-model", effort
     return workshop, picker, calls
 
 
@@ -40,6 +42,12 @@ def test_launch_three_agents_to_selected_workspace(tmp_path, monkeypatch):
     assert len(panes) == 3
     assert all(c[c.index("--session") + 1] == "selected" for c in panes)
     assert all(c[c.index("--root") + 1] == str(tmp_path) for c in panes)
+    assert [c[c.index("--model") + 1] for c in panes] == [
+        "exact-codex-model",
+        "exact-claude-model",
+        "exact-grok-model",
+    ]
+    assert [c[c.index("--effort") + 1] for c in panes] == ["low", "medium", "high"]
     assert [r["status"] for r in picker.launch_results] == ["opened"] * 3
     picker.launch()
     assert len(calls) == 3
@@ -88,6 +96,9 @@ def test_model_effort_persist_per_project_provider(tmp_path, monkeypatch):
     launched.launch()
     assert launched.launch_results[0]["status"] == "opened", launched.error
     assert calls
+    argv = calls[0]
+    assert argv[argv.index("--model") + 1] == "exact-codex-model"
+    assert argv[argv.index("--effort") + 1] == "high"
 
 
 def test_partial_launch_failure_does_not_duplicate_agents(tmp_path, monkeypatch):
@@ -160,6 +171,21 @@ def test_no_effort_for_provider_without_control(tmp_path, monkeypatch):
     picker.handle_launcher_key(ord("h"))
     assert picker.effort == ""
     assert "unavailable" in picker.error
+    # A stale or injected choice must also fail at launch, before any tab opens.
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination="selected",
+        live=["selected"],
+        current="selected",
+    )
+    launched.agent = workshop.AGENTS.index("kimi")
+    launched.effort = "high"
+    launched.launch()
+    assert launched.launch_results[0]["status"] == "failed"
+    assert "unavailable" in launched.error
+    assert calls == []
 
 
 def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: F811
@@ -191,7 +217,7 @@ def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: 
         terminal.expect("Choose a provider, then Launch.")
         terminal.send(b"c")
         terminal.expect("Model")
-        terminal.send(b"exact-codex-model\t\tc")
+        terminal.send(b"exact-codex-model\thigh\tc")
         terminal.send(b"++")
         terminal.expect("3 codex")
         terminal.send(b"\n")
@@ -199,6 +225,7 @@ def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: 
         lines = [json.loads(line) for line in capture.read_text().splitlines()]
         assert len(lines) == 3
         assert lines[0][lines[0].index("--model") + 1] == "exact-codex-model"
+        assert lines[0][lines[0].index("--effort") + 1] == "high"
         assert all(c[c.index("--session") + 1] == destination for c in lines)
         assert all(c[c.index("--root") + 1] == str(project) for c in lines)
         terminal.send(b"\n")

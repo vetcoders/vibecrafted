@@ -34,7 +34,7 @@ from .control_plane import (
     normalize_run_root,
     sync_state,
 )
-from .effort_overrides import _with_effort_override
+from .effort_overrides import _effort_override_receipt, _with_effort_override
 from .env_allowlist import dispatcher_identity, filter_headless_worker_env
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
@@ -1586,6 +1586,7 @@ def interactive_workspace_command(
     parent_lineage_id: str = "",
     *,
     model: str = "",
+    effort: str = "",
     source_file: str = "",
     base: str = "",
     worktree: str | bool | None = None,
@@ -1741,10 +1742,15 @@ def interactive_workspace_command(
             "runtime_class": execution,
             "worktree": worktree,
             "model": model,
+            "effort": effort,
             "runtime": "terminal",
         },
         Path(__file__).parent,
     )
+    if spec.effort_source == "cli" and _effort_override_receipt(
+        provider, spec.effort
+    ).get("effort_override_skipped"):
+        raise ValueError(f"Effort is unavailable for provider {provider}")
     source = _source_prompt(spec)
     if native_session:
         native_session = _validated_continuity_id(
@@ -5796,6 +5802,7 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument("--root", required=True)
     interactive_command.add_argument("--file", default="")
     interactive_command.add_argument("--model", default="")
+    interactive_command.add_argument("--effort", default="")
     interactive_command.add_argument("--base", default="")
     interactive_command.add_argument("--execution-runtime", default="")
     interactive_command.add_argument("--worktree", default="")
@@ -5924,6 +5931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.parent_session,
                 args.continuity_parent,
                 model=args.model,
+                effort=args.effort,
                 source_file=args.file,
                 base=args.base,
                 execution_runtime=args.execution_runtime,
