@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_POLICY = REPO_ROOT / "config/vc-terminal/vibecrafted.toml"
@@ -41,3 +40,17 @@ def test_native_cmd_shift_period_emits_quick_command_csi_u_sequence() -> None:
 
     assert binding is not None
     assert binding["chars"] == "\x1b[46;10u"
+
+
+def test_native_cmd_t_opens_window_and_cmd_n_stays_in_frame() -> None:
+    policy = tomllib.loads(TERMINAL_POLICY.read_text(encoding="utf-8"))
+    new_window = _binding_for_native_event(policy, logical_key="t", modifiers="Command")
+    new_session = _binding_for_native_event(
+        policy, logical_key="n", modifiers="Command"
+    )
+
+    assert new_window is not None
+    assert new_window["action"] == "CreateNewWindow"
+    assert "chars" not in new_window
+    assert new_session is not None
+    assert new_session["chars"] == "\x1b[110;9u"
