@@ -17,7 +17,7 @@ try:
         match = next((p for p in panes if not p.get("is_plugin") and str(p.get("id")) != current), None)
     if match:
         prefix = "plugin_" if match.get("is_plugin") else ""
-        print(f"{prefix}{match.get(\"id\")}")
+        print("{}{}".format(prefix, match.get("id")))
 except Exception:
     pass
 ' || true)
