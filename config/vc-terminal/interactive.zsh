@@ -1,6 +1,12 @@
 # Loaded only by the product terminal's private ZDOTDIR.
 [[ -o interactive ]] || return 0
 
+# A visible terminal enables TTY color without forcing ordinary shell pipelines.
+# Explicit provider/pane launches force their own level in env_allowlist.py.
+unset NO_COLOR NODE_DISABLE_COLORS ANSI_COLORS_DISABLED FORCE_COLOR CLICOLOR_FORCE
+case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac
+export CLICOLOR=1
+
 # Remember the file that defined this profile so reload can re-read it after
 # an on-disk update. ${(%):-%x} is this sourced path; keep a fallback.
 typeset -g _VC_TERMINAL_PROFILE_FILE="${${(%):-%x}:-$HOME/.config/vibecrafted/vc-terminal/interactive.zsh}"

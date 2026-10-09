@@ -17,6 +17,12 @@
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
+# A visible terminal enables TTY color without forcing ordinary shell pipelines.
+# Explicit provider/pane launches force their own level in env_allowlist.py.
+unset NO_COLOR NODE_DISABLE_COLORS ANSI_COLORS_DISABLED FORCE_COLOR CLICOLOR_FORCE
+case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac
+export CLICOLOR=1
+
 # Root discovery cannot call PATH tools. Sanitization has not run yet, and a
 # hostile or empty inherited PATH is a supported startup case.
 _vc_terminal_entry="${BASH_SOURCE[0]}"
