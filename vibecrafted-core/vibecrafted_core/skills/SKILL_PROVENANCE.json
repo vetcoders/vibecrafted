@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-07",
+  "generated_at": "2026-10-09",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -3380,6 +3380,7 @@
         "6ad7fe5024c8bd8f7676503c9c905242937790eb2241f13e0175d73e5978daca",
         "6cd9b09593f507f4fb5a12dbdf6290c6931be6139c46a60811e0b537943a236c",
         "6d65fca650a3144ffa327bef3dae0407072055bf77acd5f91a83e798dbb4a6d3",
+        "7552b8bf9e1fe3845bf3d58759e2e999debf9cd3bccd61009f0126c0ec8ded22",
         "7d9475c537a743cdf93cf96c5c920d44627c2e646143977c5c8ce6dcc2140888",
         "86a3fac378b20107564deaf8efda08dcc7e9c75161a0423cea8db83ad547d22a",
         "870be28f05121a08f5759459729b409f27ceb7213ef8c2c106e36cb1949531e7",
@@ -3389,6 +3390,7 @@
         "93760bdf2c43368b6b4b2a6536aa1c2345206a81f26af56b0192b51bf34373a1",
         "a5fdca7d44e66799d12030cd5d21c3c49c31ce0bdc910ba3289d00bee3a76f49",
         "a8d520dae5eb6b796fd26256767cf482e6227396e6641190157f4f477def6ecd",
+        "afcd478cda0a8f79bcf18d828df4df4c63e0d275d602fabc4d7f64b9ae53e813",
         "b49784bc47c061289cd1c15f5ecdbfcd7d73af1b45e8a686796d419386cf4016",
         "c6aec6c084763df80a5aebbb2728b1fe97e2fd73e090bd793d27b9f6e4738a9b",
         "ca1238fcf79f7602c52f4a974bf66f7d30f7c60c2654e6de0a876578c985e5ba",
@@ -3411,37 +3413,51 @@
         ],
         "CONTRACT.md": [
           "4957e1785dc21bb44992e96f45109954650d455a",
+          "6d22ed98f9b5c02330b0a3da8bff89305dd5a327",
+          "c2b918bf2f8ec31544f4d16e7217ace9c393d29c",
+          "d1f4d90ed922c0d5f5c81b939a69c251ee861f13",
+          "e1e600a73ac807db4d1d98515c60bb572f0e7457",
           "ed9a9c81bd401794b3e7bfbcbe4730b92ac064ff",
           "f46699b9f24b30590ac3609e2656a8d2af3076dd"
         ],
         "FLOW.md": [
+          "06d7379ca648db710fb6b1d3d1473b95dc3c4020",
           "359c0f5b1f62b52d8e3b1500fff8865e643e0261",
           "5613e7aca5669f4f9724450fcc34193749c30859",
+          "696f3102746ebc5297ad3c842284f4b107481b3b",
           "704db4370a5919bf6f00b3eab9f4ee38f24e0078",
+          "7d7109175d29b45ec0642363acc0dd8dba292797",
           "7ddd4a6321fc14970b617a5cba500f1fdb5048d2",
+          "9d8951653e204b3e98334699494bc31c2502f9e6",
           "ae1d136c52280e24941f86fe5886998d90ebd37b",
           "b810dabdd70161ec7bac6556b0fe65c3988917d8",
           "baa4a3fb9880559e7b00268a244af1781c5d313b",
           "fc2abca7f67e3ca4b5dd4e1600fc19dd1a9a5e65"
         ],
         "JOURNAL.md": [
+          "463c133d08b316e9c2d5efb7c99534c271efd31b",
+          "4e91ad7433fb85f6f8190282cf330fb5b8555e7a",
           "7da273c6bd29cf454433183390523cb0c5cc4aa3",
           "f94d3923bfd12b0bae6f803795b4c1c883b26a7a"
         ],
         "README.md": [
+          "1b8ed2fb12a15845f6a0d27119f92c79015f66fb",
           "4365d1121e72bfae9b920f7fe354ea84fdaee87b",
           "59d27a5575a25b154dbc9133317ef30baeb83bca",
           "6b29e98da2deb57e196fc2eba8d06795724d00d2",
           "6de1fb10bdad6be3b6f792f09cbe8c9e882f71d9",
           "8ae07693948b72fe4cbe3427330455204be82f0d",
           "9926208fb7bc7ca0f84e8f159d927b2ff3e9f2d2",
+          "ce4f32a3b5042edb2356bdf4f85afbb32dcfcdfc",
           "e13d6c4747974550b336739c44320bcbc9de539e",
           "e785215fe556cd88cbb1926087ee1a9b72f28d08",
           "ff0b74e88c84508386e0027ed7b3ccf8bff72e56"
         ],
         "RUNTIME.md": [
+          "25ef88adf5877eac14008e34a63af51f40cfffc0",
           "55bfd42c40890a5a3fca2745b6ccebad062571d4",
           "743be16d7fe6172f2ca80cd755fdd774af4ae234",
+          "7fa975d20803ee1e6b497522b2a41aad5923ceff",
           "82aa75d80a5d06016a37b7216b1b1e2cebb8056d",
           "833b39057bf68b8be7108f4092d1df177c67a87a",
           "855a0ecc9cc12572b578049e8a8c760c239bcc71",
@@ -3451,6 +3467,7 @@
           "0007d3826971bd0563d172d1bf670668f69bafce",
           "1499f91de15e3f0e25b845c20da32a78ef3a7a48",
           "163905fcec361b0233032058982821cf5a183596",
+          "19b99ad3aef1f3365a80a47397736bdad82d6d04",
           "1c564c470fb583e74f3398c8e74e06a1fc9d6928",
           "24349e2f5c868202ffe84284efae3243d86df40f",
           "2a056ba7f5323d2eb553a65a1ac0b800fc02d1fe",
@@ -3480,6 +3497,7 @@
           "a2553ac8d3a1e7260db11f037330bfc03756fcb9",
           "afe2bec29f2782c126731ff3b503adcc4cc35dd2",
           "b8160742f3886030369dff1d0167c9a158a5e825",
+          "bc6c48d55eee4b86d7baee49cbacc091a2ed5aa9",
           "be007131782f00893aef8cf83c630b4d36375350",
           "cae834b5cb087af2fa93eac7a18b228745619c27",
           "cef3c168914f049d9fee6fde3b9ab3675ed5716a",
@@ -3492,10 +3510,15 @@
           "fecddb940c70a6b0cad763bc09917c48651c4a78"
         ],
         "TAXONOMY.md": [
+          "0ce4d761491b14f6c02ce91e05c0df33f798636b",
+          "1941d9f1713a9f7797e893f92a16b6c3a288e71f",
           "31bb668d327a84e68feef7c4d4af6e494e96f872",
-          "4a943d308adf416cb249c7fe57f85f579536a35f"
+          "4a943d308adf416cb249c7fe57f85f579536a35f",
+          "95a978a4cac2b117355c49fcc7c0cc23ca144b43",
+          "f671f417755cef5c65346bb7738730ab62fcf5af"
         ],
         "agents/openai.yaml": [
+          "2ef6622c92ca70fc78a7c3fb5a68d8955efa68d0",
           "553bcf0934a735eeb4bc7d7c48d76b1b7ab1a24c",
           "79adc8cb4d5cecfef69bec63076f15dcb2678738",
           "f27264b32395ea65b319729e0d8694045ae00a26"

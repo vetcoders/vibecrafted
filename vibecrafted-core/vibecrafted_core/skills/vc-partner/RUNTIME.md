@@ -1,84 +1,28 @@
 # `vc-partner` Runtime
 
-`vc-partner` as an interactive skill does not automatically launch runtime.
-
-Runtime begins only from a TTY face (same family as `vc-init`):
+The interactive skill adopts a posture in the current session. The launcher
+opens an interactive TTY session in the init family:
 
 ```bash
 vibecrafted partner <agent>
 vibecrafted partner <agent> --runtime plain
-vc-start   # then [New] with the partner ritual, then /vc-partner
 ```
 
-`vc-partner` without a TTY refuses. `--prompt` / `--file` on
-`vibecrafted partner` are extra seed context, never a headless worker.
+`--prompt` and `--file` provide seed context. The launcher refuses a headless
+invocation; it is not a worker-dispatch command. See the
+[Delegation Matrix](../DELEGATION_MATRIX.md) for current launcher semantics.
 
-## Runtime Responsibilities
+For authorized external work, use the appropriate framework lane:
+`implement` for a bounded implementation, `workflow` for Examine → Research →
+Implement, or a dispatch plan for multiple dependent cuts. Preserve selected
+runtime and model pins.
 
-The partner runtime creates durable state for shared steering:
+Retain the actual launch receipt and arm completion delivery through available
+harness notifications or a background framework await. Keep transcripts,
+reports and recovery links observable. A printed await command alone is not an
+armed monitor. A worker process is owned by its runtime, not by a Frame view.
 
-- run metadata
-- transcript
-- partner report
-- append-only journal
-- delegated runtime links
-- close-out summary
-
-## Artifact Layout
-
-```text
-$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/partner/
-  journal.md
-  reports/
-    <timestamp>_<slug>_partner.md
-    <timestamp>_<slug>_partner.transcript.log
-    <timestamp>_<slug>_partner.meta.json
-```
-
-The journal is the memory spine. Reports are snapshots.
-
-## Runtime Lanes
-
-| Need                                    | Runtime lane                                                      |
-| --------------------------------------- | ----------------------------------------------------------------- |
-| Single bounded build                    | `vibecrafted implement <agent>`                                   |
-| Strict Examine -> Research -> Implement | `vibecrafted workflow <agent>`                                    |
-| Multiple field teams                    | `$vc-operator` posture + `vibecrafted dispatch` or workflow lanes |
-| Full takeover                           | `vibecrafted ownership <agent>`                                   |
-| Implementation review                   | `vibecrafted review <agent>`                                      |
-| Shape/trajectory check                  | `vibecrafted followup <agent>`                                    |
-| Independent falsification               | `vibecrafted audit <agent>`                                       |
-| Product-surface undone check            | `vibecrafted dou <agent>`                                         |
-| Gap convergence                         | `vibecrafted marbles <agent>`                                     |
-| Entropy reduction after marbles         | `vibecrafted polarize <agent>`                                    |
-| Release surface                         | `vibecrafted release <agent>`                                     |
-
-## Runtime Close-Out
-
-Partner runtime may close only when one terminal state is true:
-
-```yaml
-terminal_state:
-  shipped:
-    requires:
-      - original_shape preserved or intentionally changed
-      - gates recorded
-      - review/followup/audit/dou findings handled or deferred explicitly
-      - next move named
-  escalated_to_ownership:
-    requires:
-      - reason for takeover
-      - current original_shape
-      - handoff state
-  blocked_with_evidence:
-    requires:
-      - blocker
-      - attempted checks
-      - nearest safe next action
-```
-
-## Non-Goals
-
-- Do not use runtime to avoid shared decision-making.
-- Do not launch field teams before the success contract exists.
-- Do not let runtime workers change the original shape without a journal entry.
+After notification, inspect the terminal receipt, verify the result, and admit
+or reject its integration within the agreed scope. Report outstanding user
+decisions or blockers concretely. Use the existing repository journal for
+material decisions; launcher artifacts do not create another canonical journal.
