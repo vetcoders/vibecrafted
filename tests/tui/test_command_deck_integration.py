@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import http.server
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,97 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SHELL = ROOT / "vibecrafted-app/shell-agent"
 APP = SHELL / "app/Vibecrafted"
+
+
+def test_app_ffi_has_one_dynamic_linkage_owner() -> None:
+    project = (SHELL / "app/project.yml").read_text()
+    # Static + dynamic Rust linkage registers mac-notification-sys's ObjC
+    # classes twice. The embedded dylib must be the only runtime owner.
+    assert "libvibecrafted_shell_ffi.a" not in project
+    assert "-lvibecrafted_shell_ffi" not in project
+    dependencies = project.split("    dependencies:\n", 1)[1].split(
+        "    postBuildScripts:", 1
+    )[0]
+    assert dependencies.count("libvibecrafted_shell_ffi") == 1
+    assert re.search(
+        r"framework: ../../target/release/libvibecrafted_shell_ffi\.dylib\n"
+        r"\s+embed: true\n\s+link: true",
+        dependencies,
+    )
+    assert (
+        "--library target/release/libvibecrafted_shell_ffi.dylib --language swift"
+        in project
+    )
+    assert project.count("fix-dylib-install-names.sh") == 2
+    assert "SWIFT_OBJC_BRIDGING_HEADER:" in project
+
+
+def test_generated_xcode_project_keeps_single_ffi_link_and_embed(
+    tmp_path: Path,
+) -> None:
+    if sys.platform != "darwin" or not shutil.which("xcodegen"):
+        pytest.skip("macOS XcodeGen topology contract")
+    subprocess.run(
+        [
+            "xcodegen",
+            "generate",
+            "--spec",
+            str(SHELL / "app/project.yml"),
+            "--project-root",
+            str(SHELL / "app"),
+            "--project",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    converted = subprocess.run(
+        [
+            "plutil",
+            "-convert",
+            "json",
+            "-o",
+            "-",
+            str(tmp_path / "Vibecrafted.xcodeproj/project.pbxproj"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    objects = json.loads(converted.stdout)["objects"]
+    target = next(obj for obj in objects.values() if obj["isa"] == "PBXNativeTarget")
+    ffi_refs = {
+        key
+        for key, obj in objects.items()
+        if obj["isa"] == "PBXFileReference"
+        and "libvibecrafted_shell_ffi" in obj.get("path", "")
+    }
+    assert len(ffi_refs) == 1
+    assert objects[next(iter(ffi_refs))]["path"].endswith(".dylib")
+    for phase_type in ("PBXFrameworksBuildPhase", "PBXCopyFilesBuildPhase"):
+        phase = next(
+            objects[key]
+            for key in target["buildPhases"]
+            if objects[key]["isa"] == phase_type
+        )
+        ffi_files = [
+            objects[key]
+            for key in phase["files"]
+            if objects[key].get("fileRef") in ffi_refs
+        ]
+        assert len(ffi_files) == 1
+        if phase_type == "PBXCopyFilesBuildPhase":
+            assert phase["dstSubfolderSpec"] == "10"  # Contents/Frameworks
+            assert "CodeSignOnCopy" in ffi_files[0]["settings"]["ATTRIBUTES"]
+    configs = objects[target["buildConfigurationList"]]["buildConfigurations"]
+    assert {objects[key]["name"] for key in configs} == {"Debug", "Release"}
+    for key in configs:
+        settings = objects[key]["buildSettings"]
+        assert "libvibecrafted_shell_ffi" not in str(settings.get("OTHER_LDFLAGS"))
+        assert "@executable_path/../Frameworks" in settings["LD_RUNPATH_SEARCH_PATHS"]
 
 
 def _production_scaffold_editor_source(scaffold: str) -> str:
