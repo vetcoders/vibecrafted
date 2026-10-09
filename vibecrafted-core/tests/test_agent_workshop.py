@@ -367,7 +367,7 @@ def _prepare_launch(
         "list_live_frame_sessions",
         lambda: (list(live), listing_error),
     )
-    monkeypatch.setattr(workshop, "current_frame_session", lambda: current)
+    monkeypatch.setattr(workshop, "current_frame_session", lambda **_kwargs: current)
     monkeypatch.setattr(workshop.shutil, "which", lambda _name: "/bin/vibecrafted")
     monkeypatch.setattr(
         workshop.subprocess,
@@ -442,6 +442,145 @@ def test_session_names_from_listing_skip_exited_sessions() -> None:
         "loctree",
         "vibecrafted",
     ]
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+@pytest.mark.parametrize("binding", ["live", "dead", "wrong-instance", "missing"])
+def test_custom_current_seat_requires_exact_project_wes_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign: bool, binding: str
+) -> None:
+    from vibecrafted_core.workspace_catalog import (
+        new_uuid7,
+        record_runtime_session_attachment,
+        resolve_run_workspace_identity,
+    )
+
+    project = tmp_path / "selected"
+    source = tmp_path / "another-project"
+    project.mkdir()
+    source.mkdir()
+    identity = resolve_run_workspace_identity(root=source if foreign else project)
+    if binding != "missing":
+        record_runtime_session_attachment(
+            workspace_id=identity.workspace_id,
+            vibecrafted_session_id=identity.vibecrafted_session_id,
+            workspace_instance_id=identity.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="workday-440",
+            state="dead" if binding == "dead" else "live",
+        )
+    for key, value in identity.to_env().items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("VC_FRAME_SESSION_NAME", "workday-440")
+    if binding == "wrong-instance":
+        monkeypatch.setenv("VIBECRAFTED_WORKSPACE_INSTANCE_ID", new_uuid7())
+    workshop = _load()
+    owned = not foreign and binding == "live"
+    assert workshop.destination_session_for_workspace(project) == (
+        "workday-440" if owned else "selected"
+    )
+    assert workshop.catalog_owns_destination(project.resolve(), "workday-440") is (
+        owned
+    )
+
+
+def test_custom_current_seat_launch_preserves_old_seat_and_retry_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core.workspace_catalog import (
+        operator_session_name,
+        record_runtime_session_attachment,
+        resolve_run_workspace_identity,
+    )
+
+    identity = resolve_run_workspace_identity(root=tmp_path)
+    record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="workday-440",
+        state="live",
+    )
+    for key, value in identity.to_env().items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("VC_FRAME_SESSION_NAME", "workday-440")
+    workshop = _load()
+    destination = workshop.destination_session_for_workspace
+    ownership = workshop.catalog_owns_destination
+    old_destination = operator_session_name(identity.workspace_id)
+    launched, calls = _prepare_launch(
+        workshop,
+        tmp_path,
+        monkeypatch,
+        destination=old_destination,
+        live=["workday-440", old_destination],
+        current="workday-440",
+    )
+    monkeypatch.setattr(workshop, "destination_session_for_workspace", destination)
+    monkeypatch.setattr(workshop, "catalog_owns_destination", ownership)
+    launched.launch()
+    launched.launch()
+
+    assert launched.error == ""
+    assert len(calls) == 1
+    assert calls[0][:5] == ["vc-frame", "--session", "workday-440", "action", "new-tab"]
+
+
+def test_creator_error_retains_actionable_stdout_before_progress_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop, launched, calls, _generation = _prepare_project_creation(
+        tmp_path, monkeypatch
+    )
+
+    def refused(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=4,
+            stdout="Frame client rejected the session contract.\nOpen a current-generation session from the Sessions rail.",
+            stderr="vc-start: checking your workspace and available sessions...\n",
+        )
+
+    monkeypatch.setattr(workshop.subprocess, "run", refused)
+    launched.launch()
+    assert "Frame client rejected the session contract" in launched.error
+    assert "Open a current-generation session" in launched.error
+    assert "checking your workspace" in launched.error
+    assert launched.error.index("Frame client") < launched.error.index("checking")
+    assert len(calls) == 1
+
+
+def test_launch_error_details_wrap_scroll_and_return_without_retry() -> None:
+    workshop = _load()
+    drawn: list[str] = []
+
+    class Window:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (8, 38)
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            drawn.append(text)
+
+    form = workshop.Workshop(Window(), mode="launcher")
+    form.error = (
+        "Project could not be opened: Frame rejected this session.\n"
+        + "Long diagnostic context " * 20
+        + "\nUse the Sessions rail to open a current-generation session."
+    )
+    form.handle_launcher_key(ord("e"))
+    form.draw_launcher()
+    assert "Launch error" in drawn
+    assert "Frame rejected" in " ".join(drawn)
+    for _ in range(40):
+        form.handle_launcher_key(workshop.curses.KEY_DOWN)
+    drawn.clear()
+    form.draw_launcher()
+    assert any("current-generation session" in line for line in drawn)
+    form.handle_launcher_key(27)
+    assert not form.error_details
+    assert form.mode == "launcher"
+    assert form.launch_results == []
 
 
 def test_successful_launch_opens_destination_tab_and_keeps_workshop(

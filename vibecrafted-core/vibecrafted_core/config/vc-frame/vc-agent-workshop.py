@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -317,20 +318,57 @@ def destination_session_for_workspace(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Canonical human place-session for the selected project checkout.
+    """Prefer the hosting seat only with an exact project WES binding.
 
-    This is the workspace catalog place-session, not a worker host and not
-    the current Frame seat. An empty result is an error, never a cue to
-    omit ``--session``.
+    Catalog names are the fallback for another project, never authority to
+    displace an owned custom seat with an older same-project session.
     """
+    current = owned_current_destination(Path(workspace).resolve(), env=env)
+    if current:
+        return current
     name = str(resolve_operator_place_session(root=workspace, env=env) or "").strip()
     if not name:
         raise ValueError("could not resolve a Frame session for that project")
     return name
 
 
+def owned_current_destination(
+    workspace: Path, *, env: Mapping[str, str] | None = None
+) -> str:
+    """Read-only admission of the physical seat attached to this logical session."""
+    environ = env if env is not None else os.environ
+    current = current_frame_session(env=environ)
+    session_id = str(environ.get("VIBECRAFTED_SESSION_ID") or "").strip()
+    if not current or not session_id:
+        return ""
+    try:
+        receipt = read_workspace_session(session_id)
+        record = read_catalog().workspaces.get(receipt.workspace_id)
+        if (
+            record is not None
+            and record.status == WORKSPACE_STATUS_ACTIVE
+            and Path(record.canonical_root).resolve() == workspace
+            and receipt.session_id == session_id
+            and receipt.workspace_id == environ.get("VIBECRAFTED_WORKSPACE_ID")
+            and receipt.workspace_instance_id
+            == environ.get("VIBECRAFTED_WORKSPACE_INSTANCE_ID")
+            and any(
+                item.runtime == "vc-frame"
+                and item.runtime_session_id == current
+                and item.state == "live"
+                for item in receipt.attachments
+            )
+        ):
+            return current
+    except (OSError, WorkspaceCatalogError):
+        pass
+    return ""
+
+
 def catalog_owns_destination(workspace: Path, session: str) -> bool:
     """A fallback basename is not evidence that a live seat belongs to this root."""
+    if session and owned_current_destination(workspace) == session:
+        return True
     try:
         catalog = read_catalog()
         return any(
@@ -355,14 +393,30 @@ class LiveDestination(NamedTuple):
     environment: dict[str, str] | None
 
 
+def launch_failure_reason(result: Any, fallback: str) -> str:
+    """Keep both diagnostic streams, putting causes before startup progress."""
+    lines = []
+    progress = []
+    for output in (result.stdout, result.stderr):
+        for line in (output or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("vc-start: ") and line.endswith(("...", "…")):
+                progress.append(line)
+            else:
+                lines.append(line)
+    return "\n".join(dict.fromkeys([*lines, *progress])) or fallback
+
+
 def ensure_live_destination(
     workspace: Path, session: str, live_names: list[str]
 ) -> LiveDestination:
     """Let the selected product entry open a missing project, then admit its WES seat.
 
-    vc-start owns creation, resurrection and host projection. Its stdout and the
-    workshop's current seat are never destination authority. Bind its child to
-    one canonical WES identity so recovery can be read from that exact receipt.
+    vc-start owns creation, resurrection and host projection. Names and command
+    output alone are never destination authority. Bind its child to one WES
+    identity so recovery can be read from that exact receipt.
     """
     try:
         workspace = validate_workspace_root(workspace)
@@ -405,9 +459,7 @@ def ensure_live_destination(
             timeout=PROJECT_OPEN_TIMEOUT,
         )
         if result.returncode != 0:
-            reason = (
-                result.stderr or result.stdout or "vc-start refused the project"
-            ).strip()
+            reason = launch_failure_reason(result, "vc-start refused the project")
             raise ValueError(reason)
         deadline = time.monotonic() + PROJECT_LIVE_TIMEOUT
         while True:
@@ -1021,6 +1073,8 @@ class Workshop:
             .resolve()
         )
         self.error = ""
+        self.error_details = False
+        self.error_scroll = 0
         self.notice = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
         self.presence_schedule = PresenceSchedule()
@@ -1420,6 +1474,9 @@ class Workshop:
             x += len(token) + 1
 
     def draw_launcher(self) -> None:
+        if self.error_details:
+            self.draw_launch_error()
+            return
         height, width = self.window.getmaxyx()
         compact = height < 16 or width < 52
         left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
@@ -1661,7 +1718,8 @@ class Workshop:
         for offset, result in enumerate(self.launch_results):
             label = f"{offset + 1} {result.get('provider', '')}: {result['status']}"
             if result["reason"]:
-                label += f" · {public_reason(result['reason']) or result['reason']}"
+                reason = public_reason(result["reason"]) or result["reason"]
+                label += f" · {reason.splitlines()[0]}"
             _safe_addstr(
                 self.window,
                 cursor + 1 + offset,
@@ -1674,13 +1732,40 @@ class Workshop:
             if compact
             else "←/→ provider · +/- agent · [/] slot · c choices · a advanced · Enter launch · Esc back"
         )
+        if self.error:
+            hint = "e error details · " + hint
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
             _safe_addstr(
-                self.window, height - 1, left, public_reason(self.error) or self.error
+                self.window,
+                height - 1,
+                left,
+                (public_reason(self.error) or self.error).splitlines()[0],
             )
         elif self.notice:
             _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
+
+    def draw_launch_error(self) -> None:
+        height, width = self.window.getmaxyx()
+        lines = [
+            wrapped
+            for line in self.error.splitlines()
+            for wrapped in (textwrap.wrap(line, max(1, width - 3)) or [""])
+        ]
+        available = max(1, height - 3)
+        self.error_scroll = min(self.error_scroll, max(0, len(lines) - available))
+        _safe_addstr(self.window, 0, 1, "Launch error", curses.A_BOLD)
+        for row, line in enumerate(
+            lines[self.error_scroll : self.error_scroll + available], start=1
+        ):
+            _safe_addstr(self.window, row, 1, line)
+        _safe_addstr(
+            self.window,
+            height - 1,
+            1,
+            "↑/↓ scroll · Esc back to launcher",
+            curses.A_DIM,
+        )
 
     def handle_home_key(self, key: int) -> None:
         if key in (ord("n"), ord("N")):
@@ -1694,6 +1779,18 @@ class Workshop:
                 self.open_launcher()
 
     def handle_launcher_key(self, key: int) -> None:
+        if self.error_details:
+            if key in (27, ord("e")):
+                self.error_details = False
+            elif key in (curses.KEY_UP, curses.KEY_PPAGE):
+                self.error_scroll = max(0, self.error_scroll - 1)
+            elif key in (curses.KEY_DOWN, curses.KEY_NPAGE):
+                self.error_scroll += 1
+            return
+        if key == ord("e") and self.error:
+            self.error_details = True
+            self.error_scroll = 0
+            return
         self.error = ""
         if key == 27:
             if self.standalone_launcher:
@@ -2183,9 +2280,9 @@ class Workshop:
             self.error = "vc-frame is not available in this Runtime Pack"
             return
         if result.returncode != 0:
-            self.error = (
-                result.stderr or result.stdout or "cannot open a tab for that Agent"
-            ).strip()
+            self.error = launch_failure_reason(
+                result, "cannot open a tab for that Agent"
+            )
             return
         self._opened = True
         current = current_frame_session()
@@ -2202,11 +2299,10 @@ class Workshop:
                 self.error = "vc-frame is not available in this Runtime Pack"
                 return
             if attached.returncode != 0:
-                self.error = (
-                    attached.stderr
-                    or attached.stdout
-                    or f"Agent opened in {destination}, but that session could not be shown"
-                ).strip()
+                self.error = launch_failure_reason(
+                    attached,
+                    f"Agent opened in {destination}, but that session could not be shown",
+                )
                 return
         # Product entry remains a launcher when Start here focuses it again.
         self.mode = "launcher" if self.standalone_launcher else "home"
