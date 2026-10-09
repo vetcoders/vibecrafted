@@ -18,6 +18,9 @@ struct Host {
 
 impl Host {
     fn launch() -> Self {
+        Self::launch_route("host-runs")
+    }
+    fn launch_route(route: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("home/.vibecrafted/control_plane");
         fs::create_dir_all(state.join("runs")).unwrap();
@@ -62,7 +65,7 @@ impl Host {
         command
             .args([
                 "--view",
-                "host-runs",
+                route,
                 "--tick-ms",
                 "50",
                 "--server",
@@ -102,15 +105,21 @@ impl Host {
     fn contents(&self) -> String {
         self.screen.lock().unwrap().screen().contents()
     }
-    fn reads(&self) -> usize {
+    fn count(&self, kind: &str) -> usize {
         fs::read_to_string(self.root.path().join("reads.jsonl"))
             .unwrap_or_default()
             .lines()
-            .filter(|line| line.contains("host_control_plane"))
+            .filter(|line| line.contains(kind))
             .count()
     }
+    fn reads(&self) -> usize {
+        self.count("host_control_plane")
+    }
     fn wait(&mut self, label: &str, predicate: impl Fn(&Self) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        self.wait_for(label, Duration::from_secs(10), predicate);
+    }
+    fn wait_for(&mut self, label: &str, timeout: Duration, predicate: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + timeout;
         while !predicate(self) {
             assert!(
                 self.child.try_wait().unwrap().is_none(),
@@ -169,4 +178,121 @@ fn idle_host_skips_history_but_receives_new_runs_and_keys() {
         assert!(Instant::now() < deadline, "quit blocked by reader");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn sustained_updates_reuse_raw_inventory_and_watcher_on_every_host_route() {
+    for route in [
+        "host",
+        "host-runs",
+        "host-config",
+        "host-doctor",
+        "host-projects",
+    ] {
+        let mut host = Host::launch_route(route);
+        host.wait("initial raw discovery", |h| h.count("host_raw_sources") > 0);
+        // All source roots exist before the steady-state measurement. Their
+        // creation legitimately changes registration once, but writes do not.
+        let home = host.root.path().join("home/.vibecrafted");
+        for name in ["artifacts", "locks", "marbles"] {
+            fs::create_dir_all(home.join(name)).unwrap();
+        }
+        host.master.write_all(b"r").unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let raw_before = host.count("host_raw_sources");
+        let watchers_before = host.count("host_watcher");
+        let reads_before = host.reads();
+        let now = chrono::Utc::now().to_rfc3339();
+        for i in 0..12 {
+            fs::write(home.join("control_plane/runs/updates.json"), serde_json::json!({
+                "run_id":"updates", "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":format!("/fixture/update-{i}"), "started_at":now, "updated_at":now, "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false
+            }).to_string()).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        host.wait("fresh projection after sustained writes", |h| {
+            h.reads() > reads_before
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(
+            host.count("host_raw_sources"),
+            raw_before,
+            "{route}: control-plane writes rescanned raw history"
+        );
+        assert_eq!(
+            host.count("host_watcher"),
+            watchers_before,
+            "{route}: writes recreated the watcher"
+        );
+        // A raw-only insertion into a deep existing source tree must also wake
+        // the host, even though no Python snapshot/event was written.
+        let raw_dir = home.join("artifacts/org/repo/day/reports");
+        fs::create_dir_all(&raw_dir).unwrap();
+        let before = host.count("host_raw_sources");
+        fs::write(raw_dir.join("raw-arrival.meta.json"), serde_json::json!({"run_id":"raw-arrival", "status":"completed", "agent":"codex", "skill":"workflow", "root":"/fixture/raw-arrival", "started_at":now, "finished_at":now}).to_string()).unwrap();
+        host.wait("artifact-only invalidation", |h| {
+            h.count("host_raw_sources") > before
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        let before = host.count("host_raw_sources");
+        fs::write(raw_dir.join("raw-arrival.meta.json"), serde_json::json!({"run_id":"raw-arrival", "status":"running", "agent":"codex", "skill":"workflow", "root":"/fixture/raw-changed", "started_at":now, "updated_at":now}).to_string()).unwrap();
+        host.master.write_all(b"2").unwrap();
+        host.wait("raw in-place change stays fresh", |h| {
+            h.contents().contains("raw-changed")
+        });
+        assert_eq!(
+            host.count("host_raw_sources"),
+            before,
+            "{route}: content write rescanned names"
+        );
+        let before = host.count("host_raw_sources");
+        fs::rename(&raw_dir, home.join("artifacts/renamed-reports")).unwrap();
+        host.wait("raw directory rename", |h| {
+            h.count("host_raw_sources") > before
+        });
+        let before = host.count("host_raw_sources");
+        fs::remove_file(home.join("artifacts/renamed-reports/raw-arrival.meta.json")).unwrap();
+        host.wait("raw deletion", |h| h.count("host_raw_sources") > before);
+        host.master.write_all(b"3").unwrap();
+        host.wait("responsive input during updates", |h| {
+            h.contents().contains("Control plane:")
+        });
+        host.master.write_all(b"q").unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while host.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until, "{route}: quit blocked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+fn host_rechecks_pid_exit_within_the_liveness_bound_without_disk_changes() {
+    let mut host = Host::launch();
+    host.wait("initial projection", |h| h.reads() > 0);
+    let mut worker = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+    let old = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+    fs::write(host.root.path().join("home/.vibecrafted/control_plane/runs/pid-fixture.json"), serde_json::json!({"run_id":"pid-fixture", "state":"running", "health":"active", "worker_pid":worker.id(), "worker_alive":true, "agent":"codex", "skill":"workflow", "mode":"headless", "root":"/fixture/pid-project", "started_at":old, "updated_at":old, "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false}).to_string()).unwrap();
+    // Always reap this fixture process before an assertion can unwind.
+    let live_until = Instant::now() + Duration::from_secs(10);
+    while !host.contents().contains("Active runs 1") && Instant::now() < live_until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let was_live = host.contents().contains("Active runs 1");
+    worker.kill().unwrap();
+    worker.wait().unwrap();
+    assert!(was_live, "fixture live PID was never projected");
+    let died_at = Instant::now();
+    host.wait_for("PID exit without a write", Duration::from_secs(31), |h| {
+        h.contents().contains("Active runs 0")
+    });
+    assert!(
+        died_at.elapsed() <= Duration::from_secs(31),
+        "30s recheck plus one input/render tick"
+    );
+    eprintln!(
+        "PID exit projected after {:.3}s; raw discoveries={}, watchers={}",
+        died_at.elapsed().as_secs_f64(),
+        host.count("host_raw_sources"),
+        host.count("host_watcher")
+    );
 }
