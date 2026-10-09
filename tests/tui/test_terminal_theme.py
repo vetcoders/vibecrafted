@@ -11,6 +11,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 THEME_COMMAND = REPO_ROOT / "bin/vc-theme"
 
 
+def test_frame_rgb_backgrounds_follow_window_opacity() -> None:
+    config = tomllib.loads(
+        (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text()
+    )
+    assert config["colors"].get("transparent_background_colors", False) is True
+    assert config["window"]["opacity"] == 0.9
+    assert config["window"]["blur"] is True
+
+
 def test_local_path_hint_stops_before_terminal_padding() -> None:
     config = tomllib.loads(
         (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text()
