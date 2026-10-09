@@ -108,6 +108,28 @@ akceptacji.
 Jednozdaniowa prośba może wystarczyć do rozpoczęcia autoryzowanej pracy.
 Partner pisze brief; użytkownik nie musi układać komend ani obsługiwać floty.
 
+### Przykład „pstryk”
+
+Gdy użytkownik zatwierdza przygotowany brief słowem „pstryk”, partner uruchamia
+zadanie i wraca do rozmowy. Dla uzgodnionego zadania Codex / `gpt-6-sol`
+w osobnym worktree wykonaj:
+
+```bash
+PROMPT="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts/<org>/<repo>/$(date +%Y_%m%d)/plans/<plan_file>.md"
+vc-workflow codex \
+  --model gpt-6-sol \
+  --repo "$(pwd)" \
+  --worktree true \
+  --file "$PROMPT" \
+  --json
+```
+
+Zastąp placeholdery ścieżką rzeczywiście zapisanego briefu i zachowaj
+uzgodnionego providera, model oraz runtime. Ustaw `PROMPT` przed komendą startu:
+przypisanie przy tej samej komendzie nie zasila jej rozwinięcia `$PROMPT`.
+`--file` wczytuje brief, a `--prompt` przyjmuje tekst inline. Zachowaj zwrócony
+receipt runu i uzbrój odbiór ukończenia, zanim wrócisz do wspólnego myślenia.
+
 Zewnętrznych workerów uruchamiaj przez framework, zachowując wybrany runtime,
 model, effort i zakres. Domyślnie worker działa odłączony i obserwowalny; użyj
 widocznego terminala, gdy provider wymaga TTY lub użytkownik tego chce.

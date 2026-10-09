@@ -107,6 +107,28 @@ examples.
 A one-sentence request can be enough to start authorized work. The partner
 writes the brief; the user need not compose commands or operate the fleet.
 
+### “Go ahead” example
+
+Once the user approves a prepared brief with “go ahead”, the partner launches it
+and returns to the conversation. For an agreed Codex / `gpt-6-sol` task in an
+isolated worktree, run:
+
+```bash
+PROMPT="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts/<org>/<repo>/$(date +%Y_%m%d)/plans/<plan_file>.md"
+vc-workflow codex \
+  --model gpt-6-sol \
+  --repo "$(pwd)" \
+  --worktree true \
+  --file "$PROMPT" \
+  --json
+```
+
+Replace the placeholders with the actual saved brief path and preserve the
+agreed provider, model and runtime. Assign `PROMPT` before the launch command:
+an assignment on that command does not supply its own `$PROMPT` expansion.
+`--file` loads the brief; `--prompt` takes inline text. Retain the returned run
+receipt and arm completion delivery before returning to shared thinking.
+
 Use framework dispatch for external workers, preserving the selected runtime,
 model, effort, and scope. Detached, observable workers are the default; use a
 visible terminal only where the provider requires a TTY or the user requests it.
