@@ -42,6 +42,7 @@ def _generation(tmp_path: Path) -> tuple[Path, Path]:
         "Path = __import__('pathlib').Path\n"
         "Path(os.environ['TEST_VC_TERMINAL_CAPTURE']).write_text(json.dumps({\n"
         "    'argv': sys.argv[1:],\n"
+        "    'color': {key: os.environ.get(key) for key in ('TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CLICOLOR', 'CLICOLOR_FORCE', 'NODE_DISABLE_COLORS', 'ANSI_COLORS_DISABLED')},\n"
         "    'markers': {key: os.environ.get(key) for key in "
         + repr(ATTACHMENT_MARKERS)
         + "},\n"
@@ -115,3 +116,100 @@ def test_new_terminal_drops_inherited_attachment_context_but_preserves_root_and_
     ]
     if inherited:
         assert {key: os.environ[key] for key in ATTACHMENT_MARKERS} == inherited_values
+
+
+@pytest.mark.parametrize(
+    "term,colorterm",
+    [
+        ("xterm-256color", "truecolor"),
+        ("screen-256color", ""),
+        ("linux", ""),
+        ("dumb", ""),
+    ],
+)
+def test_native_terminal_entry_overrides_contaminated_app_parent(
+    tmp_path, term, colorterm
+):
+    wrapper, capture = _generation(tmp_path)
+    home = tmp_path / "home"
+    _write(home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[window]\n")
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TEST_VC_TERMINAL_CAPTURE": str(capture),
+        "TERM": term,
+        "COLORTERM": colorterm,
+        "NO_COLOR": "1",
+        "FORCE_COLOR": "0",
+        "CLICOLOR": "0",
+        "CLICOLOR_FORCE": "0",
+        "NODE_DISABLE_COLORS": "1",
+        "ANSI_COLORS_DISABLED": "1",
+    }
+    result = subprocess.run(
+        [str(wrapper), "-e", "explicit-shell"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    color = json.loads(capture.read_text())["color"]
+    assert color == {
+        "TERM": "xterm-256color" if term == "dumb" else term,
+        "COLORTERM": colorterm,
+        "NO_COLOR": None,
+        "FORCE_COLOR": None,
+        "CLICOLOR": "1",
+        "CLICOLOR_FORCE": None,
+        "NODE_DISABLE_COLORS": None,
+        "ANSI_COLORS_DISABLED": None,
+    }
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_product_shell_normalizes_existing_frame_parent_only_when_interactive(
+    tmp_path, interactive
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(tmp_path / "vc-home"),
+        "PATH": "/usr/bin:/bin",
+        "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "no-plugins"),
+        "VIBECRAFTED_QUIET_START": "1",
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "NO_COLOR": "1",
+        "FORCE_COLOR": "0",
+        "CLICOLOR": "0",
+        "CLICOLOR_FORCE": "0",
+        "NODE_DISABLE_COLORS": "1",
+        "ANSI_COLORS_DISABLED": "1",
+    }
+    profile = REPO_ROOT / "config/vc-terminal/interactive.zsh"
+    result = subprocess.run(
+        [
+            "/bin/zsh",
+            "-dfi" if interactive else "-df",
+            "-c",
+            'source "$1"; "$2" -c \'import json,os;print(json.dumps({k:v for k,v in os.environ.items() if k in ("NO_COLOR","FORCE_COLOR","CLICOLOR","CLICOLOR_FORCE")}))\'',
+            "probe",
+            str(profile),
+            sys.executable,
+        ],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout.splitlines()[-1])
+    assert observed.get("NO_COLOR") == (None if interactive else "1")
+    assert observed.get("FORCE_COLOR") == (None if interactive else "0")
+    assert observed["CLICOLOR"] == ("1" if interactive else "0")
+    assert observed.get("CLICOLOR_FORCE") == (None if interactive else "0")

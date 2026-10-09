@@ -35,7 +35,11 @@ from .control_plane import (
     sync_state,
 )
 from .effort_overrides import _effort_override_receipt, _with_effort_override
-from .env_allowlist import dispatcher_identity, filter_headless_worker_env
+from .env_allowlist import (
+    dispatcher_identity,
+    filter_headless_worker_env,
+    visible_color_environment,
+)
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .failure_attribution import attribute_failure
@@ -1066,7 +1070,7 @@ def _fresh_child_environment(
         for name in tuple(child):
             if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
                 child.pop(name, None)
-    return _scrub_runtime_bootstrap(child)
+    return visible_color_environment(_scrub_runtime_bootstrap(child))
 
 
 def continuity_policy_capabilities(

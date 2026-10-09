@@ -112,6 +112,7 @@ def _fake_supervision_provider(path: Path) -> None:
         "capture = pathlib.Path(os.environ['SUPERVISION_CAPTURES']) / f'{role}.json'\n"
         "capture.write_text(json.dumps({\n"
         "  'pid': os.getpid(), 'role': role,\n"
+        "  'color': {k:os.environ.get(k) for k in ('NO_COLOR','NODE_DISABLE_COLORS','ANSI_COLORS_DISABLED','FORCE_COLOR','CLICOLOR','CLICOLOR_FORCE')},\n"
         "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
         "  'session_id': sys.argv[sys.argv.index('--session-id') + 1],\n"
         "}) + '\\n', encoding='utf-8')\n"
@@ -707,6 +708,16 @@ def test_supervised_terminal_semantics_settle_both_processes(
         SUPERVISION_CAPTURES=str(captures),
         PATH=str(fake_bin) + os.pathsep + env["PATH"],
     )
+    env.update(
+        TERM="xterm-256color",
+        COLORTERM="truecolor",
+        NO_COLOR="1",
+        NODE_DISABLE_COLORS="1",
+        ANSI_COLORS_DISABLED="1",
+        FORCE_COLOR="0",
+        CLICOLOR="0",
+        CLICOLOR_FORCE="0",
+    )
     env["AGENT_EXIT" if exit_role == "agent" else "OPERATOR_EXIT"] = str(exit_code)
     completed = subprocess.run(
         [*_interactive_argv(repo), "--operator", "auto"],
@@ -734,6 +745,14 @@ def test_supervised_terminal_semantics_settle_both_processes(
     assert metas["agent"]["terminal_reason"] == child_reason
     assert metas["operator"]["terminal_reason"] == operator_reason
     for role in ("operator", "agent"):
+        assert captured[role]["color"] == {
+            "NO_COLOR": None,
+            "NODE_DISABLE_COLORS": None,
+            "ANSI_COLORS_DISABLED": None,
+            "FORCE_COLOR": "3",
+            "CLICOLOR": "1",
+            "CLICOLOR_FORCE": "1",
+        }
         assert metas[role]["liveness"] == "terminal"
         with pytest.raises(ProcessLookupError):
             os.kill(captured[role]["pid"], 0)
@@ -1964,7 +1983,14 @@ def test_continuity_modes_are_exact_and_fresh_proves_scoped_absence() -> None:
         },
         policy,
     )
-    assert child == {"PATH": "/tools", "HOME": "/user"}
+    assert child == {
+        "PATH": "/tools",
+        "HOME": "/user",
+        "TERM": "xterm-256color",
+        "FORCE_COLOR": "2",
+        "CLICOLOR": "1",
+        "CLICOLOR_FORCE": "1",
+    }
 
 
 def test_full_lineage_requires_explicit_parent_evidence() -> None:
@@ -2463,7 +2489,9 @@ def test_provider_boundary_leaves_a_founder_environment_untouched(
         "PYTHONNOUSERSITE": "1",
     }
 
-    assert _fresh_child_environment(dict(founder), policy) == founder
+    child = _fresh_child_environment(dict(founder), policy)
+    assert {key: child[key] for key in founder} == founder
+    assert child["CLICOLOR"] == "1" and child["CLICOLOR_FORCE"] == "1"
 
 
 def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> None:
