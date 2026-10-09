@@ -74,7 +74,7 @@ assets, failed Apple validation, a failed mounted-DMG walk-around, or a
 downloaded tarball whose source-provenance does not close against HEAD. It
 publishes only after downloading and byte-comparing the draft assets.
 
-The ordered command sequence to cut 4.1.0 with that DMG attached — including
+The ordered command sequence to cut 4.4.0 with that DMG attached — including
 which `$HOME/.keys` files must be present and what each verification step
 proves — is [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 

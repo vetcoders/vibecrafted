@@ -1,4 +1,4 @@
-# Cut 4.3.3 with six carriers
+# Cut 4.4.0 with six carriers
 
 This is the Agent-Operator preparation sequence. Merging into `main`, creating
 and pushing the release tag, publication, and replacing a live App remain
@@ -7,19 +7,19 @@ Founder actions. [RELEASE_KICKOFF.md](RELEASE_KICKOFF.md) defines the product;
 
 ## 0. One immutable release
 
-One GitHub Release `v4.3.3` carries one framework commit and one recorded
-terminal/Frame donor tuple. `VERSION` is already `4.3.3`.
+One GitHub Release `v4.4.0` carries one framework commit and one recorded
+terminal/Frame donor tuple. `VERSION` is already `4.4.0`.
 
 The publisher's closed allowlist contains **16 assets**:
 
 | Carrier or receipt                                                    | Required sidecars | Evidence                              |
 | --------------------------------------------------------------------- | ----------------- | ------------------------------------- |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
-| `Vibecrafted_RuntimePack_4.3.3-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
-| `Vibecrafted_RuntimePack_4.3.3-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
+| `Vibecrafted_RuntimePack_4.4.0-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
+| `Vibecrafted_RuntimePack_4.4.0-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
 | `release-output.json`                                                 | `.sig`            | source tuple and bound macOS carriers |
 
 Sidecars append their suffix to the complete carrier filename.
@@ -36,7 +36,7 @@ The portable archive is a source distribution, not proof of a native runtime.
 Inspect the exact source and donor commits before any build:
 
 ```bash
-test "$(tr -d '[:space:]' < VERSION)" = "4.3.3"
+test "$(tr -d '[:space:]' < VERSION)" = "4.4.0"
 git status --porcelain
 git rev-parse HEAD
 git -C ../vc-terminal status --porcelain
@@ -145,7 +145,7 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
 uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
   --release-output dist/release-output.json \
   --signature dist/release-output.json.sig \
-  --output dist/vibecrafted-4.3.3-walkaround.json
+  --output dist/vibecrafted-4.4.0-walkaround.json
 ```
 
 Verify each checksum, detached Runtime Pack signature, DMG staple and
@@ -171,8 +171,8 @@ the Founder’s live runtime. Missing fixtures are a failed required gate.
 After reviewing the exact candidate, promote it to `main` and tag that commit:
 
 ```bash
-git tag -a v4.3.3 -m "Vibecrafted 4.3.3"
-git push origin v4.3.3
+git tag -a v4.4.0 -m "Vibecrafted 4.4.0"
+git push origin v4.4.0
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```
 
