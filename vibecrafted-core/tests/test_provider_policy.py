@@ -1419,6 +1419,78 @@ def test_interactive_workspace_command_wraps_the_exact_init_route(
 
 
 @pytest.mark.parametrize(
+    "provider", ["codex", "claude", "agy", "grok", "junie", "copilot"]
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_interactive_effort_selection(tmp_path, monkeypatch, provider, explicit):
+    _repo(tmp_path)
+    config = tmp_path / "xdg" / "vibecrafted"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text(f'[agents.{provider}]\neffort = "low"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent))
+    command = interactive_workspace_command(
+        provider,
+        "/vc-init",
+        "local-native",
+        "bypass",
+        tmp_path,
+        token_budget="unmetered",
+        model="exact-provider-model",
+        effort="high" if explicit else "",
+    )
+    admission = json.loads(Path(command[-1]).read_text())
+    assert (
+        admission["model_requested"]
+        == admission["model_effective"]
+        == "exact-provider-model"
+    )
+    assert (
+        admission["effort_requested"]
+        == admission["effort_effective"]
+        == ("high" if explicit else "low")
+    )
+    assert admission["effort_source"] == ("cli" if explicit else "config.toml")
+    assert admission["effort_override_supported"] is True
+    assert admission["effort_override_skipped"] is False
+    assert (
+        config / "config.toml"
+    ).read_text() == f'[agents.{provider}]\neffort = "low"\n'
+
+
+@pytest.mark.parametrize(
+    "provider,effort,reason",
+    [
+        ("kimi", "high", "Effort is unavailable"),
+        ("cursor", "high", "Effort is unavailable"),
+    ]
+    + [
+        ("codex", invalid, "effort")
+        for invalid in (" high", "high ", "--high", "high\nlow")
+    ],
+)
+def test_interactive_effort_refuses_before_run_allocation(
+    tmp_path, monkeypatch, provider, effort, reason
+):
+    _repo(tmp_path)
+    # A refused control must not reserve a run or create a worktree.
+    monkeypatch.setattr(
+        "vibecrafted_core.workflow.reserve_run_id",
+        lambda *_: pytest.fail("refused effort allocated a run"),
+    )
+    with pytest.raises(ValueError, match=reason):
+        interactive_workspace_command(
+            provider,
+            "/vc-init",
+            "local-native",
+            "bypass",
+            tmp_path,
+            token_budget="unmetered",
+            effort=effort,
+            execution_runtime="local-worktrees",
+        )
+
+
+@pytest.mark.parametrize(
     ("selection", "runtime", "expected_kind", "expected_budget"),
     [
         (None, "local-native", "bounded", 250_000),

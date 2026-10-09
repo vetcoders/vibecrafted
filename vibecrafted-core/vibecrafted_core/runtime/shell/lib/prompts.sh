@@ -34,6 +34,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
   _vetcoders_contract_model=""
+  _vetcoders_contract_effort=""
   _vetcoders_contract_base=""
   _vetcoders_contract_policy_runtime=""
   _vetcoders_contract_execution_runtime=""
@@ -167,6 +168,16 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 && -n "$1" ]] || { echo "Missing or empty value for --model" >&2; return 1; }
         _vetcoders_contract_model="$1"
+        ;;
+      --effort)
+        # Interactive cost controls share the model admission gate.
+        if [[ -z "${_vetcoders_contract_allow_model:-}" ]]; then
+          printf 'Unknown flag: %s (flags go before --prompt; use -- for literal text)\n' "$1" >&2
+          return 1
+        fi
+        shift
+        [[ $# -gt 0 && -n "$1" ]] || { echo "Missing or empty value for --effort" >&2; return 1; }
+        _vetcoders_contract_effort="$1"
         ;;
       --execution-runtime)
         shift
