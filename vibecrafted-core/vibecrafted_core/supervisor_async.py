@@ -10,7 +10,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .agent_stream import (
@@ -90,7 +90,7 @@ def _default_silence_timeout() -> float:
 
 def _utc_now() -> datetime:
     """Current UTC-aware datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _provider_store_home() -> Path:
@@ -833,7 +833,7 @@ class AsyncSupervisor:
                     ),
                     timeout=timeout,
                 )
-        except asyncio.TimeoutError as stall:
+        except TimeoutError as stall:
             await self._terminate(handle)
             handle.exit_code = handle.process.returncode
             handle.completed_at = _utc_now()
@@ -1416,7 +1416,7 @@ class AsyncSupervisor:
             return
         try:
             await asyncio.wait_for(handle.process.wait(), timeout=3)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 if handle.pgid is not None:
                     os.killpg(handle.pgid, signal.SIGKILL)

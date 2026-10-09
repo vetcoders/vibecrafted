@@ -30,11 +30,10 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-
-import tomllib
 
 REPO_FLAG = "--repo"
 ROOT_FLAG = "--root"

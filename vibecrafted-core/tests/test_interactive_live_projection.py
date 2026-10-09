@@ -211,7 +211,7 @@ def test_interactive_launch_publishes_live_projection_without_observer(
 
         # An idle provider stays visibly live far past the heartbeat stall
         # window because its identity receipt proves the same process is alive.
-        idle_now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+        idle_now = dt.datetime.now(dt.UTC) + dt.timedelta(
             seconds=control_plane.RUN_STALL_SECONDS + 600
         )
         monkeypatch.setattr(control_plane, "_now", lambda: idle_now)

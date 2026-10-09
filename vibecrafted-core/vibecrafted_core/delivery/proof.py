@@ -15,7 +15,7 @@ import shlex
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -216,7 +216,7 @@ def run_proof(
         refusal_reasons=tuple(dict.fromkeys(refusals)),
         contract_sha256=contract_digest,
         executor_sha256=engine_digest,
-        evaluated_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        evaluated_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
     )
 
 

@@ -24,10 +24,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-
 import tomllib
+from datetime import UTC, datetime
+from pathlib import Path
 
 _TELEMETRY_ROOT = Path(__file__).resolve().parents[1]
 if str(_TELEMETRY_ROOT) not in sys.path:
@@ -234,7 +233,7 @@ class KimiWebProbe:
 def build_snapshot(auth_data: dict, info_data: dict, usage_data: dict) -> dict:
     snap = {
         "ts": int(time.time()),
-        "ts_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts_iso": datetime.now(UTC).isoformat(timespec="seconds"),
         "auth": (auth_data.get("managed_provider") or {}).get("status", "unknown"),
         "kind": usage_data.get("kind", "error"),
     }
@@ -282,8 +281,8 @@ def _kimi_day(value: object, mtime: float) -> str:
     if number > 10_000_000_000:
         number //= 1000
     if number > 1_000_000_000:
-        return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
-    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(number, tz=UTC).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(mtime, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _iter_wire_files(root: Path) -> list[Path]:
@@ -574,7 +573,7 @@ def cmd_daemon(cfg: dict) -> int:
                 usages = quota.get("usages") or {}
                 snap = {
                     "ts": int(now),
-                    "ts_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "ts_iso": datetime.now(UTC).isoformat(timespec="seconds"),
                     "auth": cached_auth,
                     "kind": "ok",
                     "plan": cached_userinfo.get("userLevelName"),
@@ -864,8 +863,10 @@ def _reset_in(reset_at: str | None) -> str:
     if not reset_at:
         return "?"
     try:
-        dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
-        delta = dt - datetime.now(timezone.utc)
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = reset_at.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized_timestamp)
+        delta = dt - datetime.now(UTC)
         secs = max(0, int(delta.total_seconds()))
         return f"{secs // 3600}:{(secs % 3600) // 60:02d}"
     except (AttributeError, TypeError, ValueError):

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -5635,10 +5635,12 @@ def resolve_session_selection(
             native = _provider_session_for_continue(row)
             stamp = str(row.get("started_at") or row.get("created_at") or "")
             try:
-                instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                # Keep legacy date-only parsing and embedded-Z rejection.
+                normalized_timestamp = stamp.replace("Z", "+00:00")
+                instant = datetime.fromisoformat(normalized_timestamp)
                 if instant.tzinfo is None:
                     continue
-                timestamp = instant.astimezone(timezone.utc).timestamp()
+                timestamp = instant.astimezone(UTC).timestamp()
             except ValueError:
                 continue
             if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:

@@ -79,8 +79,10 @@ def ensure_generation_python() -> None:
     selected = os.environ.get("VIBECRAFTED_RUNTIME_ROOT") or os.environ.get(
         "VIBECRAFTED_ROOT", ""
     )
+    # Bootstrap can run on older host Python despite the package's 3.11 floor.
+    minimum_python = (3, 11)
     try:
-        if sys.version_info < (3, 11):
+        if sys.version_info < minimum_python:
             raise ImportError("Python 3.11+ with tomllib is required")
         __import__("tomllib")
         core = __import__("vibecrafted_core")

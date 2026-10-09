@@ -141,7 +141,7 @@ def test_real_dispatcher_wakes_await_under_100ms_without_server(
     try:
         _wait_for(socket_path)
         result = control_plane.await_run(run_id, hard_cap_seconds=5)
-        returned_at = dt.datetime.now(dt.timezone.utc)
+        returned_at = dt.datetime.now(dt.UTC)
         process.wait(timeout=5)
     finally:
         if process.poll() is None:
@@ -399,7 +399,7 @@ def test_real_dispatcher_drops_backpressured_client_without_stalling_terminal(
         _wait_for(socket_path)
         slow.connect(str(socket_path))
         result = control_plane.await_run(run_id, hard_cap_seconds=5)
-        returned_at = dt.datetime.now(dt.timezone.utc)
+        returned_at = dt.datetime.now(dt.UTC)
         stdout, stderr = process.communicate(timeout=5)
     finally:
         slow.close()
@@ -425,7 +425,7 @@ def test_real_dispatcher_client_buffers_partial_jsonl_frame_byte_by_byte(
     try:
         _wait_for(socket_path)
         result = wait_for_run_signal(run_id, timeout=5, read_size=1)
-        returned_at = dt.datetime.now(dt.timezone.utc)
+        returned_at = dt.datetime.now(dt.UTC)
         stdout, stderr = process.communicate(timeout=5)
     finally:
         if process.poll() is None:
@@ -477,7 +477,7 @@ def test_real_dispatcher_replacement_changes_identity_and_reclaims_dead_owner(
     )
     try:
         verdict = control_plane.await_run(run_id, hard_cap_seconds=5)
-        returned_at = dt.datetime.now(dt.timezone.utc)
+        returned_at = dt.datetime.now(dt.UTC)
         stdout, stderr = replacement.communicate(timeout=5)
     finally:
         if replacement.poll() is None:
@@ -543,7 +543,7 @@ def test_real_dispatchers_long_home_use_distinct_mac_safe_sun_paths(
         monkeypatch.setenv("VIBECRAFTED_HOME", str(home_a))
         _wait_for(path_a)
         result_a = control_plane.await_run(run_id, hard_cap_seconds=5)
-        returned_a = dt.datetime.now(dt.timezone.utc)
+        returned_a = dt.datetime.now(dt.UTC)
         first_output = first.communicate(timeout=5)
     finally:
         if first.poll() is None:
@@ -557,7 +557,7 @@ def test_real_dispatchers_long_home_use_distinct_mac_safe_sun_paths(
         monkeypatch.setenv("VIBECRAFTED_HOME", str(home_b))
         _wait_for(path_b)
         result_b = control_plane.await_run(run_id, hard_cap_seconds=5)
-        returned_b = dt.datetime.now(dt.timezone.utc)
+        returned_b = dt.datetime.now(dt.UTC)
         second_output = second.communicate(timeout=5)
     finally:
         if second.poll() is None:

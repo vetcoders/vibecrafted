@@ -6,10 +6,10 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 import vibecrafted_core
 from vibecrafted_core import workflows
 

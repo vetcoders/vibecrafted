@@ -24,10 +24,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-
 import tomllib
+from datetime import UTC, datetime
+from pathlib import Path
 
 # ---------------------------------------------------------------- config
 
@@ -325,7 +324,9 @@ class AgyTranscriptTracker:
                     ev_ts = 0
                     if dt_str:
                         try:
-                            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                            # Keep legacy date-only parsing and embedded-Z rejection.
+                            normalized_timestamp = dt_str.replace("Z", "+00:00")
+                            dt = datetime.fromisoformat(normalized_timestamp)
                             ev_ts = int(dt.timestamp() * 1000)
                         except (AttributeError, ValueError):
                             ev_ts = int(time.time() * 1000)
@@ -565,7 +566,7 @@ def cmd_once(cfg: dict, conversation_id: str | None = None) -> int:
 
     snap = {
         "ts": int(time.time()),
-        "ts_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts_iso": datetime.now(UTC).isoformat(timespec="seconds"),
         "conversation_id": cid,
         "surface": surface,
         "workspace": agg.get("workspace"),
@@ -628,7 +629,7 @@ def cmd_daemon(cfg: dict) -> int:
                 is_429 = agg.get("last_429_ts", 0) > agg.get("last_success_ts", 0)
                 snap = {
                     "ts": int(time.time()),
-                    "ts_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "ts_iso": datetime.now(UTC).isoformat(timespec="seconds"),
                     "conversation_id": cid,
                     "surface": surface,
                     "workspace": agg.get("workspace"),
@@ -701,7 +702,7 @@ def cmd_sessions(cfg: dict) -> int:
         tracker = AgyTranscriptTracker(p, cid, cfg)
         agg = tracker.update()
         dt = (
-            datetime.fromtimestamp(mtime, tz=timezone.utc)
+            datetime.fromtimestamp(mtime, tz=UTC)
             .astimezone()
             .strftime("%Y-%m-%d %H:%M")
         )

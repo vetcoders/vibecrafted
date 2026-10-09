@@ -16,10 +16,10 @@ import sys
 import tempfile
 import termios
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 ENTRY = (
     Path(__file__).resolve().parents[2] / "config/alacritty/launch-primary-shell.zsh"

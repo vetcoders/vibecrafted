@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1272,7 +1272,7 @@ def test_marbles_runtime_consumes_ancestor_override_sequence_across_children(
     assert all(loop["ancestor_slug"] == "ancestor" for loop in state["loops"][:3])
     assert state["ancestor_mtime"] == datetime.fromtimestamp(
         (state_dir / "ancestor.md").stat().st_mtime,
-        timezone.utc,
+        UTC,
     ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     events = _load_spawn_events(capture_file)

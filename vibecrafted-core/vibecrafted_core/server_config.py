@@ -12,11 +12,10 @@ import shlex
 import stat
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
-
-import tomllib
 
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 3024
