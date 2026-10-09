@@ -159,6 +159,13 @@ export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
+# The runtime python pin: this terminal's python and python3 are the
+# interpreter pinned above, reached through the generation's door. The shell
+# profile only inherits it and puts the door back after zsh startup.
+if [[ -x "$root/config/runtime-pin/bin/python3" ]]; then
+  PATH="$root/config/runtime-pin/bin${PATH:+:$PATH}"
+  export PATH
+fi
 
 # This wrapper creates a new native terminal, so it must not pass through an
 # attachment identity from the non-interactive caller.  The child may start a

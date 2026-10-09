@@ -131,6 +131,7 @@ def seed_runtime_pack(
     for relative in (
         "vibecrafted-core/vibecrafted_core/config/vc-frame",
         "config/vc-terminal",
+        "config/runtime-pin",
         "vibecrafted-core/vibecrafted_core/runtime/shell/aliases",
     ):
         shutil.copytree(

@@ -557,7 +557,92 @@ def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
         seen.add(text)
         resolved.append(text)
 
+    door = _selected_python_door(env)
+    if door is not None:
+        resolved = [door, *(entry for entry in resolved if entry != door)]
     return os.pathsep.join(resolved)
+
+
+# The runtime python pin. A process entering the runtime pins one interpreter,
+# VIBECRAFTED_PYTHON (the absolute bin/python3 of the selected generation), and
+# puts the generation's python door first on PATH. The door forwards python and
+# python3 to the pin and refuses without one; the guest ZDOTDIR keeps the door
+# first in nested zsh. Bash twins: runtime/scripts/lib/util.sh
+# (spawn_prepend_agent_tool_paths, spawn_pin_runtime_python).
+RUNTIME_PIN_DIRECTORY = "config/runtime-pin"
+
+
+def runtime_python_door(runtime_root: Path) -> Path:
+    """The generation's private directory holding only ``python`` and ``python3``."""
+    return runtime_root / RUNTIME_PIN_DIRECTORY / "bin"
+
+
+def runtime_guest_zdotdir(runtime_root: Path) -> Path:
+    """The generation's guest ZDOTDIR: the user's zsh startup, then the door."""
+    return runtime_root / RUNTIME_PIN_DIRECTORY / "zsh"
+
+
+def _selected_python_door(environment: Mapping[str, str]) -> str | None:
+    if is_windows():
+        return None
+    raw_root = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip()
+    if not raw_root or not Path(raw_root).is_absolute():
+        return None
+    door = runtime_python_door(Path(raw_root))
+    if not (door / "python3").is_file():
+        return None
+    return str(door)
+
+
+def pin_runtime_python(environment: Mapping[str, str]) -> dict[str, str]:
+    """Carry the runtime python pin into a child environment.
+
+    An inherited ``VIBECRAFTED_PYTHON`` stays: an update never moves a live
+    session to another interpreter. A child without one gets the selected
+    generation's ``bin/python3``, the same generation as its runtime root. The
+    door goes first on PATH, so ``python``, ``python3`` and
+    ``#!/usr/bin/env python3`` reach the pin. ``ZDOTDIR`` names the guest
+    directory, which runs the user's own zsh startup (``VIBECRAFTED_USER_ZDOTDIR``,
+    default HOME) and then puts the door back in front of what path_helper
+    and personal dotfiles prepended.
+
+    Without a selected generation that carries the door (source and test
+    lanes, Windows, older generations) the environment is returned unchanged:
+    outside the runtime ``python3`` stays the user's own.
+    """
+
+    env = dict(environment)
+    door = _selected_python_door(env)
+    if door is None:
+        return env
+    root = Path(str(env["VIBECRAFTED_RUNTIME_ROOT"]).strip())
+    if not str(env.get("VIBECRAFTED_PYTHON", "")).strip():
+        env["VIBECRAFTED_PYTHON"] = str(root / "bin" / "python3")
+    entries = [
+        entry
+        for entry in str(env.get("PATH", "")).split(os.pathsep)
+        if entry and entry != door
+    ]
+    env["PATH"] = os.pathsep.join([door, *entries])
+
+    guest = runtime_guest_zdotdir(root)
+    if guest.is_dir():
+        current = str(env.get("ZDOTDIR", "")).strip()
+        home = str(env.get("HOME") or Path.home())
+        crafted = str(env.get("VIBECRAFTED_HOME") or f"{home}/.vibecrafted")
+        # A product shell ZDOTDIR (vc-terminal, Quick cmd) restores the door
+        # itself; keep it, as the bash twin does.
+        product = {
+            f"{home}/.config/vibecrafted/vc-terminal",
+            f"{crafted}/shell/quick-cmd",
+        }
+        if current != str(guest) and current not in product:
+            if current and not current.endswith(f"/{RUNTIME_PIN_DIRECTORY}/zsh"):
+                env["VIBECRAFTED_USER_ZDOTDIR"] = current
+            elif not str(env.get("VIBECRAFTED_USER_ZDOTDIR", "")).strip():
+                env["VIBECRAFTED_USER_ZDOTDIR"] = home
+            env["ZDOTDIR"] = str(guest)
+    return env
 
 
 def active_runtime_pointer(runtime_home: Path | None = None) -> Path:

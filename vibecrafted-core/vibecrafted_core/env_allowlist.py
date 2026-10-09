@@ -7,12 +7,19 @@ Codex worker, along with unrelated API tokens. One allowlist is the gate.
 
 ``selected_runtime_environment`` is not this gate. Message delivery still uses
 that helper to address a selected runtime generation.
+
+What passes the gate keeps the runtime python pin: ``pin_runtime_python``
+puts the selected generation's python door first on PATH and points ZDOTDIR
+at its guest directory, so the worker's own shells -- a provider's login-shell
+snapshot, ``zsh -lc``, a hook -- reach ``VIBECRAFTED_PYTHON`` as python3.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+
+from .runtime_paths import pin_runtime_python
 
 # Process basics a provider CLI needs before it can read HOME or speak HTTPS.
 _PROCESS_ALLOW: frozenset[str] = frozenset(
@@ -191,16 +198,21 @@ def env_key_allowed(name: str) -> bool:
 
 
 def filter_headless_worker_env(source: Mapping[str, str]) -> dict[str, str]:
-    """Copy only allowlisted string entries, preserving order and values.
+    """Copy only allowlisted string entries, then carry the runtime python pin.
 
     Non-string values are dropped. ``subprocess`` environments are strings,
     and a non-string would be a programming error rather than a secret to pass.
+    The inherited ZDOTDIR does not pass; a selected generation that carries
+    the python door replaces it with its guest directory (see
+    ``runtime_paths.pin_runtime_python``).
     """
-    return {
-        key: value
-        for key, value in source.items()
-        if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
-    }
+    return pin_runtime_python(
+        {
+            key: value
+            for key, value in source.items()
+            if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
+        }
+    )
 
 
 def dispatcher_identity(

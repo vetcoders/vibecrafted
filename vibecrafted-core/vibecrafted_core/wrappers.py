@@ -18,7 +18,7 @@ from .env_allowlist import filter_headless_worker_env
 from .events import append_event
 from .help_surface import AGENT_SELECTOR
 from .package_resources import deck_path, package_root, runtime_path
-from .spawn import Supervisor
+from .spawn import Supervisor, interactive_launch_interpreter
 
 AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
@@ -127,7 +127,10 @@ def _env_for_run(run_id: str, skill_code: str) -> dict[str, str]:
     env["VIBECRAFTED_RUN_ID"] = run_id
     env["VIBECRAFTED_SKILL_CODE"] = skill_code
     env.setdefault("VIBECRAFTED_ROOT", str(runtime_root()))
-    env.setdefault("VIBECRAFTED_PYTHON", sys.executable)
+    if not env.get("VIBECRAFTED_PYTHON"):
+        # The pin names the generation's bin/python3 bootstrap, never the raw
+        # interpreter this process runs on inside a Runtime Pack.
+        env["VIBECRAFTED_PYTHON"], _ = interactive_launch_interpreter(env)
     env.setdefault("VETCODERS_SPAWN_RUNTIME", "headless")
     core_path = str(package_root().parent)
     env["PYTHONPATH"] = f"{core_path}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(

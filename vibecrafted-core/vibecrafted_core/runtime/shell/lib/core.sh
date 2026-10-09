@@ -208,6 +208,14 @@ _vetcoders_path_with_bundled_bin_priority() {
   local current_path="${1:-}"
   local remainder="$current_path"
   local entry dir result="" consumed=0
+  local pin_root="${VIBECRAFTED_RUNTIME_ROOT:-}"
+
+  # The selected generation's python door goes first: python and python3 are
+  # the runtime pin (VIBECRAFTED_PYTHON), never a host interpreter. It holds
+  # only those two names, so the Founder's own tool order is untouched.
+  if [[ "$pin_root" == /* && -x "${pin_root%/}/config/runtime-pin/bin/python3" ]]; then
+    result="${pin_root%/}/config/runtime-pin/bin"
+  fi
 
   while (( ! consumed )); do
     if [[ "$remainder" == *:* ]]; then
