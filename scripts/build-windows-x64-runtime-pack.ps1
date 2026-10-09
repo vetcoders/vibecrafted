@@ -43,8 +43,8 @@ $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim(
 # only after this Windows builder actually compiles them (fail closed below).
 $terminalRevision = "cfa2c367ed36ba9179a05fff32ab1221060cb04e"
 $terminalArchiveSha256 = "ea2f893250a42b0b2722e835e990d6c8169e4e65d817b99fc951c1f2de128c94"
-$frameRevision = "a485821727bb1bc1dc27a17d6db78a375e723e63"
-$frameArchiveSha256 = "a45b32fd356bfb3f343e775f22d8811f74703d8d8db533c4b99b3762c921ddaa"
+$frameRevision = "5db1b3ebcfe34aa1c83ac383a28bb0199fe30bfa"
+$frameArchiveSha256 = "5cfcdf19c5954fb70c63c5d31983453745d283bf8b21aa0bd88bf16b92a3b2ff"
 # Canonical carrier name matches Linux/darwin Runtime Pack shape:
 # Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
 # (platform token stays win32-x64 for install-runtime-pack.ps1 contract).
