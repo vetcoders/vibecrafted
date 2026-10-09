@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import curses
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -128,8 +130,14 @@ from vibecrafted_core.aicx_session_chain import (
     SessionRecord,
     project_filter_for_root,
 )
+from vibecrafted_core.effort_overrides import EFFORT_OVERRIDE_STYLES
+from vibecrafted_core.model_overrides import MODEL_OVERRIDE_FLAGS
 from vibecrafted_core.repo_selection import RepoSelectionError, validate_workspace_root
-from vibecrafted_core.runtime_paths import selected_runtime_environment
+from vibecrafted_core.runtime_paths import (
+    selected_runtime_environment,
+    vibecrafted_home,
+)
+from vibecrafted_core.server_config import load_agent_launch_config, validate_agent_pin
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
     OPERATOR_POLICIES,
@@ -152,6 +160,12 @@ from vibecrafted_core.workspace_catalog import (
 
 AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
+PURPOSES = ("Quick script", "Think with me", "Fix and verify")
+PURPOSE_PROMPTS = (
+    "Help me write a quick script. Agree on its scope before running it.",
+    "Think through this project with me. Discuss options before making changes.",
+    "Help me diagnose, fix and verify a problem. First agree on the problem and scope.",
+)
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
     "local-native": ("This checkout, shared with you.", ""),
@@ -194,6 +208,10 @@ def launch_argv(
     continuity: str = "fresh",
     continuity_parent: str = "",
     workspace: str | os.PathLike[str] = "",
+    *,
+    model: str = "",
+    purpose: int | None = None,
+    session: str = "",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
@@ -202,6 +220,12 @@ def launch_argv(
         raise ValueError(f"unsupported interactive mode: {mode}")
     if continuity not in CONTINUITY_MODES:
         raise ValueError(f"unsupported continuity policy: {continuity}")
+    if model:
+        validate_agent_pin(model, "model")
+        if agent not in MODEL_OVERRIDE_FLAGS:
+            raise ValueError("Model selection is unavailable for this provider")
+    if purpose is not None and purpose not in range(len(PURPOSES)):
+        raise ValueError("unsupported purpose")
     root = str(Path(workspace).expanduser().resolve()) if workspace else ""
     if mode != "resume":
         decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
@@ -240,7 +264,11 @@ def launch_argv(
             command.extend(["--parent-session", continuity_parent])
         elif continuity == "full-lineage" and continuity_parent:
             command.extend(["--continuity-parent", continuity_parent])
-        if mode in MODE_PROMPTS:
+        if model:
+            command.extend(["--model", model])
+        if purpose is not None:
+            command.extend(["--prompt", PURPOSE_PROMPTS[purpose]])
+        elif mode in MODE_PROMPTS:
             command.extend(["--prompt", MODE_PROMPTS[mode]])
         return command
     if runtime != "local-native":
@@ -250,6 +278,12 @@ def launch_argv(
     command = ["vibecrafted", "resume", agent]
     if root:
         command.extend(["--root", root])
+    if session:
+        if session in {"current", "last"}:
+            raise ValueError("Choose a concrete provider session")
+        command.extend(["--session", session])
+    if model:
+        command.extend(["--model", model])
     return command
 
 
@@ -961,7 +995,9 @@ class Workshop:
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
         self.launch_mode = 0
-        self.runtime = 1  # separate working copy when the provider supports it
+        self.runtime = (
+            0  # start in the selected project; isolation is an explicit choice
+        )
         self.permissions = 0
         self.continuity = 0
         self.continuity_parent = ""
@@ -986,6 +1022,183 @@ class Workshop:
         self.other_sessions: list[str] = []
         self.other_error = ""
         self.show_other = False
+        self.model = ""
+        self.effort = ""
+        self.purpose = 1
+        self.session = ""
+        self.edit_controls = False
+        self.active_slot = 0
+        self.choices_root = self.path
+        self.agent_slots: list[dict[str, Any]] = [{}]
+        self.launch_results: list[dict[str, str]] = []
+        self._load_choices(restore_slots=True)
+
+    def _choice_path(self) -> Path:
+        # UI preferences belong to this launcher, not the workspace identity
+        # catalog or server configuration. Each canonical root owns one file.
+        digest = hashlib.sha256(
+            str(Path(self.path).expanduser().resolve()).encode()
+        ).hexdigest()
+        return vibecrafted_home() / "store" / "agent-workshop" / f"{digest}.json"
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            name: getattr(self, name)
+            for name in (
+                "agent",
+                "launch_mode",
+                "runtime",
+                "permissions",
+                "continuity",
+                "continuity_parent",
+                "model",
+                "effort",
+                "purpose",
+                "session",
+            )
+        }
+
+    def _restore(self, values: dict[str, Any]) -> None:
+        for name, value in values.items():
+            if name in self._snapshot():
+                setattr(self, name, value)
+        self.parent_sessions = []
+        self.parent_index = -1
+
+    def _read_choices(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self._choice_path().read_text())
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("unsupported preferences version")
+            if not isinstance(data.get("providers", {}), dict):
+                raise TypeError("invalid provider preferences")
+            return data
+        except FileNotFoundError:
+            return {"version": 1, "providers": {}}
+        except (OSError, ValueError, TypeError) as exc:
+            self.error = f"Saved choices unavailable: {exc}"
+            return {"version": 1, "providers": {}}
+
+    def _load_choices(self, *, restore_slots: bool = False) -> None:
+        data = self._read_choices()
+        if restore_slots:
+            slots = data.get("slots", [])
+            if isinstance(slots, list) and 1 <= len(slots) <= 3:
+                restored = []
+                for slot in slots:
+                    if not isinstance(slot, dict) or slot.get("provider") not in AGENTS:
+                        break
+                    values = {"agent": AGENTS.index(slot["provider"])}
+                    for name in ("model", "effort"):
+                        value = slot.get(name, "")
+                        if not isinstance(value, str):
+                            break
+                        if value:
+                            try:
+                                validate_agent_pin(value, name)
+                            except ValueError:
+                                break
+                        values[name] = value
+                    else:
+                        purpose = slot.get("purpose", 1)
+                        if isinstance(purpose, int) and purpose in range(len(PURPOSES)):
+                            values["purpose"] = purpose
+                            restored.append(values)
+                            continue
+                    break
+                if len(restored) == len(slots):
+                    self.agent_slots = restored
+                    self.agent = restored[0]["agent"]
+        provider = AGENTS[self.agent]
+        try:
+            defaults = load_agent_launch_config(provider)
+            self.model, self.effort = defaults.model, ""
+            # Empty effort leaves the existing runtime config default intact;
+            # only an explicit UI pin needs the missing admission extension.
+        except ValueError as exc:
+            self.model, self.effort = "", ""
+            self.error = str(exc)
+        self.purpose = 1
+        saved = data.get("providers", {}).get(provider, {})
+        if not isinstance(saved, dict):
+            self.error = "Saved provider choices are invalid"
+            return
+        for name in ("model", "effort"):
+            value = saved.get(name, "")
+            if isinstance(value, str) and value:
+                try:
+                    validate_agent_pin(value, name)
+                except ValueError:
+                    self.error = f"Saved {name} is invalid"
+                else:
+                    setattr(self, name, value)
+        purpose = saved.get("purpose", 1)
+        if isinstance(purpose, int) and purpose in range(len(PURPOSES)):
+            self.purpose = purpose
+        if restore_slots:
+            self._restore(self.agent_slots[0])
+        if provider not in EFFORT_OVERRIDE_STYLES:
+            self.effort = ""
+
+    def save_choices(self) -> None:
+        self.agent_slots[self.active_slot] = self._snapshot()
+        data = self._read_choices()
+        data.setdefault("providers", {})[AGENTS[self.agent]] = {
+            "model": self.model,
+            "effort": self.effort,
+            "purpose": self.purpose,
+        }
+        data["slots"] = [
+            {
+                "provider": AGENTS[s.get("agent", self.agent)],
+                **{
+                    key: s.get(key, getattr(self, key))
+                    for key in ("model", "effort", "purpose")
+                },
+            }
+            for s in self.agent_slots
+        ]
+        path = self._choice_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic publication; sessions and launch status are intentionally not
+        # remembered, because another visit is a new explicit launch batch.
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, delete=False
+        ) as stream:
+            json.dump(data, stream)
+            temporary = Path(stream.name)
+        temporary.replace(path)
+
+    def select_slot(self, index: int) -> None:
+        if not 0 <= index < len(self.agent_slots):
+            return
+        self.agent_slots[self.active_slot] = self._snapshot()
+        self.active_slot = index
+        values = self.agent_slots[index]
+        self.agent = values.get("agent", self.agent)
+        self._load_choices()
+        self._restore(values)
+        self.row = 0
+
+    def add_agent(self) -> None:
+        if len(self.agent_slots) == 3:
+            self.error = "Choose at most 3 agents"
+            return
+        self.agent_slots[self.active_slot] = self._snapshot()
+        self.agent_slots.append({"agent": self.agent})
+        self.select_slot(len(self.agent_slots) - 1)
+        self.session = ""
+        self.continuity_parent = ""
+
+    def remove_agent(self) -> None:
+        if len(self.agent_slots) == 1:
+            self.error = "Keep at least one agent"
+            return
+        self.agent_slots.pop(self.active_slot)
+        if self.launch_results:
+            self.launch_results.pop(self.active_slot)
+        self.active_slot = min(self.active_slot, len(self.agent_slots) - 1)
+        self._restore(self.agent_slots[self.active_slot])
 
     def configure(self) -> None:
         try:
@@ -1199,7 +1412,24 @@ class Workshop:
         height, width = self.window.getmaxyx()
         compact = height < 16 or width < 52
         left = 1 if compact else max(1, (width - min(width - 2, 84)) // 2)
-        top = 0 if compact else max(1, (height - (19 if self.advanced else 11)) // 2)
+        top = (
+            0
+            if compact
+            else max(
+                1,
+                (
+                    height
+                    - (
+                        19
+                        if self.advanced
+                        else 18
+                        if self.edit_controls or self.launch_results
+                        else 11
+                    )
+                )
+                // 2,
+            )
+        )
         inner = max(12, width - left - 2)
         _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
         _safe_addstr(
@@ -1209,6 +1439,28 @@ class Workshop:
             "Choose a provider, then Launch.",
             curses.A_DIM,
         )
+        slot_col = left
+        for index, slot in enumerate(self.agent_slots):
+            provider = (
+                AGENTS[self.agent]
+                if index == self.active_slot
+                else AGENTS[slot.get("agent", self.agent)]
+            )
+            label = f"[{index + 1} {provider}] "
+            _safe_addstr(
+                self.window,
+                top + 2,
+                slot_col,
+                label,
+                curses.A_BOLD if index == self.active_slot else 0,
+            )
+            self.mouse_targets.append(
+                (top + 2, slot_col, slot_col + len(label), index, "slot")
+            )
+            slot_col += len(label)
+        if len(self.agent_slots) < 3:
+            _safe_addstr(self.window, top + 2, slot_col, "[+ agent]", curses.A_BOLD)
+            self.mouse_targets.append((top + 2, slot_col, slot_col + 9, 0, "add"))
         self._draw_providers(top + 3, left, inner)
         path_row = top + 5
         path_col = _paint_row_focus(self.window, path_row, left, self.row == 1)
@@ -1218,6 +1470,13 @@ class Workshop:
             path_col,
             _clip(f"Project  {self.path}", inner),
             0,
+        )
+        controls = f"Choices · {self.model or 'provider model'} · {self.effort or 'default effort'} · {PURPOSES[self.purpose]}"
+        _safe_addstr(
+            self.window, path_row + 1, left, _clip(controls, inner), curses.A_DIM
+        )
+        self.mouse_targets.append(
+            (path_row + 1, left, left + min(len(controls), inner), 0, "controls")
         )
         toggle = (
             "▾" if self.advanced else "▸"
@@ -1349,14 +1608,60 @@ class Workshop:
                     curses.A_DIM,
                 )
             cursor += 9
+        if self.edit_controls:
+            fields = (
+                ("Model", self.model or "(provider default)", 7),
+                (
+                    "Effort",
+                    self.effort
+                    or (
+                        "(provider default)"
+                        if AGENTS[self.agent] in EFFORT_OVERRIDE_STYLES
+                        else "unavailable"
+                    ),
+                    8,
+                ),
+                ("Purpose", PURPOSES[self.purpose], 9),
+                ("Session", self.session or "(fresh; exact ID to resume)", 10),
+            )
+            if compact:
+                fields = (
+                    tuple(field for field in fields if field[2] == self.row)
+                    or fields[:1]
+                )
+            for offset, (label, value, focus_row) in enumerate(fields):
+                text_col = _paint_row_focus(
+                    self.window, cursor + offset, left, self.row == focus_row
+                )
+                _safe_addstr(
+                    self.window,
+                    cursor + offset,
+                    text_col,
+                    _clip(f"{label:10}{value}", inner),
+                )
+                self.mouse_targets.append(
+                    (cursor + offset, left, left + inner, focus_row, "field")
+                )
+            cursor += len(fields)
         launch_label = "[ Launch ]"
         launch_attr = curses.A_BOLD
         _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
         self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
+        for offset, result in enumerate(self.launch_results):
+            label = f"{offset + 1} {result.get('provider', '')}: {result['status']}"
+            if result["reason"]:
+                label += f" · {public_reason(result['reason']) or result['reason']}"
+            _safe_addstr(
+                self.window,
+                cursor + 1 + offset,
+                left,
+                _clip(label, inner),
+                curses.A_BOLD,
+            )
         hint = (
             "Enter launch  Esc back"
             if compact
-            else "←/→ provider · type to edit project · a advanced · Enter launch · Esc back"
+            else "←/→ provider · +/- agent · [/] slot · c choices · a advanced · Enter launch · Esc back"
         )
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
@@ -1384,25 +1689,69 @@ class Workshop:
                 raise SystemExit(0)
             self.mode = "home"
             return
+        editing_control = self.edit_controls and self.row in (7, 8, 10)
         editing_parent = self.advanced and self.row == 6
         editing_path = self.row == 1
-        if key in (ord("a"), ord("A")) and not editing_path and not editing_parent:
+        if not editing_path and not editing_parent and not editing_control:
+            if key == ord("+"):
+                self.add_agent()
+                return
+            if key == ord("-"):
+                self.remove_agent()
+                return
+            if key in (ord("["), ord("]")):
+                self.select_slot(
+                    (self.active_slot + (-1 if key == ord("[") else 1))
+                    % len(self.agent_slots)
+                )
+                return
+            if key in (ord("c"), ord("C")):
+                self.edit_controls = not self.edit_controls
+                self.advanced = False
+                self.row = 7 if self.edit_controls else 0
+                return
+        if (
+            self.active_slot < len(self.launch_results)
+            and self.launch_results[self.active_slot]["status"] == "opened"
+            and key not in (10, 13, curses.KEY_ENTER)
+        ):
+            self.error = (
+                "This agent tab is already open; add a new agent to launch another"
+            )
+            return
+        if (
+            key in (ord("a"), ord("A"))
+            and not editing_path
+            and not editing_parent
+            and not editing_control
+        ):
             self.advanced = not self.advanced
+            self.edit_controls = False
             if not self.advanced:
                 self.row = min(self.row, 1)
             return
-        rows = 7 if self.advanced else 2
+        rows = (
+            list(range(7))
+            if self.advanced
+            else [0, 1, 7, 8, 9, 10]
+            if self.edit_controls
+            else [0, 1]
+        )
+        if self.row not in rows:
+            self.row = rows[0]
         if key == curses.KEY_UP:
-            self.row = (self.row - 1) % rows
+            self.row = rows[(rows.index(self.row) - 1) % len(rows)]
             return
         if key in (curses.KEY_DOWN, ord("\t")):
-            self.row = (self.row + 1) % rows
+            self.row = rows[(rows.index(self.row) + 1) % len(rows)]
             return
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT) or (
             key == ord(" ") and not editing_path and not editing_parent
         ):
             delta = -1 if key == curses.KEY_LEFT else 1
-            if self.row == 0:
+            if self.row == 9 and self.edit_controls:
+                self.purpose = (self.purpose + delta) % len(PURPOSES)
+            elif self.row == 0:
                 self._cycle_agent(delta)
             elif self.advanced and self.row == 2:
                 self._cycle_mode(delta)
@@ -1420,6 +1769,16 @@ class Workshop:
             return
         editing_parent = self.advanced and self.row == 6
         editing_path = self.row == 1
+        if editing_control:
+            name = {7: "model", 8: "effort", 10: "session"}[self.row]
+            if name == "effort" and AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES:
+                self.error = "Effort is unavailable for this provider"
+                return
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                setattr(self, name, getattr(self, name)[:-1])
+            elif 32 <= key <= 126:
+                setattr(self, name, getattr(self, name) + chr(key))
+            return
         if editing_path or editing_parent:
             if key in (curses.KEY_BACKSPACE, 127, 8):
                 if editing_parent:
@@ -1437,6 +1796,14 @@ class Workshop:
                     self.path += chr(key)
                     self.parent_sessions = []
                     self.parent_index = -1
+            if editing_path and self.path != self.choices_root:
+                self.choices_root = self.path
+                self.active_slot = 0
+                self.agent_slots = [{"agent": self.agent}]
+                self.launch_results = []
+                self.session = ""
+                self.continuity_parent = ""
+                self._load_choices(restore_slots=True)
 
     def _cycle_agent(self, delta: int) -> None:
         index = self.agent
@@ -1449,7 +1816,23 @@ class Workshop:
 
     def _select_agent(self, index: int) -> None:
         """Switch provider by key or click; parent sessions belong to the old one."""
+        if (
+            self.active_slot < len(self.launch_results)
+            and self.launch_results[self.active_slot]["status"] == "opened"
+        ):
+            self.error = (
+                "This agent tab is already open; add a new agent to launch another"
+            )
+            return
+        try:
+            self.save_choices()
+        except (OSError, ValueError) as exc:
+            self.error = f"Cannot remember choices: {exc}"
+            return
         self.agent = index
+        self.session = ""
+        self.continuity_parent = ""
+        self._load_choices()
         self._normalize_runtime_choice()
         self._normalize_permission_choice()
         self._normalize_mode_choice()
@@ -1588,6 +1971,20 @@ class Workshop:
             if kind == "face":
                 self._focus_face(index)
                 return
+            if kind == "slot":
+                self.select_slot(index)
+                return
+            if kind == "add":
+                self.add_agent()
+                return
+            if kind == "controls":
+                self.edit_controls = not self.edit_controls
+                self.advanced = False
+                self.row = 7 if self.edit_controls else 0
+                return
+            if kind == "field":
+                self.row = index
+                return
             if kind == "provider":
                 self.row = 0
                 if _provider_available(AGENTS[index]):
@@ -1600,6 +1997,7 @@ class Workshop:
                 return
             if kind == "advanced":
                 self.advanced = not self.advanced
+                self.edit_controls = False
                 if not self.advanced:
                     self.row = min(self.row, 1)
                 return
@@ -1658,6 +2056,51 @@ class Workshop:
     def launch(self) -> None:
         try:
             workspace = normalized_workspace(self.path)
+            if self.launch_results and any(
+                r["status"] == "opened" and r["workspace"] != str(workspace)
+                for r in self.launch_results
+            ):
+                raise ValueError(
+                    "Tabs are already open in the previous project; reopen the launcher for a new batch"
+                )
+            self.save_choices()
+        except (ValueError, OSError) as exc:
+            self.error = str(exc)
+            return
+        active = self.active_slot
+        selections = [dict(s) for s in self.agent_slots]
+        while len(self.launch_results) < len(selections):
+            self.launch_results.append({"status": "pending", "reason": ""})
+        if self.launch_results and all(
+            r["status"] == "opened" for r in self.launch_results
+        ):
+            self.notice = "All selected agent tabs are already open"
+        else:
+            self.notice = ""
+        for index, values in enumerate(selections):
+            result = self.launch_results[index]
+            # Opening a tab is the duplicate boundary, even when showing that
+            # session afterwards fails. It is not a provider-health receipt.
+            if result["status"] == "opened":
+                continue
+            self._restore(values)
+            self.error = ""
+            self._opened = False
+            self._launch_one()
+            self.launch_results[index] = {
+                "status": "opened" if self._opened else "failed",
+                "reason": self.error,
+                "provider": AGENTS[self.agent],
+                "workspace": str(workspace),
+            }
+        self._restore(selections[active])
+        self.error = next((r["reason"] for r in self.launch_results if r["reason"]), "")
+        if len(selections) > 1 or self.error:
+            self.mode = "launcher"
+
+    def _launch_one(self) -> None:
+        try:
+            workspace = normalized_workspace(self.path)
             runtime_name = RUNTIME_POLICIES[self.runtime]
             capability = runtime_policy_capabilities(AGENTS[self.agent])[runtime_name]
             if not capability["available"]:
@@ -1672,13 +2115,23 @@ class Workshop:
                 raise ValueError(str(continuity_capability["reason"]))
             argv = launch_argv(
                 AGENTS[self.agent],
-                LAUNCH_MODES[self.launch_mode],
+                "resume" if self.session else LAUNCH_MODES[self.launch_mode],
                 runtime_name,
                 PERMISSION_POLICIES[self.permissions],
                 continuity=continuity_name,
                 continuity_parent=self.continuity_parent,
                 workspace=workspace,
+                model=self.model,
+                purpose=self.purpose if self.launch_mode == 0 else None,
+                session=self.session,
             )
+            if self.effort:
+                validate_agent_pin(self.effort, "effort")
+                if AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES:
+                    raise ValueError("Effort is unavailable for this provider")
+                raise ValueError(
+                    "Interactive effort transport needs the bounded spawn contract extension"
+                )
         except ValueError as exc:
             self.error = public_reason(str(exc)) or str(exc)
             return
@@ -1729,6 +2182,7 @@ class Workshop:
                 result.stderr or result.stdout or "cannot open a tab for that Agent"
             ).strip()
             return
+        self._opened = True
         current = current_frame_session()
         if current != destination:
             try:
