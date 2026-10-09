@@ -251,6 +251,10 @@ bindings = [
   { mouse = "WheelDown", mods = "Shift", action = "ScrollLineDown" },
 ]
 
+[colors]
+# Frame emits explicit RGB backgrounds; apply window opacity so blur stays visible.
+transparent_background_colors = true
+
 # Vibecrafted copper palette
 [colors.primary]
 background = "#0b0b12"
