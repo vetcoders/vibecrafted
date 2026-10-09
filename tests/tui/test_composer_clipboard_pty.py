@@ -42,6 +42,8 @@ class EditorPTY:
         clipboard: str = "pbcopy",
         remote: str = "",
         draft: bytes = DRAFT,
+        panes: list[dict] | None = None,
+        current_pane: str = "9",
     ) -> None:
         self.root = root
         self.output = bytearray()
@@ -57,6 +59,9 @@ class EditorPTY:
         bin_dir = root / "bin"
         bin_dir.mkdir()
         (root / "seed").write_bytes(draft)
+        (root / "panes.json").write_text(
+            json.dumps(panes if panes is not None else [{"id": 1, "is_focused": True}])
+        )
         (root / "tmp").mkdir()
         (root / "home").mkdir()
         self.clipboard = root / "clipboard"
@@ -81,7 +86,7 @@ class EditorPTY:
             "r = pathlib.Path(os.environ['PTY_ROOT'])\n"
             "a = sys.argv[1:]\n"
             "with (r/'frame-calls').open('a') as f: f.write(json.dumps(a)+'\\n')\n"
-            "if 'list-panes' in a: print('[{\"id\":1,\"is_focused\":true}]')\n"
+            "if 'list-panes' in a: print((r/'panes.json').read_text())\n"
             "if 'dump-screen' in a: pathlib.Path(a[a.index('--path')+1]).write_bytes((r/'seed').read_bytes())\n"
             "if 'write-chars' in a: (r/'sent').write_bytes(a[-1].encode())\n",
         )
@@ -103,6 +108,7 @@ class EditorPTY:
             "LANG": "en_US.UTF-8",
             "EDITOR": str(bin_dir / editor),
             "VC_COMPOSER_CARET": "0",
+            "VC_FRAME_PANE_ID": current_pane,
             "PTY_ROOT": str(root),
             "PTY_CLIPBOARD": clipboard,
         }
@@ -313,3 +319,62 @@ def test_no_local_clipboard_provider_still_emits_host_payload(
     assert pane.clipboard.read_bytes() == b"untouched"
     pane.finish()
     assert pane.clipboard.read_bytes() == b"untouched"
+
+
+@pytest.mark.parametrize("editor", EDITORS)
+@pytest.mark.parametrize(
+    "panes, expected",
+    [
+        (
+            [
+                {"id": 1, "is_plugin": False, "is_focused": False},
+                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+                {"id": 2, "is_plugin": False, "is_focused": True},
+            ],
+            "2",
+        ),
+        (
+            [
+                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+                {"id": 7, "is_plugin": True, "is_focused": False},
+                {"id": 2, "is_plugin": False, "is_focused": False},
+            ],
+            "2",
+        ),
+        (
+            [
+                {"id": 9, "is_plugin": False, "is_focused": True, "is_floating": True},
+                {"id": 7, "is_plugin": True, "is_focused": True},
+                {"id": 2, "is_plugin": False, "is_focused": False},
+            ],
+            "plugin_7",
+        ),
+        ([{"id": 0, "is_plugin": False, "is_focused": True}], "0"),
+        ([{"id": 9, "is_plugin": False, "is_focused": True}], None),
+        ([], None),
+    ],
+    ids=[
+        "focused-underlying",
+        "first-terminal-fallback",
+        "plugin-prefix",
+        "zero-id",
+        "viewer-only",
+        "empty",
+    ],
+)
+def test_scrollback_selector_targets_other_pane(editor_pty, editor, panes, expected):
+    # list-panes uses integer ids plus is_plugin (as the existing physical
+    # Frame fixtures show); CLI actions accept a bare terminal id/plugin_N.
+    pane = editor_pty(editor, "scrollback-select.sh", panes=panes)
+    assert b"SyntaxError" not in pane.output
+    calls = [
+        json.loads(line)
+        for line in (pane.root / "frame-calls").read_text().splitlines()
+    ]
+    dumps = [call for call in calls if "dump-screen" in call]
+    assert len(dumps) == 1
+    if expected is None:
+        assert "--pane-id" not in dumps[0]
+    else:
+        assert dumps[0][dumps[0].index("--pane-id") + 1] == expected
+    pane.finish()
