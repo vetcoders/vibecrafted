@@ -1280,7 +1280,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "!entry.starts_with('/')" in launcher
 
 
-def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
+def test_tray_menu_accepts_verified_runtime_from_another_build() -> None:
     app_dir = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
     delegate = (app_dir / "AppDelegate.swift").read_text(encoding="utf-8")
     policy = (app_dir / "RuntimePackMenuPolicy.swift").read_text(encoding="utf-8")
@@ -1311,9 +1311,9 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
         in delegate
     )
     assert "generation: canonicalInstall?.root.lastPathComponent" in delegate
-    # The policy owns the drift rule: generation `X.Y.Z+g<sha>` vs the signed
-    # carrier's full manifest revision; drift is amber (runtime-first upgrades
-    # are legitimate), never silent.
+    # The policy shows carrier identity while the runtime resolver owns the
+    # readiness decision. A different SHA alone cannot make a usable install
+    # look unhealthy.
     assert "func generationRevisionToken(_ generation: String) -> String?" in policy
     assert (
         "func runtimePackMatchesCarrier(generation: String, signedSourceRevision: String) -> Bool"
@@ -1326,7 +1326,7 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
     assert "Runtime already current" in policy
-    assert "the installed runtime moved; update the App to re-sync" in policy
+    assert "Verified installed runtime from another build" in policy
     # The durable lifecycle trail is supervision evidence, but it is not
     # installer behavior: it lives in its own unit so the AppDelegate hub stays
     # a UI/process host (the contract above forbids createDirectory there).
@@ -1396,8 +1396,8 @@ expect(synced.actionsEnabled, "synced actions enabled")
 let drifted = deriveRuntimePackMenuState(
   generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha, runtimeReady: true)
 expect(drifted.header == "Runtime Pack: 4.4.0+gdeadbeef", "drift header")
-expect(drifted.detail.contains("Carrier expects 0a5eaaea"), "drift detail names carrier")
-expect(drifted.health == .transitioning, "drift is amber, not red")
+expect(drifted.detail.contains("Verified installed runtime from another build"), "another build is identified")
+expect(drifted.health == .healthy, "verified runtime stays healthy")
 expect(drifted.actionsEnabled, "drift actions enabled")
 
 let unstamped = deriveRuntimePackMenuState(

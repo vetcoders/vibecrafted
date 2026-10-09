@@ -1286,6 +1286,8 @@ def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
 
 
 def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
+    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    assert pins["schema"] == "vibecrafted.source-components.v1"
     workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
     linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
     windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
@@ -1293,6 +1295,7 @@ def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
         revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
         assert revision is not None
         sha = revision.group(1)
+        assert pins["components"][f"vc-{donor}"]["revision"] == sha
         assert f'${donor}Revision = "{sha}"' in windows
         assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
         assert f"repository: vetcoders/vc-{donor}" in workflow
@@ -1697,6 +1700,14 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+    assert (
+        'donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"'
+        in builder
+    )
+    assert (
+        'donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"'
+        in builder
+    )
 
     # Regenerated plugin assets are deterministic derived output. Their
     # mutation must not make the binary claim that the immutable donor commit

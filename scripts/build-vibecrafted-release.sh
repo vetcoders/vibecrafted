@@ -828,11 +828,11 @@ materialize_donor_snapshots() {
     || die "main snapshot HEAD $DONOR_SNAPSHOT_HEAD is not the bound release revision $ROOT_SHA"
   log "vibecrafted snapshot at $DONOR_SNAPSHOT_HEAD"
   if (( SNAPSHOT_DONORS )); then
-    log "Snapshotting donors at HEAD; their dirty working trees stay untouched"
+    log "Snapshotting donors at the selected commits; their dirty working trees stay untouched"
     local terminal_head frame_head
-    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO"
+    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"
     terminal_head="$DONOR_SNAPSHOT_HEAD"
-    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO"
+    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"
     frame_head="$DONOR_SNAPSHOT_HEAD"
     log "vc-terminal snapshot at $terminal_head"
     log "vc-frame snapshot at $frame_head"
