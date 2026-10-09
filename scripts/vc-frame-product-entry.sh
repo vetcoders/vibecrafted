@@ -89,6 +89,12 @@ export VIBECRAFTED_RUNTIME_BIN="$root/bin"
 export VIBECRAFTED_CORE_DIR="$root/vibecrafted-core"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$real"
+# The runtime python pin travels to every pane this server starts: the
+# generation's door first on PATH, forwarding python/python3 to the pin above.
+if [[ -x "$root/config/runtime-pin/bin/python3" ]]; then
+  PATH="$root/config/runtime-pin/bin${PATH:+:$PATH}"
+  export PATH
+fi
 unset VIBECRAFTED_PREFER_REPO_VC_FRAME VIBECRAFTED_PREFER_REPO_SPAWN
 pin_product_shell
 pin_darwin_socket_dir

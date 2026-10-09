@@ -48,23 +48,31 @@ _vc_terminal_apply_fallback_prompt() {
   RPROMPT=''
 }
 
-_vc_terminal_python_door="$HOME/.config/vibecrafted/vc-terminal/bin"
-
 _vc_terminal_bind_owned_python() {
-  # Typed python / python3 go through the same door as env/command/shebang:
-  # the ZDOTDIR/bin wrapper resolves the product interpreter (pin, then the
-  # active generation) and steps aside for the host when there is none. Do not
-  # prepend generation bin. Do not write python3 into ~/.local/bin.
-  #
-  # A door shell reached without the product entry (a Frame pane, a copied
-  # environment) pins the active generation it can see, so children inherit a
-  # working interpreter instead of a PATH whose python3 has nothing behind it.
-  if [[ -z "${VIBECRAFTED_PYTHON:-}" || ! -x "${VIBECRAFTED_PYTHON:-}" ]]; then
-    local vc_current="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}/tools/vibecrafted-current/bin/python3"
-    [[ -x "$vc_current" ]] && export VIBECRAFTED_PYTHON="${vc_current:A}"
+  # The runtime python pin is inherited, never chosen here: the entry that
+  # started this shell (vc-terminal, vc-frame) exported VIBECRAFTED_PYTHON and
+  # VIBECRAFTED_RUNTIME_ROOT. Typed python / python3 go through the pinned
+  # generation's door, the same file env/command/shebang reach on PATH; the
+  # door refuses loudly when the pin is missing. Do not prepend generation
+  # bin. Do not write python3 into ~/.local/bin. Do not re-pin from the active
+  # generation: an update must not move a live shell.
+  local vc_root="${VIBECRAFTED_RUNTIME_ROOT:-}"
+  if (( ${_vc_terminal_python_bound:-0} )); then
+    unfunction python python3 2>/dev/null || true
   fi
-
+  typeset -g _vc_terminal_python_bound=0 _vc_terminal_python_door=""
+  if [[ "$vc_root" == /* && -x "${vc_root%/}/config/runtime-pin/bin/python3" ]]; then
+    _vc_terminal_python_door="${vc_root%/}/config/runtime-pin/bin"
+  elif [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$HOME/.config/vibecrafted/vc-terminal/bin/python3" ]]; then
+    # A terminal started by a generation older than config/runtime-pin: the
+    # installer's copy of the same door forwards to the pin that entry set.
+    _vc_terminal_python_door="$HOME/.config/vibecrafted/vc-terminal/bin"
+  else
+    return 0
+  fi
   unalias python python3 2>/dev/null || true
+  _vc_terminal_python_bound=1
+  path=("$_vc_terminal_python_door" ${path:#$_vc_terminal_python_door})
   python3() {
     "$_vc_terminal_python_door/python3" "$@"
   }
@@ -209,6 +217,9 @@ personal-shell() {
   else
     print -u2 -r -- 'Vibecrafted: personal-shell found no ~/.zshrc; product tool pins were released.'
   fi
+  # The python door stays product-owned: a personal PATH or python alias
+  # must not take python3 away from the runtime pin.
+  _vc_terminal_bind_owned_python
   unset _VC_TERMINAL_PERSONAL_LOADING
 }
 
@@ -225,7 +236,7 @@ _vc_terminal_pin_product_env
 # ZDOTDIR to obtain this behaviour.
 setopt extendedhistory incappendhistory sharehistory histignoredups \
   histignorealldups histverify appendhistory histignorespace
-path=("$_vc_terminal_python_door" "$HOME/.local/bin" $path)
+path=("$HOME/.local/bin" $path)
 typeset -U path
 bindkey -e
 bindkey '^[b' backward-word
@@ -248,7 +259,8 @@ typeset -ga _VC_TERMINAL_NOTES=()
 
 # Public VC commands remain the installed PATH launchers. No automatic Frame
 # attach/create, provider process, or private generation-bin export belongs here.
-# Door python names are ZDOTDIR/bin wrappers plus functions over VIBECRAFTED_PYTHON.
+# Door python names are the pinned generation's config/runtime-pin/bin plus
+# functions over it; the door runs VIBECRAFTED_PYTHON or refuses.
 # A completion directory holding an unreadable entry (for example a Homebrew
 # link into an app that is gone) would make compinit fail on that one file.
 # Such a directory is replaced, at its fpath position, by a product-state

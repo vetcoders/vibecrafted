@@ -50,15 +50,18 @@ def test_inherited_path_drops_product_shell_python_doors() -> None:
 
     dirty = (
         "/Users/x/.config/vibecrafted/vc-terminal/bin:"
+        "/Users/x/src/vibecrafted/config/runtime-pin/bin:"
         "/Users/x/.local/share/vibecrafted/releases/current/bin:"
         "/usr/bin:/bin"
     )
     cleaned = without_product_shell_path(dirty)
     assert "vc-terminal/bin" not in cleaned
+    assert "runtime-pin/bin" not in cleaned
     assert "share/vibecrafted" not in cleaned
     assert "/usr/bin" in cleaned.split(":")
     entries = os.environ.get("PATH", "").split(":")
     assert not any("vc-terminal/bin" in part.replace("\\", "/") for part in entries)
+    assert not any("runtime-pin/bin" in part.replace("\\", "/") for part in entries)
     assert not any("share/vibecrafted" in part.replace("\\", "/") for part in entries)
 
 

@@ -82,7 +82,11 @@ def test_pane_python_reexecs_generation_interpreter(tmp_path: Path) -> None:
     assert "home" in recorded
 
 
-def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None:
+def test_pane_python_refuses_an_interpreter_outside_the_pin(tmp_path: Path) -> None:
+    """No pin and no selected generation: the pane names the problem and stays
+    a usable shell. It never runs the uv-tool venv, the active-generation
+    pointer or a PATH python in place of the runtime pin."""
+
     runner = (
         Path(__file__).resolve().parents[1]
         / "vibecrafted_core"
@@ -91,37 +95,44 @@ def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> N
         / "pane-python"
     )
     log = tmp_path / "ran.log"
-    uv_bin = tmp_path / "data" / "uv" / "tools" / "vibecrafted" / "bin"
-    uv_bin.mkdir(parents=True)
-    stub = uv_bin / "python"
-    stub.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
-        encoding="utf-8",
-    )
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    data = tmp_path / "data"
+    stubs = [
+        data / "uv/tools/vibecrafted/bin/python",
+        data / "uv/tools/vibecrafted/bin/python3",
+        data / "vibecrafted/tools/vibecrafted-current/bin/python3",
+    ]
+    for stub in stubs:
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$0" >> "{log}"\nexit 0\n',
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     script = tmp_path / "vc-start-here.py"
-    script.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    script.write_text(
+        f'#!/bin/sh\necho SCRIPT_RAN >> "{log}"\nexit 0\n', encoding="utf-8"
+    )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     env = os.environ.copy()
     env.pop("VIBECRAFTED_PYTHON", None)
     env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
     env.pop("VIBECRAFTED_ROOT", None)
     env["HOME"] = str(tmp_path)
-    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    env["XDG_DATA_HOME"] = str(data)
     env["PATH"] = "/usr/bin:/bin"
+    env["SHELL"] = "/usr/bin/true"
     result = subprocess.run(
         ["bash", str(runner), str(script), "home"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    recorded = log.read_text(encoding="utf-8")
-    assert str(stub) in recorded
-    assert str(script) in recorded
-    assert "home" in recorded
+    assert "No runtime interpreter pinned for this pane" in result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
 
 
 def test_start_here_routes_to_existing_product_owners() -> None:

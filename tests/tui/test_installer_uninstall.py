@@ -269,11 +269,18 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     )
     assert (product_config / "vc-terminal/vc-terminal.toml").is_file()
     assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    # Legacy ZDOTDIR/bin copy of the generation's runtime python door, kept for
+    # product shells that started before the door moved to config/runtime-pin.
     for name in ("python", "python3"):
         installed_door = product_config / "vc-terminal/bin" / name
-        source_door = payload / "config/vc-terminal/bin" / name
+        source_door = payload / "config/runtime-pin/bin" / name
         assert installed_door.read_bytes() == source_door.read_bytes()
         assert installed_door.stat().st_mode & 0o777 == 0o755
+    # Nested zsh inside product shells restores the pinned door after startup.
+    for stage in (".zshenv", ".zprofile", ".zlogin"):
+        assert (product_config / "vc-terminal" / stage).read_text() == (
+            installer._PRODUCT_ZDOTDIR_PIN_STAGE
+        )
     assert not (debris_dir / "alacritty.toml").exists()
     assert not (debris_dir / "launch-alt-screen.zsh").exists()
     assert not (product_config / "terminal-entry.toml").exists()
@@ -281,6 +288,9 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
         path.name for path in debris_dir.iterdir() if path.name != ".DS_Store"
     )
     assert names == [
+        ".zlogin",
+        ".zprofile",
+        ".zshenv",
         ".zshrc",
         "bin",
         "interactive.zsh",

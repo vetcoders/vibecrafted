@@ -351,6 +351,39 @@ core and `bin/python3` are mandatory, with no foreign-generation/host fallback.
 VOC consumes the real selected deck catalog; absent provider/environment cells
 remain unavailable, without a locally invented capability list.
 
+## Runtime python pin
+
+The pin belongs to the running runtime; shells only inherit it.
+
+- **Entry pins.** A process entering the runtime -- a public `vc-*` /
+  `vibecrafted` launcher, `bin/vc-terminal`, `bin/vc-frame`, the bash spawn
+  launcher, the headless worker gate (`env_allowlist.filter_headless_worker_env`)
+  -- exports `VIBECRAFTED_PYTHON`, the absolute `bin/python3` of its own
+  generation, and puts that generation's door `config/runtime-pin/bin` first on
+  PATH. A child keeps an inherited pin, so an update never moves a live session.
+- **Door.** `config/runtime-pin/bin/{python,python3}` are one file that execs
+  `$VIBECRAFTED_PYTHON`. A missing, relative, non-executable or self-referential
+  pin (a door, or a script whose shebang finds python on PATH) exits 127 with the
+  reason. There is no fallback to the host python or to the active generation.
+  The door holds only those two names; every other lookup keeps the user's order.
+- **Shells inherit.** zsh startup reorders PATH (`/etc/zprofile` path_helper,
+  personal `~/.zshenv` / `~/.zshrc`). The headless gate and the spawn launcher
+  point `ZDOTDIR` at the generation's guest directory `config/runtime-pin/zsh`,
+  which runs the user's own startup files (`VIBECRAFTED_USER_ZDOTDIR`, default
+  `$HOME`) and then puts the door back in front; product shells (vc-terminal,
+  Frame panes, Quick cmd) get the same from their ZDOTDIR stage files. `zsh -c`,
+  `zsh -l`, `zsh -i`, `sh -c`, `bash -c`, hooks and `#!/usr/bin/env python3`
+  therefore reach one interpreter. `bash -l` reads only the user's own
+  `~/.bash_profile` after path_helper and is not re-pinned.
+- **Framework code never depends on PATH.** Launchers, hooks and pane runners
+  name their interpreter by absolute path; the door is convenience for agents
+  and scripts.
+- **Outside the runtime** nothing changes: no door on PATH, no guest ZDOTDIR,
+  nothing published in `~/.local/bin`, and `python3` stays the user's own.
+
+Proof: `tests/tui/test_runtime_python_pin.py` crosses each boundary against a
+personal profile that prepends a host python at every zsh stage.
+
 ## Correlated interactive Codex fork
 
 The interactive spawn owner uses the selected Codex executable's app-server
