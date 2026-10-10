@@ -1,8 +1,8 @@
 """Contract tests for ``vibecrafted reinstall --clean``.
 
-No live process is signaled, no Frame session is created and nothing is
-installed: every probe, the installer census and the subprocess runner are
-doubles.  The doubles record calls so the tests can prove what did NOT happen.
+Most probes are doubles. Two macOS integration cases create only sandbox
+Frame sessions and fake provider children, then remove those test sessions.
+No Founder process is signaled and nothing is installed.
 """
 
 from __future__ import annotations
@@ -10,7 +10,11 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -18,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from vibecrafted_core import frame_layout, reinstall_clean
+from vibecrafted_core import frame_layout, process_control, reinstall_clean
 from vibecrafted_core.reinstall_clean import (
     MANIFEST_SCHEMA,
     PROVEN,
@@ -29,6 +33,7 @@ from vibecrafted_core.reinstall_clean import (
     ResurrectContext,
 )
 
+_REAL_FRAME_BINARY = reinstall_clean.frame_binary()
 SOCKETS = Path("/tmp/vc-frame-test")
 OLD = "/rt/releases/4.4.0+gold"
 NEW = "/rt/releases/4.4.0+gnew"
@@ -1044,11 +1049,19 @@ class Runner:
     def __init__(self, refuse: set[str] | None = None):
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.refuse = refuse or set()
+        self.live_agents = True
+        self.bad_lineage = False
+        self.cache = Path("/unused-test-cache")
+        self.metadata: dict[str, dict[str, Any]] = {}
 
     def __call__(
         self, argv: list[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
+        if argv[1:] == ["setup", "--check"]:
+            return subprocess.CompletedProcess(
+                argv, 0, f"[CACHE DIR]: {self.cache}\n", ""
+            )
         if "interactive-command" in argv:
             session = argv[argv.index("--session") + 1] if "--session" in argv else ""
             if session in self.refuse:
@@ -1056,18 +1069,34 @@ class Runner:
                     argv, 2, "", "native session already has an active executor"
                 )
             provider = argv[argv.index("interactive-command") + 1]
+            run_id = f"{provider}-{session or 'fresh'}"
+            pid = 200 + len(self.metadata) * 2
+            self.metadata[run_id] = {
+                "worker_pid": pid + 1,
+                "owner_pid": pid,
+                "worker_identity": {
+                    "pid": pid + 1,
+                    "run_id": run_id,
+                    "start_token": "birth-proof",
+                },
+            }
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                f"/new/py -m vibecrafted_core.spawn interactive-launch {provider} --admission-file /adm/{provider}-{session or 'fresh'}.json\n",
+                f"/new/py -m vibecrafted_core.spawn interactive-launch {provider} --admission-file /adm/{run_id}/admission.json\n",
                 "",
             )
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
 def ctx_for(
-    tmp_path: Path, runner: Runner, *, live: list[str] | None = None
+    tmp_path: Path,
+    runner: Runner,
+    *,
+    live: list[str] | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> ResurrectContext:
+    runner.cache = tmp_path / "frame-cache"
     created: list[str] = list(live or [])
 
     def live_sessions() -> list[str]:
@@ -1075,6 +1104,53 @@ def ctx_for(
             if "--create-background" in argv:
                 created.append(argv[-1])
         return created
+
+    class Probe(FakeProcs):
+        def table(self) -> dict[int, ProcessRecord]:
+            records = [
+                rec(
+                    100,
+                    1,
+                    "/new/vc-frame",
+                    "--server",
+                    str(SOCKETS / "contract_version_4/vibecrafted"),
+                )
+            ]
+            if runner.live_agents:
+                for run_id, meta in runner.metadata.items():
+                    owner = meta["owner_pid"]
+                    records.extend(
+                        [
+                            rec(
+                                owner,
+                                1 if runner.bad_lineage else 100,
+                                "/new/py",
+                                "-m",
+                                "vibecrafted_core.spawn",
+                                "interactive-launch",
+                                run_id.split("-", 1)[0],
+                                "--admission-file",
+                                f"/adm/{run_id}/admission.json",
+                            ),
+                            rec(
+                                meta["worker_pid"],
+                                owner,
+                                f"/usr/local/bin/{run_id.split('-', 1)[0]}",
+                                "resume",
+                            ),
+                        ]
+                    )
+            return {r.pid: r for r in records}
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(
+            process_control,
+            "validate_process_identity",
+            lambda receipt, **kwargs: (True, "ok", None),
+        )
+
+    def metadata(run_id: str) -> dict[str, Any] | None:
+        return runner.metadata.get(run_id) or run_meta(run_id)
 
     return ResurrectContext(
         run_dir=tmp_path,
@@ -1091,19 +1167,28 @@ def ctx_for(
             "HOME": "/srv/op",
         },
         runner=runner,
-        run_meta=run_meta,
+        run_meta=metadata,
         live_sessions=live_sessions,
-        wait_seconds=1.0,
+        process_probe=Probe([], {}),
+        wait_seconds=0.02,
     )
 
 
-def test_resurrect_resumes_proven_and_freshens_unknown(tmp_path: Path) -> None:
+def test_resurrect_resumes_proven_and_freshens_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest = take(tmp_path / "w")
     runner = Runner()
-    report = reinstall_clean.resurrect(manifest, ctx_for(tmp_path, runner))
+    report = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )
     session = report["sessions"][0]
     assert session["result"] == "live"
-    results = {p["tab"]: p["result"] for p in session["panes"]}
+    assert all(
+        p["result"] == "live" and p["liveness"]["worker_identity"]
+        for p in session["panes"]
+    )
+    results = {p["tab"]: p["mode"] for p in session["panes"]}
     assert results == {
         "claude": "native-resume",
         "codex": "native-resume",
@@ -1125,19 +1210,25 @@ def test_resurrect_resumes_proven_and_freshens_unknown(tmp_path: Path) -> None:
     assert "PYTHONPATH" not in env and "VC_FRAME_PANE_ID" not in env
     assert env["VC_FRAME_SOCKET_DIR"] == str(SOCKETS)
     layout = (tmp_path / "resurrect-layouts" / "vibecrafted.kdl").read_text()
-    assert f"/adm/claude-{CLAUDE_ID}.json" in layout
+    assert f"/adm/claude-{CLAUDE_ID}/admission.json" in layout
     headless = report["headless"][0]
-    assert headless["result"] == "resumed"
+    assert headless["result"] == "left-running"
+    assert not [a for a, _ in runner.calls if "--run-id" in a]
 
 
-def test_resurrect_records_a_refused_resume_and_keeps_going(tmp_path: Path) -> None:
+def test_resurrect_records_a_refused_resume_and_keeps_going(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest = take(tmp_path / "w")
     runner = Runner(refuse={CLAUDE_ID})
-    report = reinstall_clean.resurrect(manifest, ctx_for(tmp_path, runner))
+    report = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )
     panes = {p["tab"]: p for p in report["sessions"][0]["panes"]}
     assert panes["claude"]["result"] == "refused"
     assert "active executor" in panes["claude"]["reason"]
-    assert panes["codex"]["result"] == "native-resume"
+    assert panes["codex"]["result"] == "live"
+    assert report["sessions"][0]["result"] == "failed"
 
 
 def test_resurrect_never_clobbers_a_live_session(tmp_path: Path) -> None:
@@ -1183,3 +1274,459 @@ def test_resolve_source_requires_a_vibecrafted_checkout(tmp_path: Path) -> None:
     assert reinstall_clean.resolve_source(None, nested) == checkout
     assert reinstall_clean.resolve_source(str(checkout), tmp_path) == checkout
     assert reinstall_clean.resolve_source(str(tmp_path / "missing"), checkout) is None
+
+
+@pytest.mark.parametrize("bad_lineage", [False, True])
+def test_resurrect_dead_or_unrelated_provider_is_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_lineage: bool
+) -> None:
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    runner.live_agents = bad_lineage  # either absent, or alive outside Frame
+    runner.bad_lineage = bad_lineage
+    report = reinstall_clean.resurrect(take(tmp_path / "w"), ctx)
+    session = report["sessions"][0]
+    assert session["frame_result"] == "live"
+    assert session["result"] == "failed"
+    assert all(p["result"] == "failed" for p in session["panes"])
+    assert all(p["liveness"]["verified"] is False for p in session["panes"])
+    assert all("stderr" in p and "screen_unavailable" in p for p in session["panes"])
+
+
+def test_resurrect_rechecks_worker_identity_and_retries_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner)
+    ctx.wait_seconds = 1.0
+    validations: list[int] = []
+
+    def validate(receipt: dict[str, Any], **kwargs: Any) -> tuple[bool, str, None]:
+        assert kwargs["expected_pid"] == receipt["pid"]
+        assert kwargs["expected_run_id"] == receipt["run_id"]
+        validations.append(receipt["pid"])
+        return (len(validations) > 3, "process_identity_mismatch", None)
+
+    monkeypatch.setattr(process_control, "validate_process_identity", validate)
+    report = reinstall_clean.resurrect(take(tmp_path / "w"), ctx)
+    assert report["sessions"][0]["result"] == "live"
+    assert len(validations) == 6
+
+
+def test_resurrect_identity_mismatch_never_claims_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner)
+    monkeypatch.setattr(
+        process_control,
+        "validate_process_identity",
+        lambda *a, **k: (False, "process_identity_mismatch", None),
+    )
+    report = reinstall_clean.resurrect(take(tmp_path / "w"), ctx)
+    assert report["sessions"][0]["result"] == "failed"
+    assert all(
+        p["reason"] == "process_identity_mismatch"
+        for p in report["sessions"][0]["panes"]
+    )
+
+
+def test_failed_spawn_captures_only_its_exact_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DiagnosticRunner(Runner):
+        def __call__(
+            self, argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if "list-panes" in argv:
+                self.calls.append((argv, kwargs))
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps(
+                        [
+                            {
+                                "id": 45,
+                                "pane_command": f"/new/py -m vibecrafted_core.spawn interactive-launch claude --admission-file /adm/claude-{CLAUDE_ID}/admission.json",
+                            },
+                            {"id": 99, "pane_command": "other private conversation"},
+                        ]
+                    ),
+                    "pane probe stderr",
+                )
+            if "dump-screen" in argv:
+                self.calls.append((argv, kwargs))
+                return subprocess.CompletedProcess(
+                    argv, 0, "provider exited 127", "launch stderr"
+                )
+            return super().__call__(argv, **kwargs)
+
+    runner = DiagnosticRunner()
+    ctx = ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    runner.live_agents = False
+    report = reinstall_clean.resurrect(take(tmp_path / "w"), ctx)
+    pane = next(p for p in report["sessions"][0]["panes"] if p["provider"] == "claude")
+    assert pane["result"] == "failed" and pane["new_pane"] == 45
+    assert pane["stderr"] == "launch stderr"
+    assert Path(pane["screen_file"]).read_text() == "provider exited 127launch stderr"
+    assert Path(pane["screen_file"]).stat().st_mode & 0o077 == 0
+    assert [a[-1] for a, _ in runner.calls if "dump-screen" in a] == ["45"]
+
+
+def test_resurrect_nonspared_headless_still_resumes(tmp_path: Path) -> None:
+    manifest = take(tmp_path / "w")
+    manifest["frame"]["sessions"] = []
+    manifest["headless_runs"][0]["spared"] = False
+    runner = Runner()
+    report = reinstall_clean.resurrect(manifest, ctx_for(tmp_path, runner))
+    assert report["headless"][0]["result"] == "resumed"
+    assert len([a for a, _ in runner.calls if "--run-id" in a]) == 1
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_phase4_receipt_and_executor_summary_include_front_door(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failed: bool,
+) -> None:
+    manifest = take(tmp_path / "w")
+    reinstall_clean.store_manifest(tmp_path, manifest)
+    reinstall_clean.write_json(
+        tmp_path / "plan.json", {"resurrect": {"relaunch_apps": []}}
+    )
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    runner.live_agents = not failed
+    monkeypatch.setattr(reinstall_clean, "ResurrectContext", lambda **kwargs: ctx)
+    monkeypatch.setattr(reinstall_clean, "frame_binary", lambda: ctx.frame_bin)
+    monkeypatch.setattr(reinstall_clean, "_active_runtime_root", lambda: NEW)
+    rc = reinstall_clean.resurrect_main(tmp_path)
+    receipt = json.loads((tmp_path / "receipts/phase-4-resurrect.json").read_text())
+    assert rc == int(failed)
+    assert receipt["status"] == ("partial" if failed else "ok")
+    assert receipt["front_door"]["result"] == "needs-tty"
+    assert receipt["front_door"]["session"] == "vibecrafted"
+    assert receipt["front_door"]["command"][-2:] == ["attach", "vibecrafted"]
+    assert receipt["front_door"]["instruction"] in capsys.readouterr().out
+
+
+def test_front_door_prefers_conversations_and_reports_no_live_session(
+    tmp_path: Path,
+) -> None:
+    ctx = ctx_for(tmp_path, Runner())
+    restored = {
+        "sessions": [
+            {"session": "vc-host", "result": "live", "panes": []},
+            {
+                "session": "vibecrafted-project",
+                "result": "live",
+                "panes": [{"result": "live"}],
+            },
+        ]
+    }
+    assert (
+        reinstall_clean.resurrection_front_door(ctx, restored)["session"]
+        == "vibecrafted-project"
+    )
+    assert (
+        reinstall_clean.resurrection_front_door(ctx, {"sessions": []})["result"]
+        == "unavailable"
+    )
+
+
+def test_pack_parser_resolves_relative_and_tilde_paths_before_detach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    parser = reinstall_clean.build_parser()
+    assert parser.parse_args(["--pack", "dist/pack.tar.gz"]).pack == str(
+        tmp_path / "dist/pack.tar.gz"
+    )
+    assert parser.parse_args(["--pack", "~/pack.tar.gz"]).pack == str(
+        tmp_path / "pack.tar.gz"
+    )
+    assert not parser.parse_args([]).pack
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(reinstall_clean, "execute", lambda *a, **k: seen.update(k) or 0)
+    assert (
+        reinstall_clean.main(
+            ["execute", "--run-dir", str(tmp_path), "--pack", "dist/pack.tar.gz"]
+        )
+        == 0
+    )
+    assert seen["pack"] == str(tmp_path / "dist/pack.tar.gz")
+
+
+def test_serialized_frame_cache_receives_rewritten_layout_before_attach(
+    tmp_path: Path,
+) -> None:
+    class CachedRunner(Runner):
+        def __call__(
+            self, argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if "--create-background" in argv:
+                assert cached.read_text() == rewritten.read_text()
+                assert OLD not in cached.read_text()
+                assert notes.read_text() == "Founder scrollback"
+            return super().__call__(argv, **kwargs)
+
+    runner = CachedRunner()
+    ctx = ctx_for(tmp_path, runner)
+    cached = (
+        runner.cache / "contract_version_4/session_info/vibecrafted/session-layout.kdl"
+    )
+    cached.parent.mkdir(parents=True)
+    cached.write_text(LAYOUT)
+    notes = cached.with_name("pane-scrollback")
+    notes.write_text("Founder scrollback")
+    rewritten = tmp_path / "rewritten.kdl"
+    text, _ = frame_layout.rewrite_layout(
+        LAYOUT, launches=[], config_dir=CONFIG, old_roots=[OLD], new_root=NEW
+    )
+    rewritten.write_text(text)
+    outcome = reinstall_clean.create_session(ctx, "vibecrafted", rewritten)
+    assert outcome["result"] == "live"
+    backup = Path(outcome["resurrection_cache"][0]["backup"])
+    assert backup.read_text() == LAYOUT
+    assert backup.stat().st_mode & 0o077 == 0
+
+
+def test_unknown_frame_cache_fails_closed_before_create(tmp_path: Path) -> None:
+    class UnknownCache(Runner):
+        def __call__(
+            self, argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            self.calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "unexpected setup output", "")
+
+    runner = UnknownCache()
+    ctx = ctx_for(tmp_path, runner)
+    outcome = reinstall_clean.create_session(
+        ctx, "vibecrafted", tmp_path / "layout.kdl"
+    )
+    assert outcome["result"] == "failed"
+    assert not [a for a, _ in runner.calls if "--create-background" in a]
+
+
+def test_newly_live_session_cache_is_preserved(tmp_path: Path) -> None:
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner, live=["vibecrafted"])
+    outcome = reinstall_clean.create_session(
+        ctx, "vibecrafted", tmp_path / "absent.kdl"
+    )
+    assert outcome["result"] == "failed"
+    assert "preserved" in outcome["reason"]
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("surface", ["interactive-command", "--create-background"])
+def test_phase4_spawn_timeout_is_a_failure_receipt(
+    tmp_path: Path, surface: str
+) -> None:
+    class TimedOut(Runner):
+        def __call__(
+            self, argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if surface in argv:
+                raise subprocess.TimeoutExpired(argv, 0.01)
+            return super().__call__(argv, **kwargs)
+
+    ctx = ctx_for(tmp_path, TimedOut())
+    report = reinstall_clean.resurrect(take(tmp_path / "w"), ctx)
+    assert report["sessions"][0]["result"] == "failed"
+    assert all(p["result"] == "failed" for p in report["sessions"][0]["panes"])
+
+
+@pytest.fixture
+def short_frame_sockets():
+    with tempfile.TemporaryDirectory(prefix="vc-reinstall-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("vc-frame") is None,
+    reason="installed macOS Frame required for isolated process proof",
+)
+@pytest.mark.parametrize("alive", [True, False])
+def test_isolated_frame_restores_fake_agent_from_rewritten_cache(
+    tmp_path: Path, alive: bool, short_frame_sockets: Path
+) -> None:
+    """Real Frame + census + identity validation, exclusively sandbox children."""
+    binary = _REAL_FRAME_BINARY
+    assert Path(binary).is_file()
+    sandbox = tmp_path / "sandbox"
+    home = sandbox / "home"
+    home.mkdir(parents=True)
+    config = sandbox / "config"
+    config.mkdir()
+    (config / "config.kdl").write_text(
+        "session_serialization false\nkeybinds clear-defaults=true {}\n"
+    )
+    env = reinstall_clean.scrubbed_env(os.environ)
+    env.update(
+        {
+            "HOME": str(home),
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+            "XDG_CONFIG_HOME": str(config),
+            "XDG_CACHE_HOME": str(sandbox / "cache"),
+            "XDG_DATA_HOME": str(sandbox / "data"),
+            "XDG_RUNTIME_DIR": str(sandbox / "tmp"),
+            "VC_FRAME_CONFIG_DIR": str(config),
+            "VC_FRAME_CONFIG_FILE": str(config / "config.kdl"),
+            "VC_FRAME_SOCKET_DIR": str(short_frame_sockets),
+            "ZELLIJ_SOCKET_DIR": str(short_frame_sockets),
+        }
+    )
+    env.pop("PYTHONPATH", None)
+    for sub in ("cache", "data", "tmp", "sockets"):
+        (sandbox / sub).mkdir()
+    run_id = "fake-resurrect"
+    run_dir = home / ".vibecrafted/control_plane/runtime_runs" / run_id
+    run_dir.mkdir(parents=True)
+    admission = run_dir / "admission.json"
+    admission.write_text("{}")
+    provider = sandbox / "codex"
+    provider.write_text("import sys, time\ntime.sleep(float(sys.argv[1]))\n")
+    owner_script = sandbox / "owner.py"
+    core = Path(reinstall_clean.__file__).resolve().parent.parent
+    owner_script.write_text(f"""
+import json, os, signal, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, {str(core)!r})
+from vibecrafted_core.process_control import process_identity_receipt
+
+def stop(signum, frame):
+    raise SystemExit(0)
+for sig in (signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, stop)
+os.environ["SPAWN_RUN_ID"] = {run_id!r}
+child = subprocess.Popen([sys.executable, {str(provider)!r}, {"60" if alive else "0"!r}])
+try:
+    identity = process_identity_receipt(child.pid, run_id={run_id!r})
+    Path({str(run_dir / "meta.json")!r}).write_text(json.dumps({{
+        "run_id": {run_id!r}, "worker_pid": child.pid, "owner_pid": os.getpid(),
+        "worker_identity": identity,
+    }}))
+    child.wait()
+finally:
+    if child.poll() is None:
+        child.terminate()
+    child.wait()
+""")
+    launch_argv = [
+        sys.executable,
+        str(owner_script),
+        "--admission-file",
+        str(admission),
+    ]
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "interactive-command" in argv:
+            return subprocess.CompletedProcess(argv, 0, shlex.join(launch_argv), "")
+        return subprocess.run(argv, check=kwargs.pop("check", False), **kwargs)
+
+    ctx = ResurrectContext(
+        run_dir=tmp_path / "artifacts",
+        python=sys.executable,
+        frame_bin=binary,
+        socket_dir=short_frame_sockets,
+        config_dir=config,
+        new_root=NEW,
+        launcher=sandbox / "vibecrafted",
+        env=env,
+        runner=runner,
+        run_meta=lambda _: (
+            json.loads((run_dir / "meta.json").read_text())
+            if (run_dir / "meta.json").exists()
+            else None
+        ),
+        process_probe=reinstall_clean.DarwinProcessProbe(reinstall_clean._installer()),
+        wait_seconds=3.0,
+    )
+
+    def frame(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [binary, *args],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    def live_sessions() -> list[str]:
+        from vibecrafted_core.settlement_history import _running_session_names
+
+        return list(
+            _running_session_names(frame("list-sessions", "--no-formatting").stdout)
+        )
+
+    ctx.live_sessions = live_sessions
+    checked = frame("setup", "--check")
+    cache = next(
+        Path(line.removeprefix("[CACHE DIR]: ").strip().strip('"'))
+        for line in (checked.stdout + checked.stderr).splitlines()
+        if line.startswith("[CACHE DIR]: ")
+    )
+    assert cache.resolve().is_relative_to(sandbox.resolve())
+    name = "reinstall-fixture"
+    cached = cache / "contract_version_4/session_info" / name / "session-layout.kdl"
+    cached.parent.mkdir(parents=True)
+    layout = f'''layout {{
+    tab name="codex" {{
+        pane command="{OLD}/bin/nonexistent" {{
+            start_suspended true
+        }}
+    }}
+}}
+'''
+    cached.write_text(layout)
+    manifest = {
+        "runtime": {"running_roots": [OLD]},
+        "headless_runs": [],
+        "frame": {
+            "sessions": [
+                {
+                    "name": name,
+                    "layout": layout,
+                    "cwd": str(sandbox),
+                    "unplaced_agents": [],
+                    "panes": [
+                        {
+                            "id": 0,
+                            "tab_name": "codex",
+                            "pane_command": f"{OLD}/bin/nonexistent",
+                            "agent": {
+                                "provider": "codex",
+                                "identity": PROVEN,
+                                "native_session_id": CODEX_ID,
+                                "cwd": str(sandbox),
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    try:
+        report = reinstall_clean.resurrect(manifest, ctx)
+        session = report["sessions"][0]
+        assert session["frame_result"] == "live", json.dumps(session, indent=2)
+        assert session["result"] == ("live" if alive else "failed"), json.dumps(
+            session, indent=2
+        )
+        pane = session["panes"][0]
+        assert pane["result"] == ("live" if alive else "failed"), pane
+        dumped = frame("--session", name, "action", "dump-layout")
+        assert OLD not in dumped.stdout
+        assert str(owner_script) in dumped.stdout
+        if alive:
+            assert pane["liveness"]["worker_identity"]["run_id"] == run_id
+        backup = Path(session["resurrection_cache"][0]["backup"])
+        assert backup.read_text() == layout
+    finally:
+        # These names/sockets/cache and their children were created by this test.
+        frame("delete-session", name, "--force")
