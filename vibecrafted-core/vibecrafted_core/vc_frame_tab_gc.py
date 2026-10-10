@@ -27,7 +27,10 @@ from .run_triage import (
 )
 
 BUCKET_SESSIONS = ("Finalized runs", "Failed runs", "Needs attention")
-PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell", "Voc"}
+# "Voc" left the set 2026-10-10 (decyzja Macieja): Voc is the compact-bar
+# button beside Composer since the layout dropped its tab (vc-frame
+# 9a5e152d2/b39deb2d) — protecting a tab nobody ships only embalms zombies.
+PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell"}
 _HEX = frozenset("0123456789abcdefABCDEF")
 
 

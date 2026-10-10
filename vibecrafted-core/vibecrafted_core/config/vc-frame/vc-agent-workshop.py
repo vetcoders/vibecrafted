@@ -196,7 +196,10 @@ _AMBIENT_LINEAGE_KEYS = (
     "CLAUDE_CODE_SESSION_ID",
     "VIBECRAFTED_OPERATOR_SESSION_ID",
 )
-_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "Voc", "start here"})
+# Compared against title.casefold(): entries must be lowercase. The old
+# "Voc" entry never matched for that reason, and the Voc tab itself left the
+# layout (Voc is the compact-bar button beside Composer) — removed 2026-10-10.
+_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "start here"})
 _AGENT_BINARIES = {
     "agy": "agy",
     "gemini": "agy",
