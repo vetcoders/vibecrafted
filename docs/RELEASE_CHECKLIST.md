@@ -179,7 +179,7 @@ RELEASE_SHA="$(git rev-parse HEAD)"
 gh workflow run gate-rehearsal.yml --ref main
 # Wait for success on exactly RELEASE_SHA, then admit immediately before tagging.
 bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
-  git tag -a v4.4.0 "$RELEASE_SHA" -m "Vibecrafted 4.4.0"
+  git tag -a v4.4.0 -m "Vibecrafted 4.4.0" "$RELEASE_SHA"
 git push origin v4.4.0
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```
