@@ -941,7 +941,7 @@ def write_start_here_guide(
     store_display = str(store_path)
 
     lines = [
-        "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Start Here",
+        "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Launchpad",
         "",
         f"Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
         f"Framework version: {framework_version}",
@@ -958,7 +958,7 @@ def write_start_here_guide(
         + (", ".join(missing_required) if missing_required else "none required"),
         "",
         "## Simplest path (backyard ride)",
-        "1. `vc-start` — open the operator session (tab **Start here** = map of the workspace)",
+        "1. `vc-start` — open the operator session (tab **Launchpad** = map of the workspace)",
         "2. `vibecrafted doctor` — health of foundations + install truth",
         "3. `vibecrafted init claude` — orient an agent in a real repo",
         '4. `vibecrafted implement codex --prompt "Ship <task>"` — first cut',

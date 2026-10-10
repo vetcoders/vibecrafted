@@ -30,7 +30,9 @@ BUCKET_SESSIONS = ("Finalized runs", "Failed runs", "Needs attention")
 # "Voc" left the set 2026-10-10 (decyzja Macieja): Voc is the compact-bar
 # button beside Composer since the layout dropped its tab (vc-frame
 # 9a5e152d2/b39deb2d) — protecting a tab nobody ships only embalms zombies.
-PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell"}
+# 2026-10-10: Launchpad is the product entry; keep Start here protected too
+# so upgrades preserve the Founder's existing sessions.
+PROTECTED_TAB_NAMES = {"Launchpad", "Start here", "Agents", "Shell"}
 _HEX = frozenset("0123456789abcdefABCDEF")
 
 

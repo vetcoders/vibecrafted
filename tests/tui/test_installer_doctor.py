@@ -289,6 +289,8 @@ def test_run_doctor_smokes_helper_and_launcher_runtime(
 
     guide_path = installer.write_start_here_guide(store_path, state, findings)
     guide_text = guide_path.read_text(encoding="utf-8")
+    assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Launchpad" in guide_text
+    assert "tab **Launchpad**" in guide_text
     assert "vibecrafted init claude" in guide_text
     assert "vibecrafted dou claude" in guide_text
     assert "vibecrafted decorate codex" in guide_text

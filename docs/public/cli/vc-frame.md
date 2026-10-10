@@ -23,13 +23,13 @@ vibecrafted start                  # alias for vibecrafted dashboard
 
 Shipped layouts:
 
-| Layout      | Purpose                                                |
-| ----------- | ------------------------------------------------------ |
-| `dashboard` | Mission-control 2x2 grid (default)                     |
-| `operator`  | Operator entry: Start here + work shell, sessions rail |
-| `marbles`   | Convergence-loop workspace                             |
-| `workflow`  | Examine → Research → Implement workspace               |
-| `research`  | Research swarm: synthesis pane + agent panes           |
+| Layout      | Purpose                                               |
+| ----------- | ----------------------------------------------------- |
+| `dashboard` | Mission-control 2x2 grid (default)                    |
+| `operator`  | Operator entry: Launchpad + work shell, sessions rail |
+| `marbles`   | Convergence-loop workspace                            |
+| `workflow`  | Examine → Research → Implement workspace              |
+| `research`  | Research swarm: synthesis pane + agent panes          |
 
 The dashboard is optional and a second-visit surface — the CLI front door is
 `vibecrafted help` and `vibecrafted init <agent>`.

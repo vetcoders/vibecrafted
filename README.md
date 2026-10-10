@@ -105,10 +105,10 @@ The runtime ships with **vc-frame**, the terminal cockpit every launcher and
 lifecycle runs inside. One window is one session with a fixed chrome:
 
 <p align="center">
-  <img alt="vc-frame anatomy — Start here map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
+  <img alt="vc-frame anatomy — Launchpad map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
 </p>
 
-- **TOP** — tabs of this session (`Start here` · `Shell` · one tab per worker run)
+- **TOP** — tabs of this session (`Launchpad` · `Shell` · one tab per worker run)
 - **LEFT** — the sessions rail: other sessions and agent rooms, click to jump
 - **CENTER** — the work surface (guide, shell, live worker streams)
 - **BOTTOM** — status bar with modes (`Ctrl+t` TAB · `Ctrl+p` PANE · `Ctrl+o` SESSION)

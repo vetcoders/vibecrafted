@@ -1576,7 +1576,7 @@ def _validate_launch_contract(
     ):
         _fail(
             E_ENTRYPOINT,
-            "launch_contract does not encode the canonical Start here entry",
+            "launch_contract does not encode the canonical Launchpad entry",
         )
     environment = raw["environment"]
     if not isinstance(environment, dict):
@@ -3780,8 +3780,8 @@ def _scenario_start_here(
 ) -> Mapping[str, bytes | str]:
     layout = scenario.product_config / "vc-frame/layouts/operator.kdl"
     payload = layout.read_bytes()
-    if b'tab name="Start here"' not in payload:
-        raise RuntimeError("installed operator layout has no Start here tab")
+    if b'tab name="Launchpad"' not in payload:
+        raise RuntimeError("installed operator layout has no Launchpad tab")
     help_output = _scenario_command(
         scenario, [scenario.launchers / "vc-start", "--help"]
     ).stdout

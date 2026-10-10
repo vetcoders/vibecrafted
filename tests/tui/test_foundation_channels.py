@@ -596,7 +596,8 @@ def test_runtime_install_retains_early_failure_evidence(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "missing", [None, "config.kdl", "vc-composer.sh", "layouts/operator.kdl"]
+    "missing",
+    [None, "config.kdl", "vc-composer.sh", "layouts/operator.kdl", "Launchpad"],
 )
 def test_canonical_frame_config_passes_strict_cockpit_gate(
     tmp_path: Path, missing: str | None
@@ -610,7 +611,10 @@ def test_canonical_frame_config_passes_strict_cockpit_gate(
         target.write_bytes((source / name).read_bytes())
         if name.endswith(".sh"):
             target.chmod(0o755)
-    if missing:
+    if missing == "Launchpad":
+        layout = config / "layouts/operator.kdl"
+        layout.write_text(layout.read_text().replace("Launchpad", "Start here"))
+    elif missing:
         (config / missing).unlink()
     fake_bin = tmp_path / "bin"
     _executable(fake_bin / "vc-frame", "#!/bin/sh\necho 'vc-frame 4.3.3'\n")
@@ -626,3 +630,4 @@ def test_canonical_frame_config_passes_strict_cockpit_gate(
     else:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "cockpit: READY" in result.stdout
+        assert "cockpit: Launchpad layout" in result.stdout

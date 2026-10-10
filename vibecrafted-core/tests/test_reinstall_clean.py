@@ -961,9 +961,10 @@ def launch(key: str, pane_command: str, tab: str) -> frame_layout.PaneLaunch:
     )
 
 
-def test_rewrite_layout_boots_from_the_new_generation() -> None:
+@pytest.mark.parametrize("entry_name", ["Start here", "Launchpad"])
+def test_rewrite_layout_boots_from_the_new_generation(entry_name: str) -> None:
     out, report = frame_layout.rewrite_layout(
-        LAYOUT,
+        LAYOUT.replace('tab name="Start here"', f'tab name="{entry_name}"'),
         launches=[
             launch("5", "bash /art/tmp/vc-spawn-cmd.0704", "claude"),
             launch(
@@ -982,7 +983,7 @@ def test_rewrite_layout_boots_from_the_new_generation() -> None:
         name: [p for _, p in frame_layout._command_panes(root) if _ in (tabs[name],)]
         for name in tabs
     }
-    start = commands["Start here"][0]
+    start = commands[entry_name][0]
     assert start.prop("command") == f"{CONFIG}/pane-python"
     assert start.child("start_suspended") is None
     claude = commands["claude"][0]
