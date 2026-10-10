@@ -527,12 +527,15 @@ def test_start_refreshes_previous_shell_inventory_and_preserves_existing_project
         '_vetcoders_start_cached_live_hosts=""; '
         "vc-start existing-project",
     )
-    assert _rc(result) == 3, result.stdout + result.stderr
+    # Entry contract (2026-10-10): a live session with no TTY is entered
+    # through the product terminal, not refused with an inventory menu.
+    assert _rc(result) == 0, result.stdout + result.stderr
     assert not _creates(scene.calls())
     assert scene.live() == sorted(before)
     for name, body in before.items():
         assert (scene.table / "live" / name).read_bytes() == body
-    assert not scene.terminal_launches(wait=0)
+    launches = scene.terminal_launches()
+    assert len(launches) == 1, (launches, result.stderr)
 
 
 def _fault_created_host_role(scene: Scene, fault: str, failures: int) -> Path:
