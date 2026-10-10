@@ -150,7 +150,14 @@ release-prereqs:
 		exit 0; \
 	fi; \
 	vibecrafted_release_verify_darwin_linker; \
-	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
+	if ! command -v rustup >/dev/null 2>&1 && [ -x "$$HOME/.cargo/bin/rustup" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH"; export PATH; \
+	fi; \
+	command -v rustup >/dev/null 2>&1 || { \
+		printf '%s\n' "FATAL: rustup is required for release (an ambient Homebrew rust cannot provide the pinned toolchain $$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN)" >&2; \
+		printf '%s\n' 'FIX: brew install rustup-init && rustup-init -y   (or https://rustup.rs), then re-run' >&2; \
+		exit 1; \
+	}; \
 	toolchain="$$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"; \
 	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
 		printf '==> Installing pinned release toolchain %s\n' "$$toolchain"; \
