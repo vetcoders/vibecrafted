@@ -1336,9 +1336,17 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     assert not resolve_provider_policy(
         provider, "local-worktrees", "bypass", "headless"
     ).supported
+    # local-vm is the local container: supported exactly for the providers its
+    # recipe installs, refused per provider (never globally) otherwise.
+    container = resolve_provider_policy(provider, "local-vm", "bypass", "interactive")
+    if provider in {"claude", "codex", "kimi"}:
+        assert container.supported, container.reason
+    else:
+        assert not container.supported
+        assert "not installed in the local container recipe" in container.reason
     assert (
-        "VM entrypoint"
-        in resolve_provider_policy(provider, "local-vm", "bypass", "interactive").reason
+        "interactive Agent Workspaces only"
+        in resolve_provider_policy(provider, "local-vm", "bypass", "headless").reason
     )
     assert (
         "coming soon"
@@ -1533,8 +1541,14 @@ def test_invalid_bounded_quota_fails_closed(selection: str) -> None:
 
 
 def test_unlimited_quota_is_restricted_to_observed_local_native() -> None:
-    with pytest.raises(ValueError, match="User-observed local-native"):
-        resolve_quota_policy("unlimited", runtime="local-worktrees")
+    # Every local interactive environment is watched in a Frame tab; a missing
+    # meter is "no data", not a refusal of the environment.
+    for runtime in ("local-native", "local-worktrees", "local-vm"):
+        assert resolve_quota_policy("unmetered", runtime=runtime).kind == "unmetered"
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unlimited", runtime="local-worktrees", mode="headless")
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unmetered", runtime="cloud-soon")
 
 
 def test_unsupported_provider_quota_fails_before_runtime_truth(
@@ -1994,8 +2008,14 @@ def test_continuity_modes_are_exact_and_fresh_proves_scoped_absence() -> None:
 
 
 def test_full_lineage_requires_explicit_parent_evidence() -> None:
-    with pytest.raises(ValueError, match="parent lineage id"):
+    # Missing lineage is a choice to make, not a malformed identifier, and it
+    # never silently becomes fresh.
+    with pytest.raises(ValueError, match="full-lineage needs a parent lineage"):
         resolve_continuity_policy("full-lineage", provider="claude", env={})
+    with pytest.raises(ValueError, match="well-formed identifier"):
+        resolve_continuity_policy(
+            "full-lineage", provider="claude", parent_lineage_id="bad id", env={}
+        )
     policy = resolve_continuity_policy(
         "full-lineage",
         provider="claude",
@@ -2190,9 +2210,13 @@ def test_runtime_policy_capabilities_require_live_usage_for_worktree_admission(
         caps = spawn.runtime_policy_capabilities(provider)
         assert caps["local-native"]["available"] is True
         assert caps["local-native"]["reason"] == ""
-        assert caps["local-worktrees"]["available"] is False
+        # Environment readiness is separate from usage metering: the worktree
+        # works, and the missing meter is reported as honest "no data".
+        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-worktrees"]["reason"] == ""
         assert caps["local-native"]["usage_capability"]["supported"] is False
-        assert "child-attributable" in caps["local-worktrees"]["reason"]
+        assert caps["local-worktrees"]["metering"]["state"] == "unavailable"
+        assert "no data" in caps["local-worktrees"]["metering"]["note"]
 
 
 def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(

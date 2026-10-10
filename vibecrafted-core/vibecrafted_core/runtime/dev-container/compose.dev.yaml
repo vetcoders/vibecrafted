@@ -1,8 +1,11 @@
-# Persistent, per-repo personal-dev container.
+# Persistent, per-repo local container for interactive Agents.
 #
-# One command:   ./dev-up.sh [repo-path]     (recommended — sets project + mount)
-# Or manually:   VC_WORKSPACE_DIR=/path/to/repo \
-#                  docker compose -p vc-<repo-slug> -f compose.dev.yaml up -d --build
+# Owner: vibecrafted_core.dev_container (the Agents launcher "local container"
+# environment; runtime-policy key `local-vm`). It builds Dockerfile.dev into
+# `vibecrafted-dev:recipe-<digest>` (the digest of this recipe directory) and
+# runs:  VC_WORKSPACE_DIR=<repo> VC_DEV_IMAGE=<tag> \
+#          docker compose -p vc-<repo-slug> -f compose.dev.yaml up -d --no-build
+# Manual entry:  vibecrafted-vm/dev-up.sh [repo-path]
 # Enter shell:   docker compose -p vc-<repo-slug> -f compose.dev.yaml exec dev zsh
 #
 # Per-repo isolation comes from the Compose PROJECT NAME (-p vc-<slug>), which
@@ -10,8 +13,8 @@
 # NON-EPHEMERAL: `down` (without -v) and `up` again keep every agent's session
 # history and the AICX corpus. Use `down -v` only when you want to wipe history.
 #
-# This uses the operator-owned Dockerfile.dev image and is not a security
-# boundary. Do not combine with the broad host mounts of compose.yaml.
+# This is a local development container, not a VM and not a security
+# boundary. Do not combine with the broad host mounts of vibecrafted-vm/compose.yaml.
 services:
   dev:
     build:
@@ -31,8 +34,9 @@ services:
       - TERM=${TERM:-xterm-256color}
       - COLORTERM=${COLORTERM:-truecolor}
     volumes:
-      # The repository under work, mounted live (defaults to this checkout).
-      - ${VC_WORKSPACE_DIR:-..}:/workspace:rw
+      # The repository under work, mounted live. Required: a default would
+      # silently mount whatever directory sits next to this recipe.
+      - ${VC_WORKSPACE_DIR:?set VC_WORKSPACE_DIR to the repository to mount}:/workspace:rw
       # Cross-agent session history + memory — the whole point of this container.
       # Persisted across down/up/rebuild by the project-prefixed named volumes.
       - aicx:/root/.aicx

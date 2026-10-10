@@ -406,7 +406,7 @@ _vetcoders_resume_agent() {
   local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
   case "${_vetcoders_contract_runtime:-}" in
-    ""|headless|terminal|visible) ;;
+    ""|headless|terminal|visible|plain) ;;
     *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
   esac
   case "${_vetcoders_contract_execution_runtime:-}" in
@@ -623,6 +623,14 @@ _vetcoders_resume_agent() {
   _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
   case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
   resume_declared_root="$_vetcoders_contract_root"
+
+  # `--runtime plain`: the caller's terminal IS the Agent TTY (the Agents
+  # launcher opens exactly one Frame tab for this command). Resolving an
+  # operator session here would open a second tab for the same conversation.
+  if [[ "$runtime" == plain ]]; then
+    _vetcoders_init_in_current_terminal "$tool" "$resume_cmd" plain resume
+    return $?
+  fi
 
   # Interactive resume — provider-neutral policy (adapters only change argv):
   #   bare resume → interactive → explicit or detected operator target
