@@ -11,8 +11,10 @@
 #
 # The one-shot rule lives in zsh hooks: preexec arms after a real command,
 # precmd prints [exit N] on failure, probes pin state and closes an unpinned
-# pane by id; `exit` and Ctrl-D close through zshexit. Ctrl-C stops only the
-# running command (or clears an empty prompt); it does not kill this shell.
+# pane by id; `exit` and Ctrl-D close through zshexit. A completion or
+# autosuggestion helper inherits that hook; its exit must not close the pane.
+# Ctrl-C stops only the running command (or clears an empty prompt); it does
+# not kill this shell.
 #
 # Never `close-pane` without `--pane-id`. A bare close-pane follows focus and
 # would kill whichever pane holds it — including a durable Agent the command
@@ -134,11 +136,17 @@ print("pinned" if flag is True else "unpinned")
 PY
 }
 
-# Closed exactly once: the one-shot path closes explicitly (zsh on Linux does
-# not reliably run zshexit for an `exit` issued inside a precmd hook), and the
-# zshexit hook then finds the pane already released.
+# Closed exactly once, and only by the root interactive shell. The one-shot
+# path closes explicitly (zsh on Linux does not reliably run zshexit for an
+# `exit` issued inside a precmd hook), and the root zshexit then finds the
+# pane already released. An explicit `exit` in a helper subshell does run
+# the inherited zshexit (ZSH_SUBSHELL > 0); that is the completion /
+# autosuggestion worker, and it must not close this pane.
 typeset -g _vc_quick_closed=0
 _vc_quick_close_self() {
+  if (( ZSH_SUBSHELL )); then
+    return 0
+  fi
   if [[ -z "${VC_QUICK_PANE_ID:-}" ]]; then
     return 0
   fi
@@ -175,7 +183,8 @@ autoload -Uz add-zsh-hook
 add-zsh-hook preexec _vc_quick_preexec
 add-zsh-hook precmd _vc_quick_precmd
 
-# Every way out — one-shot close, typed `exit`, Ctrl-D — releases the pane.
+# Root shell only — one-shot close, typed `exit`, Ctrl-D. Helper exits hit
+# the same function and return at the ZSH_SUBSHELL gate.
 zshexit() { _vc_quick_close_self }
 ZSHRC
 

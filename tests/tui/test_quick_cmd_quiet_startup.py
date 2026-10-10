@@ -662,3 +662,202 @@ def test_product_profile_keeps_on_request_help_behind_quiet_gate() -> None:
     assert "VIBECRAFTED_QUIET_START" in text
     assert "vibecrafted --help" in text
     assert "Your terminal is ready" in text
+
+
+def _install_helper_exit_profile(home: Path) -> None:
+    """Profile fixture: one typed character forks a helper that exits explicitly.
+
+    `(exit 0)` is the case that runs an inherited zshexit. A plain `(print)`
+    subshell does not. The hook is installed by Quick cmd after this file is
+    sourced, so the widget fires only once the line editor is up.
+    """
+
+    product = home / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    (product / "interactive.zsh").write_text(
+        """\
+typeset -g _vc_test_helper_done=0
+_vc_test_note_preexec() {
+  print -r -- "preexec" >> "${VC_QUICK_HELPER_LOG}"
+}
+_vc_test_self_insert() {
+  zle .self-insert
+  (( _vc_test_helper_done )) && return 0
+  _vc_test_helper_done=1
+  (
+    print -r -- "helper kind=subshell ZSH_SUBSHELL=$ZSH_SUBSHELL" >> "${VC_QUICK_HELPER_LOG}"
+    exit 0
+  ) || true
+  print -r -- "helper kind=parent-alive" >> "${VC_QUICK_HELPER_LOG}"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _vc_test_note_preexec
+zle -N self-insert _vc_test_self_insert
+""",
+        encoding="utf-8",
+    )
+
+
+def _read_pty_until(fd: int, output: bytearray, predicate, timeout: float) -> bool:
+    import os
+    import select
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return predicate()
+        if not chunk:
+            return predicate()
+        output += chunk
+    return predicate()
+
+
+def _reap_pty(pid: int, fd: int) -> None:
+    import os
+    import signal
+
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        done, _status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+    os.waitpid(pid, 0)
+
+
+def _quick_cmd_after_helper_exit(
+    tmp_path: Path,
+    *,
+    panes: list[dict[str, object]],
+    follow_up: bytes,
+) -> tuple[str, list[str], list[str]]:
+    """Type one character, let the helper exit, then send `follow_up`.
+
+    Returns the helper receipt, frame events observed before follow-up, and
+    the events after the shell leaves.
+    """
+
+    import os
+    import pty
+
+    bin_dir = tmp_path / "bin"
+    stub_dir = tmp_path / "stubs"
+    log = tmp_path / "events.log"
+    helper_log = tmp_path / "helper.log"
+    _install_frame(bin_dir, log, panes)
+    _install_probe(stub_dir, log)
+    _install_helper_exit_profile(tmp_path)
+    env = {
+        "HOME": str(tmp_path),
+        "USER": "op",
+        "TERM": "xterm",
+        "PATH": f"{stub_dir}:{bin_dir}:/usr/bin:/bin",
+        "VC_FRAME_PANE_ID": "terminal_18",
+        "VC_QUICK_HELPER_LOG": str(helper_log),
+    }
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve("/bin/bash", ["/bin/bash", str(WRAPPER)], env)
+
+    output = bytearray()
+    try:
+        assert _read_pty_until(fd, output, lambda: b"\xe2\x9d\xaf_" in output, 15), (
+            output.decode("utf-8", "replace")
+        )
+        os.write(fd, b"v")
+        assert _read_pty_until(
+            fd,
+            output,
+            lambda: (
+                helper_log.exists()
+                and "kind=parent-alive" in helper_log.read_text(encoding="utf-8")
+            ),
+            15,
+        ), output.decode("utf-8", "replace")
+        os.kill(pid, 0)
+        helper_text = helper_log.read_text(encoding="utf-8")
+        before = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        os.write(fd, follow_up)
+        _read_pty_until(
+            fd,
+            output,
+            lambda: (
+                log.exists()
+                and "close-pane --pane-id terminal_18"
+                in log.read_text(encoding="utf-8")
+            ),
+            15,
+        )
+    finally:
+        _reap_pty(pid, fd)
+    after = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return helper_text, before, after
+
+
+def test_typing_without_enter_does_not_let_helper_zshexit_close_the_pane(
+    tmp_path: Path,
+) -> None:
+    """A completion helper's explicit exit inherits zshexit. No Enter was
+    accepted, so that exit must not close the pane; the root shell stays up
+    and a later command still closes exactly this pane id."""
+
+    import re
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    helper_text, before, after = _quick_cmd_after_helper_exit(
+        tmp_path,
+        panes=panes,
+        follow_up=b"\x15probe kept\r",
+    )
+
+    match = re.search(r"kind=subshell ZSH_SUBSHELL=(\d+)", helper_text)
+    assert match is not None, helper_text
+    assert int(match.group(1)) > 0, helper_text
+    assert "kind=parent-alive" in helper_text
+    assert "preexec" not in helper_text.split("kind=parent-alive", 1)[0]
+    assert before == [], before
+    assert after == [
+        "ran kept",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert "action close-pane\n" not in "\n".join(after) + "\n"
+
+
+def test_pinned_pane_stays_when_a_helper_subshell_exits(tmp_path: Path) -> None:
+    """Pin still owns the pane: a helper exit does not close it, and a typed
+    exit afterwards closes exactly this id once both commands have run."""
+
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    helper_text, before, after = _quick_cmd_after_helper_exit(
+        tmp_path,
+        panes=panes,
+        follow_up=b"\x15probe one\rprobe two\rexit\r",
+    )
+
+    assert "kind=subshell ZSH_SUBSHELL=" in helper_text
+    assert "kind=parent-alive" in helper_text
+    assert before == [], before
+    assert after == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
