@@ -19,6 +19,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -147,8 +148,10 @@ from vibecrafted_core.spawn import (
     PERMISSION_POLICIES,
     RUNTIME_POLICIES,
     continuity_policy_capabilities,
+    interactive_resume_support,
     resolve_operator_agent_policy,
     resolve_provider_policy,
+    resumable_interactive_runs,
     runtime_policy_capabilities,
 )
 from vibecrafted_core.workspace_catalog import (
@@ -170,18 +173,29 @@ PURPOSE_PROMPTS = (
     "Help me diagnose, fix and verify a problem. First agree on the problem and scope.",
 )
 MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
+# The configuration key stays `local-vm`; what runs is a local container.
+RUNTIME_LABELS = {"local-vm": "local-container"}
 RUNTIME_HELP = {
     "local-native": ("This checkout, shared with you.", ""),
-    # The worktree lane is admitted only on a verified live usage source
-    # (runtime_policy_capabilities); the plain second line keeps that gate
-    # visible instead of presenting the lane as unconditionally available.
     "local-worktrees": (
-        "A separate working copy for this Agent.",
-        "Only when this provider's live usage can be verified.",
+        "A separate branch-backed working copy under ~/.vibecrafted/worktrees.",
+        "",
     ),
-    "local-vm": ("Not available yet.", ""),
+    "local-vm": (
+        "A persistent local Docker container (not a VM); the project is mounted at /workspace.",
+        "",
+    ),
     "cloud-soon": ("Not available yet.", ""),
 }
+ADVANCED_ROWS = ("mode", "runtime", "permissions", "continuity")
+# Ambient agent identities a launcher pane may inherit. They describe whoever
+# opened this pane, never the parent the User chose for a new Agent.
+_AMBIENT_LINEAGE_KEYS = (
+    "VIBECRAFTED_RUN_ID",
+    "CODEX_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "VIBECRAFTED_OPERATOR_SESSION_ID",
+)
 _WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "Voc", "start here"})
 _AGENT_BINARIES = {
     "agy": "agy",
@@ -216,6 +230,7 @@ def launch_argv(
     effort: str = "",
     purpose: int | None = None,
     session: str = "",
+    run_id: str = "",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
@@ -281,17 +296,35 @@ def launch_argv(
         elif mode in MODE_PROMPTS:
             command.extend(["--prompt", MODE_PROMPTS[mode]])
         return command
-    if runtime != "local-native":
-        raise ValueError(
-            "worktree resume supervision belongs to H2b2 and is not configured yet"
-        )
-    command = ["vibecrafted", "resume", agent]
-    if root:
-        command.extend(["--root", root])
-    if session:
-        if session in {"current", "last"}:
-            raise ValueError("Choose a concrete provider session")
+    supported, reason = interactive_resume_support(agent, runtime)
+    if not supported:
+        raise ValueError(reason)
+    decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
+    if not decision.supported:
+        raise ValueError(decision.reason)
+    if session in {"current", "last"}:
+        raise ValueError("Choose a concrete provider session")
+    if not session and not run_id:
+        raise ValueError("Resume needs a concrete session: choose one in Session (←/→)")
+    # `--runtime plain`: this Frame tab is the Agent TTY. The recorded run
+    # owns its checkout/container, so a run id never carries --root.
+    command = [
+        "vibecrafted",
+        "resume",
+        agent,
+        "--runtime",
+        "plain",
+        "--permissions",
+        permissions,
+    ]
+    if run_id:
+        command.extend(["--run-id", run_id])
+    else:
+        if root:
+            command.extend(["--root", root])
         command.extend(["--session", session])
+    if runtime != "local-native":
+        command.extend(["--policy-runtime", runtime])
     if model:
         command.extend(["--model", model])
     if effort:
@@ -546,17 +579,12 @@ def mode_capabilities(
 ) -> dict[str, dict[str, Any]]:
     """Describe every launch mode without hiding unsupported combinations."""
     decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
-    resume_available = runtime == "local-native"
+    resume_available, resume_reason = interactive_resume_support(agent, runtime)
+    if resume_available and not decision.supported:
+        resume_available, resume_reason = False, decision.reason
     return {
         "init": {"available": decision.supported, "reason": decision.reason},
-        "resume": {
-            "available": resume_available,
-            "reason": (
-                ""
-                if resume_available
-                else "resume is supported only in local-native runtime"
-            ),
-        },
+        "resume": {"available": resume_available, "reason": resume_reason},
         "partner": {"available": decision.supported, "reason": decision.reason},
         "operator": {"available": decision.supported, "reason": decision.reason},
     }
@@ -625,6 +653,18 @@ def public_reason(reason: str) -> str:
         return ""
     low = text.casefold()
     if low.startswith("project could not be opened:"):
+        return text
+    # Environment causes are written for the User and carry the next step
+    # (start Colima, share a path, rebuild); never fold them into a bucket.
+    if any(
+        token in low for token in ("docker", "colima", "local container", "/workspace")
+    ):
+        return text
+    if "full-lineage needs a parent" in low or "parent lineage id" in low:
+        return "Memory full-lineage needs a parent: pick one in Parent (←/→) or choose fresh"
+    if "token limit" in low and "metering" in low:
+        return "This token limit needs live usage metering; choose no limit"
+    if low.startswith("resume needs") or "resume of an exact session" in low:
         return text
     # Parent-session and project reasons are not provider policy; keep them
     # out of the provider buckets below (an origin-less checkout is not an
@@ -964,12 +1004,77 @@ def bind_terminal_paper(window: curses.window) -> int:
     return _PAPER
 
 
+def _char_cells(char: str) -> int:
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+
+
+def _cell_width(text: str) -> int:
+    """Terminal cells *text* occupies (wide CJK = 2, combining = 0)."""
+    return sum(_char_cells(char) for char in text)
+
+
+def _slice_cells(text: str, start: int, end: int) -> str:
+    """The characters of *text* that occupy cells [start, end)."""
+    out: list[str] = []
+    cell = 0
+    for char in text:
+        width = _char_cells(char)
+        if cell >= end:
+            break
+        if cell >= start:
+            out.append(char)
+        cell += width
+    return "".join(out)
+
+
 def _clip(text: str, width: int) -> str:
+    """Clip to *width* terminal cells, marking a cut with an ellipsis."""
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if _cell_width(text) <= width:
         return text
-    return text[: max(0, width - 1)] + "…"
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        cells = _char_cells(char)
+        if used + cells > width - 1:
+            break
+        kept.append(char)
+        used += cells
+    return "".join(kept) + "…"
+
+
+def _choice_layout(
+    tokens: tuple[str, ...], start_col: int, end_col: int
+) -> list[tuple[int, int, int, str]]:
+    """Visible span of every token as ``(index, start, end, fragment)``.
+
+    Painting and mouse hitboxes both come from this one layout: the joined
+    tokens are clipped once to ``end_col`` and each token keeps exactly the
+    cells it occupies in that clipped line, so a click lands on what is shown
+    after a resize, a cut, or wide characters.
+    """
+    visible = _clip(" ".join(tokens), end_col - start_col)
+    visible_cells = _cell_width(visible)
+    layout: list[tuple[int, int, int, str]] = []
+    offset = 0
+    for index, token in enumerate(tokens):
+        cells = _cell_width(token)
+        if offset >= visible_cells:
+            break
+        stop = min(offset + cells, visible_cells)
+        layout.append(
+            (
+                index,
+                start_col + offset,
+                start_col + stop,
+                _slice_cells(visible, offset, stop),
+            )
+        )
+        offset += cells + 1
+    return layout
 
 
 def _safe_addstr(
@@ -994,30 +1099,24 @@ def _dim_unavailable_choices(
     selected: int,
     end_col: int,
     base: int = 0,
-) -> None:
+) -> list[tuple[int, int, int, str]]:
     """Paint unavailable tokens dim and the selected token bold in the accent color.
 
     Focus is a chevron beside the row,
     never an underline or strike through the glyphs, and never a reverse-video
-    block.
+    block. Returns the layout the caller turns into mouse hitboxes.
     """
     tokens = _choice_tokens(choices, selected=selected, available=available)
     # The base line clips the *whole* token sequence.  Slice that same rendered
     # sequence before applying token attributes so a trailing disabled token
     # cannot overwrite its ellipsis or drift relative to the selected token.
-    visible = _clip(" ".join(tokens), end_col - col)
-    offset = 0
-    for index, (token, enabled) in enumerate(zip(tokens, available, strict=True)):
-        fragment = visible[offset : offset + len(token)]
-        if not fragment:
-            break
-        if not enabled:
-            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM | base)
+    layout = _choice_layout(tokens, col, end_col)
+    for index, start, _end, fragment in layout:
+        if not available[index]:
+            _safe_addstr(window, row, start, fragment, curses.A_DIM | base)
         elif index == selected:
-            _safe_addstr(
-                window, row, col + offset, fragment, curses.A_BOLD | _ACCENT | base
-            )
-        offset += len(token) + 1
+            _safe_addstr(window, row, start, fragment, curses.A_BOLD | _ACCENT | base)
+    return layout
 
 
 def _choice_tokens(
@@ -1063,7 +1162,16 @@ class Workshop:
         )
         self.permissions = 0
         self.continuity = 0
+        # Memory is normalized to what is available until the User picks one;
+        # an explicit pick is never silently replaced (full-lineage ≠ fresh).
+        self.continuity_explicit = False
         self.continuity_parent = ""
+        self.resume_candidates: list[dict[str, Any]] | None = None
+        self.resume_index = -1
+        self.resume_run_id = ""
+        self.resume_error = ""
+        self._mouse_down: tuple[int, int] | None = None
+        self._drawn_size: tuple[int, int] | None = None
         self.parent_sessions: list[SessionRecord] = []
         self.parent_index = -1
         self.parent_error = ""
@@ -1076,7 +1184,7 @@ class Workshop:
         self.error_details = False
         self.error_scroll = 0
         self.notice = ""
-        self.mouse_targets: list[tuple[int, int, int, int, str]] = []
+        self.mouse_targets: list[tuple[int, int, int, Any, str]] = []
         self.presence_schedule = PresenceSchedule()
         self.faces: list[str] = []
         self.unknown_faces: list[str] = []
@@ -1115,11 +1223,13 @@ class Workshop:
                 "runtime",
                 "permissions",
                 "continuity",
+                "continuity_explicit",
                 "continuity_parent",
                 "model",
                 "effort",
                 "purpose",
                 "session",
+                "resume_run_id",
             )
         }
 
@@ -1129,6 +1239,8 @@ class Workshop:
                 setattr(self, name, value)
         self.parent_sessions = []
         self.parent_index = -1
+        self.resume_candidates = None
+        self.resume_index = -1
 
     def _read_choices(self) -> dict[str, Any]:
         try:
@@ -1168,6 +1280,19 @@ class Workshop:
                         purpose = slot.get("purpose", 1)
                         if isinstance(purpose, int) and purpose in range(len(PURPOSES)):
                             values["purpose"] = purpose
+                            # Each slot keeps its own launch semantics; an
+                            # unknown or retired name restores the default.
+                            for name, choices in (
+                                ("runtime", RUNTIME_POLICIES),
+                                ("permissions", PERMISSION_POLICIES),
+                                ("launch_mode", LAUNCH_MODES),
+                                ("continuity", CONTINUITY_MODES),
+                            ):
+                                chosen = slot.get(name)
+                                if isinstance(chosen, str) and chosen in choices:
+                                    values[name] = choices.index(chosen)
+                            if slot.get("continuity_explicit") is True:
+                                values["continuity_explicit"] = True
                             restored.append(values)
                             continue
                     break
@@ -1220,6 +1345,15 @@ class Workshop:
                     key: s.get(key, getattr(self, key))
                     for key in ("model", "effort", "purpose")
                 },
+                "runtime": RUNTIME_POLICIES[s.get("runtime", self.runtime)],
+                "permissions": PERMISSION_POLICIES[
+                    s.get("permissions", self.permissions)
+                ],
+                "launch_mode": LAUNCH_MODES[s.get("launch_mode", self.launch_mode)],
+                "continuity": CONTINUITY_MODES[s.get("continuity", self.continuity)],
+                "continuity_explicit": bool(
+                    s.get("continuity_explicit", self.continuity_explicit)
+                ),
             }
             for s in self.agent_slots
         ]
@@ -1275,12 +1409,19 @@ class Workshop:
         curses.cbreak()
         self.window.keypad(True)
         self.window.timeout(500)
+        try:
+            # Report raw presses: no click resolution delay, and a press is
+            # the single activation of one physical click.
+            curses.mouseinterval(0)
+        except curses.error:
+            pass
         self._normalize_runtime_choice()
         self._normalize_permission_choice()
         self._normalize_mode_choice()
         self._normalize_continuity_choice()
         try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            # Presses and releases only: hover/motion reports are not choices.
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
         except curses.error:
             pass
 
@@ -1305,6 +1446,10 @@ class Workshop:
     def draw(self) -> None:
         self.window.erase()
         self.mouse_targets.clear()
+        try:
+            self._drawn_size = tuple(self.window.getmaxyx())
+        except (AttributeError, curses.error):
+            self._drawn_size = None
         if self.mode == "home":
             self.draw_home()
         else:
@@ -1555,127 +1700,94 @@ class Workshop:
             (toggle_row, left, left + min(len(toggle), inner), 0, "advanced")
         )
         cursor = toggle_row + 1
-        if self.advanced and not compact:
-            provider = AGENTS[self.agent]
-            capabilities = runtime_policy_capabilities(provider)
-            runtime_available = tuple(
-                bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES
-            )
-            permission_available = tuple(
-                resolve_provider_policy(
-                    provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
-                ).supported
-                for name in PERMISSION_POLICIES
-            )
-            mode_caps = mode_capabilities(
-                provider,
-                RUNTIME_POLICIES[self.runtime],
-                PERMISSION_POLICIES[self.permissions],
-            )
-            mode_available = tuple(
-                bool(mode_caps[name]["available"]) for name in LAUNCH_MODES
-            )
-            continuity_caps = continuity_policy_capabilities(
-                provider,
-                root=self.path,
-                explicit_parent=self.continuity_parent,
-            )
-            continuity_available = tuple(
-                bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
-            )
-            advanced_rows = (
-                (
-                    "Mode      ",
-                    LAUNCH_MODES,
-                    self.launch_mode,
-                    mode_available,
-                ),
-                (
-                    "Runtime   ",
-                    RUNTIME_POLICIES,
-                    self.runtime,
-                    runtime_available,
-                ),
-                (
-                    "Permits   ",
-                    PERMISSION_POLICIES,
-                    self.permissions,
-                    permission_available,
-                ),
-                (
-                    "Memory    ",
-                    CONTINUITY_MODES,
-                    self.continuity,
-                    continuity_available,
-                ),
-            )
-            for offset, (label, choices, selected, available) in enumerate(
-                advanced_rows
-            ):
-                line = label + " ".join(
-                    _choice_tokens(choices, selected=selected, available=available)
-                )
+        if self.advanced:
+            rows = self._advanced_model()
+            last_row = height - 3
+            drawn_rows = 0
+            for offset, row in enumerate(rows):
+                y = cursor + offset
+                if y >= last_row:
+                    break
                 focused = self.row == offset + 2
-                text_col = _paint_row_focus(self.window, cursor + offset, left, focused)
+                text_col = _paint_row_focus(self.window, y, left, focused)
+                end_col = min(text_col + inner, width)
+                line = row["label"] + " ".join(row["labels"])
                 _safe_addstr(
-                    self.window,
-                    cursor + offset,
-                    text_col,
-                    _clip(line, inner),
-                    0,
+                    self.window, y, text_col, _clip(line, end_col - text_col), 0
                 )
-                _dim_unavailable_choices(
+                layout = _dim_unavailable_choices(
                     self.window,
-                    cursor + offset,
-                    text_col + len(label),
-                    choices,
-                    available,
-                    selected,
-                    text_col + inner,
+                    y,
+                    text_col + _cell_width(row["label"]),
+                    row["labels"],
+                    row["available"],
+                    row["selected"],
+                    end_col,
                     base=0,
                 )
-            parent_col = _paint_row_focus(self.window, cursor + 4, left, self.row == 6)
-            _safe_addstr(
-                self.window,
-                cursor + 4,
-                parent_col,
-                _clip(f"Parent    {self.continuity_parent or '(none)'}", inner),
-                0,
-            )
-            runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
-            help_text = public_reason(runtime_help[0]) or runtime_help[0]
-            _safe_addstr(
-                self.window, cursor + 5, left, _clip(help_text, inner), curses.A_DIM
-            )
-            if runtime_help[1]:
-                _safe_addstr(
-                    self.window,
-                    cursor + 6,
-                    left,
-                    _clip(runtime_help[1], inner),
-                    curses.A_DIM,
+                for index, start, stop, _fragment in layout:
+                    self.mouse_targets.append(
+                        (y, start, stop, (offset, index), "choice")
+                    )
+                drawn_rows += 1
+            parent_y = cursor + len(rows)
+            if drawn_rows == len(rows) and parent_y < last_row:
+                parent_col = _paint_row_focus(
+                    self.window, parent_y, left, self.row == 6
                 )
-            # Disabled choices keep a visible reason in plain words.  The
-            # admission gates themselves live in spawn; only wording is public.
-            unavailable = [
-                f"{name}: {public_reason(str(caps[name]['reason'])) or 'Not available'}"
-                for names, caps in (
-                    (RUNTIME_POLICIES, capabilities),
-                    (LAUNCH_MODES, mode_caps),
-                    (CONTINUITY_MODES, continuity_caps),
+                parent_text = _clip(self._parent_row_text(), inner)
+                _safe_addstr(self.window, parent_y, parent_col, parent_text, 0)
+                self.mouse_targets.append(
+                    (
+                        parent_y,
+                        parent_col,
+                        min(width, parent_col + _cell_width(parent_text)),
+                        0,
+                        "parent",
+                    )
                 )
-                for name in names
-                if not caps[name]["available"]
-            ]
-            if unavailable:
-                _safe_addstr(
-                    self.window,
-                    cursor + 7,
-                    left,
-                    _clip("Unavailable — " + " · ".join(unavailable), inner),
-                    curses.A_DIM,
+            if not compact:
+                runtime_name = RUNTIME_POLICIES[self.runtime]
+                help_lines = self._runtime_help_lines(runtime_name)
+                for extra, text in enumerate(help_lines[:2]):
+                    _safe_addstr(
+                        self.window,
+                        cursor + 5 + extra,
+                        left,
+                        _clip(text, inner),
+                        curses.A_DIM,
+                    )
+                # Disabled choices keep a visible reason in plain words.  The
+                # admission gates themselves live in spawn; only wording is public.
+                # Environment first: in a narrow pane it is the reason that
+                # decides whether anything else matters.
+                ordered = sorted(
+                    rows,
+                    key=lambda row: (
+                        "runtime",
+                        "mode",
+                        "permissions",
+                        "continuity",
+                    ).index(row["key"]),
                 )
-            cursor += 9
+                unavailable = [
+                    f"{row['labels'][index]}: "
+                    f"{public_reason(row['reasons'][index]) or 'Not available'}"
+                    for row in ordered
+                    for index, ok in enumerate(row["available"])
+                    if not ok
+                ]
+                if unavailable:
+                    _safe_addstr(
+                        self.window,
+                        cursor + 7,
+                        left,
+                        _clip("Unavailable — " + " · ".join(unavailable), inner),
+                        curses.A_DIM,
+                    )
+                cursor += 9
+            else:
+                cursor += min(len(rows) + 1, max(0, last_row - cursor))
         if self.edit_controls:
             fields = (
                 ("Model", self.model or "(provider default)", 7),
@@ -1766,6 +1878,219 @@ class Workshop:
             "↑/↓ scroll · Esc back to launcher",
             curses.A_DIM,
         )
+
+    def _launcher_env(self) -> dict[str, str]:
+        """This pane's environment without inherited agent identities."""
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if key not in _AMBIENT_LINEAGE_KEYS
+        }
+
+    def _continuity_caps(
+        self, root: str | os.PathLike[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        caps = continuity_policy_capabilities(
+            AGENTS[self.agent],
+            root=root or self.path,
+            explicit_parent=self.continuity_parent,
+            env=self._launcher_env(),
+        )
+        if RUNTIME_POLICIES[self.runtime] == "local-vm":
+            caps["bare-fork"] = {
+                **caps["bare-fork"],
+                "available": False,
+                "reason": "bare-fork is not available in the local container",
+            }
+        return caps
+
+    def _resume_mode(self) -> bool:
+        return LAUNCH_MODES[self.launch_mode] == "resume"
+
+    def _advanced_model(self) -> list[dict[str, Any]]:
+        """One description of the four choice rows: drawing, clicks and reasons."""
+        provider = AGENTS[self.agent]
+        runtime_name = RUNTIME_POLICIES[self.runtime]
+        runtime_caps = runtime_policy_capabilities(provider)
+        permission_decisions = [
+            resolve_provider_policy(provider, runtime_name, name, "interactive")
+            for name in PERMISSION_POLICIES
+        ]
+        mode_caps = mode_capabilities(
+            provider, runtime_name, PERMISSION_POLICIES[self.permissions]
+        )
+        continuity_caps = self._continuity_caps()
+        resume_reason = (
+            "Resume continues the chosen session; memory applies to new sessions"
+        )
+        rows = [
+            {
+                "key": "mode",
+                "label": "Mode      ",
+                "values": LAUNCH_MODES,
+                "selected": self.launch_mode,
+                "available": tuple(
+                    bool(mode_caps[n]["available"]) for n in LAUNCH_MODES
+                ),
+                "reasons": tuple(str(mode_caps[n]["reason"]) for n in LAUNCH_MODES),
+            },
+            {
+                "key": "runtime",
+                "label": "Runtime   ",
+                "values": RUNTIME_POLICIES,
+                "selected": self.runtime,
+                "available": tuple(
+                    bool(runtime_caps[n]["available"]) for n in RUNTIME_POLICIES
+                ),
+                "reasons": tuple(
+                    str(runtime_caps[n].get("reason") or "") for n in RUNTIME_POLICIES
+                ),
+            },
+            {
+                "key": "permissions",
+                "label": "Permits   ",
+                "values": PERMISSION_POLICIES,
+                "selected": self.permissions,
+                "available": tuple(d.supported for d in permission_decisions),
+                "reasons": tuple(d.reason for d in permission_decisions),
+            },
+            {
+                "key": "continuity",
+                "label": "Memory    ",
+                "values": CONTINUITY_MODES,
+                "selected": self.continuity,
+                "available": tuple(
+                    False
+                    if self._resume_mode()
+                    else bool(continuity_caps[n]["available"])
+                    for n in CONTINUITY_MODES
+                ),
+                "reasons": tuple(
+                    resume_reason
+                    if self._resume_mode()
+                    else str(continuity_caps[n]["reason"])
+                    for n in CONTINUITY_MODES
+                ),
+            },
+        ]
+        for row in rows:
+            row["labels"] = tuple(RUNTIME_LABELS.get(v, v) for v in row["values"])
+        return rows
+
+    def _runtime_help_lines(self, runtime_name: str) -> list[str]:
+        first = RUNTIME_HELP[runtime_name][0]
+        caps = runtime_policy_capabilities(AGENTS[self.agent]).get(runtime_name, {})
+        notes: list[str] = []
+        if runtime_name == "local-vm" and caps.get("available"):
+            notes.append(
+                "Image ready."
+                if caps.get("image_ready")
+                else "First Launch builds the image in the new tab (several minutes)."
+            )
+        metering = caps.get("metering") or {}
+        if caps.get("available") and metering:
+            notes.append(
+                "Usage: live metering."
+                if metering.get("state") == "live"
+                else "Usage: no data (not metered); no token limit is applied."
+            )
+        return [first, " ".join(notes)] if notes else [first]
+
+    def _session_label(self, candidate: dict[str, Any]) -> str:
+        stamp = str(candidate.get("updated_at") or "")[:16].replace("T", " ")
+        branch = str(candidate.get("branch") or "")
+        where = f" · {branch}" if branch else ""
+        return f"{candidate['session_id']} · {stamp}{where}"
+
+    def _parent_row_text(self) -> str:
+        if not self._resume_mode():
+            return f"Parent    {self.continuity_parent or '(none)'}"
+        if (
+            self.resume_run_id
+            and self.resume_candidates
+            and 0 <= self.resume_index < len(self.resume_candidates)
+        ):
+            return "Session   " + self._session_label(
+                self.resume_candidates[self.resume_index]
+            )
+        if self.session:
+            return f"Session   {self.session}"
+        if self.resume_candidates == []:
+            return f"Session   (none: {self.resume_error})"
+        return "Session   (choose with ←/→ or click — earlier sessions here)"
+
+    def _refresh_resume_candidates(self) -> None:
+        provider = AGENTS[self.agent]
+        runtime_name = RUNTIME_POLICIES[self.runtime]
+        try:
+            self.resume_candidates = resumable_interactive_runs(
+                provider, self.path, runtime_name
+            )
+        except (OSError, ValueError) as exc:
+            self.resume_candidates = []
+            self.resume_error = f"session catalog unavailable: {exc}"
+            return
+        self.resume_index = -1
+        label = RUNTIME_LABELS.get(runtime_name, runtime_name)
+        self.resume_error = (
+            ""
+            if self.resume_candidates
+            else f"no earlier {provider} session in {label} for {Path(self.path).name}"
+        )
+
+    def _cycle_resume(self, delta: int) -> None:
+        if self.resume_candidates is None:
+            self._refresh_resume_candidates()
+        if not self.resume_candidates:
+            self.error = f"Resume needs a session: {self.resume_error}"
+            return
+        self.resume_index = (
+            self.resume_index + delta
+            if self.resume_index >= 0
+            else (0 if delta > 0 else len(self.resume_candidates) - 1)
+        ) % len(self.resume_candidates)
+        chosen = self.resume_candidates[self.resume_index]
+        self.resume_run_id = chosen["run_id"]
+        self.session = chosen["session_id"]
+
+    def _reset_resume(self) -> None:
+        self.resume_candidates = None
+        self.resume_index = -1
+        self.resume_run_id = ""
+        self.resume_error = ""
+
+    def _choose_advanced(self, offset: int, index: int) -> None:
+        """Apply one clicked value; an unavailable one explains itself."""
+        rows = self._advanced_model()
+        if not 0 <= offset < len(rows):
+            return
+        row = rows[offset]
+        if not 0 <= index < len(row["values"]):
+            return
+        self.row = offset + 2
+        if not row["available"][index]:
+            reason = public_reason(row["reasons"][index]) or "Not available"
+            self.error = f"{row['labels'][index]}: {reason}"
+            return
+        if row["selected"] == index:
+            return
+        if row["key"] == "mode":
+            self.launch_mode = index
+            if self._resume_mode():
+                self._reset_resume()
+        elif row["key"] == "runtime":
+            self.runtime = index
+            self._reset_resume()
+            self.session = ""
+            self._normalize_permission_choice()
+            self._normalize_mode_choice()
+            self._normalize_continuity_choice()
+        elif row["key"] == "permissions":
+            self.permissions = index
+            self._normalize_mode_choice()
+        elif row["key"] == "continuity":
+            self.continuity = index
+            self.continuity_explicit = True
 
     def handle_home_key(self, key: int) -> None:
         if key in (ord("n"), ord("N")):
@@ -1870,7 +2195,10 @@ class Workshop:
             elif self.advanced and self.row == 5:
                 self._cycle_continuity(delta)
             elif self.advanced and self.row == 6:
-                self._cycle_parent(delta)
+                if self._resume_mode():
+                    self._cycle_resume(delta)
+                else:
+                    self._cycle_parent(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
             self.launch()
@@ -1886,6 +2214,16 @@ class Workshop:
                 setattr(self, name, getattr(self, name)[:-1])
             elif 32 <= key <= 126:
                 setattr(self, name, getattr(self, name) + chr(key))
+            return
+        if editing_parent and self._resume_mode():
+            # An exact provider session typed by hand; the recorded run (and
+            # its environment) is resolved again at Launch.
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                self.session = self.session[:-1]
+            elif 32 <= key <= 126:
+                self.session += chr(key)
+            self.resume_run_id = ""
+            self.resume_index = -1
             return
         if editing_path or editing_parent:
             if key in (curses.KEY_BACKSPACE, 127, 8):
@@ -1940,6 +2278,7 @@ class Workshop:
         self.agent = index
         self.session = ""
         self.continuity_parent = ""
+        self._reset_resume()
         self._load_choices()
         self._normalize_runtime_choice()
         self._normalize_permission_choice()
@@ -1957,6 +2296,8 @@ class Workshop:
         for _ in LAUNCH_MODES:
             self.launch_mode = (self.launch_mode + delta) % len(LAUNCH_MODES)
             if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
+                if self._resume_mode():
+                    self._reset_resume()
                 return
         self.error = "No start mode is available for this provider"
 
@@ -1978,7 +2319,8 @@ class Workshop:
             else (0 if delta > 0 else len(self.parent_sessions) - 1)
         ) % len(self.parent_sessions)
         self.continuity_parent = self.parent_sessions[self.parent_index].session_id
-        self._normalize_continuity_choice()
+        if not self.continuity_explicit:
+            self._normalize_continuity_choice()
 
     def _cycle_runtime(self, delta: int) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -1986,8 +2328,11 @@ class Workshop:
             self.runtime = (self.runtime + delta) % len(RUNTIME_POLICIES)
             name = RUNTIME_POLICIES[self.runtime]
             if capabilities[name]["available"]:
+                self._reset_resume()
+                self.session = ""
                 self._normalize_permission_choice()
                 self._normalize_mode_choice()
+                self._normalize_continuity_choice()
                 return
         self.error = "No runtime is available for this provider"
 
@@ -2040,19 +2385,24 @@ class Workshop:
                 return
 
     def _cycle_continuity(self, delta: int) -> None:
-        capabilities = continuity_policy_capabilities(
-            AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
-        )
+        if self._resume_mode():
+            self.error = (
+                "Resume continues the chosen session; memory applies to new sessions"
+            )
+            return
+        capabilities = self._continuity_caps()
         for _ in CONTINUITY_MODES:
             self.continuity = (self.continuity + delta) % len(CONTINUITY_MODES)
             if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
+                self.continuity_explicit = True
                 return
         self.error = "No memory option is available"
 
     def _normalize_continuity_choice(self) -> None:
-        capabilities = continuity_policy_capabilities(
-            AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
-        )
+        if self.continuity_explicit:
+            # The User's memory choice stands; Launch reports what it needs.
+            return
+        capabilities = self._continuity_caps()
         if capabilities["full-lineage"]["available"]:
             self.continuity = CONTINUITY_MODES.index("full-lineage")
         else:
@@ -2063,11 +2413,34 @@ class Workshop:
             _, x, y, _, state = curses.getmouse()
         except curses.error:
             return
-        # Release, hover and secondary buttons are not a second activation.
-        # ncurses reports either a press or a combined click for button one.
-        activation = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED
-        if not state & activation:
+        # Hover/drag, release and secondary buttons are never an activation.
+        # One physical click is one press; a CLICKED that ncurses still
+        # synthesizes for the same press is that click, not a second one.
+        if state & getattr(curses, "REPORT_MOUSE_POSITION", 0):
             return
+        if state & curses.BUTTON1_RELEASED:
+            self._mouse_down = None
+            return
+        if state & curses.BUTTON1_PRESSED:
+            self._mouse_down = (x, y)
+        elif state & curses.BUTTON1_CLICKED:
+            if self._mouse_down == (x, y):
+                self._mouse_down = None
+                return
+        else:
+            return
+        try:
+            size = tuple(self.window.getmaxyx())
+        except (AttributeError, curses.error):
+            size = None
+        if (
+            size is not None
+            and self._drawn_size is not None
+            and size != self._drawn_size
+        ):
+            # The terminal resized after the last paint: hit-test the layout
+            # the User sees now, not the stale one.
+            self.draw()
         self.presence_schedule.request()
         for row, start, end, index, kind in self.mouse_targets:
             if y != row or not (start <= x < end):
@@ -2099,6 +2472,19 @@ class Workshop:
                     self._select_agent(index)
                 else:
                     self.error = "That provider is not available"
+                return
+            if kind == "choice":
+                self.error = ""
+                offset, value = index
+                self._choose_advanced(offset, value)
+                return
+            if kind == "parent":
+                self.error = ""
+                self.row = 6
+                if self._resume_mode():
+                    self._cycle_resume(1)
+                else:
+                    self._cycle_parent(1)
                 return
             if kind == "launch":
                 self.launch()
@@ -2206,6 +2592,33 @@ class Workshop:
         if len(selections) > 1 or self.error:
             self.mode = "launcher"
 
+    def _resolve_resume_target(self, runtime_name: str) -> tuple[str, str]:
+        """``(run_id, session)`` of the exact conversation to re-open, or refuse."""
+        provider = AGENTS[self.agent]
+        supported, reason = interactive_resume_support(provider, runtime_name)
+        if not supported:
+            raise ValueError(reason)
+        if self.resume_run_id:
+            return self.resume_run_id, self.session
+        if self.resume_candidates is None:
+            self._refresh_resume_candidates()
+        typed = self.session.strip()
+        if typed:
+            for candidate in self.resume_candidates or []:
+                if candidate["session_id"] == typed:
+                    return candidate["run_id"], typed
+            if runtime_name != "local-native":
+                label = RUNTIME_LABELS.get(runtime_name, runtime_name)
+                raise ValueError(
+                    f"Resume needs a session recorded in {label}: {typed} is not one; "
+                    "choose a session in Session (←/→)"
+                )
+            return "", typed
+        raise ValueError(
+            "Resume needs a concrete session: "
+            + (self.resume_error or "choose one in Session (←/→)")
+        )
+
     def _launch_one(self) -> None:
         try:
             workspace = normalized_workspace(self.path)
@@ -2214,16 +2627,20 @@ class Workshop:
             if not capability["available"]:
                 raise ValueError(str(capability["reason"]))
             continuity_name = CONTINUITY_MODES[self.continuity]
-            continuity_capability = continuity_policy_capabilities(
-                AGENTS[self.agent],
-                root=workspace,
-                explicit_parent=self.continuity_parent,
-            )[continuity_name]
-            if not continuity_capability["available"]:
-                raise ValueError(str(continuity_capability["reason"]))
+            resuming = bool(self.session) or self._resume_mode()
+            run_id = ""
+            if resuming:
+                run_id, session = self._resolve_resume_target(runtime_name)
+            else:
+                session = ""
+                continuity_capability = self._continuity_caps(workspace)[
+                    continuity_name
+                ]
+                if not continuity_capability["available"]:
+                    raise ValueError(str(continuity_capability["reason"]))
             argv = launch_argv(
                 AGENTS[self.agent],
-                "resume" if self.session else LAUNCH_MODES[self.launch_mode],
+                "resume" if resuming else LAUNCH_MODES[self.launch_mode],
                 runtime_name,
                 PERMISSION_POLICIES[self.permissions],
                 continuity=continuity_name,
@@ -2232,7 +2649,8 @@ class Workshop:
                 model=self.model,
                 effort=self.effort,
                 purpose=self.purpose if self.launch_mode == 0 else None,
-                session=self.session,
+                session=session,
+                run_id=run_id,
             )
         except ValueError as exc:
             self.error = public_reason(str(exc)) or str(exc)
@@ -2241,9 +2659,13 @@ class Workshop:
         if executable is None:
             self.error = "vibecrafted launcher is missing from PATH"
             return
+        environment = {
+            "local-worktrees": " · worktree",
+            "local-vm": " · container",
+        }.get(runtime_name, "")
         title = (
             f"{AGENTS[self.agent]} · "
-            f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}"
+            f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}{environment}"
         )
         try:
             destination = destination_session_for_workspace(workspace)

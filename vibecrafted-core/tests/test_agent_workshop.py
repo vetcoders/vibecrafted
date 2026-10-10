@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -64,11 +65,22 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         "--continuity",
         "fresh",
     ]
-    assert workshop.launch_argv("claude", "resume") == [
+    # Resume re-opens one exact conversation in this tab; it never becomes a
+    # bare AICX "new session" and never opens a second tab.
+    session = "11111111-2222-4333-8444-555555555555"
+    assert workshop.launch_argv("claude", "resume", session=session) == [
         "vibecrafted",
         "resume",
         "claude",
+        "--runtime",
+        "plain",
+        "--permissions",
+        "bypass",
+        "--session",
+        session,
     ]
+    with pytest.raises(ValueError, match="concrete session"):
+        workshop.launch_argv("claude", "resume")
     with pytest.raises(ValueError, match="interactive mode"):
         workshop.launch_argv("codex", "workflow")
 
@@ -91,11 +103,10 @@ def test_kimi_launch_builds_the_same_command_shape() -> None:
         "--continuity",
         "fresh",
     ]
-    assert workshop.launch_argv("kimi", "resume") == [
-        "vibecrafted",
-        "resume",
-        "kimi",
-    ]
+    # kimi's interactive CLI cannot re-open one exact session: say so for
+    # this provider instead of composing a resume that cannot be honored.
+    with pytest.raises(ValueError, match="kimi has no interactive resume"):
+        workshop.launch_argv("kimi", "resume", session="abc-session")
 
 
 def test_default_provider_stays_codex_with_kimi_on_the_row() -> None:
@@ -216,15 +227,25 @@ def test_interactive_mode_matrix_is_complete_and_fails_closed() -> None:
 
     native = workshop.mode_capabilities("codex", "local-native", "bypass")
     worktree = workshop.mode_capabilities("codex", "local-worktrees", "bypass")
+    container = workshop.mode_capabilities("codex", "local-vm", "bypass")
+    agy_container = workshop.mode_capabilities("agy", "local-vm", "bypass")
+    kimi_native = workshop.mode_capabilities("kimi", "local-native", "bypass")
 
     assert tuple(native) == ("init", "resume", "partner", "operator")
     assert native["partner"]["available"] == native["init"]["available"]
     assert native["operator"]["available"] == native["init"]["available"]
+    # Every environment re-opens its own recorded conversation.
     assert native["resume"]["available"] is True
-    assert worktree["resume"] == {
-        "available": False,
-        "reason": "resume is supported only in local-native runtime",
-    }
+    assert worktree["resume"] == {"available": True, "reason": ""}
+    assert container["resume"] == {"available": True, "reason": ""}
+    assert container["init"]["available"] is True
+    # A real per-provider gap is reported for that cell, not globally.
+    assert agy_container["init"]["available"] is False
+    assert (
+        "not installed in the local container recipe" in agy_container["init"]["reason"]
+    )
+    assert kimi_native["resume"]["available"] is False
+    assert "kimi has no interactive resume" in kimi_native["resume"]["reason"]
 
 
 def test_partner_operator_and_path_are_preserved_in_launch_argv(
@@ -238,11 +259,51 @@ def test_partner_operator_and_path_are_preserved_in_launch_argv(
     operator = workshop.launch_argv(
         "codex", "operator", workspace=tmp_path, continuity="fresh"
     )
-    resume = workshop.launch_argv("codex", "resume", workspace=tmp_path)
+    resume = workshop.launch_argv(
+        "codex",
+        "resume",
+        workspace=tmp_path,
+        session="019a0000-0000-7000-8000-000000000001",
+    )
+    worktree_resume = workshop.launch_argv(
+        "codex",
+        "resume",
+        "local-worktrees",
+        "auto",
+        workspace=tmp_path,
+        run_id="init-20261010-000000-abcd",
+        session="019a0000-0000-7000-8000-000000000001",
+        model="gpt-6.1-sol",
+        effort="high",
+    )
 
     assert partner[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-partner"]
     assert operator[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-operator"]
-    assert resume[-2:] == ["--root", str(tmp_path)]
+    assert resume[-4:] == [
+        "--root",
+        str(tmp_path),
+        "--session",
+        "019a0000-0000-7000-8000-000000000001",
+    ]
+    # A recorded run owns its checkout: no --root, its environment travels,
+    # and the selected permissions, model and effort are preserved.
+    assert worktree_resume == [
+        "vibecrafted",
+        "resume",
+        "codex",
+        "--runtime",
+        "plain",
+        "--permissions",
+        "auto",
+        "--run-id",
+        "init-20261010-000000-abcd",
+        "--policy-runtime",
+        "local-worktrees",
+        "--model",
+        "gpt-6.1-sol",
+        "--effort",
+        "high",
+    ]
 
 
 def _git_checkout(path: Path, origin: str | None) -> Path:
@@ -1157,8 +1218,10 @@ def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:
         workshop.launch_argv("codex", "init", "local-native", "accept-edits")
     with pytest.raises(ValueError, match="coming soon"):
         workshop.launch_argv("claude", "init", "cloud-soon", "auto")
-    with pytest.raises(ValueError, match="H2b2"):
+    with pytest.raises(ValueError, match="concrete session"):
         workshop.launch_argv("claude", "resume", "local-worktrees", "auto")
+    with pytest.raises(ValueError, match="not installed in the local container"):
+        workshop.launch_argv("grok", "init", "local-vm", "bypass")
 
 
 def test_runtime_help_is_user_facing_without_false_recommendation() -> None:
@@ -1168,7 +1231,7 @@ def test_runtime_help_is_user_facing_without_false_recommendation() -> None:
     )
 
     assert "This checkout, shared with you." in help_text
-    assert "A separate working copy for this Agent." in help_text
+    assert "branch-backed working copy" in help_text
     assert "Not available yet." in help_text
     assert "canonical worktree" not in help_text
     assert "admission" not in help_text
@@ -1178,10 +1241,11 @@ def test_runtime_help_is_user_facing_without_false_recommendation() -> None:
     assert "--operator" not in help_text
     # No lane is recommended, and no gated or disabled lane reads as available.
     assert "recommended" not in help_text.casefold()
-    assert "live usage can be verified" in " ".join(
-        workshop.RUNTIME_HELP["local-worktrees"]
-    )
-    assert workshop.RUNTIME_HELP["local-vm"][0] == "Not available yet."
+    # Metering is no longer an environment gate: no lane promises it.
+    assert "live usage can be verified" not in help_text
+    # The local-vm key is honestly a container, never sold as a VM.
+    assert workshop.RUNTIME_LABELS["local-vm"] == "local-container"
+    assert "container (not a VM)" in workshop.RUNTIME_HELP["local-vm"][0]
     assert workshop.RUNTIME_HELP["cloud-soon"][0] == "Not available yet."
 
 
@@ -1524,7 +1588,7 @@ def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
 
     expected = (
         "Mode      init resume partner operator",
-        "Runtime   local-native local-worktrees local-vm cloud-soon",
+        "Runtime   local-native local-worktrees local-container cloud-soon",
         "Permits   bypass auto accept-edits read-only",
         "Memory    full-lineage fresh bare-fork",
     )
@@ -2437,3 +2501,499 @@ def test_session_names_from_listing_and_other_sessions_are_on_demand(
     names, error = workshop.list_other_sessions()
     assert error == ""
     assert names == ["other-root"]
+
+
+# --- Advanced: every visible value is a mouse target from the same render ---
+
+
+class _GridWindow:
+    """Records painted cells so hitboxes can be checked against the screen."""
+
+    def __init__(self, height: int = 26, width: int = 100) -> None:
+        self.height = height
+        self.width = width
+        self.grid: dict[tuple[int, int], str] = {}
+
+    def getmaxyx(self) -> tuple[int, int]:
+        return (self.height, self.width)
+
+    def erase(self) -> None:
+        self.grid.clear()
+
+    def refresh(self) -> None:
+        pass
+
+    def addstr(self, row: int, col: int, text: str, _attr: int = 0) -> None:
+        for offset, char in enumerate(text):
+            self.grid[(row, col + offset)] = char
+
+    def text(self, row: int, start: int, end: int) -> str:
+        return "".join(self.grid.get((row, col), " ") for col in range(start, end))
+
+
+def _advanced_picker(
+    workshop: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    window: _GridWindow,
+    *,
+    runtime_caps: dict | None = None,
+) -> object:
+    caps = runtime_caps or {
+        name: {"available": True, "reason": ""} for name in workshop.RUNTIME_POLICIES
+    }
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
+    monkeypatch.setattr(workshop, "runtime_policy_capabilities", lambda _agent: caps)
+    monkeypatch.setattr(
+        workshop,
+        "resolve_provider_policy",
+        lambda *_args: SimpleNamespace(supported=True, reason=""),
+    )
+    monkeypatch.setattr(
+        workshop,
+        "mode_capabilities",
+        lambda *_args: {
+            name: {"available": True, "reason": ""} for name in workshop.LAUNCH_MODES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "continuity_policy_capabilities",
+        lambda *_args, **_kwargs: {
+            name: {"available": True, "reason": ""}
+            for name in workshop.CONTINUITY_MODES
+        },
+    )
+    picker = workshop.Workshop(window, mode="launcher")
+    picker.advanced = True
+    picker.draw()
+    return picker
+
+
+def _press(
+    workshop: ModuleType, monkeypatch: pytest.MonkeyPatch, x: int, y: int, state: int
+) -> None:
+    monkeypatch.setattr(
+        workshop.curses, "getmouse", lambda: (0, x, y, 0, state), raising=False
+    )
+
+
+def _choice_targets(picker: object) -> dict[tuple[int, int], tuple[int, int, int]]:
+    return {
+        index: (row, start, end)
+        for row, start, end, index, kind in picker.mouse_targets
+        if kind == "choice"
+    }
+
+
+def test_every_advanced_value_is_a_hitbox_over_its_own_rendered_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    window = _GridWindow()
+    picker = _advanced_picker(workshop, monkeypatch, window)
+
+    targets = _choice_targets(picker)
+    rows = picker._advanced_model()
+    expected = {
+        (offset, index)
+        for offset, row in enumerate(rows)
+        for index in range(len(row["values"]))
+    }
+    assert set(targets) == expected
+    for (offset, index), (row, start, end) in targets.items():
+        assert window.text(row, start, end) == rows[offset]["labels"][index]
+    # The container is named honestly on screen; the config key stays local-vm.
+    runtime_row = targets[(1, workshop.RUNTIME_POLICIES.index("local-vm"))]
+    assert window.text(*runtime_row) == "local-container"
+
+
+@pytest.mark.parametrize(
+    "offset,attribute,choices",
+    [
+        (0, "launch_mode", "LAUNCH_MODES"),
+        (1, "runtime", "RUNTIME_POLICIES"),
+        (2, "permissions", "PERMISSION_POLICIES"),
+        (3, "continuity", "CONTINUITY_MODES"),
+    ],
+)
+def test_clicking_each_value_selects_exactly_that_value(
+    monkeypatch: pytest.MonkeyPatch, offset: int, attribute: str, choices: str
+) -> None:
+    workshop = _load()
+    window = _GridWindow()
+    picker = _advanced_picker(workshop, monkeypatch, window)
+
+    for index in reversed(range(len(getattr(workshop, choices)))):
+        picker.draw()
+        row, _start, end = _choice_targets(picker)[(offset, index)]
+        _press(workshop, monkeypatch, end - 1, row, workshop.curses.BUTTON1_PRESSED)
+        picker.handle_mouse()
+        _press(workshop, monkeypatch, end - 1, row, workshop.curses.BUTTON1_RELEASED)
+        picker.handle_mouse()
+        assert getattr(picker, attribute) == index, (attribute, index)
+        # Focus follows the click so the keyboard continues on that row.
+        assert picker.row == offset + 2
+    if attribute == "continuity":
+        assert picker.continuity_explicit is True
+
+
+def test_one_physical_click_is_one_change_and_hover_or_release_do_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    window = _GridWindow()
+    picker = _advanced_picker(workshop, monkeypatch, window)
+    applied: list[tuple[int, int]] = []
+    original = picker._choose_advanced
+    monkeypatch.setattr(
+        picker,
+        "_choose_advanced",
+        lambda offset, index: (
+            applied.append((offset, index)) or original(offset, index)
+        ),
+    )
+    row, start, _end = _choice_targets(picker)[(1, 1)]
+
+    _press(workshop, monkeypatch, start, row, workshop.curses.BUTTON1_PRESSED)
+    picker.handle_mouse()
+    # A terminal that still reports CLICKED for the same press: same click.
+    _press(workshop, monkeypatch, start, row, workshop.curses.BUTTON1_CLICKED)
+    picker.handle_mouse()
+    _press(workshop, monkeypatch, start, row, workshop.curses.BUTTON1_RELEASED)
+    picker.handle_mouse()
+    hover = workshop.curses.REPORT_MOUSE_POSITION | workshop.curses.BUTTON1_PRESSED
+    _press(workshop, monkeypatch, start, row, hover)
+    picker.handle_mouse()
+
+    assert applied == [(1, 1)]
+    # A CLICKED without a preceding press is its own physical click.
+    _press(workshop, monkeypatch, start, row, workshop.curses.BUTTON1_CLICKED)
+    picker.handle_mouse()
+    assert applied == [(1, 1), (1, 1)]
+
+
+def test_unavailable_value_click_keeps_choice_and_names_the_exact_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    window = _GridWindow()
+    reason = (
+        "Docker daemon is not running (context colima-ci); start it with "
+        "`colima start --profile ci`, then Launch again"
+    )
+    caps = {
+        name: {"available": True, "reason": ""} for name in workshop.RUNTIME_POLICIES
+    }
+    caps["local-vm"] = {"available": False, "reason": reason}
+    picker = _advanced_picker(workshop, monkeypatch, window, runtime_caps=caps)
+    before = picker.runtime
+    row, start, _end = _choice_targets(picker)[
+        (1, workshop.RUNTIME_POLICIES.index("local-vm"))
+    ]
+
+    _press(workshop, monkeypatch, start + 2, row, workshop.curses.BUTTON1_PRESSED)
+    picker.handle_mouse()
+
+    assert picker.runtime == before
+    assert picker.error == f"local-container: {reason}"
+    picker.draw()
+    unavailable = [
+        window.text(r, 0, window.width).strip()
+        for r in range(window.height)
+        if window.text(r, 0, window.width).strip().startswith("Unavailable")
+    ]
+    assert (
+        unavailable
+        and "local-container: Docker daemon is not running" in unavailable[0]
+    )
+
+
+def test_resize_rebuilds_hitboxes_before_hit_testing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    window = _GridWindow(width=100)
+    picker = _advanced_picker(workshop, monkeypatch, window)
+    wide = _choice_targets(picker)[(0, 3)]
+
+    window.width = 64  # the terminal shrinks after the last paint
+    probe = _GridWindow(width=64)
+    reference = _advanced_picker(workshop, monkeypatch, probe)
+    narrow = _choice_targets(reference)[(0, 3)]
+    assert narrow != wide
+
+    _press(workshop, monkeypatch, narrow[1], narrow[0], workshop.curses.BUTTON1_PRESSED)
+    picker.handle_mouse()
+
+    assert picker.launch_mode == workshop.LAUNCH_MODES.index("operator")
+
+
+def test_clipped_and_wide_layout_never_exceeds_the_visible_cells() -> None:
+    workshop = _load()
+    layout = workshop._choice_layout(("ąę", "日本語", "operator"), 10, 20)
+    assert layout[0][:3] == (0, 10, 12)
+    assert layout[1][:3] == (1, 13, 19)
+    # The third token is cut to the ellipsis cell, never past the row end.
+    assert layout[-1][2] <= 20
+    assert all(end <= 20 for _index, _start, end, _fragment in layout)
+    assert workshop._cell_width(workshop._clip("日本語テキスト", 7)) <= 7
+
+
+def test_parent_row_click_cycles_parent_then_resume_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    window = _GridWindow()
+    picker = _advanced_picker(workshop, monkeypatch, window)
+    picker.path = str(tmp_path)
+    monkeypatch.setattr(
+        workshop,
+        "parent_session_choices",
+        lambda *_args, **_kwargs: (
+            [
+                SimpleNamespace(session_id="parent-a"),
+                SimpleNamespace(session_id="parent-b"),
+            ],
+            "",
+        ),
+    )
+    picker.draw()
+    parent = next(t for t in picker.mouse_targets if t[4] == "parent")
+    _press(workshop, monkeypatch, parent[1], parent[0], workshop.curses.BUTTON1_PRESSED)
+    picker.handle_mouse()
+    assert picker.continuity_parent == "parent-a"
+
+    monkeypatch.setattr(
+        workshop,
+        "resumable_interactive_runs",
+        lambda *_args, **_kwargs: [
+            {
+                "run_id": "init-worktree-1",
+                "session_id": "019a-worktree",
+                "environment": "local-worktrees",
+                "root": str(tmp_path),
+                "branch": "cut/codex-init-worktree-1",
+                "updated_at": "2026-10-10T06:00:00Z",
+            }
+        ],
+    )
+    picker.launch_mode = workshop.LAUNCH_MODES.index("resume")
+    picker.runtime = workshop.RUNTIME_POLICIES.index("local-worktrees")
+    picker._reset_resume()
+    picker.draw()
+    session = next(t for t in picker.mouse_targets if t[4] == "parent")
+    assert window.text(session[0], session[1], session[1] + 8) == "Session "
+    _press(
+        workshop, monkeypatch, session[1], session[0], workshop.curses.BUTTON1_PRESSED
+    )
+    picker.handle_mouse()
+    assert picker.resume_run_id == "init-worktree-1"
+    assert picker.session == "019a-worktree"
+    picker.draw()
+    assert "cut/codex-init-worktree-1" in window.text(session[0], 0, window.width)
+
+
+def test_resume_launch_needs_a_concrete_session_before_any_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.launch_mode = workshop.LAUNCH_MODES.index("resume")
+    launched.runtime = workshop.RUNTIME_POLICIES.index("local-worktrees")
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {"local-worktrees": {"available": True, "reason": ""}},
+    )
+    monkeypatch.setattr(workshop, "resumable_interactive_runs", lambda *_a, **_k: [])
+
+    launched.launch()
+
+    assert calls == []
+    assert launched.error.startswith("Resume needs a concrete session")
+    assert "no earlier codex session in local-worktrees" in launched.error
+
+
+def test_resume_launch_routes_the_recorded_run_into_this_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.launch_mode = workshop.LAUNCH_MODES.index("resume")
+    launched.runtime = workshop.RUNTIME_POLICIES.index("local-vm")
+    launched.permissions = workshop.PERMISSION_POLICIES.index("auto")
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {"local-vm": {"available": True, "reason": ""}},
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resolve_provider_policy",
+        lambda *_args: SimpleNamespace(supported=True, reason=""),
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resumable_interactive_runs",
+        lambda *_a, **_k: [
+            {
+                "run_id": "init-container-7",
+                "session_id": "019a-container",
+                "environment": "local-vm",
+                "root": str(tmp_path),
+                "branch": "",
+                "updated_at": "",
+            }
+        ],
+    )
+    launched._cycle_resume(1)
+
+    launched.launch()
+
+    assert launched.error == ""
+    tab = calls[0]
+    command = tab[tab.index("--") + 1 :]
+    assert command[:7] == [
+        "vibecrafted",
+        "resume",
+        "codex",
+        "--runtime",
+        "plain",
+        "--permissions",
+        "auto",
+    ]
+    assert command[command.index("--run-id") + 1] == "init-container-7"
+    assert command[command.index("--policy-runtime") + 1] == "local-vm"
+    assert "--root" not in command
+    assert tab[tab.index("--name") + 1].endswith(" · container")
+
+
+def test_memory_parent_is_never_guessed_from_the_launcher_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    seen: list[dict] = []
+
+    def capture(*_args, **kwargs):
+        seen.append(dict(kwargs.get("env") or {}))
+        return {
+            "full-lineage": {
+                "available": False,
+                "reason": "no explicit/current parent lineage id",
+            },
+            "fresh": {"available": True, "reason": ""},
+            "bare-fork": {"available": False, "reason": "expert-only"},
+        }
+
+    monkeypatch.setenv("VIBECRAFTED_RUN_ID", "ambient-run-of-whoever-opened-this-pane")
+    monkeypatch.setenv("CODEX_SESSION_ID", "ambient-codex")
+    monkeypatch.setattr(workshop, "continuity_policy_capabilities", capture)
+    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    picker.path = str(tmp_path)
+    picker.continuity = workshop.CONTINUITY_MODES.index("full-lineage")
+    picker.continuity_explicit = True
+
+    picker._normalize_continuity_choice()
+
+    # An explicit full-lineage pick is not silently turned into fresh.
+    assert picker.continuity == workshop.CONTINUITY_MODES.index("full-lineage")
+    caps = picker._continuity_caps()
+    assert caps["full-lineage"]["available"] is False
+    assert seen and all(
+        "VIBECRAFTED_RUN_ID" not in env and "CODEX_SESSION_ID" not in env
+        for env in seen
+    )
+    assert workshop.public_reason(caps["full-lineage"]["reason"]).startswith(
+        "Memory full-lineage needs a parent"
+    )
+
+
+def test_slots_keep_their_own_environment_permissions_mode_and_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(workshop, "vibecrafted_home", lambda: tmp_path / "home")
+    first = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    first.path = first.choices_root = str(tmp_path)
+    first.runtime = workshop.RUNTIME_POLICIES.index("local-worktrees")
+    first.permissions = workshop.PERMISSION_POLICIES.index("auto")
+    first.launch_mode = workshop.LAUNCH_MODES.index("partner")
+    first.continuity = workshop.CONTINUITY_MODES.index("fresh")
+    first.continuity_explicit = True
+    first.add_agent()
+    first.agent = workshop.AGENTS.index("claude")
+    first.runtime = workshop.RUNTIME_POLICIES.index("local-vm")
+    first.permissions = workshop.PERMISSION_POLICIES.index("bypass")
+    first.launch_mode = workshop.LAUNCH_MODES.index("init")
+    first.save_choices()
+
+    data = json.loads(first._choice_path().read_text())
+    assert [slot["runtime"] for slot in data["slots"]] == [
+        "local-worktrees",
+        "local-vm",
+    ]
+    assert [slot["permissions"] for slot in data["slots"]] == ["auto", "bypass"]
+    assert [slot["launch_mode"] for slot in data["slots"]] == ["partner", "init"]
+
+    monkeypatch.setenv("VIBECRAFTED_WORKSPACE_ROOT", str(tmp_path))
+    again = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    assert len(again.agent_slots) == 2
+    assert again.agent_slots[0]["runtime"] == workshop.RUNTIME_POLICIES.index(
+        "local-worktrees"
+    )
+    assert again.agent_slots[0]["continuity_explicit"] is True
+    assert again.agent_slots[1]["runtime"] == workshop.RUNTIME_POLICIES.index(
+        "local-vm"
+    )
+    assert again.runtime == workshop.RUNTIME_POLICIES.index("local-worktrees")
+
+
+@pytest.mark.parametrize("runtime", ["local-native", "local-worktrees", "local-vm"])
+@pytest.mark.parametrize("mode", ["init", "resume", "partner", "operator"])
+def test_launch_matrix_three_environments_by_four_modes(
+    tmp_path: Path, runtime: str, mode: str
+) -> None:
+    workshop = _load()
+    session = "019a0000-0000-7000-8000-000000000042"
+    argv = workshop.launch_argv(
+        "codex",
+        mode,
+        runtime,
+        "auto",
+        continuity="fresh",
+        workspace=tmp_path,
+        model="gpt-6.1-sol",
+        effort="high",
+        session=session if mode == "resume" else "",
+        run_id="init-recorded-1"
+        if mode == "resume" and runtime != "local-native"
+        else "",
+    )
+    assert argv[:3] == [
+        "vibecrafted",
+        "init" if mode != "resume" else "resume",
+        "codex",
+    ]
+    assert argv[argv.index("--runtime") + 1] == "plain"
+    assert argv[argv.index("--permissions") + 1] == "auto"
+    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
+    assert argv[argv.index("--effort") + 1] == "high"
+    if mode == "resume":
+        if runtime == "local-native":
+            assert argv[argv.index("--session") + 1] == session
+            assert argv[argv.index("--root") + 1] == str(tmp_path.resolve())
+        else:
+            assert argv[argv.index("--run-id") + 1] == "init-recorded-1"
+            assert "--root" not in argv
+            assert argv[argv.index("--policy-runtime") + 1] == runtime
+    else:
+        assert argv[argv.index("--policy-runtime") + 1] == runtime
+        assert argv[argv.index("--root") + 1] == str(tmp_path.resolve())
+        prompt = {"partner": "/vc-partner", "operator": "/vc-operator"}.get(mode)
+        if prompt:
+            assert argv[argv.index("--prompt") + 1] == prompt
