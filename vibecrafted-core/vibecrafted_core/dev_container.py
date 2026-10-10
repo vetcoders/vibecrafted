@@ -712,30 +712,50 @@ def ensure_container(
     directory = recipe_dir()
     digest = recipe_digest(directory)
     tag = image_tag(digest)
-    log(f"[1/3] Image {tag} (Docker context {status.context or 'default'})")
-    if image_recipe(cli, tag, env, refresh=True) != digest:
-        log(
-            "      not built for this recipe yet — building runtime/dev-container/"
-            "Dockerfile.dev (first build takes several minutes; Ctrl-C cancels)"
-        )
-        build_image(cli, directory, tag, digest, env, log)
-        if image_recipe(cli, tag, env, refresh=True) != digest:
-            raise ContainerError(
-                f"built image {tag} does not carry recipe label {digest}", stage="build"
-            )
-    log("      ready")
+    # Decide about a running container before any long build: an upgrade
+    # never ends Agents already working in it.
     project, record = select_project(cli, host_root, env)
-    log(f"[2/3] Container project {project}")
-    if (
-        record is None
-        or record.image != tag
-        or record.state != "running"
-        or not _same_path(record.workspace_source, host_root)
-    ):
+    reuse = record is not None and record.state == "running"
+    if reuse:
+        assert record is not None
+        running_recipe = image_recipe(cli, record.image, env, refresh=True) or "unknown"
+        if not _same_path(record.workspace_source, host_root) or (
+            record.image != tag and running_recipe != digest
+        ):
+            # Compose would recreate it and end every Agent working inside;
+            # the volumes would survive, the running processes would not.
+            compose_file = directory / "compose.dev.yaml"
+            raise ContainerError(
+                f"container {record.name} is running {record.image} "
+                f"(recipe {running_recipe}); this runtime ships recipe {digest}. "
+                "Running Agents are never replaced: finish or close the Agents in it, "
+                f"then stop it with `{Path(cli).name} compose -p {project} -f "
+                f"{compose_file} stop dev` (history volumes are kept) and Launch again.",
+                stage="drift",
+            )
+        log(
+            f"[1/3] Image {record.image} (recipe {running_recipe}, Docker context "
+            f"{status.context or 'default'}) — already serving this project"
+        )
+        log(f"[2/3] Container project {project}")
+        log("      already running with this recipe")
+    else:
+        log(f"[1/3] Image {tag} (Docker context {status.context or 'default'})")
+        if image_recipe(cli, tag, env, refresh=True) != digest:
+            log(
+                "      not built for this recipe yet — building runtime/dev-container/"
+                "Dockerfile.dev (first build takes several minutes; Ctrl-C cancels)"
+            )
+            build_image(cli, directory, tag, digest, env, log)
+            if image_recipe(cli, tag, env, refresh=True) != digest:
+                raise ContainerError(
+                    f"built image {tag} does not carry recipe label {digest}",
+                    stage="build",
+                )
+        log("      ready")
+        log(f"[2/3] Container project {project}")
         _probe_visibility(cli, tag, host_root, status.context, env)
         compose_up(cli, directory, project, host_root, tag, env, log)
-    else:
-        log("      already running with this recipe")
     record = _wait_running(cli, project, env)
     if not _same_path(record.workspace_source, host_root):
         raise ContainerError(
@@ -750,7 +770,8 @@ def ensure_container(
         project=project,
         container_id=record.container_id,
         container_name=record.name,
-        image=tag,
+        # The image actually serving the project, never assumed from the tag.
+        image=record.image,
         recipe_digest=digest,
         host_root=str(host_root),
         engine_context=status.context,
@@ -840,7 +861,10 @@ IDENTITY_FILE = "provider.identity"
 # Same identity shape as process_control.process_start_token: the kernel
 # starttime (field 22 of /proc/<pid>/stat, read after the last ")") plus the
 # kernel boot id. A PID alone is not an identity: run directories live in a
-# named volume and outlive container restarts, where PIDs start over.
+# named volume and outlive container restarts, where PIDs start over -- the
+# starttime catches that reuse. The boot id belongs to the Docker VM kernel
+# (unchanged by `docker restart`) and catches a VM reboot, where starttime
+# values could repeat.
 _STARTTIME = "sed 's/.*) //' \"$P/$1/stat\" 2>/dev/null | cut -d' ' -f20"
 _RECORD_SCRIPT = (
     "d=$1; shift; P=/proc; "

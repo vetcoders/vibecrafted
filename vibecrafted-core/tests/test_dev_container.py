@@ -324,7 +324,9 @@ def test_ready_image_and_running_container_are_reused_without_rebuild(
     assert target.container_id == "cid-vc-smoke-project"
 
 
-def test_stale_recipe_rebuilds_and_recreates_with_volumes_kept(tmp_path: Path) -> None:
+def test_stopped_container_on_an_older_recipe_is_upgraded_with_volumes_kept(
+    tmp_path: Path,
+) -> None:
     engine = FakeEngine(tmp_path)
     root = _project(tmp_path)
     engine.state["images"]["vibecrafted-dev:debian13"] = {}
@@ -332,7 +334,7 @@ def test_stale_recipe_rebuilds_and_recreates_with_volumes_kept(tmp_path: Path) -
         "id": "cid-old",
         "image": "vibecrafted-dev:debian13",
         "mount": str(root.resolve()),
-        "status": "running",
+        "status": "exited",
     }
     engine.save()
 
@@ -343,7 +345,69 @@ def test_stale_recipe_rebuilds_and_recreates_with_volumes_kept(tmp_path: Path) -
     argv = [entry["argv"] for entry in engine.calls()]
     assert any(item[0] == "build" for item in argv)
     assert any(item[0] == "compose" and "up" in item for item in argv)
+    assert not any("down" in item or "rm" in item for item in argv)
     assert target.image == dev_container.image_tag(dev_container.recipe_digest())
+
+
+def test_running_container_on_another_recipe_is_kept_not_recreated(
+    tmp_path: Path,
+) -> None:
+    engine = FakeEngine(tmp_path)
+    root = _project(tmp_path)
+    engine.state["images"]["vibecrafted-dev:recipe-older"] = {
+        dev_container.RECIPE_LABEL: "older"
+    }
+    running = {
+        "id": "cid-running-owned",
+        "image": "vibecrafted-dev:recipe-older",
+        "mount": str(root.resolve()),
+        "status": "running",
+    }
+    engine.state["containers"]["vc-smoke-project"] = dict(running)
+    engine.save()
+
+    with pytest.raises(dev_container.ContainerError) as raised:
+        dev_container.ensure_container(root, env=engine.env, log=lambda _line: None)
+
+    # Agents working inside are never ended by an upgrade: no build, no
+    # compose up/recreate, the running container stays exactly as it was.
+    assert raised.value.stage == "drift"
+    message = str(raised.value)
+    assert "recipe older" in message and dev_container.recipe_digest() in message
+    assert "stop dev" in message and "history volumes are kept" in message
+    argv = [entry["argv"] for entry in engine.calls()]
+    assert not any(item[0] == "build" for item in argv)
+    assert not any(item[0] == "compose" and "up" in item for item in argv)
+    assert engine.load()["containers"]["vc-smoke-project"] == running
+
+
+def test_running_container_with_the_same_recipe_under_another_tag_is_reused(
+    tmp_path: Path,
+) -> None:
+    engine = FakeEngine(tmp_path)
+    root = _project(tmp_path)
+    digest = dev_container.recipe_digest()
+    engine.state["images"]["vibecrafted-dev:retagged"] = {
+        dev_container.RECIPE_LABEL: digest
+    }
+    engine.state["containers"]["vc-smoke-project"] = {
+        "id": "cid-same-recipe",
+        "image": "vibecrafted-dev:retagged",
+        "mount": str(root.resolve()),
+        "status": "running",
+    }
+    engine.save()
+    lines: list[str] = []
+
+    target = dev_container.ensure_container(root, env=engine.env, log=lines.append)
+
+    argv = [entry["argv"] for entry in engine.calls()]
+    assert not any(item[0] == "build" for item in argv)
+    assert not any(item[0] == "compose" and "up" in item for item in argv)
+    assert target.container_id == "cid-same-recipe"
+    # The receipt names the image actually running, with its real recipe.
+    assert target.image == "vibecrafted-dev:retagged"
+    assert any(f"recipe {digest}" in line for line in lines)
 
 
 def test_foreign_mount_never_reuses_another_projects_container(tmp_path: Path) -> None:
@@ -657,17 +721,46 @@ def test_stale_record_never_reaches_a_distinct_live_process(
     assert ended == [] and not record.exists() and _alive(bystander)
 
 
-def test_container_restart_invalidates_recorded_identity(world: IdentityWorld) -> None:
+def test_container_restart_reused_pid_keeps_boot_id_but_not_starttime(
+    world: IdentityWorld,
+) -> None:
+    # `docker restart` keeps the VM kernel (same boot id) and starts PIDs over:
+    # the recorded PID now names a different live process with a new starttime.
+    reused = world.spawn()
+    world.kernel_view(reused.pid, "1200")
+    record = world.record("init-before-restart", reused.pid, "300", boot_id="boot-A")
+
+    assert (
+        dev_container.sweep_orphan_providers(
+            world.target, is_live=lambda _run: False, env=world.env
+        )
+        == []
+    )
+    assert not record.exists() and _alive(reused)
+    record = world.record("init-before-restart", reused.pid, "300", boot_id="boot-A")
+    assert (
+        dev_container.terminate_provider(world.target, "init-before-restart", world.env)
+        == "stale"
+    )
+    record = world.record("init-before-restart", reused.pid, "300", boot_id="boot-A")
+    assert dev_container.terminate_provider_detached(
+        world.target, "init-before-restart", world.env
+    )
+    assert world.wait_gone(record) and _alive(reused)
+
+
+def test_kernel_reboot_invalidates_recorded_identity(world: IdentityWorld) -> None:
+    # A Docker VM reboot changes the boot id; starttime values may repeat.
     bystander = world.spawn()
     world.kernel_view(bystander.pid, "333")
-    world.record("init-before-restart", bystander.pid, "333", boot_id="boot-A")
+    world.record("init-before-reboot", bystander.pid, "333", boot_id="boot-A")
     world.boot("boot-B")
 
     ended = dev_container.sweep_orphan_providers(
         world.target, is_live=lambda _run: False, env=world.env
     )
     outcome = dev_container.terminate_provider(
-        world.target, "init-before-restart", world.env
+        world.target, "init-before-reboot", world.env
     )
 
     assert ended == [] and outcome == "none" and _alive(bystander)

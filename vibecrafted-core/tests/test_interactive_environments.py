@@ -675,3 +675,40 @@ def test_terminal_state_is_published_before_container_teardown(
     )
     assert meta["status"] == "completed"
     assert meta["container_provider_teardown"] == "terminated"
+
+
+def test_owner_liveness_uses_the_qualified_owner_receipt(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import process_control
+
+    me = os.getpid()
+    receipt = process_control.process_identity_receipt(me, run_id="init-owner-live")
+    assert receipt is not None
+    _record_run(
+        home,
+        "init-owner-live",
+        status="active",
+        liveness="active",
+        owner_pid=me,
+        owner_identity=receipt,
+    )
+    _record_run(
+        home,
+        "init-owner-reused",
+        status="active",
+        liveness="active",
+        owner_pid=me,
+        owner_identity={
+            **receipt,
+            "run_id": "init-owner-reused",
+            "start_token": "start:1",
+        },
+    )
+    _record_run(home, "init-owner-terminal", owner_pid=me, liveness="terminal")
+
+    assert spawn._interactive_run_owner_alive("init-owner-live") is True
+    # Same numeric PID, different process start: not the owner any more.
+    assert spawn._interactive_run_owner_alive("init-owner-reused") is False
+    assert spawn._interactive_run_owner_alive("init-owner-terminal") is False
+    assert spawn._interactive_run_owner_alive("init-missing") is False

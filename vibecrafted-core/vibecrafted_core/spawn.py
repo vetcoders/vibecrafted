@@ -3065,7 +3065,13 @@ def _ask_container_retry(stage: str) -> bool:
 
 
 def _interactive_run_owner_alive(run_id: str) -> bool:
-    """Whether a recorded interactive run still has its owner process."""
+    """Whether a recorded interactive run still has its owner process.
+
+    The qualified owner receipt (start token, command hash, pgid) decides when
+    present: a reused PID is not the owner. Without a usable receipt the
+    numeric PID is the conservative answer -- a reused PID can keep an orphan
+    alive until the next sweep, but never ends a live Agent.
+    """
     meta = _read_meta(control_plane_home() / "runtime_runs" / run_id / "meta.json")
     if not meta or meta.get("liveness") == "terminal":
         return False
@@ -3075,6 +3081,26 @@ def _interactive_run_owner_alive(run_id: str) -> bool:
         return False
     if owner <= 0:
         return False
+    receipt = meta.get("owner_identity")
+    if isinstance(receipt, Mapping):
+        from .process_control import validate_process_identity
+
+        try:
+            current, reason, _identity = validate_process_identity(
+                receipt,
+                expected_pid=owner,
+                expected_pgid=None,
+                expected_run_id=run_id,
+            )
+        except (OSError, RuntimeError, ValueError):
+            current, reason = False, "process_identity_unavailable"
+        # The validator compares start token and command before the run-id
+        # env evidence: a run-id mismatch is still the same process (a pane can
+        # carry another ambient run id), so it is the owner, alive.
+        if current or reason == "process_run_id_mismatch":
+            return True
+        if reason in {"process_identity_gone", "process_identity_mismatch"}:
+            return False
     try:
         os.kill(owner, 0)
     except ProcessLookupError:
