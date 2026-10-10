@@ -18516,6 +18516,33 @@ def _runtime_launcher_body(
     return "\n".join(lines) + "\n"
 
 
+def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Heal receipts checkpointed before the 2026-10-05 bloat fix.
+
+    `_recovery_receipt_snapshot` keeps new documents slim, but a machine that
+    checkpointed earlier still carries the full per-file backup ledger inside
+    `retirement_rollback.receipt` and under `preparing_previous_receipt`.
+    Restore reads those layers only for light attribution keys and overwrites
+    the ledger from the live layer, yet the dead copies keep every later
+    checkpoint above `_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES` for the life of the
+    machine (observed 2026-10-10: a 70 MiB document refused each install).
+    The live-layer ledger is ownership truth and stays untouched.
+    """
+    for holder in (receipt, receipt.get("preparing_previous_receipt")):
+        if not isinstance(holder, dict):
+            continue
+        rollback = holder.get("retirement_rollback")
+        if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
+            rollback["receipt"].pop("drift_backup_history", None)
+            rollback["receipt"].pop("preparing_previous_receipt", None)
+    saved = receipt.get("preparing_previous_receipt")
+    if isinstance(saved, dict):
+        if saved.get("drift_backup_history"):
+            saved["drift_backup_history"] = {}
+        saved.pop("preparing_previous_receipt", None)
+    return receipt
+
+
 def _load_runtime_install_receipt(
     path: Path, *, raw: bytes | None = None
 ) -> dict[str, Any]:
@@ -18586,7 +18613,7 @@ def _load_runtime_install_receipt(
             raise RuntimeInstallRefusal(
                 f"invalid runtime receipt field: {receipt_field}"
             )
-    return receipt
+    return _compact_legacy_receipt_layers(receipt)
 
 
 def _checkpoint_runtime_install_receipt(
