@@ -355,6 +355,7 @@ def test_layout_wraps_product_line_inside_reading_width_at_80x24() -> None:
         "shell",
         "console",
         "help",
+        "recent",
     }
     assert start_here.HELP_LINE in prose
 
