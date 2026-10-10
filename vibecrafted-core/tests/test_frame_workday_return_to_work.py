@@ -11,6 +11,7 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,10 @@ from vibecrafted_core.control_plane import control_plane_home
 
 @pytest.fixture
 def return_runtime(tmp_path, monkeypatch):
+    user_home = tmp_path / "user-home"
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("CODEX_HOME", str(user_home / ".codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_home / ".claude"))
     root = tmp_path / "first" / "same-name"
     root.mkdir(parents=True)
     foreign = tmp_path / "second" / "same-name"
@@ -186,7 +191,22 @@ def test_reopen_project_preserves_conversation_and_shell(return_runtime):
             p.wait(timeout=5)
 
 
-def _record_closed(r, provider, run_id, root, session, **extra):
+def _record_closed(r, provider, run_id, root, session, *, native_file=True, **extra):
+    if native_file:
+        if provider == "codex":
+            native = (
+                Path(os.environ["CODEX_HOME"])
+                / "sessions/2026/10/10"
+                / f"rollout-2026-10-10T21-42-00-{session}.jsonl"
+            )
+        else:
+            native = (
+                Path(os.environ["CLAUDE_CONFIG_DIR"])
+                / "projects/-repo"
+                / f"{session}.jsonl"
+            )
+        native.parent.mkdir(parents=True, exist_ok=True)
+        native.touch()
     meta = {
         "run_id": run_id,
         "agent": provider,
@@ -205,6 +225,17 @@ def _record_closed(r, provider, run_id, root, session, **extra):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta))
     return meta
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_return_picker_hides_missing_provider_session(return_runtime, provider):
+    r = return_runtime
+    r.state.write_text(json.dumps({"panes": []}))
+    _record_closed(r, provider, "init-missing", r.root, "missing", native_file=False)
+    _record_closed(r, provider, "init-present", r.root, "present")
+    r.ui.open_return_project(r.record.workspace_id)
+    choices = [a.key for a in r.ui.return_actions if a.key.startswith("resume:")]
+    assert choices == ["resume:init-present"]
 
 
 def test_resume_uses_exact_provider_session(return_runtime, monkeypatch):
@@ -386,6 +417,8 @@ def test_drifted_recovery_identity_needs_review(return_runtime):
     r.ui.activate_return("resume:init-return-drift")
     assert "Enter again" in r.ui.error
     parent["agent_session_id"] = "different-session"
+    sessions = Path(os.environ["CODEX_HOME"]) / "sessions/2026/10/10"
+    (sessions / "rollout-2026-10-10T21-42-00-different-session.jsonl").touch()
     meta = control_plane_home() / "runtime_runs/init-return-drift/meta.json"
     meta.write_text(json.dumps(parent))
     r.ui.activate_return("resume:init-return-drift")
