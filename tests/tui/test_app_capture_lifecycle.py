@@ -25,6 +25,66 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/vc-app-update.sh"
 
 
+@pytest.mark.parametrize("diagnostic_size", [0, 1024 * 1024])
+@pytest.mark.parametrize(
+    "identifier,team,verify_rc,display_rc,accepted",
+    [
+        ("io.vetcoders.vibecrafted", "not set", 0, 0, True),
+        ("ioXvetcodersXvibecrafted", "not set", 0, 0, False),
+        ("io.vetcoders.vibecrafted", "foreign", 0, 0, False),
+        ("", "not set", 0, 0, False),
+        ("io.vetcoders.vibecrafted", "not set", 1, 0, False),
+        ("io.vetcoders.vibecrafted", "not set", 0, 1, False),
+    ],
+)
+def test_signed_identity_reads_complete_codesign_display(
+    tmp_path, identifier, team, verify_rc, display_rc, accepted, diagnostic_size
+):
+    # Exercise the production readers with more than a pipe buffer of output.
+    # Early grep/awk exit used to SIGPIPE the writer under pipefail (v4.3.3).
+    display = tmp_path / "codesign-display"
+    display.write_text(
+        f"Identifier={identifier}\nTeamIdentifier={team}\nCDHash=abc123\n"
+        + "diagnostic="
+        + "x" * diagnostic_size
+        + "\n"
+    )
+    helper = HELPER.read_text()
+    readers = helper[
+        helper.index("verify_signed_app() {") : helper.index("app_identity_token() {")
+    ]
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            """set -euo pipefail
+EXPECTED_IDENTIFIER=io.vetcoders.vibecrafted
+EXPECTED_TEAM='not set'
+without_update_lock_fd() {
+  if [[ "$2" == --verify ]]; then return "$VERIFY_RC"; fi
+  cat "$DISPLAY_FILE"
+  return "$DISPLAY_RC"
+}
+"""
+            + readers
+            + "\nverify_signed_app fixture.app\napp_cdhash fixture.app\n",
+        ],
+        env={
+            **os.environ,
+            "DISPLAY_FILE": str(display),
+            "VERIFY_RC": str(verify_rc),
+            "DISPLAY_RC": str(display_rc),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == accepted, result.stderr
+    if accepted:
+        assert result.stdout.strip() == "abc123"
+
+
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value))

@@ -121,6 +121,36 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     assert prov_idx < unified_idx < test_idx
 
 
+def test_source_and_rehearsal_have_identical_gate_steps() -> None:
+    source = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+    rehearsal = (REPO_ROOT / ".github/workflows/gate-rehearsal.yml").read_text()
+    # A rehearsal cannot certify a tag that provisions a different environment.
+    for text in (source, rehearsal):
+        assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in text
+        assert 'rustup default "$RUSTUP_TOOLCHAIN"' in text
+        assert "printf 'RUSTUP_HOME=%s\\n' \"$(rustup show home)\"" in text
+        assert "printf 'CARGO_HOME=%s\\n' \"$HOME/.cargo\"" in text
+        assert '>> "$GITHUB_ENV"' in text
+        assert text.index("Provision pinned Rust toolchain") < text.index(
+            "Run unified product contract gate"
+        )
+    assert re.findall(r"run: (make [^\n]+)", source) == re.findall(
+        r"run: (make [^\n]+)", rehearsal
+    )
+    assert (
+        source[
+            source.index(
+                "      - name: Provision pinned Rust toolchain"
+            ) : source.index("      - name: Run shell checks")
+        ]
+        == rehearsal[
+            rehearsal.index(
+                "      - name: Provision pinned Rust toolchain"
+            ) : rehearsal.index("      - name: Run shell checks")
+        ]
+    )
+
+
 @pytest.mark.parametrize("profile", ["local", "local-classic"])
 def test_classic_darwin_linker_wrapper_injects_flag_before_cargo_arguments(
     tmp_path: Path,
