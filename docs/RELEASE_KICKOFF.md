@@ -54,9 +54,39 @@ The hosted notary step accepts either the complete App Store Connect API key
 set or the complete Apple ID credential set, which it stores in an ephemeral
 runner Keychain profile before invoking the builder.
 
+## Exact-SHA rehearsal before tagging
+
+After merging to `main`, rehearse the resulting commit. A green PR run does
+not certify a later squash commit. Both triggers call the same local
+`source-gate.yml` reusable workflow; only the tag caller enables immutable
+annotated-tag verification. The runner, toolchain, tests and budgets have one
+definition. Workflow permissions remain `contents: read`.
+
+The Founder performs this ceremony from a clean, up-to-date `main` checkout:
+
+```bash
+git pull --ff-only origin main
+RELEASE_SHA="$(git rev-parse HEAD)"
+gh workflow run gate-rehearsal.yml --ref main
+# Wait for a completed green run whose headSha is exactly RELEASE_SHA.
+# Re-run admission immediately before tagging; failure stops the ceremony.
+bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
+  git tag -a "v$(tr -d '[:space:]' < VERSION)" "$RELEASE_SHA" -m "Release $(cat VERSION)"
+# Only after admission and review, push that annotated tag explicitly.
+```
+
+If `main` moves before dispatch resolves its ref, that run certifies the new
+SHA. Update the checkout and rehearse again; never substitute a green result
+from another SHA. The read-only guard checks completed successful manual
+rehearsals for the exact full SHA and refuses missing evidence or GitHub query
+errors with that SHA and `gh workflow run gate-rehearsal.yml --repo
+vetcoders/vibecrafted --ref main`. The publisher invokes the same guard before
+its existing tag and artifact verification. Direct `git tag` commands bypass
+this scripted ceremony; always use the guarded sequence above.
+
 ## Hosted runner admission
 
-`release.yml` and `gate-rehearsal.yml` provision Rust `1.97.0`, its WASM
+The shared `source-gate.yml` provisions Rust `1.97.0`, its WASM
 targets, and a default toolchain before any source tests. They export the
 provisioned `RUSTUP_HOME` and `CARGO_HOME` through `GITHUB_ENV`: test fixtures
 isolate `HOME`, so setting a default alone does not make Rust reachable.
@@ -98,7 +128,8 @@ do, and it re-validates the archive it just wrote before the bytes may leave the
 machine. It writes `dist/portable-output.json`, which is how the publisher
 resolves `PORTABLE_NAME` and the digests it must see again.
 
-`publish-release` refuses a dirty tree, a non-annotated or unpushed tag, a
+`publish-release` refuses a dirty tree, a missing successful exact-SHA manual
+rehearsal, a non-annotated or unpushed tag, a
 failed source gate, any open CodeQL alert on `main`, an invalid signature,
 a portable manifest naming a revision other than HEAD, unexpected release
 assets, failed Apple validation, a failed mounted-DMG walk-around, or a

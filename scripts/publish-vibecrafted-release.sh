@@ -43,6 +43,7 @@ test -s "$PORTABLE_OUTPUT" || die "missing $PORTABLE_OUTPUT; run make portable f
 cd "$ROOT"
 test -z "$(git status --porcelain)" || die "source tree is dirty"
 HEAD_SHA="$(git rev-parse HEAD)"
+bash "$ROOT/scripts/check-release-rehearsal.sh" "$HEAD_SHA"
 test "$(git cat-file -t "$TAG" 2>/dev/null || true)" = "tag" || die "$TAG must be an annotated tag"
 test "$(git rev-list -n 1 "$TAG")" = "$HEAD_SHA" || die "$TAG does not point at HEAD"
 REMOTE_TAG_SHA="$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')"
