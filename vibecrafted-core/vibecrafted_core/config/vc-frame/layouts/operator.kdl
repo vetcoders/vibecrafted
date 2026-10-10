@@ -65,8 +65,11 @@ layout {
 
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
+        // The pane carries no fixed name so programs may retitle it; the OSC
+        // title below is the human placeholder until one does — without it
+        // the frame shows this whole bash one-liner as the title.
         pane command="bash" {
-            args "-lc" "printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Launchpad | Agents | Shell · Voc beside Composer\\n    Ctrl+t 1    back to Launchpad\\n\\n'; exec zsh -l"
+            args "-lc" "printf '\\033]0;Shell\\007'; printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Launchpad | Agents | Shell · Voc beside Composer\\n    Ctrl+t 1    back to Launchpad\\n\\n'; exec zsh -l"
         }
     }
 
