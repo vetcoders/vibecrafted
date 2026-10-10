@@ -4998,7 +4998,7 @@ cmd_help() {
       cmd_fork_help
       return
       ;;
-    claims|message|relocate|resume-session|settlements)
+    claims|message|reinstall|relocate|resume-session|settlements)
       if _run_core_help "$topic"; then
         return 0
       fi
@@ -5058,6 +5058,7 @@ cmd_help() {
   printf '  %bclaims%b               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)\n' "$_cyan" "$_reset"
   printf '  %bsettlements%b          Read-only f/x/n ledger query (summary|list|inspect)\n' "$_cyan" "$_reset"
   printf '  %bupdate%b               Update to the latest release\n' "$_cyan" "$_reset"
+  printf '  %breinstall --clean%b    Stop everything, reinstall, resurrect sessions + agents\n' "$_cyan" "$_reset"
   printf '  %buninstall%b            Remove runtime; preserve Founder data and unknowns\n' "$_cyan" "$_reset"
   printf '  %bhelp%b [topic|--all]   This deck · full reference\n' "$_cyan" "$_reset"
   printf '\n'
@@ -5197,6 +5198,7 @@ cmd_help_full() {
   printf '  %bvibecrafted settlements%b summary|list|inspect               Read-only f/x/n ledger\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted status%b                    Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted update%b                     Pull latest + reinstall\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted reinstall%b --clean --dry-run  Snapshot sessions/agents; plan kill → install → resurrect\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted doctor%b                    Installation health check\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted version%b                   Print version\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted uninstall%b                 Reverse the install\n' "$_cyan" "$_reset"
@@ -6879,6 +6881,10 @@ run_wrapper() {
     cmd_update "$@"
     return
   fi
+  if [[ "$wrapper" == "vc-reinstall" ]]; then
+    cmd_core_cli reinstall "$@"
+    return
+  fi
   if [[ "$wrapper" == "vc-receipt" ]]; then
     cmd_receipt "$@"
     return
@@ -7000,6 +7006,7 @@ main() {
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
     claims|message|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
+    reinstall) cmd_core_cli reinstall "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
