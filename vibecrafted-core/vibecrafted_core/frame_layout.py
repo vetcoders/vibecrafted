@@ -231,6 +231,48 @@ def _pane_block(
     return lines
 
 
+def _rewrite_generation_paths(
+    text: str, old_roots: Sequence[str], new_root: str
+) -> str:
+    """Rebase parsed values, including file URIs and embedded startup commands.
+
+    Frame can serialize generations not in the running-process census. Discover
+    those siblings only in this runtime's release directories, leaving paths
+    belonging to other products alone.
+    """
+    roots = {old.rstrip("/") for old in old_roots if old}
+    release_dirs = {
+        str(Path(root).parent)
+        for root in (*roots, new_root)
+        if generation_root(root) == root
+    }
+    patterns = [re.escape(root) for root in sorted(roots, key=len, reverse=True)]
+    patterns.extend(
+        re.escape(directory + "/") + r"""[^/\s'";()]+"""
+        for directory in sorted(release_dirs)
+    )
+    if not patterns:
+        return text
+    pattern = re.compile(
+        r"(?<![\w./-])(?:" + "|".join(patterns) + r""")(?=/|$|[\s'";()])"""
+    )
+    lines = text.splitlines()
+    queue = [parse_layout(text)]
+    while queue:
+        node = queue.pop()
+        queue.extend(node.children)
+        args = [(pattern.sub(lambda _: new_root, v), s) for v, s in node.args]
+        props = [(k, pattern.sub(lambda _: new_root, v), s) for k, v, s in node.props]
+        if args == node.args and props == node.props:
+            continue
+        node.args, node.props = args, props
+        _, opens, closes = _tokenize(lines[node.start])
+        lines[node.start] = _render_line(
+            _indent_of(lines[node.start]), node, opens=bool(opens and not closes)
+        ) + (" {}" if opens and closes else "")
+    return "\n".join(lines)
+
+
 def rewrite_layout(
     text: str,
     *,
@@ -246,7 +288,8 @@ def rewrite_layout(
     * chrome panes that the serializer froze as ``<old python> <config>/x.py``
       run through the generation-agnostic ``<config>/pane-python`` again and are
       no longer suspended; a bare shell pane (``zsh -l``) is not suspended either;
-    * any remaining string under an old generation root points at the new one;
+    * remaining paths in this runtime's release directories point at the new
+      generation, including plugin URIs and generations absent from the census;
     * every other command pane keeps ``start_suspended``: the Founder decides
       whether an editor or a long command should run again.
 
@@ -293,12 +336,15 @@ def rewrite_layout(
             continue
         command = pane.prop("command") or ""
         signature = pane_signature(pane)
-        chrome = (
-            _is_python(Path(command).name)
-            and generation_root(command) is not None
-            and len(signature) > 1
-            and signature[1].startswith(config_dir.rstrip("/") + "/")
+        chrome_script = next(
+            (
+                arg
+                for arg in signature[1:]
+                if arg.startswith(config_dir.rstrip("/") + "/") and arg.endswith(".py")
+            ),
+            None,
         )
+        chrome = _is_python(Path(command).name) and chrome_script is not None
         # A login/interactive shell is always safe to start again.
         shell = Path(command).name in _SHELLS and all(
             arg.startswith("-") for arg in signature[1:]
@@ -319,7 +365,7 @@ def rewrite_layout(
         body.append(lines[pane.end])
         edits[pane.start] = (pane.end, body)
         if chrome:
-            report.append({"key": f"chrome:{pane.start + 1}", "chrome": signature[1]})
+            report.append({"key": f"chrome:{pane.start + 1}", "chrome": chrome_script})
         else:
             report.append({"key": f"shell:{pane.start + 1}", "shell": command})
     output: list[str] = []
@@ -333,10 +379,6 @@ def rewrite_layout(
         output.append(lines[index])
         index += 1
     text_out = "\n".join(output)
-    if new_root:
-        for old in old_roots:
-            if old and old != new_root:
-                text_out = text_out.replace(f'"{old}/', f'"{new_root}/')
     if unmatched:
         tabs = [c for c in root.children if c.name == "tab"]
         insert_after = max((t.end for t in tabs), default=root.start)
@@ -355,6 +397,8 @@ def rewrite_layout(
         position = insert_after + 1 + shift if insert_after > 0 else len(out_lines) - 1
         out_lines[position:position] = extra
         text_out = "\n".join(out_lines)
+    if new_root:
+        text_out = _rewrite_generation_paths(text_out, old_roots, new_root)
     return text_out + "\n", report
 
 

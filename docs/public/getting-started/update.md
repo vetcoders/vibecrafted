@@ -69,14 +69,25 @@ and rebuilds your workspace from the new generation:
    from their layouts, chrome and shells start from the new generation, and
    each agent comes back through the interactive spawn surface — with a native
    resume when its session id is proven, as a fresh session with a continuity
-   pack when it is not. Headless runs with a proven session continue under
-   their original run id. The service and the App start again when they were
+   pack when it is not. A pane is reported as live only after its provider
+   process identity and ancestry match the admitted run and Frame server.
+   Failed starts produce a partial receipt with diagnostics. Headless runs
+   spared by the kill phase are recorded as `left-running`; other proven
+   headless sessions continue under their original run id.
+   The service and the App start again when they were
    running before.
 
 The executor detaches from the terminal that started it, so it can stop the
 Frame session you typed the command in. Every phase writes a receipt under
 `~/.vibecrafted/artifacts/vetcoders/vibecrafted/<day>/reports/reinstall-clean/`;
 `vibecrafted reinstall --resurrect <run-dir>` replays phase 4 from them.
+The phase-4 receipt includes `front_door`. The detached executor cannot attach
+a terminal client, so `executor.log` prints the exact `vc-frame attach` command
+to enter the restored workspace from a terminal. Opening the App alone does
+not prove that workspace attachment succeeded.
+Frame's serialized resurrection layouts receive the same generation rewrite
+as the snapshot layouts; their originals are saved under `frame-cache-backups/`
+in the run directory. Relative `--pack` paths are resolved before detachment.
 Scrollback and programs running inside panes (an open editor) are not
 replayed: such panes come back suspended, one keypress from running again.
 

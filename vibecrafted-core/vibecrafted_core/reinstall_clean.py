@@ -52,6 +52,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1851,6 +1852,7 @@ class ResurrectContext:
     runner: Runner = subprocess.run
     run_meta: Callable[[str], dict[str, Any] | None] = default_run_meta
     live_sessions: Callable[[], list[str]] | None = None
+    process_probe: ProcessProbe | None = None
     wait_seconds: float = 30.0
 
 
@@ -1911,16 +1913,20 @@ def _interactive_launch(
         pack, note = _continuity_pack(ctx, agent, root, key)
     command = resurrect_command(agent, python=ctx.python, root=root, pack_file=pack)
     prompt = RESUMED_PROMPT if agent["identity"] == PROVEN else FRESH_PROMPT
-    result = ctx.runner(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=ctx.env,
-        input=prompt,
-        timeout=120,
-    )
     outcome.update(root=root, admission_command=command, continuity_pack=pack or None)
+    try:
+        result = ctx.runner(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=ctx.env,
+            input=prompt,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        outcome.update(result="failed", reason=str(exc), stderr=str(exc))
+        return None, outcome
     if note:
         outcome["degraded"] = note
     if result.returncode != 0:
@@ -1935,13 +1941,216 @@ def _interactive_launch(
         outcome.update(result="refused", reason="spawn printed no launch command")
         return None, outcome
     outcome.update(
-        result="native-resume"
+        mode="native-resume"
         if agent["identity"] == PROVEN
         else "fresh-with-continuity",
+        result="admitted",
         native_session_id=agent.get("native_session_id"),
         launch=launch,
     )
     return launch, outcome
+
+
+def _verify_agent_panes(
+    ctx: ResurrectContext, session: str, panes: list[dict[str, Any]]
+) -> None:
+    """Admission is intent; only a qualified provider child proves liveness.
+
+    Reuse spawn's worker identity and the installer's process probe. The
+    admission file binds the pane to its owner; lineage binds its provider to
+    this Frame server. Another agent in the same cwd cannot satisfy it.
+    """
+    from .process_control import validate_process_identity
+
+    pending = [p for p in panes if p.get("result") == "admitted"]
+    if not pending:
+        return
+    probe = ctx.process_probe or DarwinProcessProbe(_installer())
+    deadline = time.monotonic() + ctx.wait_seconds
+    while pending:
+        try:
+            table = probe.table()
+            server = frame_server_for(table, ctx.socket_dir, session)
+            for pane in list(pending):
+                admission = _flag_value(pane["launch"], "--admission-file")
+                run_id = Path(admission).parent.name if admission else ""
+                meta = ctx.run_meta(run_id) or {}
+                worker = table.get(meta.get("worker_pid"))
+                owner = table.get(meta.get("owner_pid"))
+                reason = "provider child not yet published"
+                if worker and owner and server:
+                    bound = (
+                        classify_agent(worker.argv) == pane["provider"]
+                        and _flag_value(owner.argv, "--admission-file") == admission
+                        and owner.pid in ancestors(table, worker.pid)
+                        and server.pid in ancestors(table, owner.pid)
+                    )
+                    if bound:
+                        valid, reason, _ = validate_process_identity(
+                            meta.get("worker_identity"),
+                            expected_pid=worker.pid,
+                            expected_pgid=None,
+                            expected_run_id=run_id,
+                        )
+                        if valid:
+                            pane.pop("reason", None)
+                            pane.update(
+                                result="live",
+                                liveness={
+                                    "run_id": run_id,
+                                    "worker_identity": meta["worker_identity"],
+                                    "frame_server_pid": server.pid,
+                                    "verified_at": _iso(),
+                                },
+                            )
+                            pending.remove(pane)
+                            continue
+                    else:
+                        reason = "provider/owner/Frame lineage does not match admission"
+                pane["reason"] = reason
+        except (OSError, ValueError, ReinstallError) as exc:
+            for pane in pending:
+                pane["reason"] = f"liveness probe failed: {exc}"
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    for pane in pending:
+        pane["result"] = "failed"
+        pane["liveness"] = {"verified": False, "timeout_seconds": ctx.wait_seconds}
+        _failed_pane_diagnostics(ctx, session, pane)
+
+
+def _failed_pane_diagnostics(
+    ctx: ResurrectContext, session: str, pane: dict[str, Any]
+) -> None:
+    # Keep diagnostics private to the run. Never dump an unrelated pane.
+    env = frame_client_env(without_python_path(ctx.env), ctx.socket_dir)
+    try:
+        listed = ctx.runner(
+            [
+                ctx.frame_bin,
+                "--session",
+                session,
+                "action",
+                "list-panes",
+                "--json",
+                "--all",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+        )
+        pane["stderr"] = listed.stderr.strip()[-500:]
+        admission = _flag_value(pane["launch"], "--admission-file")
+        payload = json.loads(listed.stdout or "[]")
+        matches = [
+            p
+            for p in (payload if isinstance(payload, list) else [])
+            if isinstance(p, dict) and not p.get("is_plugin")
+            if _flag_value(
+                shlex.split(
+                    str(p.get("pane_command") or p.get("terminal_command") or "")
+                ),
+                "--admission-file",
+            )
+            == admission
+        ]
+        if len(matches) == 1:
+            pane_id = matches[0]["id"]
+            screen = ctx.runner(
+                [
+                    ctx.frame_bin,
+                    "--session",
+                    session,
+                    "action",
+                    "dump-screen",
+                    "--pane-id",
+                    str(pane_id),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                timeout=20,
+            )
+            target = ctx.run_dir / "logs" / f"{session}-pane-{pane_id}.log"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(screen.stdout + screen.stderr, encoding="utf-8")
+            target.chmod(0o600)
+            pane.update(
+                new_pane=pane_id,
+                screen_file=str(target),
+                stderr=screen.stderr.strip()[-500:] or pane["stderr"],
+            )
+        else:
+            pane["screen_unavailable"] = "no unique pane matching admission"
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        pane["screen_unavailable"] = str(exc)
+
+
+def _publish_resurrection_layout(
+    ctx: ResurrectContext, name: str, layout_file: Path
+) -> list[dict[str, str]]:
+    """Update Frame's own resurrection records before attach reads them.
+
+    Frame ignores --layout for a serialized, stopped session. Discover its
+    cache via the engine's setup surface, preserve each original, and publish
+    the same rewritten layout there. Metadata and scrollback remain in place.
+    """
+    if Path(name).name != name or name in {".", ".."}:
+        raise ReinstallError("invalid Frame session name")
+    checked = ctx.runner(
+        [ctx.frame_bin, "setup", "--check"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=frame_client_env(without_python_path(ctx.env), ctx.socket_dir),
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+    )
+    marker = "[CACHE DIR]: "
+    cache = next(
+        (
+            Path(line[len(marker) :].strip().strip('"'))
+            for line in (checked.stdout + checked.stderr).splitlines()
+            if line.startswith(marker)
+        ),
+        None,
+    )
+    if checked.returncode != 0 or cache is None or not cache.is_absolute():
+        raise ReinstallError("Frame did not report its resurrection cache directory")
+    publications = []
+    rewritten = layout_file.read_text(encoding="utf-8")
+    for directory in sorted(cache.glob("contract_version_*")):
+        target = directory / "session_info" / name / "session-layout.kdl"
+        if not target.is_file():
+            continue
+        if target.is_symlink() or not target.resolve().is_relative_to(cache.resolve()):
+            raise ReinstallError("unsafe Frame resurrection layout path")
+        relative = target.relative_to(cache)
+        backup = ctx.run_dir / "frame-cache-backups" / relative
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        # Preserve the first pre-change copy if phase 4 is retried.
+        if not backup.exists():
+            backup.write_bytes(target.read_bytes())
+            backup.chmod(0o600)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=target.parent, delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(rewritten)
+            temporary.replace(target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        publications.append({"layout": str(target), "backup": str(backup)})
+    return publications
 
 
 def create_session(
@@ -1949,38 +2158,60 @@ def create_session(
 ) -> dict[str, Any]:
     """Create one detached Frame session from a layout.
 
-    ``--layout`` (not ``--new-session-with-layout``) survives the ``attach``
-    subcommand; ``attach --create-background`` is the only terminal-free create.
+    ``attach --create-background`` is the terminal-free create. Its serialized
+    resurrection layout wins over ``--layout``, so both inputs must agree.
     """
     env = frame_client_env(without_python_path(ctx.env), ctx.socket_dir)
-    result = ctx.runner(
-        [
-            ctx.frame_bin,
-            "--layout",
-            str(layout_file),
-            "attach",
-            "--create-background",
-            name,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        timeout=60,
+    live = ctx.live_sessions or (
+        lambda: CliFrameProbe(ctx.frame_bin, ctx.socket_dir).list_sessions()
     )
+    try:
+        if name in live():
+            return {
+                "session": name,
+                "result": "failed",
+                "reason": "session became live before resurrection; preserved its cache",
+            }
+        published = _publish_resurrection_layout(ctx, name, layout_file)
+    except (OSError, ReinstallError, subprocess.TimeoutExpired) as exc:
+        return {"session": name, "result": "failed", "reason": str(exc)}
+    try:
+        result = ctx.runner(
+            [
+                ctx.frame_bin,
+                "--layout",
+                str(layout_file),
+                "attach",
+                "--create-background",
+                name,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "session": name,
+            "result": "failed",
+            "reason": str(exc),
+            "resurrection_cache": published,
+        }
     outcome = {
         "session": name,
         "rc": result.returncode,
         "stderr": result.stderr.strip()[-400:],
+        "resurrection_cache": published,
     }
     if "already exists" in (result.stdout + result.stderr):
         outcome["result"] = "already-exists"
         return outcome
+    if result.returncode != 0:
+        outcome["result"] = "failed"
+        return outcome
     deadline = time.monotonic() + ctx.wait_seconds
-    live = ctx.live_sessions or (
-        lambda: CliFrameProbe(ctx.frame_bin, ctx.socket_dir).list_sessions()
-    )
     while time.monotonic() < deadline:
         if name in live():
             outcome["result"] = "live"
@@ -2052,7 +2283,25 @@ def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, A
         entry["layout_file"] = str(layout_file)
         entry["layout_matches"] = matches
         entry.update(create_session(ctx, name, layout_file))
+        entry["frame_result"] = entry["result"]
+        if entry["result"] == "live":
+            _verify_agent_panes(ctx, name, entry["panes"])
+        else:
+            for pane in entry["panes"]:
+                if pane.get("result") == "admitted":
+                    pane.update(result="failed", reason="Frame session did not start")
+        if any(p.get("result") in {"failed", "refused"} for p in entry["panes"]):
+            entry["result"] = "failed"
     for run in manifest.get("headless_runs", []):
+        if run.get("spared"):
+            report["headless"].append(
+                {
+                    "run_id": run.get("run_id"),
+                    "action": "left-running",
+                    "result": "left-running",
+                }
+            )
+            continue
         agent = run["agent"]
         if agent["identity"] != PROVEN or not run.get("run_id"):
             report["headless"].append(
@@ -2095,6 +2344,38 @@ def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, A
                 {"run_id": run["run_id"], "result": "launch-watch-timeout"}
             )
     return report
+
+
+def resurrection_front_door(
+    ctx: ResurrectContext, restored: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Give the detached executor an honest handoff to the existing attach path."""
+    available = [
+        s
+        for s in restored["sessions"]
+        if s.get("frame_result", s.get("result")) in {"live", "already-live"}
+    ]
+    if not available:
+        return {"result": "unavailable", "reason": "no restored Frame session is live"}
+    # Prefer a workspace containing conversations over the operator host.
+    workspace = next((s for s in available if s.get("panes")), None)
+    workspace = workspace or next(
+        (s for s in available if s["session"].startswith("vibecrafted")), available[0]
+    )
+    command = [
+        "env",
+        f"VC_FRAME_SOCKET_DIR={ctx.socket_dir}",
+        ctx.frame_bin,
+        "attach",
+        workspace["session"],
+    ]
+    return {
+        "result": "needs-tty",
+        "session": workspace["session"],
+        "command": command,
+        "reason": "the reinstall executor is detached and has no controlling terminal",
+        "instruction": f"Open a terminal and enter the restored workspace: {shlex.join(command)}",
+    }
 
 
 def relaunch_after(
@@ -2379,17 +2660,32 @@ def resurrect_main(run_dir: Path) -> int:
     )
     restored = resurrect(manifest, ctx)
     restored.update(relaunch_after(plan, ctx, service))
+    restored["front_door"] = resurrection_front_door(ctx, restored)
+    print(
+        restored["front_door"].get("instruction") or restored["front_door"]["reason"],
+        flush=True,
+    )
     failures = [
         s["session"]
         for s in restored["sessions"]
         if s.get("result") not in {"live", "already-live"}
     ]
+    failed_headless = [
+        r.get("run_id")
+        for r in restored["headless"]
+        if r.get("result") in {"refused", "launch-watch-timeout"}
+    ]
+    failed_relaunch = any(a.get("rc") != 0 for a in restored["apps"]) or (
+        restored.get("service") is not None and restored["service"].get("rc") != 0
+    )
+    successful = not failures and not failed_headless and not failed_relaunch
     write_receipt(
         run_dir,
         "phase-4-resurrect",
-        "ok" if not failures else "partial",
+        "ok" if successful else "partial",
         generation=ctx.new_root,
         failed_sessions=failures,
+        failed_headless=failed_headless,
         **restored,
     )
     print(
@@ -2397,12 +2693,14 @@ def resurrect_main(run_dir: Path) -> int:
             {
                 "resurrected": [s["session"] for s in restored["sessions"]],
                 "failed": failures,
+                "failed_headless": failed_headless,
+                "front_door": restored["front_door"],
                 "receipts": str(run_dir / "receipts"),
             },
             indent=2,
         )
     )
-    return 0 if not failures else 1
+    return 0 if successful else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2426,6 +2724,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pack",
+        type=lambda value: str(Path(value).expanduser().resolve()) if value else "",
         default="",
         help="explicit Runtime Pack tarball for make install RUNTIME_PACK=",
     )
@@ -2463,7 +2762,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         inner.add_argument("--run-dir", required=True)
         inner.add_argument("--parent-pid", type=int, default=0)
         inner.add_argument("--source", default="")
-        inner.add_argument("--pack", default="")
+        inner.add_argument(
+            "--pack",
+            type=lambda value: str(Path(value).expanduser().resolve()) if value else "",
+            default="",
+        )
         ns = inner.parse_args(raw[1:])
         return execute(
             Path(ns.run_dir),
