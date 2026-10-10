@@ -22,7 +22,7 @@ Jedna twarz. Pasek talii w tytule, nie na Quick cmd. Rail zostaje. Zero nachodz�
 ```
 0         1         2         3         4         5         6         7         8         9         0         1
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
- Vibecrafted. | L  ○ Start  ◉ Agents  ○ shell  ○ voc                                                      Composer · cmd
+ Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell  ○ voc                                                  Composer · cmd
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
@@ -32,7 +32,7 @@ SESSIONS 5          ┌ grok · vibecrafted ────────────
    · resume-grok    │ Pasek talii: [‹][›] [Voc] [Nowy]                                                                 │
    · resume-codex   │ New agent = interaktywny TTY na tym tabie.                                                       │
 04 ◉ vc-release     │ Dispatch / headless = inne drzwi, pozniej.                                                       │
-   · Start here     │                                                                                                  │
+   · Launchpad      │                                                                                                  │
    ◉ Agents         │                                                                                                  │
    · shell          │                                                                                                  │
    · voc            │                                                                                                  │

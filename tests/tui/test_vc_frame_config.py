@@ -174,7 +174,7 @@ def test_host_chrome_is_not_a_product_configuration_asset() -> None:
     assert not (LAYOUTS_DIR / "vibecrafted-host.kdl").exists()
     operator = LAYOUTS_DIR / "operator.kdl"
     assert operator.is_file() and not operator.is_symlink()
-    assert 'tab name="Start here"' in operator.read_text(encoding="utf-8")
+    assert 'tab name="Launchpad"' in operator.read_text(encoding="utf-8")
 
 
 def test_vc_frame_config_has_plugin_aliases() -> None:
@@ -220,7 +220,7 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
         payload = layout_file.read_text(encoding="utf-8")
         if layout_file.name == "operator.kdl":
             # Launch alias for default_layout "vibecrafted": product workspace tabs.
-            assert 'tab name="Start here"' in payload
+            assert 'tab name="Launchpad"' in payload
             assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
             assert 'tab name="Voc"' not in payload
@@ -240,7 +240,7 @@ def test_marbles_layout_is_operator_centric() -> None:
 def test_operator_layout_matches_vibecrafted_standard() -> None:
     """Projects are ordinary sessions with their own content and single chrome."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert 'tab name="Start here"' in payload
+    assert 'tab name="Launchpad"' in payload
     assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
     assert 'tab name="Voc"' not in payload
@@ -256,7 +256,7 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "compact-bar" in payload
     assert "status-bar" in payload
     assert "session_layer" in payload
-    assert 'tab name="Start here" focus=true' in payload
+    assert 'tab name="Launchpad" focus=true' in payload
     assert "vibecrafted start" in payload
     # Rejected parallel path (ignore comments).
     active = "\n".join(
@@ -316,7 +316,7 @@ def test_dashboard_and_marbles_probe_packaged_mission_control() -> None:
 
 def test_operator_layout_start_here_and_shell_tabs() -> None:
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert 'command="bash" name="Start Here"' in payload
+    assert 'command="bash" name="Launchpad"' in payload
     assert 'plugin location="about"' not in payload
     assert "pane-python" in payload
     # `config install` is retired (e1d7a791); the Runtime Pack installer owns

@@ -196,7 +196,9 @@ _AMBIENT_LINEAGE_KEYS = (
     "CLAUDE_CODE_SESSION_ID",
     "VIBECRAFTED_OPERATOR_SESSION_ID",
 )
-_WORKSHOP_TITLES = frozenset({"agent workspaces", "new agent", "Voc", "start here"})
+_WORKSHOP_TITLES = frozenset(
+    {"agent workspaces", "new agent", "Voc", "launchpad", "start here"}
+)
 _AGENT_BINARIES = {
     "agy": "agy",
     "gemini": "agy",
@@ -2726,7 +2728,7 @@ class Workshop:
                     f"Agent opened in {destination}, but that session could not be shown",
                 )
                 return
-        # Product entry remains a launcher when Start here focuses it again.
+        # Product entry remains a launcher when Launchpad focuses it again.
         self.mode = "launcher" if self.standalone_launcher else "home"
         self.presence_schedule.last_at = None
         self.presence_schedule.request()

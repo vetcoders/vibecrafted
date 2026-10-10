@@ -445,7 +445,7 @@ if (( ${#_VC_TERMINAL_WARNINGS} )); then
 fi
 
 # The command deck is the door of a plain VC Terminal. A Frame pane already has
-# its own chrome (Start here, the tab row, the Shell tab guide), so repeating
+# its own chrome (Launchpad, the tab row, the Shell tab guide), so repeating
 # the deck in every new pane is noise. A failed entry must not wear the
 # success deck: the launcher exports an allowlisted refusal (status, reason,
 # log) and this profile repeats that refusal instead of "ready".

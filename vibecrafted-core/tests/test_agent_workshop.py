@@ -1259,6 +1259,15 @@ def test_workspace_path_is_full_resolved_and_must_exist(tmp_path: Path) -> None:
         workshop.normalized_workspace("missing", base=tmp_path)
 
 
+@pytest.mark.parametrize("title", ["Launchpad", "Start here"])
+def test_product_entry_pane_is_not_an_agent_face(title: str) -> None:
+    workshop = _load()
+    assert (
+        workshop._agent_face({"pane_title": title, "command": "codex", "exited": False})
+        is None
+    )
+
+
 def test_dashboard_projects_only_active_agent_faces_from_agents_tab() -> None:
     workshop = _load()
     payload = [

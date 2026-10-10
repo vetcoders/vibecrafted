@@ -670,7 +670,7 @@ def test_wrapper_keeps_an_explicit_socket_override(tmp_path: Path) -> None:
 
 
 def test_wrapper_without_arguments_enters_the_product_start(tmp_path: Path) -> None:
-    """The framework Start here surface stays reachable through the generation."""
+    """The framework Launchpad surface stays reachable through the generation."""
     generation = _stage_generation(tmp_path, engine="native", with_start=True)
     proc = _run_wrapper(generation)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)

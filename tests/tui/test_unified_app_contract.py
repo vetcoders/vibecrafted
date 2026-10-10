@@ -35,6 +35,31 @@ SCHEMA_PATH = (
 )
 
 
+@pytest.mark.parametrize("tab_name", ["Launchpad", "Start here"])
+def test_onboarding_probe_requires_launchpad_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tab_name: str
+) -> None:
+    layout = tmp_path / "vc-frame/layouts/operator.kdl"
+    layout.parent.mkdir(parents=True)
+    payload = f'layout {{ tab name="{tab_name}" {{}} }}'.encode()
+    layout.write_bytes(payload)
+    help_output = b"Create a vc-frame workspace for a repository"
+    scenario = Namespace(product_config=tmp_path, launchers=tmp_path / "bin")
+
+    def command(_scenario, argv):
+        assert argv == [scenario.launchers / "vc-start", "--help"]
+        return subprocess.CompletedProcess(argv, 0, stdout=help_output)
+
+    monkeypatch.setattr(contract, "_scenario_command", command)
+    if tab_name == "Start here":
+        with pytest.raises(RuntimeError, match="has no Launchpad tab"):
+            contract._scenario_start_here(scenario)
+    else:
+        assert contract._scenario_start_here(scenario) == {
+            "onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()
+        }
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1948,7 +1973,7 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     elif mutation == "applications_path":
         launch["program"] = "/Applications/vc-terminal.app/Contents/MacOS/vc-terminal"
     elif mutation == "direct_alias_session":
-        launch["shell"]["argv"] = ["attach", "--create", "Start here"]
+        launch["shell"]["argv"] = ["attach", "--create", "Launchpad"]
     elif mutation == "unknown_environment":
         launch["environment"]["inject_bundle_paths"]["VC_FRAME_BIN"] = (
             "Contents/Helpers/vc-frame"

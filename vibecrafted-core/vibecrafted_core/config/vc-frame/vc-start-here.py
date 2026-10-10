@@ -166,7 +166,7 @@ def project_chooser_argv() -> list[str]:
 
 
 def action_argv(action: str, *, project_path: str | None = None) -> list[str]:
-    """Return the existing product owner command for a Start Here action."""
+    """Return the existing product owner command for a Launchpad action."""
     if action == "project":
         if project_path:
             return ["vc-start", "resume", "--repo", project_path]
@@ -211,7 +211,7 @@ def action_argv(action: str, *, project_path: str | None = None) -> list[str]:
             "-lc",
             "vibecrafted doctor; printf '\\nPress Enter to close diagnostics…'; read -r _",
         ]
-    raise ValueError(f"unknown Start Here action: {action}")
+    raise ValueError(f"unknown Launchpad action: {action}")
 
 
 def project_readiness(
@@ -369,7 +369,7 @@ def _compose(
             cursor += 1
 
     essentials = density >= 3
-    emit(["START HERE"], curses.A_BOLD)
+    emit(["LAUNCHPAD"], curses.A_BOLD)
     gap(2)
     if not essentials:
         emit(_wrap(PRODUCT_LINE, canvas), curses.A_NORMAL)

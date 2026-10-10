@@ -542,6 +542,8 @@ def test_start_here_draws_with_terminal_default_colours_in_a_real_pty(
     assert not params & forbidden, sorted(params)
     assert {"1", "7"} <= params, sorted(params)
     text = output.decode("utf-8", "replace")
+    assert "LAUNCHPAD" in text
+    assert "START HERE" not in text
     assert "visible proof." in text
     assert "RUNTIME [ready] VC Server is healthy — this workspace is ready" in text
     assert "q close" in text

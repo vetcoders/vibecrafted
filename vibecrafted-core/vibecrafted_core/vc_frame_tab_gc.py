@@ -27,7 +27,9 @@ from .run_triage import (
 )
 
 BUCKET_SESSIONS = ("Finalized runs", "Failed runs", "Needs attention")
-PROTECTED_TAB_NAMES = {"Start here", "Agents", "Shell", "Voc"}
+# 2026-10-10: Launchpad is the product entry; keep Start here protected too
+# so upgrades preserve the Founder's existing sessions.
+PROTECTED_TAB_NAMES = {"Launchpad", "Start here", "Agents", "Shell", "Voc"}
 _HEX = frozenset("0123456789abcdefABCDEF")
 
 
