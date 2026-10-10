@@ -168,10 +168,18 @@ the Founder’s live runtime. Missing fixtures are a failed required gate.
 
 ## 4. Founder buttons and native Windows evidence
 
-After reviewing the exact candidate, promote it to `main` and tag that commit:
+After reviewing the exact candidate, promote it to `main`, update the clean
+checkout, and rehearse the resulting commit before tagging. A green PR run
+does not certify a squash commit. Follow the exact-SHA ceremony in
+[RELEASE_KICKOFF.md](RELEASE_KICKOFF.md#exact-sha-rehearsal-before-tagging):
 
 ```bash
-git tag -a v4.4.0 -m "Vibecrafted 4.4.0"
+git pull --ff-only origin main
+RELEASE_SHA="$(git rev-parse HEAD)"
+gh workflow run gate-rehearsal.yml --ref main
+# Wait for success on exactly RELEASE_SHA, then admit immediately before tagging.
+bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
+  git tag -a v4.4.0 -m "Vibecrafted 4.4.0" "$RELEASE_SHA"
 git push origin v4.4.0
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```

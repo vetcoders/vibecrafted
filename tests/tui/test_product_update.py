@@ -467,6 +467,11 @@ def test_product_update_source_and_physical_gate_routes() -> None:
         workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
         )
+        if filename != "portable.yml":
+            assert "uses: ./.github/workflows/source-gate.yml" in workflow
+            workflow = (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(
+                encoding="utf-8"
+            )
         assert "run: make test\n" not in workflow
         job_budget = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
         installer_budget = re.search(

@@ -198,6 +198,11 @@ def test_unified_product_contract_gate_executes_installed_runner() -> None:
 
 def test_release_workflow_is_read_only_and_validates_the_exact_tag_source() -> None:
     workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/source-gate.yml" in workflow
+    assert "verify_tag: true" in workflow
+    workflow += (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "run: make unified-product-contract-gate" in workflow
     assert "run: make test-core" in workflow
