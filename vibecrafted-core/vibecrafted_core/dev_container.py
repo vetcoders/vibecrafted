@@ -101,6 +101,11 @@ class ContainerRecord:
     image: str
     project: str
     workspace_source: str
+    # Immutable provenance of what this container actually runs: the image ID
+    # it was created from and the recipe label it inherited at creation. The
+    # tag in ``image`` is mutable and can point elsewhere by now.
+    image_id: str = ""
+    recipe: str = ""
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,7 @@ class ContainerTarget:
     host_root: str
     engine_context: str = ""
     workdir: str = WORKDIR
+    image_id: str = ""
 
     def receipt(self) -> dict[str, Any]:
         return {
@@ -124,6 +130,7 @@ class ContainerTarget:
             "container_id": self.container_id,
             "container_name": self.container_name,
             "image": self.image,
+            "image_id": self.image_id,
             "recipe_digest": self.recipe_digest,
             "host_root": self.host_root,
             "workdir": self.workdir,
@@ -486,13 +493,17 @@ def find_project_container(
         if isinstance(mount, dict) and mount.get("Destination") == WORKDIR:
             source = str(mount.get("Source") or "")
     state = payload.get("State") or {}
+    config = payload.get("Config") or {}
+    labels = config.get("Labels") or {}
     return ContainerRecord(
         container_id=str(payload.get("Id") or ids[0]),
         name=str(payload.get("Name") or "").lstrip("/"),
         state=str(state.get("Status") or ""),
-        image=str((payload.get("Config") or {}).get("Image") or ""),
+        image=str(config.get("Image") or ""),
         project=project,
         workspace_source=source,
+        image_id=str(payload.get("Image") or ""),
+        recipe=str(labels.get(RECIPE_LABEL) or "") if isinstance(labels, dict) else "",
     )
 
 
@@ -718,24 +729,28 @@ def ensure_container(
     reuse = record is not None and record.state == "running"
     if reuse:
         assert record is not None
-        running_recipe = image_recipe(cli, record.image, env, refresh=True) or "unknown"
-        if not _same_path(record.workspace_source, host_root) or (
-            record.image != tag and running_recipe != digest
+        # Only the container's own creation-time recipe label certifies what
+        # runs: a tag may have been retagged or rebuilt since.
+        running_recipe = record.recipe or "unknown"
+        if (
+            not _same_path(record.workspace_source, host_root)
+            or record.recipe != digest
         ):
             # Compose would recreate it and end every Agent working inside;
             # the volumes would survive, the running processes would not.
-            compose_file = directory / "compose.dev.yaml"
             raise ContainerError(
                 f"container {record.name} is running {record.image} "
-                f"(recipe {running_recipe}); this runtime ships recipe {digest}. "
-                "Running Agents are never replaced: finish or close the Agents in it, "
-                f"then stop it with `{Path(cli).name} compose -p {project} -f "
-                f"{compose_file} stop dev` (history volumes are kept) and Launch again.",
+                f"({record.image_id or 'image id unknown'}, recipe {running_recipe}); "
+                f"this runtime ships recipe {digest}. Running Agents are never replaced: "
+                "finish or close the Agents in it, then stop exactly this container "
+                f"with `{Path(cli).name} stop {record.container_id}` (history volumes "
+                "are kept) and Launch again.",
                 stage="drift",
             )
         log(
-            f"[1/3] Image {record.image} (recipe {running_recipe}, Docker context "
-            f"{status.context or 'default'}) — already serving this project"
+            f"[1/3] Image {record.image} ({record.image_id or 'image id unknown'}, "
+            f"recipe {running_recipe}, Docker context {status.context or 'default'}) "
+            "— already serving this project"
         )
         log(f"[2/3] Container project {project}")
         log("      already running with this recipe")
@@ -757,6 +772,12 @@ def ensure_container(
         _probe_visibility(cli, tag, host_root, status.context, env)
         compose_up(cli, directory, project, host_root, tag, env, log)
     record = _wait_running(cli, project, env)
+    if record.recipe != digest:
+        raise ContainerError(
+            f"container {record.name} started from {record.image_id or record.image} "
+            f"whose recipe label is {record.recipe or 'missing'}, not {digest}",
+            stage="start",
+        )
     if not _same_path(record.workspace_source, host_root):
         raise ContainerError(
             f"container {record.name} mounts {record.workspace_source or 'nothing'} "
@@ -772,7 +793,8 @@ def ensure_container(
         container_name=record.name,
         # The image actually serving the project, never assumed from the tag.
         image=record.image,
-        recipe_digest=digest,
+        image_id=record.image_id,
+        recipe_digest=record.recipe,
         host_root=str(host_root),
         engine_context=status.context,
     )

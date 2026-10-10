@@ -93,15 +93,20 @@ if argv[:1] == ["inspect"]:
           "StartedAt": started, "ExitCode": 1 if record.get("looping") else 0}
     if "--format" in argv:
         print(json.dumps(st)); sys.exit(0)
+    labels = record.get("labels", state["images"].get(record["image"], {}))
     print(json.dumps([{"Id": cid, "Name": "/" + project + "-dev-1", "State": st,
-        "Config": {"Image": record["image"]},
+        "Image": record.get("image_id", "sha256:" + record["image"]),
+        "Config": {"Image": record["image"], "Labels": labels},
         "Mounts": [{"Destination": "/workspace", "Source": record["mount"]}]}])); sys.exit(0)
 if argv[:1] == ["run"]:
     volume = argv[argv.index("-v") + 1]
     print(listing(volume.split(":")[0])); sys.exit(0)
 if argv[:1] == ["compose"] and "up" in argv:
     project = argv[argv.index("-p") + 1]
-    state["containers"][project] = {"id": "cid-" + project, "image": os.environ["VC_DEV_IMAGE"],
+    tag = os.environ["VC_DEV_IMAGE"]
+    state["containers"][project] = {"id": "cid-" + project, "image": tag,
+        "image_id": "sha256:" + tag + ":" + json.dumps(state["images"].get(tag, {}), sort_keys=True),
+        "labels": dict(state["images"].get(tag, {})),
         "mount": os.environ["VC_WORKSPACE_DIR"], "status": "running",
         "looping": state.get("loop_after_up", False)}
     save(); print(" Container " + project + "-dev-1 Started"); sys.exit(0)
@@ -126,6 +131,11 @@ if argv[:1] == ["exec"]:
             print("exited")
         sys.exit(0)
     sys.exit(0)
+if argv[:1] == ["stop"]:
+    project, record = container(argv[1])
+    if record is None:
+        print("No such container", file=sys.stderr); sys.exit(1)
+    record["status"] = "exited"; save(); print(argv[1]); sys.exit(0)
 if argv[:1] == ["logs"]:
     print("entry: aicx --version failed"); sys.exit(0)
 print("unexpected " + " ".join(argv), file=sys.stderr)
@@ -374,7 +384,8 @@ def test_running_container_on_another_recipe_is_kept_not_recreated(
     assert raised.value.stage == "drift"
     message = str(raised.value)
     assert "recipe older" in message and dev_container.recipe_digest() in message
-    assert "stop dev" in message and "history volumes are kept" in message
+    assert "docker stop cid-running-owned" in message
+    assert "compose" not in message and "history volumes are kept" in message
     argv = [entry["argv"] for entry in engine.calls()]
     assert not any(item[0] == "build" for item in argv)
     assert not any(item[0] == "compose" and "up" in item for item in argv)
@@ -829,3 +840,92 @@ def test_escalation_kills_only_while_identity_still_holds(world: IdentityWorld) 
 
     assert outcome == "killed"
     assert stubborn.wait(timeout=5) is not None
+
+
+def test_retagged_tag_never_certifies_the_image_a_container_runs(
+    tmp_path: Path,
+) -> None:
+    engine = FakeEngine(tmp_path)
+    root = _project(tmp_path)
+    digest = dev_container.recipe_digest()
+    tag = dev_container.image_tag(digest)
+    # The container runs immutable image A (old recipe); its tag now names a
+    # rebuilt image B carrying the current recipe label.
+    engine.state["images"][tag] = {dev_container.RECIPE_LABEL: digest}
+    running = {
+        "id": "cid-old-image",
+        "image": tag,
+        "image_id": "sha256:aaaa-old",
+        "labels": {dev_container.RECIPE_LABEL: "older"},
+        "mount": str(root.resolve()),
+        "status": "running",
+    }
+    engine.state["containers"]["vc-smoke-project"] = dict(running)
+    engine.save()
+
+    with pytest.raises(dev_container.ContainerError) as raised:
+        dev_container.ensure_container(root, env=engine.env, log=lambda _line: None)
+
+    assert raised.value.stage == "drift"
+    assert "sha256:aaaa-old" in str(raised.value) and "recipe older" in str(
+        raised.value
+    )
+    assert engine.load()["containers"]["vc-smoke-project"] == running
+
+
+def test_expected_tag_with_unknown_running_recipe_is_refused(tmp_path: Path) -> None:
+    engine = FakeEngine(tmp_path)
+    root = _project(tmp_path)
+    tag = dev_container.image_tag(dev_container.recipe_digest())
+    running = {
+        "id": "cid-unlabelled",
+        "image": tag,
+        "image_id": "sha256:bbbb-unlabelled",
+        "labels": {},
+        "mount": str(root.resolve()),
+        "status": "running",
+    }
+    engine.state["containers"]["vc-smoke-project"] = dict(running)
+    engine.save()
+
+    with pytest.raises(dev_container.ContainerError) as raised:
+        dev_container.ensure_container(root, env=engine.env, log=lambda _line: None)
+
+    assert raised.value.stage == "drift" and "recipe unknown" in str(raised.value)
+    assert engine.load()["containers"]["vc-smoke-project"] == running
+
+
+def test_recovery_command_runs_without_compose_env_and_unblocks_upgrade(
+    tmp_path: Path,
+) -> None:
+    engine = FakeEngine(tmp_path)
+    root = _project(tmp_path)
+    engine.state["images"]["vibecrafted-dev:recipe-older"] = {
+        dev_container.RECIPE_LABEL: "older"
+    }
+    engine.state["containers"]["vc-smoke-project"] = {
+        "id": "cid-running-owned",
+        "image": "vibecrafted-dev:recipe-older",
+        "mount": str(root.resolve()),
+        "status": "running",
+    }
+    engine.save()
+    with pytest.raises(dev_container.ContainerError) as raised:
+        dev_container.ensure_container(root, env=engine.env, log=lambda _line: None)
+    command = re.search(r"`([^`]+)`", str(raised.value)).group(1).split()
+
+    # The printed recovery is complete on its own: no VC_WORKSPACE_DIR or
+    # other Compose interpolation is inherited from this process.
+    bare_env = {
+        key: engine.env[key] for key in ("PATH", "FAKE_DOCKER_STATE", "FAKE_DOCKER_LOG")
+    }
+    finished = subprocess.run(
+        command, check=False, env=bare_env, capture_output=True, text=True
+    )
+    assert finished.returncode == 0, finished.stderr
+    assert engine.load()["containers"]["vc-smoke-project"]["status"] == "exited"
+
+    target = dev_container.ensure_container(
+        root, env=engine.env, log=lambda _line: None
+    )
+    assert target.recipe_digest == dev_container.recipe_digest()
