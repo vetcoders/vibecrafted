@@ -301,6 +301,7 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
         "vc-observe": "observe",
         "vc-operator": "operator",
         "vc-receipt": "receipt",
+        "vc-reinstall": "reinstall",
         "vc-resume": "resume",
         "vc-resume-session": "resume-session",
         "vc-scaffold-doctor": "scaffold-doctor",

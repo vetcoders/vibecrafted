@@ -120,6 +120,7 @@ SHELL_WRAPPER_VERBS = {
     "vc-observe": "observe",
     "vc-operator": "operator",
     "vc-receipt": "receipt",
+    "vc-reinstall": "reinstall",
     "vc-resume": "resume",
     "vc-resume-session": "resume-session",
     "vc-scaffold-doctor": "scaffold-doctor",
@@ -170,6 +171,7 @@ def python_owned_commands() -> frozenset[str]:
             "procs",
             "reap",
             "receipt",
+            "reinstall",
             "session-source",
             "settle",
             "ship",
@@ -209,6 +211,10 @@ def _render_core_surface_help(topic: str) -> int:
         from .relocate import main as relocate_main
 
         return _invoke_owned_main(relocate_main, ["--help"])
+    if topic == "reinstall":
+        from .reinstall_clean import main as reinstall_main
+
+        return _invoke_owned_main(reinstall_main, ["--help"])
     if topic == "claims":
         from .repository_claims import claims_cli_main
 
@@ -2397,6 +2403,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .relocate import main as relocate_main
 
         return _invoke_owned_main(relocate_main, raw_args[1:])
+    if raw_args and raw_args[0] == "reinstall":
+        from .reinstall_clean import main as reinstall_main
+
+        return _invoke_owned_main(reinstall_main, raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 
