@@ -12,7 +12,8 @@
 # The one-shot rule lives in zsh hooks: preexec arms after a real command,
 # precmd prints [exit N] on failure, probes pin state and closes an unpinned
 # pane by id; `exit` and Ctrl-D close through zshexit. A completion or
-# autosuggestion helper inherits that hook; its exit must not close the pane.
+# autosuggestion helper inherits that hook. Only the original interactive
+# process may close the pane.
 # Ctrl-C stops only the running command (or clears an empty prompt); it does
 # not kill this shell.
 #
@@ -136,15 +137,30 @@ print("pinned" if flag is True else "unpinned")
 PY
 }
 
-# Closed exactly once, and only by the root interactive shell. The one-shot
-# path closes explicitly (zsh on Linux does not reliably run zshexit for an
-# `exit` issued inside a precmd hook), and the root zshexit then finds the
-# pane already released. An explicit `exit` in a helper subshell does run
-# the inherited zshexit (ZSH_SUBSHELL > 0); that is the completion /
-# autosuggestion worker, and it must not close this pane.
+# Closed exactly once, and only by the original interactive process. The
+# one-shot path closes explicitly (zsh on Linux does not reliably run
+# zshexit for an `exit` issued inside a precmd hook), and the root zshexit
+# then finds the pane already released. A helper inherits that hook.
+# A parenthesized subshell has ZSH_SUBSHELL > 0. A root-started zpty helper
+# does not: ZSH_SUBSHELL stays 0 and $$ is that child, not the pane. $$
+# inside an ordinary subshell is still the parent, so it cannot name the
+# owner either. zsh/system sysparams[pid] is this process in both cases.
+# Capture it once when this invocation's zsh starts. The wrapper clears any
+# inherited value before exec, so a new Quick cmd records its own pid. A
+# helper that later sources this file keeps the exported value instead of
+# adopting its own pid. Either mismatch returns before the closed flag or
+# close-pane.
+zmodload zsh/system
+if [[ -z ${_vc_quick_owner_pid:-} ]]; then
+  typeset -g _vc_quick_owner_pid=$sysparams[pid]
+fi
+export _vc_quick_owner_pid
 typeset -g _vc_quick_closed=0
 _vc_quick_close_self() {
   if (( ZSH_SUBSHELL )); then
+    return 0
+  fi
+  if [[ ${sysparams[pid]} != ${_vc_quick_owner_pid} ]]; then
     return 0
   fi
   if [[ -z "${VC_QUICK_PANE_ID:-}" ]]; then
@@ -183,8 +199,8 @@ autoload -Uz add-zsh-hook
 add-zsh-hook preexec _vc_quick_preexec
 add-zsh-hook precmd _vc_quick_precmd
 
-# Root shell only — one-shot close, typed `exit`, Ctrl-D. Helper exits hit
-# the same function and return at the ZSH_SUBSHELL gate.
+# Original process only — one-shot close, typed `exit`, Ctrl-D. Helper
+# exits hit the same function and return at the ownership gate.
 zshexit() { _vc_quick_close_self }
 ZSHRC
 
@@ -201,4 +217,8 @@ done
 # -d skips distribution /etc zsh files (same decision as launch-primary-shell):
 # a global compinit may prompt about insecure host completions and consume the
 # first keystrokes of the ephemeral lane. ZDOTDIR startup still loads.
+# Drop a parent invocation's owner pid here. This exec is the new owner.
+# The generated rc exports the pid it captures, and a helper that sources
+# that rc keeps it.
+unset _vc_quick_owner_pid
 ZDOTDIR="${_zdot}" exec zsh -d -l -i
