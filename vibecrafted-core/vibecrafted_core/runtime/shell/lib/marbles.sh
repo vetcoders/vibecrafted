@@ -151,7 +151,7 @@ _vetcoders_aicx_resume_fallback() {
   local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
   local tmp_dir context_file meta_file aicx_bin python_spec py source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
-    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
+    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, the Homebrew prefix, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
     return 1
   }
