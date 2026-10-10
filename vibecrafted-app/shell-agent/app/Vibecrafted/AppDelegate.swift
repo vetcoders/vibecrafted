@@ -155,6 +155,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var lastTrayWork: TrayWorkObservation?
   private var canonicalInstall: CanonicalRuntimeInstall?
   private var canonicalRuntimeEnvironment: [String: String]?
+  private lazy var userShellPath = NativeUserShellPath { [unowned self] process, timeout, completion in
+    try self.runBounded(process, timeout: timeout, label: "user-shell-path", completion: completion)
+  }
   private var workspaceLaunchFailureReported = false
   private var eyeReconcileProcess: Process?
   private var runtimeResolveProcess: Process?
@@ -881,8 +884,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   ///
   /// Guest, not landlord: the base is the user's own environment — the app is
   /// launched from Finder/Dock, so this is the launchd user-session env, not a
-  /// login shell; `SSH_AUTH_SOCK`, the user's PATH and every user variable
-  /// flow through. Only the explicit deny-list below is scrubbed, then the
+  /// login shell. The shared contract recovers the user's login-shell PATH
+  /// before adoption; `SSH_AUTH_SOCK` and every other user variable flow
+  /// through. Only the explicit deny-list below is scrubbed, then the
   /// Vibecrafted pins overlay the result.
   private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
@@ -904,12 +908,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
     // `#!/usr/bin/env` shebangs resolve against exactly this PATH. The
-    // inherited PATH is never replaced: the generation's canonical bin is
-    // prepended so the runtime's own pinned tools resolve deterministically,
-    // and every user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
-    // behind it.
+    // login-shell PATH is acquired asynchronously before runtime-ready delivery;
+    // a failed probe preserves the inherited PATH. The generation's bin stays
+    // first while Homebrew, ~/.local/bin and ~/.cargo/bin survive behind it.
     environment["PATH"] = composedPath(
-      generation: install.root, inherited: host["PATH"])
+      generation: install.root,
+      inherited: userShellPath.cachedPath(generation: install.root, environment: host) ?? host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["XDG_CONFIG_HOME"] = install.configHome.path
@@ -983,23 +987,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     forceRefresh: Bool = false,
     completion: @escaping (RuntimeContract) -> Void
   ) {
+    let preparedCompletion: (RuntimeContract) -> Void = { [weak self] resolution in
+      self?.prepareLaunchEnvironment(resolution, completion: completion)
+    }
     let runtimeHome = currentRuntimeHome()
     let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
     if runtimeResolveProcess != nil {
-      runtimeResolveWaiters.append(completion)
+      runtimeResolveWaiters.append(preparedCompletion)
       return
     }
     if !forceRefresh, let cached = cachedResolution,
       cached.reusable(for: fingerprint, now: ProcessInfo.processInfo.systemUptime) {
-      completion(cached.value)
+      preparedCompletion(cached.value)
       return
     }
     // Join first, then decide whether to ask. One serialization point means a
     // caller that arrives mid-flight is answered about the installation as it
     // stands when the answer lands, not about the one it happened to catch.
-    runtimeResolveWaiters.append(completion)
+    runtimeResolveWaiters.append(preparedCompletion)
     guard runtimeResolveProcess == nil else { return }
     beginRuntimeResolve(runtimeHome: runtimeHome, fingerprint: fingerprint, attempt: 0)
+  }
+
+  /// Keep first-launch and later subprocesses on the same recovered PATH,
+  /// without running an interactive login shell on the App's main thread.
+  private func prepareLaunchEnvironment(
+    _ resolution: RuntimeContract, completion: @escaping (RuntimeContract) -> Void
+  ) {
+    guard case .ready(let install) = resolution else {
+      completion(resolution)
+      return
+    }
+    let fingerprint = identityFingerprint(runtimeHome: install.runtimeHome)
+    userShellPath.resolve(generation: install.root, environment: ProcessInfo.processInfo.environment) {
+      [weak self] _ in
+      guard let self else { return }
+      // PATH discovery also takes time: publication during this probe must
+      // not bypass the resolver's existing identity-drift protection.
+      guard fingerprint == self.identityFingerprint(runtimeHome: install.runtimeHome) else {
+        self.resolveInstalledRuntime(forceRefresh: true, completion: completion)
+        return
+      }
+      completion(resolution)
+    }
   }
 
   /// Ask the owner once, about one identity, for everyone currently waiting.
@@ -1332,8 +1362,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         self.runtimeInstallProcess = nil
         let waiters = self.runtimeInstallWaiters
         self.runtimeInstallWaiters.removeAll()
-        completion(outcome)
-        waiters.forEach { $0(outcome) }
+        if case .success(let install) = outcome {
+          self.prepareLaunchEnvironment(.ready(install)) { prepared in
+            let ready: Result<CanonicalRuntimeInstall, Error>
+            if case .ready(let current) = prepared {
+              ready = .success(current)
+            } else {
+              ready = .failure(NSError(domain: "io.vetcoders.vibecrafted.install", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "runtime changed during PATH discovery"]))
+            }
+            completion(ready)
+            waiters.forEach { $0(ready) }
+          }
+        } else {
+          completion(outcome)
+          waiters.forEach { $0(outcome) }
+        }
       }
     } catch {
       completion(.failure(error))
@@ -1514,12 +1558,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   /// The generation's canonical bin is prepended to the inherited PATH so the
   /// runtime's own pinned tools resolve deterministically; every user entry
-  /// survives behind it, and the minimal system set is the floor only when the
-  /// caller carried no PATH at all.
+  /// survives behind it. Deduplicate the user's PATH and append the system
+  /// floor for shells that intentionally expose only their custom tools.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let generationBin = generation.appendingPathComponent("bin").path
-    let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
-    let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
+    var seen: Set<String> = [generationBin]
+    let entries = ((inherited ?? "").split(separator: ":").map(String.init)
+      + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]).filter {
+        $0.hasPrefix("/") && seen.insert($0).inserted
+      }
     return ([generationBin] + entries).joined(separator: ":")
   }
 
@@ -2647,8 +2694,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           do {
             let install = try self.decodeCanonicalRuntimeInstall(from: output)
             self.cachedResolution = nil
-            _ = self.applyResolution(.ready(install))
-            completion(.success(self.currentProductUpdateIdentity()))
+            self.prepareLaunchEnvironment(.ready(install)) { prepared in
+              guard self.applyResolution(prepared) != nil else {
+                completion(.failure(NSError(domain: "io.vetcoders.vibecrafted.update", code: 3,
+                  userInfo: [NSLocalizedDescriptionKey: "runtime changed during PATH discovery"])))
+                return
+              }
+              completion(.success(self.currentProductUpdateIdentity()))
+            }
           } catch { completion(.failure(error)) }
         }
       }
