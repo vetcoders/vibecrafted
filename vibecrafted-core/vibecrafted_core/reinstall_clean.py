@@ -19,7 +19,11 @@ Phases (each one leaves a durable receipt in the artifacts plane):
    partitioned for a reinstall, plus agent processes proven by lineage to run
    under an owned process.  Every signal goes through the installer's
    birth+argv re-verification.  The persistent service is *stopped*, never
-   uninstalled, so ``make install`` reconciles it back.
+   uninstalled, so ``make install`` reconciles it back.  A LIVE headless
+   dispatcher run is spared with its whole subtree (decyzja Macieja
+   2026-10-10): the old generation stays on disk after an install, so the
+   worker finishes untouched; only a dispatcher whose run meta is terminal
+   or missing falls into the kill.
 3. INSTALL: ``make -C <checkout> install [RUNTIME_PACK=<pack>]``.
 4. RESURRECT: run by the newly installed launcher, so env, pins and colours come
    from the new generation.  Layouts are rewritten (chrome through the
@@ -513,6 +517,38 @@ def linked_run_id(table: ProcessTable, pid: int) -> str:
             if match and _RUN_ID.fullmatch(match.group(1)):
                 return match.group(1)
     return ""
+
+
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "stopped", "cancelled"})
+
+
+def live_headless_dispatchers(
+    dispatchers: Sequence[ProcessRecord],
+    run_meta: Callable[[str], dict[str, Any] | None],
+    table: ProcessTable,
+) -> dict[int, str]:
+    """Dispatcher pids whose control-plane run is still live, mapped to run id.
+
+    Decyzja Macieja 2026-10-10: KILL CLEAN never takes a live headless worker
+    down mid-run.  The previous generation stays on disk after an install, so
+    the run finishes on the binaries it was born with.  Only a dispatcher
+    whose run meta is terminal (or unreadable — an unprovable zombie) stays
+    in the owned-census kill.
+    """
+    live: dict[int, str] = {}
+    for record in dispatchers:
+        run_id = _flag_value(record.argv, "--run-id") or linked_run_id(
+            table, record.pid
+        )
+        if not run_id:
+            continue
+        meta = run_meta(run_id)
+        if meta is None:
+            continue
+        status = str(meta.get("status") or "").strip().lower()
+        if status not in TERMINAL_RUN_STATUSES:
+            live[record.pid] = run_id
+    return live
 
 
 def default_run_meta(run_id: str) -> dict[str, Any] | None:
@@ -1195,6 +1231,7 @@ def snapshot_world(
             for p in descendants(table, dispatcher.pid)
             if classify_agent(table[p].argv)
         )
+    spared_headless = live_headless_dispatchers(dispatchers, run_meta, table)
     cwds = procs.cwd(sorted(set(agent_pids_all)))
 
     for session in sessions_out:
@@ -1248,7 +1285,11 @@ def snapshot_world(
             agent = AgentProcess(provider, table[pid], _real(cwds.get(pid, "")))
             agent.linked_run_id = run_id or linked_run_id(table, pid)
             agents.append(agent)
-            entry = {"run_id": agent.linked_run_id, "dispatcher": dispatcher.to_json()}
+            entry = {
+                "run_id": agent.linked_run_id,
+                "dispatcher": dispatcher.to_json(),
+                "spared": dispatcher.pid in spared_headless,
+            }
             headless.append(entry)
             placements.append((None, entry, agent))
 
@@ -1274,6 +1315,7 @@ def snapshot_world(
         agent_pids=agent_pids_all,
         dispatchers=dispatchers,
         frame_servers=servers,
+        spared_headless=spared_headless,
     )
     running_roots = sorted(
         {root for s in sessions_out if (root := s.get("generation_root"))}
@@ -1321,13 +1363,21 @@ def _kill_snapshot(
     agent_pids: Sequence[int],
     dispatchers: Sequence[ProcessRecord],
     frame_servers: Sequence[int] = (),
+    spared_headless: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Phase 2 as data.  The census never lists the caller's own ancestry, so a
     Frame server hosting the invoking pane is named here as *blocking*: only a
-    detached executor can stop it.
+    detached executor can stop it.  ``spared_headless`` maps live headless
+    dispatcher pids to their run ids; their whole subtrees stay running
+    (decyzja Macieja 2026-10-10).
     """
     if ownership is None:
         return {"available": False, "reason": "process census is macOS-only in v1"}
+    spared_headless = dict(spared_headless or {})
+    spared_pids: set[int] = set()
+    for pid in spared_headless:
+        spared_pids.add(pid)
+        spared_pids.update(descendants(table, pid))
     census = list(ownership.census())
     split = partition_census(census, roots=ownership.roots(), config_dir=config_dir)
     owned_pids = (
@@ -1340,6 +1390,7 @@ def _kill_snapshot(
         if (
             record
             and pid not in caller
+            and pid not in spared_pids
             and (set(ancestors(table, pid)) & owned_pids)
             and pid not in owned_pids
         ):
@@ -1352,7 +1403,13 @@ def _kill_snapshot(
     ]
     return {
         "available": True,
-        "kill": [_census_json(r) for r in split["kill"]],
+        "kill": [_census_json(r) for r in split["kill"] if r.pid not in spared_pids],
+        "headless_spared": [
+            {**_census_json(r), "run_id": spared_headless.get(r.pid, "")}
+            for r in split["kill"]
+            if r.pid in spared_pids
+        ],
+        "headless_spared_pids": sorted(spared_pids),
         "guests": [_census_json(r) for r in split["guests"]],
         "lineage_agents": [
             {**r.to_json(), "birth_identity": list(r.birth)} for r in lineage
@@ -1507,7 +1564,9 @@ def build_plan(
             "run_id": run["run_id"],
             "provider": run["agent"]["provider"],
             "action": (
-                "resume --run-id"
+                "left-running (live dispatcher spared)"
+                if run.get("spared")
+                else "resume --run-id"
                 if run["agent"]["identity"] == PROVEN and run["run_id"]
                 else "report-only (no proven native session)"
             ),
@@ -1520,7 +1579,9 @@ def build_plan(
                 "--prompt",
                 HEADLESS_PROMPT,
             ]
-            if run["agent"]["identity"] == PROVEN and run["run_id"]
+            if not run.get("spared")
+            and run["agent"]["identity"] == PROVEN
+            and run["run_id"]
             else None,
         }
         for run in manifest.get("headless_runs", [])
@@ -1543,6 +1604,10 @@ def build_plan(
             "spared_guests": [
                 {"pid": r["pid"], "argv": r["argv"][:3]}
                 for r in ownership.get("guests", [])
+            ],
+            "headless_spared": [
+                {"pid": r["pid"], "run_id": r.get("run_id", ""), "argv": r["argv"][:3]}
+                for r in ownership.get("headless_spared", [])
             ],
             "caller_ancestors": ownership.get("caller_ancestors", []),
             "blocking_ancestors": ownership.get("blocking_ancestors", []),
@@ -1664,11 +1729,20 @@ def kill_clean(
     detail = {} if detail is None else detail
     detail["service"] = ownership.stop_service()
     protected = set(ownership.caller_ancestors())
+    spared = set(manifest["ownership"].get("headless_spared_pids", []))
+
+    def _spared(pid: int) -> bool:
+        # A live headless dispatcher and anything under it — including
+        # children forked after the snapshot — stays running (decyzja
+        # Macieja 2026-10-10).
+        return pid in spared or bool(set(ancestors(table, pid)) & spared)
+
     lineage = [
         table[e["pid"]]
         for e in manifest["ownership"].get("lineage_agents", [])
         if e["pid"] in table
         and e["pid"] not in protected
+        and not _spared(e["pid"])
         and table[e["pid"]].birth[0] == e["birth"]
     ]
     if lineage:
@@ -1677,15 +1751,22 @@ def kill_clean(
     census = list(ownership.census())
     split = partition_census(census, roots=ownership.roots(), config_dir=config_dir)
     owned = [
-        ProcessRecord(r.pid, 0, tuple(r.birth), tuple(r.argv)) for r in split["kill"]
+        ProcessRecord(r.pid, 0, tuple(r.birth), tuple(r.argv))
+        for r in split["kill"]
+        if not _spared(r.pid)
     ]
     if owned:
         ownership.terminate(owned, label="owned runtime process")
     detail["owned_stopped"] = [r.pid for r in owned]
     detail["guests_spared"] = [r.pid for r in split["guests"]]
-    leftover = partition_census(
-        list(ownership.census()), roots=ownership.roots(), config_dir=config_dir
-    )["kill"]
+    detail["headless_spared"] = sorted(r.pid for r in split["kill"] if _spared(r.pid))
+    leftover = [
+        r
+        for r in partition_census(
+            list(ownership.census()), roots=ownership.roots(), config_dir=config_dir
+        )["kill"]
+        if not _spared(r.pid)
+    ]
     detail["leftover"] = [_census_json(r) for r in leftover]
     if leftover:
         raise ReinstallError(

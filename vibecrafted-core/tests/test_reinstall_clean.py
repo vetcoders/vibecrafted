@@ -376,6 +376,7 @@ def take(
     *,
     ownership: FakeOwnership | None = None,
     frame: FakeFrame | None = None,
+    meta: Any = run_meta,
 ) -> dict[str, Any]:
     records = world_records()
     census = [
@@ -391,9 +392,17 @@ def take(
         stores=make_stores(tmp_path),
         socket_dir=SOCKETS,
         config_dir=Path(CONFIG),
-        run_meta=run_meta,
+        run_meta=meta,
         active_root=NEW,
     )
+
+
+def terminal_run_meta(run_id: str) -> dict[str, Any] | None:
+    """Same world, but the headless run has already settled."""
+    meta = run_meta(run_id)
+    if meta and run_id.startswith("work-"):
+        return {**meta, "status": "completed"}
+    return meta
 
 
 def agent_for(manifest: dict[str, Any], tab: str) -> dict[str, Any]:
@@ -684,15 +693,43 @@ def test_kill_plan_lineage_and_caller_tree(tmp_path: Path) -> None:
     manifest = take(tmp_path)
     ownership = manifest["ownership"]
     lineage = {r["pid"] for r in ownership["lineage_agents"]}
-    # agents born under the Frame server or a dispatcher; never the foreign claude
-    assert lineage == {121, 122, 132, 142, 201}
+    # agents born under the Frame server; never the foreign claude, and never
+    # the live headless worker (201 rides under spared dispatcher 200 —
+    # decyzja Macieja 2026-10-10)
+    assert lineage == {121, 122, 132, 142}
     assert 400 not in lineage
     assert ownership["caller_ancestors"] == [4242]
+    assert [r["pid"] for r in ownership["headless_spared"]] == [200]
+    assert ownership["headless_spared"][0]["run_id"] == "work-261010-085255-54301"
+    assert {200, 201} <= set(ownership["headless_spared_pids"])
+    assert 200 not in {r["pid"] for r in ownership["kill"]}
     plan = reinstall_clean.build_plan(
         manifest, source=tmp_path, pack=None, launcher=Path("/bin/vc")
     )
     assert plan["resurrect"]["relaunch_apps"] == ["/Applications/Vibecrafted.app"]
     assert plan["kill"]["spared_guests"][0]["pid"] == 300
+    assert plan["kill"]["headless_spared"][0]["pid"] == 200
+
+
+def test_terminal_headless_dispatcher_is_killed_and_resumed(tmp_path: Path) -> None:
+    """A settled run's dispatcher is a zombie: census kill + native resume."""
+    manifest = take(tmp_path, meta=terminal_run_meta)
+    ownership = manifest["ownership"]
+    assert ownership["headless_spared"] == []
+    assert 200 in {r["pid"] for r in ownership["kill"]}
+    assert 201 in {r["pid"] for r in ownership["lineage_agents"]}
+    plan = reinstall_clean.build_plan(
+        manifest, source=tmp_path, pack=None, launcher=Path("/bin/vc")
+    )
+    headless = plan["resurrect"]["headless"][0]
+    assert headless["action"] == "resume --run-id"
+    assert headless["command"][:5] == [
+        "/bin/vc",
+        "resume",
+        "claude",
+        "--run-id",
+        "work-261010-085255-54301",
+    ]
 
 
 def test_kill_clean_order_and_zero_leftover(tmp_path: Path) -> None:
@@ -897,13 +934,10 @@ def test_plan_names_install_and_native_resume(tmp_path: Path) -> None:
     assert claude[claude.index("--root") + 1] == REPO
     assert agents["Shell"]["mode"] == "fresh-with-continuity"
     headless = plan["resurrect"]["headless"][0]
-    assert headless["command"][:5] == [
-        "/bin/vc",
-        "resume",
-        "claude",
-        "--run-id",
-        "work-261010-085255-54301",
-    ]
+    # live headless run: spared by kill clean, so nothing to resume
+    # (decyzja Macieja 2026-10-10)
+    assert headless["action"] == "left-running (live dispatcher spared)"
+    assert headless["command"] is None
 
 
 # ---------------------------------------------------------------- layout rewrite
