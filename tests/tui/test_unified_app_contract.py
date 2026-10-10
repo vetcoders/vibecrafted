@@ -1965,9 +1965,12 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
+@pytest.mark.parametrize("probe_user_path", [None, True])
 def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
 ) -> None:
     """Guest, not landlord: the child environment is the user's own
     environment with the deny-list scrubbed and Vibecrafted pins overlaid;
@@ -1988,7 +1991,21 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
     }
 
-    child = contract.build_launch_environment(app, host_environment=host)
+    probed_path = (
+        f"{tmp_path}/.cargo/bin:{tmp_path}/.local/bin:/opt/homebrew/bin:/usr/bin"
+    )
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        assert environment == host
+        assert probe_user_path is True, (
+            "explicit host mappings must not probe implicitly"
+        )
+        return probed_path
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(
+        app, host_environment=host, probe_user_path=probe_user_path
+    )
 
     resolved = app.resolve()
     assert child == {
@@ -1997,7 +2014,7 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "LANG": "pl_PL.UTF-8",
         "PATH": (
             f"{resolved / 'Contents/Resources/runtime/bin'}:"
-            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            f"{probed_path if probe_user_path else host['PATH']}:/bin:/usr/sbin:/sbin"
         ),
         "SSH_AUTH_SOCK": "/tmp/probe.sock",
         "GITHUB_TOKEN": "user-owned-flows-through",
@@ -2005,6 +2022,37 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_APP_ROOT": str(resolved),
         "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
+
+
+@pytest.mark.parametrize("probe_user_path", [None, False])
+def test_process_launch_environment_adopts_login_path_by_default(
+    tmp_path: Path,
+    macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    host = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "PYTHONPATH": "/poison"}
+    monkeypatch.setattr(contract.os, "environ", host)
+    calls = []
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        calls.append(environment)
+        return f"{tmp_path}/.cargo/bin:/usr/bin"
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(app, probe_user_path=probe_user_path)
+    assert calls == ([host] if probe_user_path is None else [])
+    expected = (
+        f"{tmp_path}/.cargo/bin:/usr/bin:/bin"
+        if probe_user_path is None
+        else host["PATH"]
+    )
+    assert child["PATH"] == (
+        f"{app.resolve()}/Contents/Resources/runtime/bin:{expected}:/usr/sbin:/sbin"
+    )
+    assert "PYTHONPATH" not in child
 
 
 @pytest.mark.parametrize("runtime_home", ["relative/runtime", "APP_DESCENDANT"])
