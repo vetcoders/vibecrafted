@@ -2,9 +2,28 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 from collections.abc import Callable, Mapping
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_launchservices_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installer tests must never change the host's LaunchServices registry."""
+    real_run = subprocess.run
+    lsregister = (
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+
+    def run(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and command and command[0] == lsregister:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
 
 # Product-shell PATH doors. A deck in Development mode does `command -v python3`
 # and, with these still first on PATH, hits the runtime python door
