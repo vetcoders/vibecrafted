@@ -956,12 +956,11 @@ cmd_start_help() {
   printf '          Rules: 1-24 characters, no / or \\, no leading -, no control characters,\n'
   printf '          no leading/trailing whitespace. Reserved words: operator, vibecrafted\n'
   printf '          (= default start), resume (= deliberate re-entry). Nothing is normalized.\n'
-  printf '  Create: create-only. The live vc-frame inventory is read first; a session with\n'
-  printf '          the same name (attached, detached or EXITED) refuses the start with the\n'
-  printf '          attach/switch/rename commands. Nothing is attached, switched, killed,\n'
-  printf '          renamed or suffixed for you. Two concurrent starts yield one workspace\n'
-  printf '          and one refusal (vc-frame creates exclusively).\n'
-  printf '  Enter:  with a terminal outside Frame, enter the new workspace.\n'
+  printf '  Enter:  an existing live workspace is attached or switched to; an EXITED\n'
+  printf '          workspace is restored in place; a missing workspace is created.\n'
+  printf '          An unreadable inventory or a known name owned by another repository\n'
+  printf '          refuses safely. Names are never silently changed or suffixed.\n'
+  printf '          With a terminal outside Frame, attach to the workspace.\n'
   printf '          Inside Frame, CLI entry requires exactly one client on the source session.\n'
   printf '          With multiple source clients, use the Sessions rail or Cmd-Up/Down.\n'
   printf '          The destination may already have multiple clients.\n'
@@ -973,7 +972,7 @@ cmd_start_help() {
   printf '          Ordinary project entry does not replace or join an older Operator Frame.\n'
   printf '          In scripts, pass --new-host explicitly; resume deliberately keeps its owner.\n'
   printf '          Operator Frame is session 00; projects start at 01 in the Sessions rail.\n'
-  printf '  Exit:   0 entered · 2 usage/name/root · 3 workspace exists · 4 inventory/create\n'
+  printf '  Exit:   0 entered · 2 usage/name/root · 3 foreign name collision · 4 inventory/restore/create\n'
   printf '          Native entry propagates the Frame exit status.\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
@@ -5164,7 +5163,7 @@ cmd_help_full() {
   printf '  %bvibecrafted dashboard gc%b [flags]      Prune dead/stale vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard switch%b <name>   Switch to session (vc-frame-native)\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted housekeeping%b plan|run|schedule  Disk-space reclaim + auto schedule\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Create a vc-frame workspace (create-only)\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Enter the repository workspace\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted gui%b                       Public/local-web launch + observe surface\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"

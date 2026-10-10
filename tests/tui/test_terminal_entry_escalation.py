@@ -2032,10 +2032,10 @@ def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
     assert launch is None, "the owned terminal child opened another terminal"
 
 
-def test_start_refuses_an_existing_project_before_terminal_entry(
+def test_start_opens_an_existing_project_without_creating_it_again(
     tmp_path: Path,
 ) -> None:
-    """Inherited targeting metadata does not turn create-only start into resume."""
+    """A live session enters through the terminal without a new create marker."""
     live = tmp_path / "live-sessions.txt"
     live.write_text("mlx-batch-runner\n", encoding="utf-8")
     result, launch = _run_entry(
@@ -2045,12 +2045,13 @@ def test_start_refuses_an_existing_project_before_terminal_entry(
             "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
             "VC_FRAME_LIVE": str(live),
         },
-        expect_launch=False,
+        expect_launch=True,
     )
 
-    assert launch is None, "a create-only collision opened a terminal"
-    assert result.returncode == 3, result.stderr
-    assert "already exists" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert launch is not None
+    assert launch["created"] == "", launch
+    assert _working_directory(launch) == tmp_path / "mlx-batch-runner"
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex"])
