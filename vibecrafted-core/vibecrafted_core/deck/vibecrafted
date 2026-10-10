@@ -4843,6 +4843,11 @@ cmd_tui() {
   deck_path="$deck_path/scripts/vibecrafted"
   state_root="$crafted_home/control_plane"
 
+  # Measured 2026-10-10 on dragon: a silent pre-UI sync took 78 s over 1416
+  # runs, so the Voc pane sat as a bare cursor for minutes. Say what is
+  # happening; the real cut (incremental/background sync) is tracked in the
+  # zen lane.
+  printf 'Voc: syncing the control plane before first draw (large workspaces take a minute)...\n' >&2
   _sync_control_plane_best_effort
 
   if [[ -n "${binary_path:-}" && -x "$binary_path" ]]; then
