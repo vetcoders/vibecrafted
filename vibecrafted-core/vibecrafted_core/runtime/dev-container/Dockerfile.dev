@@ -6,12 +6,14 @@
 # the mutable agent/session state lives in named volumes (see compose.dev.yaml),
 # so tearing the container down and rebuilding it never loses history.
 #
-# This is the operator-supplied development image referenced by compose.dev.yaml.
-# It is NOT the hardened Runtime Pack carrier (Containerfile) and NOT a security
-# boundary. Base is Debian 13 (trixie), matching .cursor/Dockerfile and the
-# rest of vibecrafted-vm.
+# Built by vibecrafted_core.dev_container for the Agents launcher "local
+# container" environment and referenced by compose.dev.yaml. It is NOT the
+# hardened Runtime Pack carrier (vibecrafted-vm/Containerfile), NOT a VM and NOT
+# a security boundary. Base is Debian 13 (trixie), matching .cursor/Dockerfile
+# and vibecrafted-vm.
 #
-# Build context is this directory (vibecrafted-vm/); the repo is not copied in.
+# Build context is this directory (runtime/dev-container/), which ships inside
+# every installed generation; the repo is not copied in.
 FROM debian:trixie-slim
 
 ARG INSTALL_RUST=true
