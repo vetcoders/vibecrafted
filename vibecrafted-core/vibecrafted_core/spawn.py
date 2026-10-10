@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import hashlib
 import inspect
 import json
@@ -1508,6 +1509,40 @@ def interactive_run_environment(meta: Mapping[str, Any]) -> str:
     return "local-native"
 
 
+def provider_session_exists(
+    provider: str, session_id: str, *, env: Mapping[str, str]
+) -> bool:
+    """Check known provider stores without trusting historical run metadata.
+
+    Other providers retain their existing admission policy. This is existence,
+    not proof that a particular run opened or created the conversation.
+    """
+    if provider not in {"claude", "codex"}:
+        return True
+    if not session_id or "/" in session_id or "\\" in session_id:
+        return False
+    home = Path(env.get("HOME") or str(Path.home())).expanduser()
+    identity = glob.escape(session_id)
+    if provider == "claude":
+        configured = str(env.get("CLAUDE_CONFIG_DIR") or "").strip()
+        base = Path(configured).expanduser() if configured else home / ".claude"
+        store = base / "projects"
+        pattern = f"*/{identity}.jsonl"
+    else:
+        configured = str(env.get("CODEX_HOME") or "").strip()
+        base = Path(configured).expanduser() if configured else home / ".codex"
+        store = base / "sessions"
+        # Native filenames: rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl.
+        # Bound traversal to the provider's YYYY/MM/DD layout; no content read.
+        pattern = (
+            f"[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/rollout-*-{identity}.jsonl"
+        )
+    try:
+        return any(path.is_file() for path in store.glob(pattern))
+    except OSError:
+        return False
+
+
 def resumable_interactive_runs(
     provider: str,
     root: str | os.PathLike[str],
@@ -1518,8 +1553,10 @@ def resumable_interactive_runs(
     """Recorded, settled conversations this provider can re-open here.
 
     Only runs with a provider-proven native session qualify: a requested ID or
-    an AICX guess never becomes a resume target. Each candidate keeps the
-    environment and checkout it ran in, so resume returns to the same place.
+    an AICX guess never becomes a resume target. Known host provider stores
+    must still contain the conversation; historical proof stamps alone are unsafe.
+    Each candidate keeps the environment and checkout it ran in, so resume
+    returns to the same place.
     """
     from .workflow import _provider_session_for_continue, _read_json_object
 
@@ -1559,6 +1596,12 @@ def resumable_interactive_runs(
             continue
         session = _provider_session_for_continue(meta)
         if not session or session in seen:
+            continue
+        # local-vm owns a separate store in its container's named volume;
+        # absence from host HOME cannot disprove that conversation.
+        if runtime != "local-vm" and not provider_session_exists(
+            provider, session, env=os.environ
+        ):
             continue
         seen.add(session)
         found.append(
@@ -3240,20 +3283,14 @@ def _prove_host_native_session(
     since: float,
 ) -> str:
     """Provider-owned on-disk evidence of the conversation this run created."""
-    home = Path(env.get("HOME") or str(Path.home())).expanduser()
     if provider == "claude" and requested:
-        configured = str(env.get("CLAUDE_CONFIG_DIR") or "").strip()
-        base = Path(configured).expanduser() if configured else home / ".claude"
-        projects = base / "projects"
-        try:
-            if any(projects.glob(f"*/{requested}.jsonl")):
-                return requested
-        except OSError:
-            return ""
-        return ""
+        return (
+            requested if provider_session_exists(provider, requested, env=env) else ""
+        )
     if provider == "codex":
         from .compact_hooks import session_meta_from_jsonl
 
+        home = Path(env.get("HOME") or str(Path.home())).expanduser()
         codex_home = Path(
             str(env.get("CODEX_HOME") or "").strip() or home / ".codex"
         ).expanduser()

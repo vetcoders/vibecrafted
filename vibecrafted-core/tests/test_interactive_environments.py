@@ -242,8 +242,16 @@ def test_resume_by_run_returns_to_the_recorded_container(
 
 
 def test_resume_catalog_lists_only_proven_sessions_in_that_environment(
-    tmp_path: Path, home: Path
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    user_home = tmp_path / "user-home"
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("CODEX_HOME", str(user_home / ".codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_home / ".claude"))
+    sessions = user_home / ".codex" / "sessions" / "2026/10/10"
+    sessions.mkdir(parents=True)
+    for session in ("019a-native", "019a-worktree", "019a-live"):
+        (sessions / f"rollout-2026-10-10T21-42-00-{session}.jsonl").touch()
     repo = tmp_path / "project"
     _repo(repo)
     worktree = home / "worktrees" / "wt-one"
@@ -302,6 +310,115 @@ def test_resume_catalog_lists_only_proven_sessions_in_that_environment(
     assert worktrees[0]["branch"] == "cut/codex-init-worktree-proven"
     assert [item["session_id"] for item in containers] == ["019a-container"]
     assert resumable_interactive_runs("claude", repo, "local-native") == []
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("exists", [False, True])
+@pytest.mark.parametrize(
+    "session",
+    [
+        "b60345e7-afed-4da1-9ff8-fee1ecfa054a",
+        "01a12736-9ecb-7813-8fd6-48486a8e0d5c",
+    ],
+)
+def test_resume_catalog_requires_session_in_selected_provider_store(
+    tmp_path: Path,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    exists: bool,
+    session: str,
+) -> None:
+    user_home = tmp_path / "user-home"
+    codex_home = tmp_path / "codex-config"
+    claude_home = tmp_path / "claude-config"
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    repo = tmp_path / "project"
+    repo.mkdir()
+    # UUID shape is deliberately irrelevant: only the provider store decides.
+    meta_path = _record_run(
+        home,
+        "poisoned-or-real",
+        agent=provider,
+        root=str(repo),
+        parent_root=str(repo),
+        status="failed",
+        agent_session_id=session,
+        provider_session_id=session,
+        native_identity_status="proven",
+    )
+    original_meta = meta_path.read_bytes()
+    other_store = (
+        claude_home / "projects" / "-project" / f"{session}.jsonl"
+        if provider == "codex"
+        else codex_home
+        / "sessions"
+        / "2026/10/10"
+        / f"rollout-2026-10-10T21-42-00-{session}.jsonl"
+    )
+    other_store.parent.mkdir(parents=True)
+    other_store.write_text("{}\n", encoding="utf-8")
+    own_store = (
+        codex_home
+        / "sessions"
+        / "2026/10/10"
+        / f"rollout-2026-10-10T21-42-00-{session}.jsonl"
+        if provider == "codex"
+        else claude_home / "projects" / "-project" / f"{session}.jsonl"
+    )
+    if exists:
+        own_store.parent.mkdir(parents=True)
+        own_store.write_text("{}\n", encoding="utf-8")
+    candidates = resumable_interactive_runs(provider, repo, "local-native")
+    assert [item["session_id"] for item in candidates] == ([session] if exists else [])
+    assert meta_path.read_bytes() == original_meta
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_provider_session_store_defaults_and_exact_file_match(
+    tmp_path: Path,
+    provider: str,
+) -> None:
+    session = "session[one]"
+    store = tmp_path / f".{provider}"
+    folder = store / (
+        "sessions/2026/10/10" if provider == "codex" else "projects/-repo"
+    )
+    folder.mkdir(parents=True)
+    filename = (
+        f"rollout-2026-10-10T21-42-00-{session}.jsonl"
+        if provider == "codex"
+        else f"{session}.jsonl"
+    )
+    path = folder / filename
+    env = {"HOME": str(tmp_path)}
+    assert not spawn.provider_session_exists(provider, session, env=env)
+    # A directory or a glob match for a different identity is not a session.
+    path.mkdir()
+    assert not spawn.provider_session_exists(provider, session, env=env)
+    path.rmdir()
+    path.with_name(filename.replace("[one]", "o")).touch()
+    assert not spawn.provider_session_exists(provider, session, env=env)
+    path.write_bytes(b"\xff")  # Existence needs no JSON/content decoding.
+    assert spawn.provider_session_exists(provider, session, env=env)
+    assert not spawn.provider_session_exists(provider, "../session", env=env)
+    assert not spawn.provider_session_exists(provider, "", env=env)
+
+
+def test_unknown_provider_keeps_existing_resume_policy(
+    tmp_path: Path, home: Path
+) -> None:
+    repo = tmp_path / "project"
+    repo.mkdir()
+    _record_run(
+        home, "agy-proven", agent="agy", root=str(repo), agent_session_id="native-agy"
+    )
+    assert [
+        item["session_id"]
+        for item in resumable_interactive_runs("agy", repo, "local-native")
+    ] == ["native-agy"]
 
 
 def test_host_native_identity_needs_provider_owned_evidence(tmp_path: Path) -> None:
