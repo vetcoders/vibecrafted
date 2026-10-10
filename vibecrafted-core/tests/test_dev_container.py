@@ -112,6 +112,15 @@ if argv[:1] == ["exec"]:
         print(listing(record["mount"])); sys.exit(0)
     if stdin_mode and rest[1:3] == ["sh", "-c"]:
         state.setdefault("staged", {})[rest[-1]] = sys.stdin.read(); save(); sys.exit(0)
+    if rest[1:3] == ["sh", "-c"] and "basename" in rest[3]:
+        print("\n".join(state.get("live_providers", []))); sys.exit(0)
+    if rest[1:3] == ["sh", "-c"] and "kill -TERM" in rest[3]:
+        run = rest[5].rsplit("/", 1)[-1]
+        if run in state.get("live_providers", []):
+            state["live_providers"].remove(run); save(); print("terminated")
+        else:
+            print("exited")
+        sys.exit(0)
     sys.exit(0)
 if argv[:1] == ["logs"]:
     print("entry: aicx --version failed"); sys.exit(0)
@@ -461,3 +470,44 @@ def test_teardown_ends_the_provider_group_left_by_a_closed_tab(tmp_path: Path) -
     assert outcome == "exited"
     with pytest.raises(dev_container.ContainerError):
         dev_container.exec_argv(target, ["codex"], run_id="../x")
+
+
+def test_sweep_ends_only_providers_whose_host_owner_is_gone(tmp_path: Path) -> None:
+    engine = FakeEngine(tmp_path)
+    target = dev_container.ensure_container(
+        _project(tmp_path), env=engine.env, log=lambda _line: None
+    )
+    state = engine.load()
+    state["live_providers"] = ["init-closed-tab", "init-still-open"]
+    engine.state = state
+    engine.save()
+
+    ended = dev_container.sweep_orphan_providers(
+        target, is_live=lambda run_id: run_id == "init-still-open", env=engine.env
+    )
+
+    assert ended == ["init-closed-tab"]
+    assert engine.load()["live_providers"] == ["init-still-open"]
+
+
+def test_signal_teardown_runs_in_its_own_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = FakeEngine(tmp_path)
+    target = dev_container.ensure_container(
+        _project(tmp_path), env=engine.env, log=lambda _line: None
+    )
+    started: list[dict] = []
+
+    class Recorder:
+        def __init__(self, argv, **kwargs) -> None:
+            started.append({"argv": argv, **kwargs})
+
+    monkeypatch.setattr(dev_container.subprocess, "Popen", Recorder)
+
+    assert dev_container.terminate_provider_detached(target, "init-9", engine.env)
+
+    # A closed tab kills the owner's process group; this teardown is not in it.
+    assert started[0]["start_new_session"] is True
+    assert started[0]["argv"][5] == dev_container._TEARDOWN_SCRIPT
+    assert started[0]["argv"][-2:] == ["/root/.vibecrafted/agent-runs/init-9", "3"]

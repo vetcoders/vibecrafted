@@ -625,3 +625,53 @@ def test_shell_resume_runs_plain_in_this_tab() -> None:
 
 if sys.platform == "win32":  # pragma: no cover - POSIX PTY contract
     pytest.skip("POSIX only", allow_module_level=True)
+
+
+def test_terminal_state_is_published_before_container_teardown(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "project"
+    _repo(repo)
+    target = _fake_target(tmp_path, repo)
+    monkeypatch.setenv("FAKE_EXEC_LOG", str(tmp_path / "exec.jsonl"))
+    monkeypatch.setenv("FAKE_EXEC_STAGE", str(tmp_path / "stage.jsonl"))
+    monkeypatch.setattr(dev_container, "ensure_container", lambda *_a, **_k: target)
+    order: list[str] = []
+    terminalize = spawn._terminalize_interactive_launch
+
+    def record_terminal(*args, **kwargs):
+        order.append("terminal")
+        return terminalize(*args, **kwargs)
+
+    def record_teardown(*_args, **_kwargs):
+        order.append("teardown")
+        return "terminated"
+
+    monkeypatch.setattr(spawn, "_terminalize_interactive_launch", record_terminal)
+    monkeypatch.setattr(dev_container, "terminate_provider", record_teardown)
+
+    status = launch_interactive_workspace(
+        "codex",
+        "/vc-init",
+        "local-vm",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        admission={"run_id": "init-20261010-050505-ffff", "skill": "init"},
+    )
+
+    assert status == 0
+    # A closed tab can hard-kill the owner after its hangup: the terminal
+    # receipt must already exist when the slower container cleanup runs.
+    assert order == ["terminal", "teardown"]
+    meta = json.loads(
+        (
+            home
+            / "control_plane"
+            / "runtime_runs"
+            / "init-20261010-050505-ffff"
+            / "meta.json"
+        ).read_text()
+    )
+    assert meta["status"] == "completed"
+    assert meta["container_provider_teardown"] == "terminated"

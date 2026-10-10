@@ -2867,13 +2867,20 @@ def launch_interactive_workspace(
     previous_handlers: dict[int, Any] = {}
 
     def _forward_owner_signal(signum: int, _frame: Any) -> None:
-        if not received_signal:
+        first = not received_signal
+        if first:
             received_signal.append(signum)
         if child.poll() is None:
             try:
                 child.send_signal(signum)
             except ProcessLookupError:
                 pass
+        if first and container_target is not None:
+            from .dev_container import terminate_provider_detached
+
+            # A closed tab kills this owner moments later; the provider in
+            # the container must not depend on this process surviving.
+            terminate_provider_detached(container_target, launch.run_id, env=child_env)
 
     if threading.current_thread() is threading.main_thread():
         for signum in (
@@ -2982,23 +2989,6 @@ def launch_interactive_workspace(
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
-    if container_target is not None:
-        from .dev_container import terminate_provider
-
-        # The tab owns the provider: whatever ended the host-side client
-        # (exit, closed tab, signal), nothing keeps running in the container.
-        receipt["container_provider_teardown"] = terminate_provider(
-            container_target, launch.run_id, env=child_env
-        )
-    _record_native_identity_after_exit(
-        receipt,
-        provider=provider,
-        run_id=launch.run_id,
-        effective_root=launch.effective_root,
-        child_env=child_env,
-        container_target=container_target,
-        since=spawned_epoch,
-    )
     shell_status = (
         128 + abs(provider_returncode)
         if provider_returncode < 0
@@ -3034,13 +3024,24 @@ def launch_interactive_workspace(
     else:
         status = "failed"
         terminal_reason = "provider_exit_nonzero"
-    _terminalize_interactive_launch(
+    # A closed tab may hard-kill this owner shortly after its hangup: publish
+    # the terminal state first, then end the container provider and bind the
+    # provider's own session evidence as a follow-up write.
+    terminal = _terminalize_interactive_launch(
         launch,
         receipt,
         status=status,
         exit_code=shell_status,
         terminal_reason=terminal_reason,
         exit_signal=abs(provider_returncode) if provider_returncode < 0 else None,
+    )
+    _settle_interactive_aftermath(
+        launch,
+        terminal,
+        provider=provider,
+        child_env=child_env,
+        container_target=container_target,
+        since=spawned_epoch,
     )
     return shell_status
 
@@ -3061,6 +3062,26 @@ def _ask_container_retry(stage: str) -> bool:
     except (KeyboardInterrupt, OSError):
         return False
     return answer.strip().lower() in {"r", "retry", "y", "yes"}
+
+
+def _interactive_run_owner_alive(run_id: str) -> bool:
+    """Whether a recorded interactive run still has its owner process."""
+    meta = _read_meta(control_plane_home() / "runtime_runs" / run_id / "meta.json")
+    if not meta or meta.get("liveness") == "terminal":
+        return False
+    try:
+        owner = int(meta.get("owner_pid") or meta.get("launcher_pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if owner <= 0:
+        return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _prepare_container_launch(
@@ -3122,6 +3143,14 @@ def _prepare_container_launch(
                 error=str(exc),
             )
             return 1
+    swept = dev_container.sweep_orphan_providers(
+        target, is_live=_interactive_run_owner_alive, env=child_env
+    )
+    if swept:
+        launch.receipt["container_orphans_ended"] = swept
+        log(
+            f"Ended {len(swept)} Agent(s) left running by closed tabs: {', '.join(swept)}"
+        )
     host_prompt = str(launch.meta_path.with_name("prompt.md"))
     text = Path(host_prompt).read_text(encoding="utf-8")
     try:
@@ -3283,6 +3312,38 @@ def _record_native_identity_after_exit(
         native_identity_status="proven",
         native_identity_source=source,
     )
+
+
+def _settle_interactive_aftermath(
+    launch: InteractiveWorkspaceLaunch,
+    terminal: dict[str, Any],
+    *,
+    provider: str,
+    child_env: dict[str, str],
+    container_target: Any | None,
+    since: float,
+) -> None:
+    """Container teardown and native-session evidence after the terminal write."""
+    settled = dict(terminal)
+    if container_target is not None:
+        from .dev_container import terminate_provider
+
+        # The tab owns the provider: whatever ended the host-side client
+        # (exit, closed tab, signal), nothing keeps running in the container.
+        settled["container_provider_teardown"] = terminate_provider(
+            container_target, launch.run_id, env=child_env
+        )
+    _record_native_identity_after_exit(
+        settled,
+        provider=provider,
+        run_id=launch.run_id,
+        effective_root=launch.effective_root,
+        child_env=child_env,
+        container_target=container_target,
+        since=since,
+    )
+    if settled != terminal:
+        _write_meta(launch.meta_path, settled)
 
 
 def _launch_supervised_interactive_workspace(

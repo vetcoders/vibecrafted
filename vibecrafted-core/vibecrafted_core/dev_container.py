@@ -843,6 +843,55 @@ def exec_argv(
     return command
 
 
+_TEARDOWN_SCRIPT = (
+    'p=$(cat "$1/provider.pid" 2>/dev/null) || exit 0; '
+    'kill -0 "$p" 2>/dev/null || { echo exited; exit 0; }; '
+    # `exec -t` makes the provider a session leader: signal its group so
+    # wrapper launchers (node -> native binary) end together.
+    'kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; i=0; '
+    'while kill -0 "$p" 2>/dev/null && [ "$i" -lt "$2" ]; do sleep 1; i=$((i+1)); done; '
+    'if kill -0 "$p" 2>/dev/null; then '
+    'kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; echo killed; '
+    "else echo terminated; fi"
+)
+
+
+def terminate_provider_detached(
+    target: ContainerTarget,
+    run_id: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    grace_seconds: int = 3,
+) -> bool:
+    """Start the teardown in its own session so it outlives a killed tab.
+
+    Frame ends a closed tab's process group right after the hangup; a
+    teardown run by that owner can die half way. This one cannot.
+    """
+    try:
+        subprocess.Popen(
+            [
+                target.cli,
+                "exec",
+                target.container_id,
+                "sh",
+                "-c",
+                _TEARDOWN_SCRIPT,
+                "sh",
+                _run_dir(run_id),
+                str(grace_seconds),
+            ],
+            env=_cli_env(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ContainerError):
+        return False
+    return True
+
+
 def terminate_provider(
     target: ContainerTarget,
     run_id: str,
@@ -851,17 +900,6 @@ def terminate_provider(
     grace_seconds: int = 3,
 ) -> str:
     """End the provider this run started inside the container, if still alive."""
-    script = (
-        'p=$(cat "$1/provider.pid" 2>/dev/null) || exit 0; '
-        'kill -0 "$p" 2>/dev/null || { echo exited; exit 0; }; '
-        # `exec -t` makes the provider a session leader: signal its group so
-        # wrapper launchers (node -> native binary) end together.
-        'kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; i=0; '
-        'while kill -0 "$p" 2>/dev/null && [ "$i" -lt "$2" ]; do sleep 1; i=$((i+1)); done; '
-        'if kill -0 "$p" 2>/dev/null; then '
-        'kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; echo killed; '
-        "else echo terminated; fi"
-    )
     try:
         result = _run(
             [
@@ -870,7 +908,7 @@ def terminate_provider(
                 target.container_id,
                 "sh",
                 "-c",
-                script,
+                _TEARDOWN_SCRIPT,
                 "sh",
                 _run_dir(run_id),
                 str(grace_seconds),
@@ -881,6 +919,46 @@ def terminate_provider(
     except (OSError, subprocess.TimeoutExpired, ContainerError) as exc:
         return f"unknown:{exc}"
     return _text(result.stdout) or ("exited" if result.returncode == 0 else "unknown")
+
+
+def sweep_orphan_providers(
+    target: ContainerTarget,
+    *,
+    is_live: Callable[[str], bool],
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """End providers whose host owner is gone (a tab killed before teardown)."""
+    try:
+        result = _run(
+            [
+                target.cli,
+                "exec",
+                target.container_id,
+                "sh",
+                "-c",
+                (
+                    'for d in "$1"/*/; do f="$d/provider.pid"; [ -f "$f" ] || continue; '
+                    'kill -0 "$(cat "$f")" 2>/dev/null && basename "$d"; done; true'
+                ),
+                "sh",
+                RUN_STAGING_ROOT,
+            ],
+            env,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    ended: list[str] = []
+    for run_id in _text(result.stdout).splitlines():
+        run_id = run_id.strip()
+        if not _SAFE_RUN_ID.fullmatch(run_id) or is_live(run_id):
+            continue
+        if terminate_provider(target, run_id, env, grace_seconds=2) in {
+            "terminated",
+            "killed",
+        }:
+            ended.append(run_id)
+    return ended
 
 
 _CODEX_PROBE = r"""
