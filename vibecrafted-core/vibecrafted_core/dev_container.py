@@ -818,9 +818,10 @@ def exec_argv(
 ) -> list[str]:
     """``docker exec -it`` into the project's container, cwd at the mounted root.
 
-    The provider records its in-container PID first: a closed tab ends only
-    the host-side ``docker exec`` client, never the process it started, so the
-    owner needs that PID to end the provider with its tab.
+    The provider records its in-container process identity first (pid, kernel
+    starttime, boot id): a closed tab ends only the host-side ``docker exec``
+    client, never the process it started, so the owner needs a verifiable
+    identity to end the provider with its tab -- and nothing else.
     """
     if not argv:
         raise ContainerError("container command must not be empty", stage="exec")
@@ -830,29 +831,53 @@ def exec_argv(
     for key, value in (extra_env or {}).items():
         command.extend(["-e", f"{key}={value}"])
     command.append(target.container_id)
-    command.extend(
-        [
-            "sh",
-            "-c",
-            'echo $$ > "$1/provider.pid" && shift && exec "$@"',
-            "sh",
-            _run_dir(run_id),
-            *argv,
-        ]
-    )
+    command.extend(["sh", "-c", _RECORD_SCRIPT, "sh", _run_dir(run_id), *argv])
     return command
 
 
+PROC_ROOT = "/proc"
+IDENTITY_FILE = "provider.identity"
+# Same identity shape as process_control.process_start_token: the kernel
+# starttime (field 22 of /proc/<pid>/stat, read after the last ")") plus the
+# kernel boot id. A PID alone is not an identity: run directories live in a
+# named volume and outlive container restarts, where PIDs start over.
+_STARTTIME = "sed 's/.*) //' \"$P/$1/stat\" 2>/dev/null | cut -d' ' -f20"
+_RECORD_SCRIPT = (
+    "d=$1; shift; P=/proc; "
+    f'st=$(set -- "$$"; {_STARTTIME}); '
+    'b=$(cat "$P/sys/kernel/random/boot_id"); '
+    '[ -n "$st" ] && [ -n "$b" ] && '
+    'printf "%s start:%s boot:%s\\n" "$$" "$st" "$b" > "$d/provider.identity.tmp" && '
+    'mv "$d/provider.identity.tmp" "$d/provider.identity" && exec "$@"'
+)
+# $1 run dir, $2 grace seconds, $3 proc root. Every signal is preceded by a
+# fresh identity check; a stale, reused or vanished identity is never
+# signalled, and the record is cleared so it can never become actionable.
 _TEARDOWN_SCRIPT = (
-    'p=$(cat "$1/provider.pid" 2>/dev/null) || exit 0; '
-    'kill -0 "$p" 2>/dev/null || { echo exited; exit 0; }; '
+    'd=$1; g=$2; P=${3:-/proc}; f="$d/provider.identity"; '
+    '[ -f "$f" ] || { echo none; exit 0; }; '
+    'read -r pid st boot < "$f" || { rm -f "$f"; echo stale; exit 0; }; '
+    f'same() {{ [ "boot:$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" = "$boot" ] && '
+    f'[ "start:$({_STARTTIME})" = "$st" ]; }}; '
+    'if ! same "$pid"; then rm -f "$f"; '
+    'if [ -e "$P/$pid" ]; then echo stale; else echo exited; fi; exit 0; fi; '
     # `exec -t` makes the provider a session leader: signal its group so
     # wrapper launchers (node -> native binary) end together.
-    'kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; i=0; '
-    'while kill -0 "$p" 2>/dev/null && [ "$i" -lt "$2" ]; do sleep 1; i=$((i+1)); done; '
-    'if kill -0 "$p" 2>/dev/null; then '
-    'kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; echo killed; '
-    "else echo terminated; fi"
+    'kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; i=0; '
+    'while same "$pid" && [ "$i" -lt "$g" ]; do sleep 1; i=$((i+1)); done; '
+    'if same "$pid"; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; '
+    'rm -f "$f"; echo killed; '
+    'elif [ -e "$P/$pid" ]; then rm -f "$f"; echo stale; '
+    'else rm -f "$f"; echo terminated; fi'
+)
+# $1 staging root, $2 proc root: run ids whose recorded provider is the same
+# live process now; stale records are cleared, never reported.
+_SWEEP_SCRIPT = (
+    'P=${2:-/proc}; b="boot:$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)"; '
+    'for f in "$1"/*/provider.identity; do [ -f "$f" ] || continue; '
+    'read -r pid st boot < "$f" || { rm -f "$f"; continue; }; '
+    f'if [ "$boot" = "$b" ] && [ "start:$(set -- "$pid"; {_STARTTIME})" = "$st" ]; then '
+    'basename "$(dirname "$f")"; else rm -f "$f"; fi; done; true'
 )
 
 
@@ -880,6 +905,7 @@ def terminate_provider_detached(
                 "sh",
                 _run_dir(run_id),
                 str(grace_seconds),
+                PROC_ROOT,
             ],
             env=_cli_env(env),
             stdin=subprocess.DEVNULL,
@@ -912,6 +938,7 @@ def terminate_provider(
                 "sh",
                 _run_dir(run_id),
                 str(grace_seconds),
+                PROC_ROOT,
             ],
             env,
             timeout=grace_seconds + 20,
@@ -927,7 +954,11 @@ def sweep_orphan_providers(
     is_live: Callable[[str], bool],
     env: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """End providers whose host owner is gone (a tab killed before teardown)."""
+    """End providers whose host owner is gone (a tab killed before teardown).
+
+    Only records whose identity still names the same live process are
+    candidates; the teardown re-verifies that identity before every signal.
+    """
     try:
         result = _run(
             [
@@ -936,12 +967,10 @@ def sweep_orphan_providers(
                 target.container_id,
                 "sh",
                 "-c",
-                (
-                    'for d in "$1"/*/; do f="$d/provider.pid"; [ -f "$f" ] || continue; '
-                    'kill -0 "$(cat "$f")" 2>/dev/null && basename "$d"; done; true'
-                ),
+                _SWEEP_SCRIPT,
                 "sh",
                 RUN_STAGING_ROOT,
+                PROC_ROOT,
             ],
             env,
             timeout=20,

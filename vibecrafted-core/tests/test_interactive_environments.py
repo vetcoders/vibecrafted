@@ -478,7 +478,7 @@ def test_container_launch_runs_the_provider_inside_and_binds_its_session(
     assert meta["usage_measurement"]["source"] == "unmetered"
     # The provider never outlives its tab inside the container.
     teardown = [c["argv"] for c in calls if c["argv"][:2] == ["exec", "cid-project"]]
-    assert any("provider.pid" in argv[4] for argv in teardown)
+    assert any(argv[4] == dev_container._TEARDOWN_SCRIPT for argv in teardown)
     assert "container_provider_teardown" in meta
     # Provider-owned evidence (the container's rollout) binds the conversation.
     assert meta["agent_session_id"] == "019a0000-0000-7000-8000-0000000c0dex"

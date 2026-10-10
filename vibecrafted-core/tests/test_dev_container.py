@@ -11,8 +11,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import stat
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -432,9 +436,10 @@ def test_exec_passes_credentials_by_name_and_stages_private_files(
     assert argv[:5] == [target.cli, "exec", "-it", "-w", "/workspace"]
     assert "COLORTERM" in argv and "OPENAI_API_KEY" in argv
     wrapper = argv[argv.index(target.container_id) + 1 :]
-    # The provider records its in-container PID, then becomes that process.
+    # The provider records its in-container identity, then becomes that process.
     assert wrapper[:2] == ["sh", "-c"]
-    assert 'echo $$ > "$1/provider.pid"' in wrapper[2] and 'exec "$@"' in wrapper[2]
+    assert wrapper[2] == dev_container._RECORD_SCRIPT
+    assert "start:%s boot:%s" in wrapper[2] and wrapper[2].endswith('exec "$@"')
     assert wrapper[3:5] == ["sh", "/root/.vibecrafted/agent-runs/init-1"]
     assert wrapper[5:] == ["codex", "--dangerously-bypass-approvals-and-sandbox", "go"]
 
@@ -464,9 +469,8 @@ def test_teardown_ends_the_provider_group_left_by_a_closed_tab(tmp_path: Path) -
     ]
     assert teardown, engine.calls()
     script = teardown[-1][4]
-    assert 'cat "$1/provider.pid"' in script
-    assert 'kill -TERM -- "-$p"' in script and 'kill -KILL -- "-$p"' in script
-    assert teardown[-1][-2:] == ["/root/.vibecrafted/agent-runs/init-1", "1"]
+    assert script == dev_container._TEARDOWN_SCRIPT
+    assert teardown[-1][-3:] == ["/root/.vibecrafted/agent-runs/init-1", "1", "/proc"]
     assert outcome == "exited"
     with pytest.raises(dev_container.ContainerError):
         dev_container.exec_argv(target, ["codex"], run_id="../x")
@@ -510,4 +514,225 @@ def test_signal_teardown_runs_in_its_own_session(
     # A closed tab kills the owner's process group; this teardown is not in it.
     assert started[0]["start_new_session"] is True
     assert started[0]["argv"][5] == dev_container._TEARDOWN_SCRIPT
-    assert started[0]["argv"][-2:] == ["/root/.vibecrafted/agent-runs/init-9", "3"]
+    assert started[0]["argv"][-3:] == [
+        "/root/.vibecrafted/agent-runs/init-9",
+        "3",
+        "/proc",
+    ]
+
+
+# --- identity-bound teardown against real disposable processes ------------
+
+PASSTHROUGH = r"""#!/usr/bin/env python3
+import os, sys
+argv = sys.argv[1:]
+assert argv[0] == "exec", argv
+rest = argv[1:]
+if rest and rest[0] == "-i":
+    rest = rest[1:]
+cid, shell, flag, script, name, *args = rest
+assert (shell, flag, name) == ("sh", "-c", "sh"), rest
+staging, proc = os.environ["FAKE_STAGING"], os.environ["FAKE_PROC"]
+mapped = []
+for arg in args:
+    if arg.startswith("/root/.vibecrafted/agent-runs"):
+        arg = staging + arg[len("/root/.vibecrafted/agent-runs"):]
+    elif arg == "/proc":
+        arg = proc
+    mapped.append(arg)
+os.execvp("sh", ["sh", "-c", script, "sh", *mapped])
+"""
+
+
+class IdentityWorld:
+    """Local stand-in for a container: real processes, a fake /proc view."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.staging = tmp_path / "staging"
+        self.proc = tmp_path / "proc"
+        (self.proc / "sys" / "kernel" / "random").mkdir(parents=True)
+        self.boot("boot-A")
+        cli = tmp_path / "bin" / "docker"
+        cli.parent.mkdir()
+        cli.write_text(
+            PASSTHROUGH.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1),
+            encoding="utf-8",
+        )
+        cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+        self.env = {
+            "PATH": f"{cli.parent}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "FAKE_STAGING": str(self.staging),
+            "FAKE_PROC": str(self.proc),
+        }
+        self.target = dev_container.ContainerTarget(
+            cli=str(cli),
+            project="vc-identity",
+            container_id="cid-identity",
+            container_name="vc-identity-dev-1",
+            image="vibecrafted-dev:recipe-test",
+            recipe_digest="test",
+            host_root=str(tmp_path),
+        )
+        self.processes: list[subprocess.Popen] = []
+
+    def boot(self, boot_id: str) -> None:
+        (self.proc / "sys" / "kernel" / "random" / "boot_id").write_text(
+            boot_id + "\n", encoding="utf-8"
+        )
+
+    def spawn(self, ignore_term: bool = False) -> subprocess.Popen:
+        argv = (
+            ["sh", "-c", "trap '' TERM; while :; do sleep 0.2; done"]
+            if ignore_term
+            else ["sleep", "300"]
+        )
+        process = subprocess.Popen(argv, start_new_session=True)
+        self.processes.append(process)
+        return process
+
+    def kernel_view(self, pid: int, starttime: str) -> None:
+        folder = self.proc / str(pid)
+        folder.mkdir(exist_ok=True)
+        fields = ["S", *(["0"] * 18), starttime, *(["0"] * 10)]
+        (folder / "stat").write_text(f"{pid} (fake proc) {' '.join(fields)}\n")
+
+    def record(
+        self, run_id: str, pid: int, starttime: str, boot_id: str = "boot-A"
+    ) -> Path:
+        run_dir = self.staging / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / dev_container.IDENTITY_FILE
+        path.write_text(f"{pid} start:{starttime} boot:{boot_id}\n", encoding="utf-8")
+        return path
+
+    def wait_gone(self, path: Path, timeout: float = 8.0) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if not path.exists():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def close(self) -> None:
+        for process in self.processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+@pytest.fixture
+def world(tmp_path: Path):
+    instance = IdentityWorld(tmp_path)
+    yield instance
+    instance.close()
+
+
+def _alive(process: subprocess.Popen, settle: float = 0.3) -> bool:
+    time.sleep(settle)
+    return process.poll() is None
+
+
+def test_stale_record_never_reaches_a_distinct_live_process(
+    world: IdentityWorld,
+) -> None:
+    bystander = world.spawn()
+    world.kernel_view(bystander.pid, "222")  # the live process the PID names now
+
+    record = world.record("init-old", bystander.pid, "111")
+    assert (
+        dev_container.terminate_provider(world.target, "init-old", world.env) == "stale"
+    )
+    assert not record.exists() and _alive(bystander)
+
+    record = world.record("init-old", bystander.pid, "111")
+    assert dev_container.terminate_provider_detached(
+        world.target, "init-old", world.env
+    )
+    assert world.wait_gone(record) and _alive(bystander)
+
+    record = world.record("init-old", bystander.pid, "111")
+    ended = dev_container.sweep_orphan_providers(
+        world.target, is_live=lambda _run: False, env=world.env
+    )
+    assert ended == [] and not record.exists() and _alive(bystander)
+
+
+def test_container_restart_invalidates_recorded_identity(world: IdentityWorld) -> None:
+    bystander = world.spawn()
+    world.kernel_view(bystander.pid, "333")
+    world.record("init-before-restart", bystander.pid, "333", boot_id="boot-A")
+    world.boot("boot-B")
+
+    ended = dev_container.sweep_orphan_providers(
+        world.target, is_live=lambda _run: False, env=world.env
+    )
+    outcome = dev_container.terminate_provider(
+        world.target, "init-before-restart", world.env
+    )
+
+    assert ended == [] and outcome == "none" and _alive(bystander)
+
+
+def test_legitimate_orphan_is_ended_by_the_sweep(world: IdentityWorld) -> None:
+    orphan = world.spawn()
+    world.kernel_view(orphan.pid, "444")
+    record = world.record("init-closed-tab", orphan.pid, "444")
+    owner_alive = {"init-closed-tab": False}
+
+    ended = dev_container.sweep_orphan_providers(
+        world.target, is_live=lambda run: owner_alive[run], env=world.env
+    )
+
+    assert ended == ["init-closed-tab"]
+    assert orphan.wait(timeout=5) is not None
+    assert not record.exists()
+
+
+def test_live_owner_keeps_its_provider_through_the_sweep(world: IdentityWorld) -> None:
+    provider = world.spawn()
+    world.kernel_view(provider.pid, "555")
+    record = world.record("init-open-tab", provider.pid, "555")
+
+    assert (
+        dev_container.sweep_orphan_providers(
+            world.target, is_live=lambda _run: True, env=world.env
+        )
+        == []
+    )
+    assert record.exists() and _alive(provider)
+
+
+def test_no_kill_escalation_once_the_original_identity_disappears(
+    world: IdentityWorld,
+) -> None:
+    stubborn = world.spawn(ignore_term=True)
+    world.kernel_view(stubborn.pid, "666")
+    world.record("init-stubborn", stubborn.pid, "666")
+    outcome: list[str] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            dev_container.terminate_provider(
+                world.target, "init-stubborn", world.env, grace_seconds=4
+            )
+        )
+    )
+    worker.start()
+    time.sleep(1.2)
+    world.kernel_view(stubborn.pid, "777")  # the PID now names something else
+    worker.join(timeout=15)
+
+    assert outcome == ["stale"]
+    assert _alive(stubborn)
+
+
+def test_escalation_kills_only_while_identity_still_holds(world: IdentityWorld) -> None:
+    stubborn = world.spawn(ignore_term=True)
+    world.kernel_view(stubborn.pid, "888")
+    world.record("init-ignores-term", stubborn.pid, "888")
+
+    outcome = dev_container.terminate_provider(
+        world.target, "init-ignores-term", world.env, grace_seconds=1
+    )
+
+    assert outcome == "killed"
+    assert stubborn.wait(timeout=5) is not None
