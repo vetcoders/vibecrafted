@@ -32,8 +32,8 @@ def _executable(path: Path, body: str) -> None:
         ),
         (
             "frame",
-            "5db1b3ebcfe34aa1c83ac383a28bb0199fe30bfa",
-            "5cfcdf19c5954fb70c63c5d31983453745d283bf8b21aa0bd88bf16b92a3b2ff",
+            "b19487648fba3451f61f153e8cd7b1edac40dfa5",
+            "3b7973383f2905b7e7ec60a2d4f3e09482fe7bc3aeba77544264c4a138aaadd9",
         ),
     ],
 )
@@ -288,7 +288,7 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
     assert "cfa2c367ed36ba9179a05fff32ab1221060cb04e" in assembler
-    assert "5db1b3ebcfe34aa1c83ac383a28bb0199fe30bfa" in assembler
+    assert "b19487648fba3451f61f153e8cd7b1edac40dfa5" in assembler
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
