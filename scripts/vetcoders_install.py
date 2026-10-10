@@ -18146,6 +18146,91 @@ def _runtime_retirement_forget_copy_history(
             receipt["drift_backup_history"].pop(destination)
 
 
+def _runtime_launchservices_targets(
+    runtime_home: Path,
+    receipt: Mapping[str, Any],
+    generations: Mapping[str, Mapping[str, Any]],
+    *,
+    active_generation: Path | None = None,
+) -> list[Path]:
+    """Select bundle directories from exact receipted release inventories only."""
+    releases = runtime_home / "releases"
+    owned = set(receipt.get("owned_dirs", []))
+    targets: set[Path] = set()
+    for raw, proof in generations.items():
+        generation = Path(raw)
+        if (
+            raw not in owned
+            or generation.parent != releases
+            or generation == active_generation
+        ):
+            continue
+        for relative, record in proof.get("entries", {}).items():
+            leaf = Path(relative)
+            if (
+                leaf.is_absolute()
+                or ".." in leaf.parts
+                or leaf.as_posix() != relative
+                or leaf.suffix != ".app"
+                or not record
+                or record[0] != "directory"
+            ):
+                continue
+            target = generation / leaf
+            try:
+                _assert_runtime_physical_path(target)
+            except (OSError, RuntimeError):
+                continue
+            targets.add(target)
+    return sorted(targets)
+
+
+def _unregister_runtime_bundles(
+    targets: Sequence[Path],
+    *,
+    dry_run: bool = False,
+    runner: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Best-effort host registry cleanup; never restart the Dock or any app."""
+    result: dict[str, Any] = {
+        "status": "not-needed",
+        "targets": [str(path) for path in targets],
+        "unregistered": [],
+        "residuals": [],
+    }
+    if not targets:
+        return result
+    if dry_run:
+        result["status"] = "dry-run"
+        return result
+    executable = Path(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+    if sys.platform != "darwin" or not executable.is_file():
+        result.update(status="skipped", reason="LaunchServices lsregister unavailable")
+        return result
+    run = runner if runner is not None else subprocess.run
+    for target in targets:
+        try:
+            # Recheck aliases at the side-effect boundary, including absent leaves.
+            _assert_runtime_physical_path(target)
+            completed = run(
+                [str(executable), "-u", str(target)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if completed.returncode:
+                raise RuntimeError(f"lsregister exited {completed.returncode}")
+            result["unregistered"].append(str(target))
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            result["residuals"].append({"path": str(target), "reason": str(exc)})
+    result["status"] = "residual" if result["residuals"] else "unregistered"
+    return result
+
+
 def _finish_runtime_retirement(
     paths: Mapping[str, Path], receipt: dict[str, Any]
 ) -> dict[str, Any]:
@@ -18314,6 +18399,22 @@ def _finish_runtime_retirement_locked(
                     for _, value in _runtime_retirement_references(paths, live)
                 ):
                     continue
+                if allowed_generation:
+                    cleanup = _unregister_runtime_bundles(
+                        _runtime_launchservices_targets(
+                            runtime_home,
+                            live,
+                            {raw: proof},
+                            active_generation=runtime_home
+                            / "releases"
+                            / live["version"],
+                        )
+                    )
+                    result.setdefault("launchservices", []).append(cleanup)
+                    if cleanup["residuals"]:
+                        raise RuntimeError(
+                            "LaunchServices cleanup failed; generation retained for retry"
+                        )
                 _runtime_retirement_delete(path, proof)
             # Remove stale directory ownership in the same atomic receipt write
             # as completing the intent; doctor must never call retirement damage.
@@ -27915,6 +28016,39 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
     )
     actions.extend(runtime_actions)
 
+    generation_proofs: dict[str, Any] = {}
+    launchservices_notes: list[dict[str, str]] = []
+    for raw in receipt.get("owned_dirs", []):
+        generation = Path(raw)
+        if generation.parent != runtime_home / "releases":
+            continue
+        proof = receipt.get("retirement_generations", {}).get(raw)
+        if proof is None:
+            try:
+                proof = _runtime_retirement_generation(generation)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                launchservices_notes.append({"path": raw, "reason": str(exc)})
+                continue
+        generation_proofs[raw] = proof
+    launchservices = _unregister_runtime_bundles(
+        _runtime_launchservices_targets(runtime_home, receipt, generation_proofs),
+        dry_run=dry_run,
+    )
+    if launchservices_notes:
+        launchservices["skipped_generations"] = launchservices_notes
+    if launchservices["residuals"]:
+        _runtime_uninstall_result(
+            args,
+            {
+                "schema": "vibecrafted.runtime-uninstall-result.v1",
+                "status": "residual",
+                "actions": actions,
+                "conflicts": [],
+                "launchservices": launchservices,
+            },
+        )
+        return 1
+
     for raw_path in sorted(owned_symlinks, reverse=True):
         path = Path(raw_path)
         if not _path_present(path):
@@ -28009,6 +28143,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
         "status": "dry-run" if dry_run else ("conflict" if conflicts else "removed"),
         "actions": actions,
         "conflicts": conflicts,
+        "launchservices": launchservices,
     }
     _runtime_uninstall_result(args, result)
     return 1 if conflicts else 0
