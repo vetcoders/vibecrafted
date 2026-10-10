@@ -669,5 +669,13 @@ def test_bare_fork_environment_keeps_transport_but_drops_parent_identity():
             parent_provider_session_id="source-native",
         ),
     )
-    assert child == {"CODEX_REMOTE": source["CODEX_REMOTE"]}
+    # The visible-child contract now adds terminal color defaults. Continue
+    # asserting the complete environment so no parent identity can slip through.
+    assert child == {
+        "CODEX_REMOTE": source["CODEX_REMOTE"],
+        "TERM": "xterm-256color",
+        "FORCE_COLOR": "2",
+        "CLICOLOR": "1",
+        "CLICOLOR_FORCE": "1",
+    }
     assert source["CODEX_THREAD_ID"] == "source-native"

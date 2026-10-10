@@ -54,6 +54,37 @@ The hosted notary step accepts either the complete App Store Connect API key
 set or the complete Apple ID credential set, which it stores in an ephemeral
 runner Keychain profile before invoking the builder.
 
+## Hosted runner admission
+
+`release.yml` and `gate-rehearsal.yml` provision Rust `1.97.0`, its WASM
+targets, and a default toolchain before any source tests. They export the
+provisioned `RUSTUP_HOME` and `CARGO_HOME` through `GITHUB_ENV`: test fixtures
+isolate `HOME`, so setting a default alone does not make Rust reachable.
+The release builder independently retains its exact Rust `1.96.0` contract.
+
+| Source test                                                 | Hosted policy                                                                                      |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `test_compiled_vc_start_enters_lobby_through_bundled_shell` | Provision Rust; execute the real compiled entry.                                                   |
+| `test_voc_admits_real_core` (both cases)                    | Provision Rust; execute both exact Rust tests with the source deck.                                |
+| `test_five_upgrades_dispose_payload_keep_unique_receipts`   | Execute with strictly verified ad-hoc fixtures (`TeamIdentifier=not set`); no Developer ID bypass. |
+
+These four cases remain active. The v4.3.3 codesign failure included a broken
+pipe while parsing display output; the identity reader now consumes that
+output without early pipeline termination and still matches the identifier
+and team exactly. Authentic signed carrier replacement remains a separate
+mandatory physical gate in the publisher.
+
+Hosted Apple admission selects only the exact
+`hosted-macos15-xcode26.3` Xcode bundle and measured clang/classic-linker pair;
+it does not use the runner's independently rotating Command Line Tools pair.
+Local profiles retain their own exact pins and linker policy. On hosted image
+drift, inspect `release-toolchain-probe.yml`'s image/version/architecture and
+resolved compiler/linker measurements, propose the new hosted tuple in a
+bounded commit, and require a green probe compiling and executing both native
+C and Rust fixtures through the production linker wrapper before admitting
+that commit. Record the run URL, image and tuple in the review. Do not widen
+version matching or move a local pin based on hosted measurements.
+
 The Windows matrix also runs on `v*` tags. Tag carriers require `VC_SIGNING_KEY`
 and must verify against the committed product public key; PR carriers keep
 their isolated rehearsal signatures. Download the Windows pack and MSI/EXE

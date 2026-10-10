@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import venv
 from pathlib import Path
 
 import pytest
@@ -56,8 +57,9 @@ def _generation(home: Path, version: str = "4.4.0") -> Path:
     """A generation as the Runtime Pack installs it."""
 
     generation = home / ".local/share/vibecrafted/releases" / version
-    (generation / "bin").mkdir(parents=True)
-    (generation / "bin/python3").symlink_to(sys.executable)
+    # Framework CPython reports its host path through a bare symlink. Give
+    # each fixture its own interpreter identity, preserving exact pin checks.
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(generation)
     shutil.copytree(REPO_ROOT / "config/runtime-pin", generation / "config/runtime-pin")
     return generation
 

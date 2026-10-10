@@ -60,9 +60,11 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
           rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown wasm32-wasip1
           rustup default "$RUSTUP_TOOLCHAIN"
+          # TUI fixtures isolate HOME. Keep the provisioned tools reachable
+          # without allowing the fixtures to touch the runner's live HOME.
+          printf 'RUSTUP_HOME=%s\n' "$(rustup show home)" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\n' "$HOME/.cargo" >> "$GITHUB_ENV"
 
-      # The same steps release.yml's source-gate runs after its immutable-tag
-      # preamble, in the same order, so a red here is a red there.
       - name: Run shell checks
         run: make check
 
@@ -80,18 +82,11 @@ jobs:
         run: make test-source
         env:
           PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
-          # macos-latest images stopped shipping a rustup default toolchain
-          # (first seen 2026-10-06): test_voc_core_contract and
-          # test_operator_mode shell out to cargo/rustc through rustup shims,
-          # which then refuse to pick a version. Server rust-toolchain.toml
-          # pins 1.97.0 and install-linux.yml provisions 1.97.0; pin the exact
-          # toolchain instead of depending on the moving stable channel.
-          RUSTUP_TOOLCHAIN: "1.97.0"
 
       - name: Build the portable release channel
         run: make portable
 
-      - name: Confirm publication boundary for both channels
+      - name: Confirm publication boundary for all carriers
         run: |
           set -euo pipefail
           test -x scripts/publish-vibecrafted-release.sh
@@ -102,5 +97,11 @@ jobs:
             docs/RELEASE_KICKOFF.md
           grep -nE 'PORTABLE_NAME|portable\.tar\.gz|portable-output\.json' \
             scripts/build-portable-release.sh \
+            scripts/publish-vibecrafted-release.sh \
+            docs/RELEASE_KICKOFF.md
+          grep -nE 'RUNTIME_PACK_NAME|RuntimePack_.*tar\.gz|install-runtime-pack\.sh' \
+            scripts/build-vibecrafted-release.sh \
+            scripts/package-runtime-pack.sh \
+            scripts/install-runtime-pack.sh \
             scripts/publish-vibecrafted-release.sh \
             docs/RELEASE_KICKOFF.md

@@ -17,6 +17,7 @@ import tempfile
 import termios
 import time
 import tomllib
+import venv
 from pathlib import Path
 
 import pytest
@@ -1063,9 +1064,9 @@ def _stage_runtime_generation(home: Path, version: str = "4.3.1") -> Path:
     runtime pin kit (config/runtime-pin). Returns the generation root."""
 
     generation = home / ".local/share/vibecrafted/releases" / version
-    python = generation / "bin" / "python3"
-    python.parent.mkdir(parents=True)
-    python.symlink_to(sys.executable)
+    # A bare symlink to framework CPython reports the host executable instead
+    # of this generation. A venv retains a distinct, exactly asserted pin.
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(generation)
     shutil.copytree(
         ENTRY.parents[2] / "config/runtime-pin", generation / "config/runtime-pin"
     )
@@ -1302,8 +1303,7 @@ def test_shell_from_a_pre_pin_generation_keeps_its_pin_through_the_copy(
     hostile_bin = tmp_path / "hostile-bin"
     _write_hostile_host_python(hostile_bin)
     old = tmp_path / ".local/share/vibecrafted/releases/4.3.0"
-    (old / "bin").mkdir(parents=True)
-    (old / "bin/python3").symlink_to(sys.executable)
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(old)
     result = _zsh_profile(
         tmp_path,
         (

@@ -15,6 +15,8 @@ jobs:
     # fail after all portable tests pass because xcrun/codesign are unavailable.
     runs-on: macos-15
     timeout-minutes: 180
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -39,6 +41,17 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Provision pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown wasm32-wasip1
+          rustup default "$RUSTUP_TOOLCHAIN"
+          # TUI fixtures isolate HOME. Keep the provisioned tools reachable
+          # without allowing the fixtures to touch the runner's live HOME.
+          printf 'RUSTUP_HOME=%s\n' "$(rustup show home)" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\n' "$HOME/.cargo" >> "$GITHUB_ENV"
 
       - name: Run shell checks
         run: make check
