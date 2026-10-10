@@ -229,6 +229,11 @@ def test_runtime_session_attachments_preserve_dead_frame_and_activate_replacemen
     assert payload["schema"] == wc.SESSION_RECORD_SCHEMA
     assert payload["workspace_id"] == workspace.workspace_id
     assert payload["workspace_instance_id"] == identity.workspace_instance_id
+    assert wc.runtime_session_owner_root(
+        "works-beef-r1234", "/legacy/socket/root"
+    ) == str(root.resolve())
+    assert wc.runtime_session_owner_root("works-beef-r1234", "/other/socket") is None
+    assert wc.runtime_session_owner_root("unbound", "/legacy/socket/root") is None
 
 
 def test_runtime_session_attachment_rejects_foreign_instance(
@@ -290,6 +295,19 @@ def test_workspace_cli_attaches_runtime_session_to_wes(
     payload = json.loads(capsys.readouterr().out)
     assert payload["attachments"][0]["runtime_session_id"] == "workspace-deadbeef"
     assert payload["attachments"][0]["state"] == "dead"
+    assert (
+        wc.workspace_cli_main(
+            [
+                "session-owner",
+                "--runtime-session-id",
+                "workspace-deadbeef",
+                "--socket-dir",
+                "/tmp/vc-frame-501",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == str(root.resolve())
 
 
 def test_workspace_resolve_cli_reuses_selected_identity_and_stable_session(

@@ -1517,6 +1517,27 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
         return WorkspaceSessionRecord.from_payload(payload)
 
 
+def runtime_session_owner_root(runtime_session_id: str, socket_dir: str) -> str | None:
+    """Return a physical Frame session's recorded repo root, if one exists."""
+
+    owners: set[str] = set()
+    for path in sessions_dir().glob("*.json"):
+        try:
+            session = read_workspace_session(path.stem)
+        except WorkspaceCatalogError:
+            continue
+        if any(
+            attachment.runtime == "vc-frame"
+            and attachment.runtime_session_id == runtime_session_id
+            and attachment.socket_dir == socket_dir
+            for attachment in session.attachments
+        ):
+            owners.add(show_workspace(session.workspace_id).canonical_root)
+    if len(owners) > 1:
+        raise WorkspaceCatalogError("physical Frame session has conflicting owners")
+    return next(iter(owners), None)
+
+
 def workspace_return_attachment(
     workspace_id: str, *, env: Mapping[str, str] | None = None
 ) -> RuntimeSessionAttachment | None:
@@ -2384,6 +2405,12 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     attach_p.add_argument("--replaces-runtime-session-id", default="")
     attach_p.add_argument("--json", action="store_true")
 
+    owner_p = sub.add_parser(
+        "session-owner", help="read a physical Frame session owner"
+    )
+    owner_p.add_argument("--runtime-session-id", required=True)
+    owner_p.add_argument("--socket-dir", required=True)
+
     counts_p = sub.add_parser(
         "settlement-counts", help="F/X/N projection scoped to workspace_id"
     )
@@ -2520,6 +2547,11 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
                 replaces_runtime_session_id=(args.replaces_runtime_session_id or None),
             )
             return _emit(session.to_payload(), as_json=args.json)
+        if args.action == "session-owner":
+            owner = runtime_session_owner_root(args.runtime_session_id, args.socket_dir)
+            if owner:
+                print(owner)
+            return 0
         if args.action == "settlement-counts":
             return _emit(
                 settlement_counts_for_workspace(args.workspace_id),
