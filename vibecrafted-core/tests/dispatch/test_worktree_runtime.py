@@ -1421,3 +1421,189 @@ def test_existing_worktree_refuse_names_owning_run_and_resume(
         match=r"owning run owning-dispatch cut cut-a.*--resume owning-dispatch",
     ):
         manager.prepare("cut-a", baseline, allow_reuse=False)
+
+
+@pytest.mark.parametrize("round_number", range(3))
+@pytest.mark.parametrize("execution", ["threads", "processes"])
+def test_concurrent_worktree_creation(
+    tmp_path: Path, round_number: int, execution: str
+) -> None:
+    """Exercise real Git and the complete prepare boundary, with distinct managers."""
+    import sys
+
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    count = 12
+    barrier = threading.Barrier(count)
+
+    def create(index: int) -> str:
+        barrier.wait(timeout=20)
+        cut = f"stress-{round_number}-{index}"
+        if execution == "threads":
+            return WorktreeManager(repo).prepare(cut, baseline).worktree_path
+        program = (
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "from vibecrafted_core.dispatch.worktrees import WorktreeManager; "
+            "print(WorktreeManager(sys.argv[2]).prepare(sys.argv[3], "
+            "sys.argv[4]).worktree_path)"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                program,
+                str(Path(__file__).parents[2]),
+                str(repo),
+                cut,
+                baseline,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        return proc.stdout.strip()
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        roots = list(pool.map(create, range(count)))
+    assert len(set(roots)) == count
+    registered = _git(repo, "worktree", "list", "--porcelain")
+    for root in roots:
+        assert _git(Path(root), "rev-parse", "HEAD") == baseline
+        assert f"worktree {root}\n" in registered
+
+
+def test_worktree_mutations_hold_portable_lock_only_during_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import portable_lock
+    from vibecrafted_core.dispatch import worktrees
+
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    common = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    real_flock = portable_lock.flock
+    real_run = subprocess.run
+    held = False
+    mutations = []
+
+    def flock(descriptor, operation):
+        nonlocal held
+        real_flock(descriptor, operation)
+        if operation == portable_lock.LOCK_EX:
+            assert (
+                os.fstat(descriptor).st_ino
+                == (common / "vibecrafted-worktrees.lock").stat().st_ino
+            )
+            held = True
+        elif operation == portable_lock.LOCK_UN:
+            held = False
+
+    def run(command, **kwargs):
+        if command[:2] == ["git", "worktree"] and command[2] in {
+            "add",
+            "remove",
+            "prune",
+        }:
+            assert held, "Git worktree metadata mutation bypassed the repository lock"
+            mutations.append(command[2])
+        else:
+            assert not held, "lock must not cover validation or worker lifecycle"
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(portable_lock, "flock", flock)
+    monkeypatch.setattr(worktrees.subprocess, "run", run)
+    manager = WorktreeManager(repo)
+    geometry = manager.prepare("locked", baseline)
+    assert manager.cleanup(geometry, settled=True) == "removed"
+    worktrees._run(repo, ["git", "worktree", "prune"], "prune worktrees")
+    assert mutations == ["add", "remove", "prune"]
+    assert not held
+
+
+@pytest.mark.parametrize("holder_kind", ["thread", "process"])
+def test_worktree_lock_shares_common_dir_and_leaves_other_repos_parallel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holder_kind: str
+) -> None:
+    import sys
+    from contextlib import ExitStack
+
+    from vibecrafted_core import portable_lock
+    from vibecrafted_core.dispatch import worktrees
+
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    sibling = Path(WorktreeManager(repo).prepare("sibling", baseline).worktree_path)
+    other_repo = tmp_path / "other"
+    other_baseline = _repo(other_repo)
+    common = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    lock_path = common / "vibecrafted-worktrees.lock"
+    inode = lock_path.stat().st_ino
+    attempted = threading.Event()
+    real_flock = portable_lock.flock
+
+    def flock(descriptor, operation):
+        if operation == portable_lock.LOCK_EX and os.fstat(descriptor).st_ino == inode:
+            attempted.set()
+        real_flock(descriptor, operation)
+
+    with ExitStack() as stack:
+        if holder_kind == "thread":
+            stack.enter_context(worktrees._worktree_metadata_lock(repo))
+        else:
+            program = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from vibecrafted_core import portable_lock as f; "
+                "h = open(sys.argv[2], 'a+b'); f.flock(h.fileno(), f.LOCK_EX); "
+                "print('locked', flush=True); sys.stdin.readline(); h.close()"
+            )
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    program,
+                    str(Path(__file__).parents[2]),
+                    str(lock_path),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stack.callback(holder.communicate, input="release\n", timeout=10)
+            assert holder.stdout.readline().strip() == "locked"
+        monkeypatch.setattr(portable_lock, "flock", flock)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                WorktreeManager(sibling).prepare, "contender", baseline
+            )
+            try:
+                assert attempted.wait(timeout=10)
+                assert not future.done(), "linked checkout bypassed the common-dir lock"
+                assert WorktreeManager(other_repo).prepare(
+                    "independent", other_baseline
+                )
+                assert not future.done(), (
+                    "lock must remain held until its owner releases"
+                )
+            finally:
+                stack.close()
+            geometry = future.result(timeout=10)
+    assert _git(Path(geometry.worktree_path), "rev-parse", "HEAD") == baseline
+    assert lock_path.stat().st_ino == inode
+
+
+def test_worktree_lock_releases_after_git_failure(
+    tmp_path: Path,
+) -> None:
+    from vibecrafted_core.dispatch import worktrees
+
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    with pytest.raises(
+        WorktreeContractError, match="failed to create invalid checkout"
+    ):
+        worktrees._run(repo, ["git", "worktree", "add"], "create invalid checkout")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(WorktreeManager(repo).prepare, "after-error", baseline)
+        assert result.result(timeout=10).baseline_sha == baseline
