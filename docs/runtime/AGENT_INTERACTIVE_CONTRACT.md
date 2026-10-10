@@ -130,6 +130,21 @@ every provider — bare resume stays interactive.
 - Policy flags are `--policy-runtime local-native|local-worktrees|local-vm|cloud-soon`
   and `--permissions bypass|auto|accept-edits|read-only`. The canonical matrix
   lives in `vibecrafted_core.spawn`; unsupported provider cells fail closed.
+- Environments (`runtime_policy_capabilities`): `local-native` is this checkout;
+  `local-worktrees` cuts a branch-backed worktree under
+  `${VIBECRAFTED_HOME}/worktrees` at admission and records project, worktree
+  root, branch and baseline; `local-vm` is the **local container** (not a VM):
+  the persistent per-project Compose project built from the shipped
+  `runtime/dev-container` recipe (`vibecrafted_core.dev_container`), with the
+  project mounted at `/workspace` and agent history in named volumes. Image
+  identity is the recipe digest; a missing/stale image is built inside the
+  Agent tab with visible progress, retry or cancel. Claude, codex and kimi are
+  in the recipe; other providers are refused for that cell only.
+- Usage metering is reported, not an environment gate: without a live meter the
+  session runs with `--token-budget unmetered` (shown as "no data"). An
+  explicit token limit still requires metering and is refused otherwise.
+- `full-lineage` needs an explicit parent lineage; it is never guessed from the
+  launcher pane and never downgraded to `fresh`.
 
 ### `vibecrafted resume <agent>`
 
@@ -137,6 +152,8 @@ every provider — bare resume stays interactive.
 | --------------------------------- | --------------------------------------------------------------------------------------- |
 | bare                              | AICX 48h pack → **new interactive** session. Never native attach. `--session` only.     |
 | `--session <id>`                  | **interactive** resume of that session                                                  |
+| `--run-id <id>`                   | **interactive** resume of that run's proven session, in its recorded checkout/container |
+| `--runtime plain`                 | this terminal is the Agent TTY (the Agents launcher's one tab); no second tab           |
 | `--session` + `--prompt`/`--file` | **non-interactive** continue (job)                                                      |
 | bare + `--prompt`/`--file`        | **non-interactive** fresh tracked job; never adopts an AICX-selected historical session |
 

@@ -370,6 +370,17 @@ class InteractiveTranscriptCapture:
         self.slave = -1
         self.thread.start()
 
+    def sync_size(self) -> None:
+        """Copy the display geometry to the provider PTY right now."""
+        import fcntl
+        import termios
+
+        try:
+            size = fcntl.ioctl(self.display_fd, termios.TIOCGWINSZ, b"\0" * 8)
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, size)
+        except (OSError, ValueError):
+            pass
+
     def _emit(self, raw: bytes) -> None:
         if not raw:
             return
