@@ -273,6 +273,9 @@ def _isolated_repo_install(
     scripts = repo / "scripts"
     (scripts / "lib").mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
+    # Make's default interpreter is a repo-owned executable, not host python3.
+    # Keep the real selector in this fixture so install reaches the pack checks.
+    shutil.copy2(REPO_ROOT / "scripts/project-python", scripts / "project-python")
     shutil.copy2(INSTALLER, scripts / INSTALLER.name)
     # The installer reads the build -> install handoff through its owner. A repo
     # without that library keeps the pre-handoff single-archive behaviour, which
@@ -288,6 +291,16 @@ def _isolated_repo_install(
     foundations = scripts / "install-foundations.sh"
     foundations.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     foundations.chmod(0o755)
+    # Bare make install now builds the checkout first. These admission tests
+    # seed a sealed carrier/selection record themselves; the source compiler
+    # has separate coverage in test_source_runtime_pack.py. Record the build
+    # boundary without replacing the installer or its fail-closed checks.
+    source_build_capture = root / "source-build-called"
+    (scripts / "build-source-runtime-pack.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['SOURCE_BUILD_CAPTURE']).write_text('called\\n')\n",
+        encoding="utf-8",
+    )
     home = root / "home"
     home.mkdir(exist_ok=True)
     fake_bin = root / "fake-bin"
@@ -303,7 +316,7 @@ def _isolated_repo_install(
         encoding="utf-8",
     )
     uname.chmod(0o755)
-    return subprocess.run(
+    result = subprocess.run(
         ["make", "--no-print-directory", "install"],
         cwd=repo,
         capture_output=True,
@@ -313,9 +326,16 @@ def _isolated_repo_install(
             **os.environ,
             "HOME": str(home),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "RUNTIME_PACK": "",
+            "SOURCE_BUILD_CAPTURE": str(source_build_capture),
             **(env or {}),
         },
     )
+    if (env or {}).get("RUNTIME_PACK"):
+        assert not source_build_capture.exists(), result.stderr
+    else:
+        assert source_build_capture.read_text() == "called\n", result.stderr
+    return result
 
 
 def test_make_install_discovers_exact_canonical_runtime_pack_name(

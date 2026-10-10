@@ -63,16 +63,40 @@ def test_vc_skills_preserve_init_and_loctree_orientation_contract() -> None:
         if skill_file.parent.name in _NO_REPO_ORIENTATION_EXEMPT_SKILLS:
             continue
         text = skill_file.read_text(encoding="utf-8")
-        has_gate = (
-            "## Canonical Orientation Gate" in text
-            or "## Canonical Structural Gate" in text
-        )
-        required = [
-            ("canonical gate", has_gate),
-            ("vc-init procedure", "`vc-init`" in text),
-            ("Loctree skill", "`Loctree:loctree`" in text),
-            ("Code-Derived Application Map", "Code-Derived Application Map" in text),
-        ]
+        if skill_file.parent.name == "vc-partner":
+            # The partner's current contract makes orientation freshness-aware
+            # and proportional to the request. Assert those obligations rather
+            # than requiring the retired unconditional gate heading.
+            required = [
+                (
+                    "vc-init procedure",
+                    "Use `vc-init` when repo orientation is missing or stale" in text,
+                ),
+                ("fresh evidence", "reuse fresh evidence" in text),
+                (
+                    "Loctree map",
+                    "For structural repository work, start\nwith Loctree" in text,
+                ),
+                ("AICX intent", "use AICX for prior intent when needed" in text),
+                (
+                    "proportional verification",
+                    "Verification remains proportional to the change" in text,
+                ),
+            ]
+        else:
+            has_gate = (
+                "## Canonical Orientation Gate" in text
+                or "## Canonical Structural Gate" in text
+            )
+            required = [
+                ("canonical gate", has_gate),
+                ("vc-init procedure", "`vc-init`" in text),
+                ("Loctree skill", "`Loctree:loctree`" in text),
+                (
+                    "Code-Derived Application Map",
+                    "Code-Derived Application Map" in text,
+                ),
+            ]
         for label, ok in required:
             if not ok:
                 missing.append(f"{skill_file.relative_to(REPO_ROOT)} missing {label}")
