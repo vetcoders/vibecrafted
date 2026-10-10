@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
+import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +25,7 @@ INFO_PLIST = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Info.plist
 START_HERE = (
     REPO_ROOT / "vibecrafted-core/vibecrafted_core/config/vc-frame/vc-start-here.py"
 )
+WORKSHOP = START_HERE.with_name("vc-agent-workshop.py")
 
 
 def test_fail_g1_debug_bundle_id_is_not_the_product_id() -> None:
@@ -108,3 +112,59 @@ def test_fail_g1_start_here_reexecs_generation_python(
     assert recorded, "host python must re-exec a generation interpreter"
     assert recorded[0][0] == str(wrapper)
     assert recorded[0][1][0] == str(wrapper)
+
+
+@pytest.mark.parametrize(
+    "script", [START_HERE, WORKSHOP], ids=["start-here", "workshop"]
+)
+@pytest.mark.parametrize(
+    "in_generation", [False, True], ids=["host", "generation-symlink"]
+)
+def test_materialized_panes_reexec_host_with_selected_core(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: Path,
+    in_generation: bool,
+) -> None:
+    """Import origin alone must not admit a host process; a venv alias is valid."""
+    generation = tmp_path / "generation"
+    (generation / "bin").mkdir(parents=True)
+    interpreter = generation / "bin/python3"
+    interpreter.symlink_to(sys.executable)
+    materialized = generation / "config/vc-frame" / script.name
+    materialized.parent.mkdir(parents=True)
+    core_file = generation / "python-site/vibecrafted_core/__init__.py"
+    # Load from the source tree before simulating the materialized process so
+    # workshop's top-level guard can admit its own core during module loading.
+    spec = importlib.util.spec_from_file_location("generation_bootstrap", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.__file__ = str(materialized)
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object):
+        if name == "vibecrafted_core":
+            return SimpleNamespace(__file__=str(core_file))
+        return real_import(name, *args, **kwargs)
+
+    calls: list[str] = []
+
+    def fake_execv(path: str, _argv: list[str]) -> None:
+        calls.append(path)
+        raise SystemExit(0)
+
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(generation))
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", str(interpreter))
+    monkeypatch.delenv("VIBECRAFTED_PANE_PYTHON_ATTEMPT", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(os, "execv", fake_execv)
+    if in_generation:
+        monkeypatch.setattr(sys, "executable", str(interpreter))
+        module.ensure_generation_python()
+        assert calls == []
+    else:
+        with pytest.raises(SystemExit) as exited:
+            module.ensure_generation_python()
+        assert exited.value.code == 0
+        assert calls == [str(interpreter)]

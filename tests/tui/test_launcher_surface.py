@@ -97,7 +97,7 @@ def test_full_help_examples_keep_decorate_between_dou_and_hydrate(
     assert "Launch Claude + codex + junie swarm" not in output
     assert "Triple-agent research (claude + codex + junie)" not in output
     assert "Alias for vibecrafted dashboard" not in output
-    assert "Create a vc-frame workspace (create-only)" in output
+    assert "Enter the repository workspace" in output
     assert "uno|duo|trio" in output
     assert "resume-session" in output
     assert "Send to tracked run inbox" in output

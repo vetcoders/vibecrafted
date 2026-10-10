@@ -17,6 +17,12 @@
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
+# A visible terminal enables TTY color without forcing ordinary shell pipelines.
+# Explicit provider/pane launches force their own level in env_allowlist.py.
+unset NO_COLOR NODE_DISABLE_COLORS ANSI_COLORS_DISABLED FORCE_COLOR CLICOLOR_FORCE
+case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac
+export CLICOLOR=1
+
 # Root discovery cannot call PATH tools. Sanitization has not run yet, and a
 # hostile or empty inherited PATH is a supported startup case.
 _vc_terminal_entry="${BASH_SOURCE[0]}"
@@ -159,6 +165,13 @@ export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
+# The runtime python pin: this terminal's python and python3 are the
+# interpreter pinned above, reached through the generation's door. The shell
+# profile only inherits it and puts the door back after zsh startup.
+if [[ -x "$root/config/runtime-pin/bin/python3" ]]; then
+  PATH="$root/config/runtime-pin/bin${PATH:+:$PATH}"
+  export PATH
+fi
 
 # This wrapper creates a new native terminal, so it must not pass through an
 # attachment identity from the non-interactive caller.  The child may start a

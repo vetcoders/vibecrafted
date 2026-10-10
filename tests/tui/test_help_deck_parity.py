@@ -34,6 +34,7 @@ UNKNOWN = "not in the command deck"
 CORE_HELP_MARKERS = {
     "claims": ("acquire", "heartbeat"),
     "message": ("Codex `queue --thread`", "never starts or resumes another worker"),
+    "reinstall": ("--clean", "--dry-run", "resurrect"),
     "relocate": ("snapshot", "restore"),
     "resume-session": ("--agent-session-id", "always headless"),
     "settlements": ("summary", "inspect"),

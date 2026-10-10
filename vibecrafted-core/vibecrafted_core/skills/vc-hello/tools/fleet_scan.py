@@ -33,12 +33,11 @@ import os
 import re
 import shlex
 import sys
+import tomllib
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 HOME = Path.home()
 

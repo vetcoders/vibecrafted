@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
 from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config
 
 SCRIPT = (
@@ -82,7 +83,63 @@ def test_pane_python_reexecs_generation_interpreter(tmp_path: Path) -> None:
     assert "home" in recorded
 
 
-def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pane", ["vc-start-here.py", "vc-agent-workshop.py"])
+def test_materialized_panes_reexec_from_older_host_python(
+    tmp_path: Path, pane: str
+) -> None:
+    host = Path("/usr/bin/python3")
+    if not host.is_file():
+        pytest.skip("no system Python available")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    probe = subprocess.run(
+        [str(host), "-c", "import sys; print(sys.version_info < (3, 11))"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "True":
+        pytest.skip("system Python is not an older bootstrap host")
+
+    materialized = tmp_path / pane
+    materialized.write_text(SCRIPT.with_name(pane).read_text(encoding="utf-8"))
+    # An ambient core plus a tomllib shim must not bypass the Python minimum.
+    ambient_core = tmp_path / "vibecrafted_core"
+    ambient_core.mkdir()
+    (ambient_core / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "tomllib.py").write_text("", encoding="utf-8")
+    log = tmp_path / "generation.log"
+    generation = tmp_path / "generation-python"
+    generation.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    generation.chmod(0o755)
+    env["VIBECRAFTED_PYTHON"] = str(generation)
+    result = subprocess.run(
+        [str(host), str(materialized), "home"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(generation),
+        str(materialized),
+        "home",
+    ]
+
+
+def test_pane_python_refuses_an_interpreter_outside_the_pin(tmp_path: Path) -> None:
+    """No pin and no selected generation: the pane names the problem and stays
+    a usable shell. It never runs the uv-tool venv, the active-generation
+    pointer or a PATH python in place of the runtime pin."""
+
     runner = (
         Path(__file__).resolve().parents[1]
         / "vibecrafted_core"
@@ -91,37 +148,44 @@ def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> N
         / "pane-python"
     )
     log = tmp_path / "ran.log"
-    uv_bin = tmp_path / "data" / "uv" / "tools" / "vibecrafted" / "bin"
-    uv_bin.mkdir(parents=True)
-    stub = uv_bin / "python"
-    stub.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
-        encoding="utf-8",
-    )
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    data = tmp_path / "data"
+    stubs = [
+        data / "uv/tools/vibecrafted/bin/python",
+        data / "uv/tools/vibecrafted/bin/python3",
+        data / "vibecrafted/tools/vibecrafted-current/bin/python3",
+    ]
+    for stub in stubs:
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$0" >> "{log}"\nexit 0\n',
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
     script = tmp_path / "vc-start-here.py"
-    script.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    script.write_text(
+        f'#!/bin/sh\necho SCRIPT_RAN >> "{log}"\nexit 0\n', encoding="utf-8"
+    )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     env = os.environ.copy()
     env.pop("VIBECRAFTED_PYTHON", None)
     env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
     env.pop("VIBECRAFTED_ROOT", None)
     env["HOME"] = str(tmp_path)
-    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    env["XDG_DATA_HOME"] = str(data)
     env["PATH"] = "/usr/bin:/bin"
+    env["SHELL"] = "/usr/bin/true"
     result = subprocess.run(
         ["bash", str(runner), str(script), "home"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    recorded = log.read_text(encoding="utf-8")
-    assert str(stub) in recorded
-    assert str(script) in recorded
-    assert "home" in recorded
+    assert "No runtime interpreter pinned for this pane" in result.stderr
+    assert not log.exists(), log.read_text(encoding="utf-8")
 
 
 def test_start_here_routes_to_existing_product_owners() -> None:
@@ -291,6 +355,7 @@ def test_layout_wraps_product_line_inside_reading_width_at_80x24() -> None:
         "shell",
         "console",
         "help",
+        "recent",
     }
     assert start_here.HELP_LINE in prose
 
@@ -478,6 +543,8 @@ def test_start_here_draws_with_terminal_default_colours_in_a_real_pty(
     assert not params & forbidden, sorted(params)
     assert {"1", "7"} <= params, sorted(params)
     text = output.decode("utf-8", "replace")
+    assert "LAUNCHPAD" in text
+    assert "START HERE" not in text
     assert "visible proof." in text
     assert "RUNTIME [ready] VC Server is healthy — this workspace is ready" in text
     assert "q close" in text

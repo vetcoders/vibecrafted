@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +108,7 @@ class WorkspaceInstanceBuildMismatch(WorkspaceCatalogError):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _new_uuid7_fallback() -> str:
@@ -1517,6 +1517,85 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
         return WorkspaceSessionRecord.from_payload(payload)
 
 
+def runtime_session_owner_root(runtime_session_id: str, socket_dir: str) -> str | None:
+    """Return a physical Frame session's recorded repo root, if one exists."""
+
+    owners: set[str] = set()
+    for path in sessions_dir().glob("*.json"):
+        try:
+            session = read_workspace_session(path.stem)
+        except WorkspaceCatalogError:
+            continue
+        if any(
+            attachment.runtime == "vc-frame"
+            and attachment.runtime_session_id == runtime_session_id
+            and attachment.socket_dir == socket_dir
+            for attachment in session.attachments
+        ):
+            owners.add(show_workspace(session.workspace_id).canonical_root)
+    if len(owners) > 1:
+        raise WorkspaceCatalogError("physical Frame session has conflicting owners")
+    return next(iter(owners), None)
+
+
+def workspace_return_attachment(
+    workspace_id: str, *, env: Mapping[str, str] | None = None
+) -> RuntimeSessionAttachment | None:
+    """Read the exact WES seat for a project without materializing new identity.
+
+    A hosting instance is preferred only with its complete identity binding.
+    Ambiguous physical seats require an explicit choice on the Frame rail.
+    This is attachment evidence; callers still probe the physical runtime.
+    """
+    record = show_workspace(workspace_id)
+    if record.status != WORKSPACE_STATUS_ACTIVE:
+        raise WorkspaceCatalogError(
+            "Project is buried — recover it explicitly before returning"
+        )
+    environ = os.environ if env is None else env
+    candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
+    for instance in list_instances(workspace_id=record.workspace_id):
+        if (
+            instance.status != INSTANCE_STATUS_LIVE
+            or not instance.vibecrafted_session_id
+        ):
+            continue
+        if (
+            Path(instance.build_id.root).resolve()
+            != Path(record.canonical_root).resolve()
+        ):
+            continue
+        if not workspace_session_path(instance.vibecrafted_session_id).is_file():
+            continue
+        session = read_workspace_session(instance.vibecrafted_session_id)
+        if (
+            session.workspace_id != record.workspace_id
+            or session.workspace_instance_id != instance.workspace_instance_id
+            or session.session_id != instance.vibecrafted_session_id
+        ):
+            raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
+        candidates.extend(
+            (instance, attachment)
+            for attachment in session.attachments
+            if attachment.runtime == "vc-frame" and attachment.state == "live"
+        )
+    preferred = [
+        attachment
+        for instance, attachment in candidates
+        if environ.get(ENV_WORKSPACE_ID) == record.workspace_id
+        and environ.get(ENV_WORKSPACE_INSTANCE_ID) == instance.workspace_instance_id
+        and environ.get(ENV_VIBECRAFTED_SESSION_ID) == instance.vibecrafted_session_id
+        and attachment.runtime_session_id
+        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+    ]
+    seats = preferred or [attachment for _, attachment in candidates]
+    if len(seats) > 1:
+        raise WorkspaceCatalogError(
+            "Multiple workspaces are open for this project — choose one on the Frame rail"
+        )
+    return seats[0] if seats else None
+
+
 def record_runtime_session_attachment(
     *,
     workspace_id: str,
@@ -2326,6 +2405,12 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     attach_p.add_argument("--replaces-runtime-session-id", default="")
     attach_p.add_argument("--json", action="store_true")
 
+    owner_p = sub.add_parser(
+        "session-owner", help="read a physical Frame session owner"
+    )
+    owner_p.add_argument("--runtime-session-id", required=True)
+    owner_p.add_argument("--socket-dir", required=True)
+
     counts_p = sub.add_parser(
         "settlement-counts", help="F/X/N projection scoped to workspace_id"
     )
@@ -2462,6 +2547,11 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
                 replaces_runtime_session_id=(args.replaces_runtime_session_id or None),
             )
             return _emit(session.to_payload(), as_json=args.json)
+        if args.action == "session-owner":
+            owner = runtime_session_owner_root(args.runtime_session_id, args.socket_dir)
+            if owner:
+                print(owner)
+            return 0
         if args.action == "settlement-counts":
             return _emit(
                 settlement_counts_for_workspace(args.workspace_id),
@@ -2529,6 +2619,7 @@ __all__ = [
     "worker_host_display_label",
     "worker_host_session_name",
     "workspace_cli_main",
+    "workspace_return_attachment",
     "workspace_session_path",
     "write_snapshot_manifest",
 ]

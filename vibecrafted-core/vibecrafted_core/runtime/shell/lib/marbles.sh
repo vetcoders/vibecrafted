@@ -151,7 +151,7 @@ _vetcoders_aicx_resume_fallback() {
   local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
   local tmp_dir context_file meta_file aicx_bin python_spec py source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
-    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
+    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, the Homebrew prefix, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
     return 1
   }
@@ -406,7 +406,7 @@ _vetcoders_resume_agent() {
   local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
   case "${_vetcoders_contract_runtime:-}" in
-    ""|headless|terminal|visible) ;;
+    ""|headless|terminal|visible|plain) ;;
     *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
   esac
   case "${_vetcoders_contract_execution_runtime:-}" in
@@ -451,6 +451,7 @@ _vetcoders_resume_agent() {
     [[ -n "${_vetcoders_contract_last:-}" ]] && core_args+=(--last)
     [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt-stdin)
     [[ -n "${_vetcoders_contract_model:-}" ]] && core_args+=(--model "$_vetcoders_contract_model")
+    [[ -n "${_vetcoders_contract_effort:-}" ]] && core_args+=(--effort "$_vetcoders_contract_effort")
     [[ -n "${_vetcoders_contract_base:-}" ]] && core_args+=(--base "$_vetcoders_contract_base")
     [[ -n "${_vetcoders_contract_file:-}" ]] && core_args+=(--file "$_vetcoders_contract_file")
     [[ -n "${_vetcoders_contract_root:-}" ]] && core_args+=(--root "$_vetcoders_contract_root")
@@ -520,6 +521,7 @@ _vetcoders_resume_agent() {
     local -a native_args=(resume-session "$tool" --agent-session-id "$_vetcoders_contract_session")
     [[ -z "${_vetcoders_contract_root:-}" ]] || native_args+=(--repo "$_vetcoders_contract_root")
     [[ -z "${_vetcoders_contract_model:-}" ]] || native_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_effort:-}" ]] || native_args+=(--effort "$_vetcoders_contract_effort")
     if [[ -n "$_vetcoders_contract_file" ]]; then
       [[ -z "$_vetcoders_contract_prompt" ]] || { printf 'Use one of --prompt or --file.\n' >&2; return 2; }
       _vetcoders_run_core_cli "${native_args[@]}" --prompt-file "$_vetcoders_contract_file"
@@ -537,6 +539,7 @@ _vetcoders_resume_agent() {
     local -a fresh_args=(workflow "$tool" --runtime headless)
     [[ -z "${_vetcoders_contract_root:-}" ]] || fresh_args+=(--repo "$_vetcoders_contract_root")
     [[ -z "${_vetcoders_contract_model:-}" ]] || fresh_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_effort:-}" ]] || fresh_args+=(--effort "$_vetcoders_contract_effort")
     [[ -z "${_vetcoders_contract_base:-}" ]] || fresh_args+=(--base "$_vetcoders_contract_base")
     [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || fresh_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
     [[ -z "${_vetcoders_contract_worktree:-}" ]] || fresh_args+=(--worktree "$_vetcoders_contract_worktree")
@@ -623,6 +626,14 @@ _vetcoders_resume_agent() {
   _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
   case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
   resume_declared_root="$_vetcoders_contract_root"
+
+  # `--runtime plain`: the caller's terminal IS the Agent TTY (the Agents
+  # launcher opens exactly one Frame tab for this command). Resolving an
+  # operator session here would open a second tab for the same conversation.
+  if [[ "$runtime" == plain ]]; then
+    _vetcoders_init_in_current_terminal "$tool" "$resume_cmd" plain resume
+    return $?
+  fi
 
   # Interactive resume — provider-neutral policy (adapters only change argv):
   #   bare resume → interactive → explicit or detected operator target

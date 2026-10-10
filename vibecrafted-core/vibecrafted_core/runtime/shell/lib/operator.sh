@@ -70,6 +70,7 @@ _vetcoders_init_command_text() {
   [[ -z "$continuity_parent" ]] || continuity_args+=(--continuity-parent "$continuity_parent")
   [[ -z "${_vetcoders_contract_file:-}" ]] || continuity_args+=(--file "$_vetcoders_contract_file")
   [[ -z "${_vetcoders_contract_model:-}" ]] || continuity_args+=(--model "$_vetcoders_contract_model")
+  [[ -z "${_vetcoders_contract_effort:-}" ]] || continuity_args+=(--effort "$_vetcoders_contract_effort")
   [[ -z "${_vetcoders_contract_base:-}" ]] || continuity_args+=(--base "$_vetcoders_contract_base")
   [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || continuity_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
   [[ -z "${_vetcoders_contract_worktree:-}" ]] || continuity_args+=(--worktree "$_vetcoders_contract_worktree")

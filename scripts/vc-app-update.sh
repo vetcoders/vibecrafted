@@ -316,12 +316,18 @@ verify_signed_app() {
     return 1
   fi
   local display
-  display="$(without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$app" 2>&1 || true)"
-  echo "$display" | /usr/bin/grep -q "^Identifier=${EXPECTED_IDENTIFIER}$" || {
+  display="$(without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$app" 2>&1)" || {
+    echo "codesign --display failed: $app" >&2
+    return 1
+  }
+  # grep -q on an echo pipeline can close the pipe before a long codesign
+  # display is written. Under pipefail that SIGPIPE falsely rejects a valid app.
+  # Literal full-line matches also keep identifier dots from becoming regexes.
+  /usr/bin/grep -Fx "Identifier=${EXPECTED_IDENTIFIER}" <<< "$display" >/dev/null || {
     echo "codesign identifier is not ${EXPECTED_IDENTIFIER}" >&2
     return 1
   }
-  echo "$display" | /usr/bin/grep -q "^TeamIdentifier=${EXPECTED_TEAM}$" || {
+  /usr/bin/grep -Fx "TeamIdentifier=${EXPECTED_TEAM}" <<< "$display" >/dev/null || {
     echo "codesign TeamIdentifier is not ${EXPECTED_TEAM}" >&2
     return 1
   }
@@ -329,7 +335,8 @@ verify_signed_app() {
 }
 
 app_cdhash() {
-  without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/{print $2; exit}'
+  # Drain display output for the same pipefail reason as verify_signed_app.
+  without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/ && !seen++ {print $2}'
 }
 
 app_identity_token() {

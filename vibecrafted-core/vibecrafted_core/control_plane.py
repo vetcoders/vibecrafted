@@ -577,7 +577,9 @@ def _parse_iso(raw: str | None) -> dt.datetime | None:
     if not raw:
         return None
     try:
-        return dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = raw.replace("Z", "+00:00")
+        return dt.datetime.fromisoformat(normalized_timestamp)
     except ValueError:
         return None
 
@@ -1013,7 +1015,7 @@ def _heartbeat_age_seconds(run: dict[str, Any], now: dt.datetime) -> float | Non
     if heartbeat_at is None:
         return None
     if heartbeat_at.tzinfo is None:
-        heartbeat_at = heartbeat_at.replace(tzinfo=dt.timezone.utc)
+        heartbeat_at = heartbeat_at.replace(tzinfo=dt.UTC)
     return (now - heartbeat_at).total_seconds()
 
 
@@ -1026,7 +1028,7 @@ def _transcript_age_seconds(run: dict[str, Any], now: dt.datetime) -> float | No
         mtime = Path(transcript).stat().st_mtime
     except OSError:
         return None
-    stamped = dt.datetime.fromtimestamp(mtime, dt.timezone.utc)
+    stamped = dt.datetime.fromtimestamp(mtime, dt.UTC)
     return max((now - stamped).total_seconds(), 0.0)
 
 
@@ -1069,9 +1071,7 @@ def _freshest_activity_stamp(*stamps: str, transcript: str = "") -> str:
         except OSError:
             pass
         else:
-            candidates.append(
-                dt.datetime.fromtimestamp(mtime, dt.timezone.utc).isoformat()
-            )
+            candidates.append(dt.datetime.fromtimestamp(mtime, dt.UTC).isoformat())
     best: dt.datetime | None = None
     best_raw = ""
     for raw in candidates:
@@ -1079,7 +1079,7 @@ def _freshest_activity_stamp(*stamps: str, transcript: str = "") -> str:
         if parsed is None:
             continue
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            parsed = parsed.replace(tzinfo=dt.UTC)
         if best is None or parsed > best:
             best = parsed
             best_raw = str(raw)
@@ -2505,7 +2505,7 @@ def _merge_status(existing: RunStatus | None, incoming: RunStatus) -> RunStatus:
         return incoming
     existing_dt = _parse_iso(existing.updated_at)
     incoming_dt = _parse_iso(incoming.updated_at) or dt.datetime.min.replace(
-        tzinfo=dt.timezone.utc
+        tzinfo=dt.UTC
     )
     latest = (
         existing if existing_dt is not None and existing_dt >= incoming_dt else incoming
@@ -2763,7 +2763,7 @@ def _snapshot_age_seconds(payload: dict[str, Any], now: dt.datetime) -> float | 
     if timestamp is None:
         return None
     if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
+        timestamp = timestamp.replace(tzinfo=dt.UTC)
     return (now - timestamp).total_seconds()
 
 
@@ -2796,9 +2796,9 @@ def _archive_expired_snapshots() -> None:
             expired_by_age.add(path)
         updated_at = _parse_iso(
             str(payload.get("updated_at") or "")
-        ) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        ) or dt.datetime.min.replace(tzinfo=dt.UTC)
         if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=dt.timezone.utc)
+            updated_at = updated_at.replace(tzinfo=dt.UTC)
         terminal_snapshots.append((updated_at, path, payload))
 
     terminal_snapshots.sort(key=lambda item: item[0], reverse=True)
@@ -3936,8 +3936,7 @@ def sync_state(only_run_id: str | None = None) -> dict[str, Any]:
 
     payload_runs.sort(
         key=lambda item: (
-            _parse_iso(item.get("updated_at"))
-            or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+            _parse_iso(item.get("updated_at")) or dt.datetime.min.replace(tzinfo=dt.UTC)
         ),
         reverse=True,
     )

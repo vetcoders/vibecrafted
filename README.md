@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
-  <a href="VERSION"><img alt="Version 4.3.3" src="https://img.shields.io/badge/version-4.3.3-informational.svg"></a>
+  <a href="VERSION"><img alt="Version 4.4.0" src="https://img.shields.io/badge/version-4.4.0-informational.svg"></a>
   <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows native + WSL2" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20native%20%2B%20WSL2-lightgrey.svg"></a>
 </p>
 
@@ -105,10 +105,10 @@ The runtime ships with **vc-frame**, the terminal cockpit every launcher and
 lifecycle runs inside. One window is one session with a fixed chrome:
 
 <p align="center">
-  <img alt="vc-frame anatomy — Start here map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
+  <img alt="vc-frame anatomy — Launchpad map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
 </p>
 
-- **TOP** — tabs of this session (`Start here` · `Shell` · one tab per worker run)
+- **TOP** — tabs of this session (`Launchpad` · `Shell` · one tab per worker run)
 - **LEFT** — the sessions rail: other sessions and agent rooms, click to jump
 - **CENTER** — the work surface (guide, shell, live worker streams)
 - **BOTTOM** — status bar with modes (`Ctrl+t` TAB · `Ctrl+p` PANE · `Ctrl+o` SESSION)
@@ -262,25 +262,26 @@ For a read-only recovery plan, invoke the same wrapper and add
 `--rescue --plan`; apply the reported plan with `--rescue --apply
 --plan-digest <digest>` using the same archive and bootstrap identity.
 
-Maintainers who intentionally want local compilation use the explicit source
-lane:
+From a committed source checkout, build and install the selected generation:
 
 ```bash
-make install-source
+make install
 make help-dev   # the full target surface
 ```
 
-`make install` never compiles a product for a stranger. It selects a closed
-Runtime Pack for the current platform and architecture; Linux and WSL2 use the
-Linux x86_64 or arm64 carrier. `make install-source` is the explicit maintainer
-lane and may require the full build toolchain.
+`make install` builds this checkout into a closed Runtime Pack, then installs
+that exact carrier. On macOS, Frame and Terminal come from the full revisions
+in `config/source-components.json`; available checkout objects are reused
+without switching branches or reading dirty files. Missing objects are fetched
+into temporary repositories. An explicit `RUNTIME_PACK=/absolute/path` selects
+a previously built, signed carrier without compiling it.
 
 A Runtime Pack install gives you the headless Vibecrafted runtime — `vibecrafted
 doctor`, every skill launcher, `observe`/`await`, reports and transcripts under
 `~/.vibecrafted`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) and agent
-CLIs are not part of the pack; install them through their own channels. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
-it ships inside the desktop app below, and `vibecrafted init <agent>` falls back
-to your current terminal until it is present. First run after install:
+CLIs are not part of the pack; install them through their own channels. The
+Runtime Pack includes `vc-frame`, `vc-terminal` and `vc-start`; the desktop app
+provides their native host as well. First run after install:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"

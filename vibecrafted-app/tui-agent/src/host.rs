@@ -9,7 +9,10 @@ use control_core::{
 use crossterm::event::{
     self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::ModifyKind,
+};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Tabs, Wrap},
@@ -324,7 +327,10 @@ impl HostSnapshot {
 }
 
 enum HostWake {
-    Changed,
+    Changed {
+        raw_sources: bool,
+        paths: Vec<PathBuf>,
+    },
     WatchError(String),
     Stop,
 }
@@ -344,41 +350,41 @@ fn host_projection_change(state_root: &Path, path: &Path) -> bool {
                 && (path.extension().is_none()
                     || path.extension().is_some_and(|ext| ext == "json"));
     }
-    crate::raw_run_source_roots(state_root)
-        .is_some_and(|(locks, marbles)| path == locks || path == marbles)
-        || crate::is_projection_path(path)
+    host_raw_source_change(state_root, path)
 }
 
-fn host_watcher(
-    state_root: &Path,
-    tx: mpsc::Sender<HostWake>,
-) -> anyhow::Result<RecommendedWatcher> {
-    let root = state_root.to_path_buf();
-    let mut watcher = RecommendedWatcher::new(
-        move |event: notify::Result<notify::Event>| match event {
-            Ok(event)
-                if !matches!(event.kind, EventKind::Access(_))
-                    && event
-                        .paths
-                        .iter()
-                        .any(|path| host_projection_change(&root, path)) =>
-            {
-                let _ = tx.send(HostWake::Changed);
-            }
-            Err(error) => {
-                let _ = tx.send(HostWake::WatchError(error.to_string()));
-            }
-            _ => {}
-        },
-        NotifyConfig::default(),
-    )?;
+fn host_raw_source_change(state_root: &Path, path: &Path) -> bool {
+    let Some(home) = state_root.parent() else {
+        return false;
+    };
+    ["artifacts", "locks", "marbles"].iter().any(|name| {
+        let root = home.join(name);
+        let Ok(relative) = path.strip_prefix(&root) else {
+            return false;
+        };
+        relative.as_os_str().is_empty()
+            || path.extension().is_none()
+            || path.is_dir()
+            || path.file_name().is_some_and(|file| {
+                let file = file.to_string_lossy();
+                match *name {
+                    "artifacts" => file.ends_with(".meta.json"),
+                    "locks" => file.ends_with(".lock"),
+                    _ => file == "state.json" || file == "_archived",
+                }
+            })
+    })
+}
+
+fn host_watch_roots(state_root: &Path) -> anyhow::Result<Vec<(PathBuf, RecursiveMode)>> {
     let mut roots = vec![state_root.to_path_buf()];
-    if let Some((locks, marbles)) = crate::raw_run_source_roots(state_root) {
-        roots.extend([locks, marbles]);
+    if let Some(home) = state_root.parent() {
+        roots.extend(["artifacts", "locks", "marbles"].map(|name| home.join(name)));
     }
-    let mut registered = std::collections::HashSet::new();
+    let mut registered = Vec::new();
     for root in roots {
-        // Observe creation when a source directory is absent, without creating it.
+        // Observe creation without creating sources or recursively watching
+        // their shared ancestor (which contains transcripts and other state).
         let existing = root
             .ancestors()
             .find(|path| path.is_dir())
@@ -388,30 +394,144 @@ fn host_watcher(
         } else {
             RecursiveMode::NonRecursive
         };
-        if registered.insert((existing.to_path_buf(), mode == RecursiveMode::Recursive)) {
-            watcher.watch(existing, mode)?;
+        let entry = (existing.to_path_buf(), mode);
+        if !registered.contains(&entry) {
+            registered.push(entry);
         }
+    }
+    Ok(registered)
+}
+
+/// Return whether a relevant event also changes the raw path inventory.
+/// An in-place file update needs a fresh merge, but no recursive discovery.
+fn host_event_change(state_root: &Path, event: &notify::Event) -> Option<bool> {
+    if matches!(event.kind, EventKind::Access(_)) {
+        return None;
+    }
+    if event.need_rescan() {
+        return Some(true);
+    }
+    // A removed/renamed directory no longer answers is_dir(), and its name
+    // may contain dots. Use the structural event kind under raw roots.
+    if matches!(
+        event.kind,
+        EventKind::Create(notify::event::CreateKind::Folder)
+            | EventKind::Remove(notify::event::RemoveKind::Folder)
+            | EventKind::Modify(ModifyKind::Name(_))
+    ) && state_root.parent().is_some_and(|home| {
+        event.paths.iter().any(|path| {
+            ["artifacts", "locks", "marbles"]
+                .iter()
+                .any(|name| path.starts_with(home.join(name)))
+        })
+    }) {
+        return Some(true);
+    }
+    if !event
+        .paths
+        .iter()
+        .any(|path| host_projection_change(state_root, path))
+    {
+        return None;
+    }
+    let raw = event
+        .paths
+        .iter()
+        .any(|path| host_raw_source_change(state_root, path));
+    let contents_only = matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_))
+    ) && !event.paths.iter().any(|path| path.is_dir());
+    Some(raw && !contents_only)
+}
+
+fn host_watcher(
+    state_root: &Path,
+    roots: &[(PathBuf, RecursiveMode)],
+    tx: mpsc::Sender<HostWake>,
+) -> anyhow::Result<RecommendedWatcher> {
+    crate::app::trace_expensive_refresh("host_watcher");
+    // Native events use canonical paths (on macOS /var is /private/var).
+    // Resolve even an absent state root through its nearest existing ancestor.
+    let root = state_root
+        .ancestors()
+        .find_map(|ancestor| {
+            ancestor.canonicalize().ok().map(|canonical| {
+                canonical.join(state_root.strip_prefix(ancestor).expect("ancestor prefix"))
+            })
+        })
+        .unwrap_or_else(|| state_root.to_path_buf());
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| match event {
+            Ok(event) => {
+                if let Some(raw_sources) = host_event_change(&root, &event) {
+                    let _ = tx.send(HostWake::Changed {
+                        raw_sources,
+                        paths: if event.need_rescan() {
+                            Vec::new()
+                        } else {
+                            event.paths
+                        },
+                    });
+                }
+            }
+            Err(error) => {
+                let _ = tx.send(HostWake::WatchError(error.to_string()));
+            }
+        },
+        NotifyConfig::default(),
+    )?;
+    for (root, mode) in roots {
+        watcher.watch(root, *mode)?;
     }
     Ok(watcher)
 }
 
 struct HostRunReader {
     cached: Option<(StateView, String, Instant)>,
+    raw_sources: Option<(control_core::read::RawRunSources, Instant)>,
 }
 impl HostRunReader {
-    fn snapshot(&mut self, config: &AppConfig, invalidated: bool, status: &str) -> HostSnapshot {
+    fn raw_inventory_changed(&self, paths: &[PathBuf]) -> bool {
+        paths.is_empty()
+            || self.raw_sources.as_ref().is_none_or(|(sources, _)| {
+                paths
+                    .iter()
+                    .any(|path| !sources.contains_path(path) || !path.is_file())
+            })
+    }
+    fn snapshot(
+        &mut self,
+        config: &AppConfig,
+        invalidated: bool,
+        raw_invalidated: bool,
+        status: &str,
+    ) -> HostSnapshot {
         let now = Instant::now();
+        let plane = ControlPlane::from_control_plane_home(&config.state_root);
+        let raw_due = raw_invalidated
+            || self
+                .raw_sources
+                .as_ref()
+                .is_none_or(|(_, at)| now.duration_since(*at) >= crate::WATCHER_FALLBACK_INTERVAL);
+        if raw_due {
+            crate::app::trace_expensive_refresh("host_raw_sources");
+            self.raw_sources = Some((plane.discover_raw_sources(), now));
+        }
         // Recheck process liveness and time-derived stalls even without writes;
         // this is the cockpit's existing recovery bound, not the input cadence.
         if invalidated
+            || raw_due
             || self.cached.as_ref().is_none_or(|(_, _, at)| {
                 now.duration_since(*at) >= crate::WATCHER_FALLBACK_INTERVAL
             })
         {
             crate::app::trace_expensive_refresh("host_control_plane");
             self.cached = Some((
-                ControlPlane::from_control_plane_home(&config.state_root)
-                    .compute_view(chrono::Utc::now()),
+                plane.compute_view_with_raw_sources(
+                    chrono::Utc::now(),
+                    &self.raw_sources.as_ref().expect("initial raw discovery").0,
+                ),
                 chrono::Utc::now().to_rfc3339(),
                 now,
             ));
@@ -1121,13 +1241,30 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
     // Only start the reader after terminal setup succeeds. Its watcher owns
     // a wake sender, so an early terminal error must not leave a reader alive.
     let reader = std::thread::spawn(move || {
-        let mut source = HostRunReader { cached: None };
+        let mut source = HostRunReader {
+            cached: None,
+            raw_sources: None,
+        };
         let mut invalidated = true;
+        let mut raw_invalidated = true;
         let mut watcher = None;
+        let mut watched_roots = Vec::new();
         let mut watch_status = String::new();
         loop {
-            if invalidated || watcher.is_none() {
-                match host_watcher(&reader_config.state_root, reader_wake.clone()) {
+            // A write changes the projection, not the watcher topology. Only
+            // source creation/removal or a watcher error changes registration.
+            let roots = host_watch_roots(&reader_config.state_root);
+            if watcher.is_none() || roots.as_ref().is_ok_and(|roots| *roots != watched_roots) {
+                if watcher.is_some() {
+                    invalidated = true;
+                    raw_invalidated = true;
+                }
+                match roots.and_then(|roots| {
+                    let watcher =
+                        host_watcher(&reader_config.state_root, &roots, reader_wake.clone())?;
+                    watched_roots = roots;
+                    Ok(watcher)
+                }) {
                     Ok(active) => {
                         watcher = Some(active);
                         watch_status = "watching changes · liveness recheck ≤30 s".into();
@@ -1138,17 +1275,31 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                     }
                 }
             }
-            if let Err(mpsc::TrySendError::Disconnected(_)) =
-                snapshot_tx.try_send(source.snapshot(&reader_config, invalidated, &watch_status))
-            {
+            if let Err(mpsc::TrySendError::Disconnected(_)) = snapshot_tx.try_send(source.snapshot(
+                &reader_config,
+                invalidated,
+                raw_invalidated,
+                &watch_status,
+            )) {
                 break;
             }
             invalidated = false;
-            let until_recheck = source.cached.as_ref().map_or(Duration::ZERO, |(_, _, at)| {
+            raw_invalidated = false;
+            let until_view_recheck = source.cached.as_ref().map_or(Duration::ZERO, |(_, _, at)| {
                 (*at + crate::WATCHER_FALLBACK_INTERVAL).saturating_duration_since(Instant::now())
             });
+            let until_raw_recheck =
+                source
+                    .raw_sources
+                    .as_ref()
+                    .map_or(Duration::ZERO, |(_, at)| {
+                        (*at + crate::WATCHER_FALLBACK_INTERVAL)
+                            .saturating_duration_since(Instant::now())
+                    });
+            let until_recheck = until_view_recheck.min(until_raw_recheck);
             match wake_rx.recv_timeout(HOST_STATUS_INTERVAL.min(until_recheck)) {
-                Ok(HostWake::Changed) => {
+                Ok(HostWake::Changed { raw_sources, paths }) => {
+                    raw_invalidated |= raw_sources && source.raw_inventory_changed(&paths);
                     // Coalesce a write/rename burst, with a fixed deadline so
                     // continuous writes cannot postpone refresh indefinitely.
                     let deadline = Instant::now() + crate::CHANGE_DEBOUNCE;
@@ -1159,10 +1310,14 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                             HostWake::Stop => return,
                             HostWake::WatchError(error) => {
                                 watcher = None;
+                                raw_invalidated = true;
                                 watch_status =
                                     format!("watcher unavailable: {error} · fallback ≤30 s");
                             }
-                            HostWake::Changed => {}
+                            HostWake::Changed { raw_sources, paths } => {
+                                raw_invalidated |=
+                                    raw_sources && source.raw_inventory_changed(&paths)
+                            }
                         }
                         if Instant::now() >= deadline {
                             break;
@@ -1172,6 +1327,8 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                 }
                 Ok(HostWake::WatchError(error)) => {
                     watcher = None;
+                    invalidated = true;
+                    raw_invalidated = true;
                     watch_status = format!("watcher unavailable: {error} · fallback ≤30 s");
                 }
                 Ok(HostWake::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1229,7 +1386,10 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                             }
                             KeyCode::Char('o') => host.project_input = Some(String::new()),
                             KeyCode::Char('r') => {
-                                let _ = wake_tx.send(HostWake::Changed);
+                                let _ = wake_tx.send(HostWake::Changed {
+                                    raw_sources: true,
+                                    paths: Vec::new(),
+                                });
                             }
                             KeyCode::Up => host.move_selection(-1),
                             KeyCode::Down => host.move_selection(1),
@@ -1347,6 +1507,26 @@ mod tests {
     }
 
     #[test]
+    fn raw_event_classification_keeps_contents_cheap_and_structural_loss_visible() {
+        use notify::event::{CreateKind, DataChange, RemoveKind};
+        let root = Path::new("/fixture/control_plane");
+        let meta = Path::new("/fixture/artifacts/org/day/file.meta.json");
+        let content = notify::Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+            .add_path(meta.into());
+        assert_eq!(host_event_change(root, &content), Some(false));
+        let create = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(meta.into());
+        assert_eq!(host_event_change(root, &create), Some(true));
+        let removal = notify::Event::new(EventKind::Remove(RemoveKind::Folder))
+            .add_path("/fixture/artifacts/org/day.v1".into());
+        assert_eq!(host_event_change(root, &removal), Some(true));
+        let lost = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(host_event_change(root, &lost), Some(true));
+        let unrelated = notify::Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+            .add_path("/fixture/artifacts/org/report.md".into());
+        assert_eq!(host_event_change(root, &unrelated), None);
+    }
+
+    #[test]
     fn fallback_rechecks_runs_without_a_filesystem_notification() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("control_plane");
@@ -1361,10 +1541,18 @@ mod tests {
             server: "http://127.0.0.1:1".into(),
             view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
         };
-        let mut reader = HostRunReader { cached: None };
+        let mut reader = HostRunReader {
+            cached: None,
+            raw_sources: None,
+        };
         assert!(
             reader
-                .snapshot(&config, false, "watcher unavailable · fallback ≤30 s")
+                .snapshot(
+                    &config,
+                    false,
+                    false,
+                    "watcher unavailable · fallback ≤30 s"
+                )
                 .runs
                 .recent_runs
                 .is_empty()
@@ -1376,15 +1564,62 @@ mod tests {
         }).to_string()).unwrap();
         assert!(
             reader
-                .snapshot(&config, false, "fallback")
+                .snapshot(&config, false, false, "fallback")
                 .runs
                 .recent_runs
                 .is_empty()
         );
         reader.cached.as_mut().unwrap().2 -= crate::WATCHER_FALLBACK_INTERVAL;
-        let snapshot = reader.snapshot(&config, false, "watcher unavailable · fallback ≤30 s");
+        let snapshot = reader.snapshot(
+            &config,
+            false,
+            false,
+            "watcher unavailable · fallback ≤30 s",
+        );
         assert_eq!(snapshot.runs.recent_runs[0].run_id, "fallback");
         assert!(snapshot.refresh_status.contains("unavailable"));
+    }
+
+    #[test]
+    fn raw_fallback_is_not_postponed_by_fresh_control_plane_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("control_plane");
+        std::fs::create_dir_all(root.join("runs")).unwrap();
+        let config = AppConfig {
+            state_root: root,
+            command_deck: temp.path().join("unused"),
+            repo: temp.path().into(),
+            presentation: crate::launch::Presentation::Headless,
+            tick_rate: Duration::from_millis(50),
+            no_verify_gate: false,
+            server: "http://127.0.0.1:1".into(),
+            view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
+        };
+        let mut reader = HostRunReader {
+            cached: None,
+            raw_sources: None,
+        };
+        reader.snapshot(&config, false, false, "fixture");
+        // The root was absent at discovery; emulate a dropped create event.
+        let directory = temp.path().join("artifacts/org/day/reports");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("missed.meta.json"), serde_json::json!({"run_id":"missed", "status":"running", "agent":"codex", "root":"/missed", "started_at":chrono::Utc::now().to_rfc3339()}).to_string()).unwrap();
+        assert!(
+            reader
+                .snapshot(&config, true, false, "fixture")
+                .runs
+                .recent_runs
+                .is_empty()
+        );
+        reader.raw_sources.as_mut().unwrap().1 -= crate::WATCHER_FALLBACK_INTERVAL;
+        assert!(
+            reader
+                .snapshot(&config, true, false, "fixture")
+                .runs
+                .recent_runs
+                .iter()
+                .any(|r| r.run_id == "missed")
+        );
     }
 
     #[test]

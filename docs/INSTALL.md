@@ -309,16 +309,18 @@ control-plane wiring.
 
 ## Build from source (power users)
 
-A source checkout carries the build, test and release targets. Installation
-consumes a verified Runtime Pack; plain `make install` does not compile or
-silently fall back to skill-only installation. `make install-source` is the
-retained maintainer spelling, currently `install-source: install`. Compile
-separately, then install the completed carrier:
+A committed source checkout carries the build, test and release targets.
+Plain `make install` builds a signed Runtime Pack from this revision and the
+Frame/Terminal revisions in `config/source-components.json`, then installs
+through the same verified Runtime Pack publisher used by release carriers.
+`make install-source` is a retained alias. Run:
 
 ```bash
-make runtime-pack
-make install-source
+make install
 ```
+
+To install an existing carrier without rebuilding, pass
+`RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz` to `make install`.
 
 Source: `Makefile` → `runtime-pack`, `install`, `install-source`.
 The Linux local build lane requires a clean tracked tree and the product release

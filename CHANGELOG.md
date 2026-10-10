@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [4.4.0] - 2026-10-09
+
+### Added
+
+- Bare `make install` can build its Runtime Pack from source. Frame and Terminal
+  revisions are pinned in `config/source-components.json`; available sibling
+  checkouts supply Git objects without changing their branches or working files.
+  Missing sources are fetched into temporary repositories. An explicit
+  `RUNTIME_PACK` continues to select an existing pack.
+  The source channel pins Frame 4.4.0 at `b19487648fba3451f61f153e8cd7b1edac40dfa5`,
+  including strider, the Launchpad landing page and the live Sessions rail;
+  Terminal remains at 0.18.0-dev.
+- Project Agents opens the interactive launcher. Launch preferences include
+  model and reasoning effort, with provider-specific effort transport verified
+  through interactive PTY fixtures.
+
+### Fixed
+
+- Runtime-private `python` and `python3` select the pinned interpreter without
+  publishing Python aliases on the user's PATH.
+- Terminal theme projections preserve opacity and RGB values.
+- Project layouts leave Voc in the global top bar and release the fixed Shell
+  pane name so native agent titles can appear.
+- Vibecrafted.app accepts a verified manually installed runtime from another
+  build when the existing resolver confirms it is ready.
+- The partner skill keeps the interactive conversation available during longer
+  work, handles simple actions inline, and includes an executable delegation
+  example in English and Polish.
+
+### Release candidate limitations
+
+- This entry describes the prepared source candidate, not a published release.
+  Signed carriers and cold installation remain release acceptance gates.
+- Login Bash can still override runtime Python selection. The `vc-start`
+  workspace-name limit and live session/plugin generation concerns remain open.
+
 ## [4.3.3] - 2026-10-04
 
 ### Added

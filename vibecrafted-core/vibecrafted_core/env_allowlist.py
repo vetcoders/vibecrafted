@@ -1,18 +1,26 @@
 """Allowlist for the environment a headless worker may inherit.
 
-Interactive sessions keep the dispatcher environment. Headless workers do not.
+Interactive sessions keep the dispatcher environment with visible color policy.
+Headless workers keep their independent no-color intent and allowlist.
 Copying ``os.environ`` wholesale leaked the parent Claude bus
 (``CLAUDE_CODE_MESSAGING_SOCKET`` / ``CLAUDE_CODE_MESSAGING_TOKEN``) into a
 Codex worker, along with unrelated API tokens. One allowlist is the gate.
 
 ``selected_runtime_environment`` is not this gate. Message delivery still uses
 that helper to address a selected runtime generation.
+
+What passes the gate keeps the runtime python pin: ``pin_runtime_python``
+puts the selected generation's python door first on PATH and points ZDOTDIR
+at its guest directory, so the worker's own shells -- a provider's login-shell
+snapshot, ``zsh -lc``, a hook -- reach ``VIBECRAFTED_PYTHON`` as python3.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+
+from .runtime_paths import pin_runtime_python
 
 # Process basics a provider CLI needs before it can read HOME or speak HTTPS.
 _PROCESS_ALLOW: frozenset[str] = frozenset(
@@ -30,6 +38,8 @@ _PROCESS_ALLOW: frozenset[str] = frozenset(
         "TERM",
         "COLORTERM",
         "NO_COLOR",
+        "NODE_DISABLE_COLORS",
+        "ANSI_COLORS_DISABLED",
         "FORCE_COLOR",
         "CLICOLOR",
         "CLICOLOR_FORCE",
@@ -183,6 +193,47 @@ _PREFIX_ALLOW: tuple[str, ...] = (
 )
 
 
+# Visible product entries override inherited rendering opt-outs, including a
+# long-lived Frame server's environment. Never apply this to headless workers
+# or ordinary pipe output. TERM/COLORTERM remain the capability authority; only
+# an absent/dumb TERM is repaired for the explicitly selected terminal.
+_COLOR_DISABLE_KEYS = ("NO_COLOR", "NODE_DISABLE_COLORS", "ANSI_COLORS_DISABLED")
+
+
+def visible_color_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Copy one explicitly visible child's environment, preserving capabilities."""
+    child = dict(source)
+    for key in _COLOR_DISABLE_KEYS:
+        child.pop(key, None)
+    if not child.get("TERM") or child["TERM"] == "dumb":
+        child["TERM"] = "xterm-256color"
+    level = "1"
+    if child.get("COLORTERM") in {"truecolor", "24bit"}:
+        level = "3"
+    elif "256color" in child["TERM"]:
+        level = "2"
+    child.update(FORCE_COLOR=level, CLICOLOR="1", CLICOLOR_FORCE="1")
+    return child
+
+
+def visible_color_shell_prelude() -> str:
+    """Normalize the pane's environment, not the dispatcher's stale snapshot.
+
+    This is for explicitly visible provider/workflow output, including tee.
+    Native terminals/profiles only remove opt-outs and enable TTY detection;
+    they leave FORCE_COLOR/CLICOLOR_FORCE unset so ordinary pipes stay plain.
+    """
+    return (
+        "unset " + " ".join(_COLOR_DISABLE_KEYS) + "\n"
+        'case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac\n'
+        'case "${COLORTERM:-}" in\n'
+        "  truecolor|24bit) export FORCE_COLOR=3 ;;\n"
+        '  *) case "$TERM" in *256color*) export FORCE_COLOR=2 ;; *) export FORCE_COLOR=1 ;; esac ;;\n'
+        "esac\n"
+        "export CLICOLOR=1 CLICOLOR_FORCE=1\n"
+    )
+
+
 def env_key_allowed(name: str) -> bool:
     """Return whether one environment name may enter a headless worker."""
     if name in _PROCESS_ALLOW or name in _PROVIDER_ALLOW:
@@ -191,16 +242,21 @@ def env_key_allowed(name: str) -> bool:
 
 
 def filter_headless_worker_env(source: Mapping[str, str]) -> dict[str, str]:
-    """Copy only allowlisted string entries, preserving order and values.
+    """Copy only allowlisted string entries, then carry the runtime python pin.
 
     Non-string values are dropped. ``subprocess`` environments are strings,
     and a non-string would be a programming error rather than a secret to pass.
+    The inherited ZDOTDIR does not pass; a selected generation that carries
+    the python door replaces it with its guest directory (see
+    ``runtime_paths.pin_runtime_python``).
     """
-    return {
-        key: value
-        for key, value in source.items()
-        if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
-    }
+    return pin_runtime_python(
+        {
+            key: value
+            for key, value in source.items()
+            if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
+        }
+    )
 
 
 def dispatcher_identity(

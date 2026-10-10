@@ -455,7 +455,12 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     pack_capture = tmp_path / "pack-installer-args.txt"
     source_dir = tmp_path / "source"
     (source_dir / "scripts").mkdir(parents=True)
-    (source_dir / "Makefile").write_text("install:\n\t@echo ok\n", encoding="utf-8")
+    (source_dir / "Makefile").write_text(
+        "install-auto:\n"
+        '\t@test -f "$(RUNTIME_PACK)"\n'
+        '\t@bash scripts/install-runtime-pack.sh --expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)"\n',
+        encoding="utf-8",
+    )
     _write_executable(
         source_dir / "scripts" / "install-runtime-pack.sh",
         '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$PACK_CAPTURE"\n',

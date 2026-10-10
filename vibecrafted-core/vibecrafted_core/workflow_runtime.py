@@ -12,7 +12,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .effort_overrides import _with_effort_override
@@ -97,9 +97,9 @@ def _slug(value: str, fallback: str) -> str:
 
 def _artifact_ts() -> str:
     """Artifact date stamp: `VIBECRAFTED_ARTIFACT_TS` override, else today's UTC date."""
-    return os.environ.get("VIBECRAFTED_ARTIFACT_TS") or datetime.now(
-        timezone.utc
-    ).strftime("%Y-%m-%d")
+    return os.environ.get("VIBECRAFTED_ARTIFACT_TS") or datetime.now(UTC).strftime(
+        "%Y-%m-%d"
+    )
 
 
 def _artifact_slug(prompt: str) -> str:
@@ -362,7 +362,7 @@ def _parent_footer(run_id: str, status: str, receipt: dict[str, object]) -> list
             f"  cost_usd: {cost if cost is not None else 'unknown'}",
             f"  cost_source: {receipt.get('cost_source', 'none')}",
             f"  status: {status}",
-            f"  completed_at: {datetime.now(timezone.utc).isoformat()}",
+            f"  completed_at: {datetime.now(UTC).isoformat()}",
             '  resume_hint: ""',
             "---",
             "",
@@ -876,7 +876,7 @@ def _timed_out_lane_result(
         tokens_output=observed.tokens_output if observed is not None else 0,
         cost_usd=observed.cost_usd if observed is not None else None,
         resume_command=observed.resume_command if observed is not None else "",
-        completed_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -1076,7 +1076,7 @@ def _failed_synthesis_result(last: ChildResult, reason: str) -> ChildResult:
         agent=last.agent,
         prompt="",
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(
         "---\nstatus: failed\n---\n\n"

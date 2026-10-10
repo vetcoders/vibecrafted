@@ -10,8 +10,8 @@
 #   4. On non-empty :wq/ZZ: push body to Paste Stack, hide floating panes,
 #      write-chars into the underlying pane (unexecuted — Enter is human)
 #   5. Any yank (y/yy/Y) is a REAL copy: OSC 52 fires in-editor through the
-#      vc-frame clipboard chain, and pbcopy/wl-copy/xclip picks up the last
-#      yank on exit for hosts whose outer terminal rejects OSC 52
+#      vc-frame clipboard chain; local pbcopy/wl-copy/xclip/xsel also runs
+#      during the yank, with an exit retry. SSH keeps the host OSC52 route
 #   6. Clean up the temp draft
 #
 # IMPORTANT: all settings go through ONE -u vimrc file. Classic vim hard-caps
@@ -22,6 +22,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export VC_EDITOR_CLIPBOARD_PROFILE="${SCRIPT_DIR}/clipboard-yank.vim"
 resolve_tool() {
   local name="$1"
   local candidate
@@ -39,12 +40,13 @@ resolve_tool() {
 
 PASTE_STACK="$(resolve_tool paste-stack.sh || true)"
 
-# Host-side clipboard fallback for the last yank (OSC 52 already fired
-# in-editor; this covers hosts whose outer terminal rejects OSC 52, e.g.
-# stock Terminal.app). Pipes only — never a `>` redirect: a file literally
+# Exit retry for local clipboard delivery (the shared bridge already copied
+# in-editor). Pipes only — never a `>` redirect: a file literally
 # named `pbcopy` once landed in a repo from that exact typo class.
 push_clipboard() {
   local file="$1"
+  # Across SSH the host owns the clipboard; OSC52 is the delivery route.
+  [[ -z "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]] || return 1
   if command -v pbcopy >/dev/null 2>&1; then pbcopy <"$file" && return 0; fi
   if command -v wl-copy >/dev/null 2>&1; then wl-copy <"$file" && return 0; fi
   if command -v xclip >/dev/null 2>&1; then xclip -selection clipboard <"$file" && return 0; fi
@@ -141,46 +143,8 @@ autocmd VimEnter * echo 'Composer: i = type · :wq = send · ? = help'
 VIMRC_HEAD
   printf '%s\n' "$wrap_line"
   printf "let g:vc_yank_file='%s'\n" "${yank_file//\'/\'\'}"
-  cat <<'VIMRC_YANK'
-" Yank bridge — every yank is a REAL copy. Two roads, one truth:
-"  1. OSC 52 through the pane: vc-frame's grid forwards it to the host
-"     clipboard chain (copy_command or outer terminal). Needs no +clipboard
-"     and no provider, so it cannot throw the Linux "provider" yank ERROR.
-"  2. g:vc_yank_file: the shell pushes the last yank to pbcopy/wl-copy/xclip
-"     on exit, for hosts whose outer terminal rejects OSC 52.
-if exists('##TextYankPost')
-  function! VcYankBridge() abort
-    if get(v:event, 'operator', '') !=# 'y'
-      return
-    endif
-    let l:text = join(get(v:event, 'regcontents', []), "\n")
-    if get(v:event, 'regtype', 'v') ==# 'V'
-      let l:text .= "\n"
-    endif
-    if empty(l:text)
-      return
-    endif
-    if exists('g:vc_yank_file')
-      call writefile(split(l:text, "\n", 1), g:vc_yank_file, 'b')
-    endif
-    " OSC 52 payload cap — oversized yanks still reach the exit fallback.
-    if strlen(l:text) > 100000
-      return
-    endif
-    let l:b64 = substitute(system('base64', l:text), '[\r\n]', '', 'g')
-    if v:shell_error
-      return
-    endif
-    let l:seq = "\x1b]52;c;" . l:b64 . "\x07"
-    if has('nvim')
-      call chansend(v:stderr, l:seq)
-    elseif exists('*echoraw')
-      call echoraw(l:seq)
-    endif
-  endfunction
-  autocmd TextYankPost * call VcYankBridge()
-endif
-VIMRC_YANK
+  # Both editors source one clipboard owner; keep the generated -u profile.
+  printf "%s\n" "execute 'source ' . fnameescape(\$VC_EDITOR_CLIPBOARD_PROFILE)"
   if [[ -n "$PASTE_STACK" ]]; then
     # Escape single quotes for a vim string literal.
     local_ps="${PASTE_STACK//\'/\'\'}"

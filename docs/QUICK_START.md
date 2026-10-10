@@ -125,11 +125,11 @@ Use `vibecrafted help` for the full operator surface.
 
 ## Developer checkout path
 
-`make install` consumes a closed Runtime Pack selected for macOS or Linux and
-the host architecture. WSL2 consumes the matching Linux carrier and no default
-install silently compiles. `make install-source` is the retained maintainer spelling;
-in this Makefile it aliases `install`. The explicit local compilation sequence
-is `make runtime-pack` followed by `make install-source`. A developer checkout also exposes the
+`make install` builds the committed checkout into a signed Runtime Pack for
+the host architecture and installs that exact pack. On macOS the Frame and
+Terminal commits are pinned in `config/source-components.json`. Pass
+`RUNTIME_PACK=/absolute/path` to install an existing carrier without a build.
+`make install-source` remains an alias. A developer checkout also exposes the
 build, test and release targets.
 Run `make help-dev` for the full inventory, or read
 [Build from source](public/getting-started/build-from-source.md).

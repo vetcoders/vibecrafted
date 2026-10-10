@@ -11,11 +11,11 @@ import asyncio
 import datetime as dt
 import json
 import os
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 import vibecrafted_mcp
 from vibecrafted_mcp import server, synthesis
 
@@ -305,7 +305,7 @@ def _write_observe_fixture(
     home = tmp_path / ".vibecrafted"
     transcript = tmp_path / "transcript.log"
     report = tmp_path / "report.md"
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    now = dt.datetime.now(dt.UTC).isoformat()
     transcript.write_text("abcdefghij", encoding="utf-8")
     report.write_text("# Report\nready\n", encoding="utf-8")
     event_stream = home / "control_plane" / "events.jsonl"

@@ -105,6 +105,7 @@ if [[ -n "$pre_hook" ]]; then
 spawn_export_frontier_sidecars
 export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
 spawn_prepend_agent_tool_paths
+spawn_pin_runtime_python
 if [[ "${SPAWN_SKILL_NAME:-}" == "research" || "${SPAWN_SKILL_CODE:-}" == "rsch" || "${VIBECRAFTED_RESEARCH_MODE:-0}" == "1" ]]; then
   export VIBECRAFTED_RESEARCH_MODE=1
   export VIBECRAFTED_NO_GIT_WRITES=1

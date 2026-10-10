@@ -229,6 +229,12 @@ key = "N"
 mods = "Command"
 chars = "\u001b[110;9u"
 
+[[keyboard.bindings]]
+# Frame owns tabs and sessions; a host-level shortcut opens a separate window.
+key = "T"
+mods = "Command"
+action = "CreateNewWindow"
+
 [scrolling]
 # Keep enough output to actually browse after long make/help dumps.
 history = 50000
@@ -250,6 +256,10 @@ bindings = [
   { mouse = "WheelUp",   mods = "Shift", action = "ScrollLineUp" },
   { mouse = "WheelDown", mods = "Shift", action = "ScrollLineDown" },
 ]
+
+[colors]
+# Frame emits explicit RGB backgrounds; apply window opacity so blur stays visible.
+transparent_background_colors = true
 
 # Vibecrafted copper palette
 [colors.primary]

@@ -401,6 +401,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
 CORE_SURFACE_COMMANDS = (
     "claims",
     "message",
+    "reinstall",
     "relocate",
     "resume-session",
     "settlements",
@@ -475,6 +476,7 @@ Commands:
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
   update               Update to the latest release
+  reinstall --clean    Stop everything, reinstall, resurrect sessions + agents
   uninstall            Remove runtime; preserve Founder data and unknowns
   help [topic|--all]   This deck · full reference
 

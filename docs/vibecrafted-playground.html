@@ -61,6 +61,12 @@
   .topbar .ver {
     color: var(--dim);
   }
+  .topbar .voc-chip {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 8px;
+    color: var(--copper);
+  }
   .topbar .hint {
     margin-left: auto;
     color: var(--dim);
@@ -204,6 +210,9 @@
   <div class="topbar">
     <span class="brand"><span class="h">⚒</span> 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Playground</span>
     <span class="ver">4.1.0+g237d2814 · symulator</span>
+    <span class="voc-chip" title="Globalna konsola, poza sesjami projektu"
+      >Voc</span
+    >
     <span class="hint"
       >Tab = dopełnianie · ↑↓ = historia · spróbuj: help · workflow codex -p "…"
       · status</span
@@ -323,7 +332,7 @@
   const sessions = [
     { name: "vibecrafted", faces: ["grok", "Shell"] },
     { name: "codescribe", faces: ["grok", "codex"] },
-    { name: "vc-release", faces: ["Start here", "Agents", "shell", "voc"] },
+    { name: "vc-release", faces: ["Launchpad", "Agents", "shell"] },
   ];
 
   function esc(s) {

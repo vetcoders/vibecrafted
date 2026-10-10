@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +50,11 @@ from .effort_overrides import (
     _effort_override_receipt,
     _with_effort_override,
 )
-from .env_allowlist import dispatcher_identity, filter_headless_worker_env
+from .env_allowlist import (
+    dispatcher_identity,
+    filter_headless_worker_env,
+    visible_color_shell_prelude,
+)
 from .events import append_event
 from .execution_controls import (
     SUPERVISED_RUNTIME_KINDS,
@@ -397,7 +401,11 @@ def _dispatcher_command(
 
 
 def _write_command_script(
-    path: Path, command: list[str], exports: dict[str, str] | None = None
+    path: Path,
+    command: list[str],
+    exports: dict[str, str] | None = None,
+    *,
+    visible: bool = False,
 ) -> Path:
     """Write an executable bash wrapper: export ``exports`` then ``exec command``."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +416,7 @@ def _write_command_script(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         f"{export_lines}"
+        f"{visible_color_shell_prelude() if visible else ''}"
         f"exec {shlex.join(command)}\n",
         encoding="utf-8",
     )
@@ -537,17 +546,7 @@ def _write_research_lane_scripts(
             claim_digest=claim_digest,
             worker_session=worker_session,
         )
-        export_lines = "".join(
-            f"export {key}={shlex.quote(value)}\n" for key, value in exports.items()
-        )
-        path.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f"{export_lines}"
-            f"exec {shlex.join(command)}\n",
-            encoding="utf-8",
-        )
-        path.chmod(0o755)
+        _write_command_script(path, command, exports, visible=True)
         scripts[agent] = path
     return scripts
 
@@ -918,6 +917,7 @@ def _launch_transport_command(
     command_script = _write_command_script(
         launch_dir / f"{run_id}-dispatcher.sh",
         dispatch_command,
+        visible=True,
         exports=_runtime_script_exports(
             run_id=run_id,
             prompt_path=prompt_path,
@@ -3550,8 +3550,8 @@ def launch_workflow(
     else:
         merged_env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
 
-    # Headless Popen replaces the child environment. Interactive and visible
-    # launches keep the dispatcher environment; vc-frame does not use this map.
+    # Headless Popen replaces the child environment. Frame does not use this
+    # map: its generated in-pane scripts apply the visible color policy.
     launch_env = (
         filter_headless_worker_env(merged_env)
         if spec.runtime == "headless"
@@ -5635,10 +5635,12 @@ def resolve_session_selection(
             native = _provider_session_for_continue(row)
             stamp = str(row.get("started_at") or row.get("created_at") or "")
             try:
-                instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                # Keep legacy date-only parsing and embedded-Z rejection.
+                normalized_timestamp = stamp.replace("Z", "+00:00")
+                instant = datetime.fromisoformat(normalized_timestamp)
                 if instant.tzinfo is None:
                     continue
-                timestamp = instant.astimezone(timezone.utc).timestamp()
+                timestamp = instant.astimezone(UTC).timestamp()
             except ValueError:
                 continue
             if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:

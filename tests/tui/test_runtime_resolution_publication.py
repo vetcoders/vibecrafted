@@ -11,12 +11,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import tomllib
 from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
 from vibecrafted_core.vc_frame_staging import (
     resolve_clipboard_command,
@@ -2325,7 +2325,7 @@ def _installed_policy(roots) -> dict:
 
 def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys):
     """A first install must produce the chrome the product promises."""
-    _install(
+    result = _install(
         seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a"),
         capsys,
     )
@@ -2336,6 +2336,48 @@ def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys
     assert {
         policy["font"][face]["family"] for face in ("normal", "bold", "italic")
     } == {_PRODUCT_FONT_FAMILY}
+    assert policy["colors"].get("transparent_background_colors", False) is True
+    staged = tomllib.loads(
+        (Path(result["root"]) / "config/vc-terminal/vibecrafted.toml").read_text()
+    )
+    assert staged["colors"].get("transparent_background_colors", False) is True
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_applies_rgb_background_opacity_and_preserves_preferences(
+    tmp_path, roots, capsys
+):
+    """New background policy must reach an existing, customized terminal."""
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    previous = incoming.replace("transparent_background_colors = true\n", "")
+    assert (
+        tomllib.loads(previous)["colors"].get("transparent_background_colors", False)
+        is False
+    )
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    _user_edit(policy, b"opacity = 0.9", b"opacity = 0.75")
+    _user_edit(policy, b'family = "Spot Mono"', b'family = "Founder Mono"')
+    _user_edit(policy, b'background = "#0b0b12"', b'background = "#112233"')
+    _user_edit(
+        policy,
+        b'key = "Enter"\nmods = "Shift"',
+        b'key = "Enter"\nmods = "Control"',
+    )
+    expected = _installed_policy(roots)
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    expected["colors"]["transparent_background_colors"] = True
+    assert _installed_policy(roots) == expected
     _resolve(roots, capsys, status="ready")
 
 

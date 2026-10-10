@@ -676,7 +676,9 @@ def _parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized_timestamp)
     except ValueError:
         return None
     return parsed.astimezone(UTC)

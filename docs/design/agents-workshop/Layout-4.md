@@ -22,7 +22,7 @@ next: layout-factory
 ```
 0         1         2         3         4         5         6         7         8         9         0         1
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
- Vibecrafted. | L  ○ Start  ◉ Agents  ○ shell  ○ voc                                                      Composer · cmd
+ Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell  ○ voc                                                  Composer · cmd
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
@@ -32,7 +32,7 @@ SESSIONS 5          ┌ grok · vibecrafted ────────────
    · resume-grok    │   ┌ voc · ten tab ──────────────────────────────────────── PIN ◉ ┐                               │
    · resume-codex   │   │  ● grok     vibecrafted   14m  na wierzchu                   │                               │
 04 ◉ vc-release     │   │  ○ claude   vibecrafted    0m                                │                               │
-   · Start here     │   │  ○ codex    vc-workspace   1h                                │                               │
+   · Launchpad      │   │  ○ codex    vc-workspace   1h                                │                               │
    ◉ Agents         │   │  ○ junie    ~             40m                                │                               │
    · shell          │   │  j/k  enter podnies  n Nowy agent                            │                               │
    · voc            │   └─ drzwi tego taba, nie farma ─────────────────────────────────┘                               │

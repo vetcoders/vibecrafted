@@ -2,19 +2,41 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 from collections.abc import Callable, Mapping
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate_launchservices_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installer tests must never change the host's LaunchServices registry."""
+    real_run = subprocess.run
+    lsregister = (
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+
+    def run(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and command and command[0] == lsregister:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
 # Product-shell PATH doors. A deck in Development mode does `command -v python3`
-# and, with these still first on PATH, hits ~/.config/vibecrafted/vc-terminal/bin
-# or a share/vibecrafted/releases shim. Those exit 127 without VIBECRAFTED_PYTHON
-# ("Development Python interpreter does not run as Python 3"). Tests copy
-# os.environ, so the autouse fixture must drop the doors before any child env
-# is built. Fixture PATH entries that later include share/vibecrafted are set
-# by the test itself and must not be re-scrubbed here.
+# and, with these still first on PATH, hits the runtime python door
+# (<generation>/config/runtime-pin/bin, or the legacy
+# ~/.config/vibecrafted/vc-terminal/bin copy) or a share/vibecrafted/releases
+# shim. A door exits 127 without VIBECRAFTED_PYTHON ("Development Python
+# interpreter does not run as Python 3"). Tests copy os.environ, so the autouse
+# fixture must drop the doors before any child env is built. Fixture PATH
+# entries that later include share/vibecrafted are set by the test itself and
+# must not be re-scrubbed here.
 _PRODUCT_SHELL_PATH_MARKERS = (
     "vc-terminal/bin",
+    "runtime-pin/bin",
     "share/vibecrafted",
 )
 

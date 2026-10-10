@@ -87,6 +87,29 @@ pub struct ControlPlane {
     control_plane_home: PathBuf,
 }
 
+/// Opaque raw-source inventory for a watching reader. Paths are scoped to the
+/// home that discovered them; this caches names, never lifecycle verdicts.
+pub struct RawRunSources {
+    home: PathBuf,
+    canonical_home: PathBuf,
+    meta: Vec<PathBuf>,
+    locks: Vec<PathBuf>,
+    marbles: Vec<PathBuf>,
+}
+
+impl RawRunSources {
+    /// Whether an event path is already in this inventory. Native watchers
+    /// may replay a file's create flag on later content writes; an existing
+    /// known file still changes contents, but cannot add a discovery path.
+    #[must_use]
+    pub fn contains_path(&self, path: &Path) -> bool {
+        let path = path
+            .strip_prefix(&self.canonical_home)
+            .map_or_else(|_| path.to_path_buf(), |relative| self.home.join(relative));
+        self.meta.contains(&path) || self.locks.contains(&path) || self.marbles.contains(&path)
+    }
+}
+
 /// Aggregate projection. Mirrors the read-shape of `control_plane.sync_state`'s
 /// return payload, minus `generated_at` (callers stamp their own clock).
 #[derive(Debug, Clone)]
@@ -937,7 +960,40 @@ impl ControlPlane {
     /// frontend-self-sufficient path.
     #[must_use]
     pub fn compute_view(&self, now: DateTime<Utc>) -> StateView {
-        let (merged, settlement_counts, mut events) = self.merge_derived_runs(now);
+        self.compute_view_with_raw_sources(now, &self.discover_raw_sources())
+    }
+
+    /// Discover raw input paths. A watching reader may retain this inventory
+    /// across control-plane writes, invalidating it on raw-source changes and
+    /// periodically reconciling it to recover missed notifications.
+    #[must_use]
+    pub fn discover_raw_sources(&self) -> RawRunSources {
+        RawRunSources {
+            home: self.home.clone(),
+            canonical_home: self
+                .home
+                .canonicalize()
+                .unwrap_or_else(|_| self.home.clone()),
+            meta: self.iter_meta_files(),
+            locks: self.iter_lock_files(),
+            marbles: self.iter_marbles_state_files(),
+        }
+    }
+
+    /// The canonical merge with a caller-maintained raw path inventory. File
+    /// contents, events, snapshots, time-derived health and PID liveness are
+    /// still read on every call; only recursive path discovery is reused.
+    #[must_use]
+    pub fn compute_view_with_raw_sources(
+        &self,
+        now: DateTime<Utc>,
+        sources: &RawRunSources,
+    ) -> StateView {
+        if sources.home != self.home {
+            return self.compute_view(now);
+        }
+        let (merged, settlement_counts, mut events) =
+            self.merge_derived_runs_with_sources(now, sources);
         if events.len() > crate::model::EVENT_TAIL_LIMIT {
             let start = events.len() - crate::model::EVENT_TAIL_LIMIT;
             events.drain(..start);
@@ -949,6 +1005,14 @@ impl ControlPlane {
     fn merge_derived_runs(
         &self,
         now: DateTime<Utc>,
+    ) -> (Vec<RunStatus>, SettlementBoard, Vec<Event>) {
+        self.merge_derived_runs_with_sources(now, &self.discover_raw_sources())
+    }
+
+    fn merge_derived_runs_with_sources(
+        &self,
+        now: DateTime<Utc>,
+        sources: &RawRunSources,
     ) -> (Vec<RunStatus>, SettlementBoard, Vec<Event>) {
         // Verdict truth is Python's persisted snapshot projection. Raw meta,
         // lock, runtime, marbles, and lifecycle sources below can disagree on
@@ -984,26 +1048,36 @@ impl ControlPlane {
         for run in &retained_snapshots {
             raw.sealed.remove(&run.run_id);
         }
-        for path in self.iter_meta_files() {
-            if let Some(payload) = read_json::<serde_json::Value>(&path) {
+        let mut raw_directories = HashMap::new();
+        for path in &sources.meta {
+            if !regular_raw_path(&self.home, path, &mut raw_directories) {
+                continue;
+            }
+            if let Some(payload) = read_json::<serde_json::Value>(path) {
                 if let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone()) {
                     if let Some(mut status) = meta.normalize(now) {
                         enrich_run_status(&mut status, &payload, false);
-                        raw.absorb(&mut merged, status, &path);
+                        raw.absorb(&mut merged, status, path);
                     }
                 }
             }
         }
-        for path in self.iter_lock_files() {
-            if let Some(status) = normalize_lock(&path, now) {
-                raw.absorb(&mut merged, status, &path);
+        for path in &sources.locks {
+            if !regular_raw_path(&self.home, path, &mut raw_directories) {
+                continue;
+            }
+            if let Some(status) = normalize_lock(path, now) {
+                raw.absorb(&mut merged, status, path);
             }
         }
-        for path in self.iter_marbles_state_files() {
+        for path in &sources.marbles {
+            if !regular_raw_path(&self.home, path, &mut raw_directories) {
+                continue;
+            }
             if let Some(status) =
-                read_json::<MarblesState>(&path).and_then(|state| state.normalize(now))
+                read_json::<MarblesState>(path).and_then(|state| state.normalize(now))
             {
-                raw.absorb(&mut merged, status, &path);
+                raw.absorb(&mut merged, status, path);
             }
         }
         // Python sync_state folds the event stream after raw sources. The
@@ -2110,6 +2184,32 @@ fn report_dou_index(path: &Path) -> Option<i64> {
 fn parse_nonnegative_i64(raw: &str) -> Option<i64> {
     let value = raw.trim().trim_matches('"').trim_matches('\'');
     coerce_int_value(&serde_json::Value::String(value.to_string())).filter(|item| *item >= 0)
+}
+
+/// Cached names must retain rglob's symlink exclusion even if a previously
+/// discovered file or directory was replaced. Check only ancestors of actual
+/// inputs, memoized for this merge, rather than the entire historical tree.
+fn regular_raw_path(home: &Path, path: &Path, directories: &mut HashMap<PathBuf, bool>) -> bool {
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return false;
+    }
+    let Some(source) = path
+        .strip_prefix(home)
+        .ok()
+        .and_then(|relative| relative.components().next())
+    else {
+        return false;
+    };
+    let root = home.join(source);
+    for dir in path.ancestors().skip(1).take_while(|dir| *dir != root) {
+        let regular = *directories.entry(dir.to_path_buf()).or_insert_with(|| {
+            fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_dir())
+        });
+        if !regular {
+            return false;
+        }
+    }
+    true
 }
 
 /// One directory as `rglob` last listed it. A directory's mtime moves when an

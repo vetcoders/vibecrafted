@@ -10,7 +10,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -241,9 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             DispatchReceiptStore(run_id, (), create=False).update_metadata(
                 scheduler_error=f"{type(exc).__name__}: {exc}",
-                scheduler_error_at=datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
+                scheduler_error_at=datetime.now(UTC).isoformat(timespec="seconds"),
             )
         except ReceiptContractError:
             pass
@@ -387,7 +385,7 @@ def _with_runtime_baseline(dispatch: Dispatch) -> Dispatch:
     baseline = dict(dispatch.meta.baseline)
     baseline["branch"] = _git(dispatch.meta.repo, ["branch", "--show-current"])
     baseline["head"] = _git(dispatch.meta.repo, ["rev-parse", "HEAD"])
-    baseline["recorded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    baseline["recorded_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     return replace(dispatch, meta=replace(dispatch.meta, baseline=baseline))
 
 

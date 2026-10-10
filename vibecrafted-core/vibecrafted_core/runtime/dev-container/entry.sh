@@ -112,10 +112,13 @@ fi
 
 # ── Verify framework readiness ────────────────────────────────────────────
 log "Framework readiness probe:"
+# A probe is informational: a tool whose --version exits non-zero (or a pipe
+# closed early by head) must not kill the entrypoint under `set -euo pipefail`,
+# which would put a persistent container into a restart loop.
 for tool in aicx aicx-mcp loct loctree-mcp claude codex gemini kimi cursor-agent uv vc_frame starship; do
     if command -v "$tool" >/dev/null 2>&1; then
-        version="$("$tool" --version 2>&1 | head -1 | head -c 60)"
-        ok "$tool — $version"
+        version="$("$tool" --version </dev/null 2>&1 | head -n 1 | cut -c 1-60 || true)"
+        ok "$tool — ${version:-version unknown}"
     else
         warn "$tool — not found"
     fi

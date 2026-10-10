@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1514,7 +1514,7 @@ def test_explicit_terminal_marbles_manual_spawn_omits_l1_transcript_tail(
         / ".vibecrafted"
         / "artifacts"
         / _org_repo()
-        / datetime.now(timezone.utc).strftime("%Y_%m%d")
+        / datetime.now(UTC).strftime("%Y_%m%d")
         / "marbles"
         / "reports"
     )

@@ -22,7 +22,7 @@ Nie budujemy teraz. Ten sam chassis. Inne narodziny: headless, serwer, nie TTY.
 ```
 0         1         2         3         4         5         6         7         8         9         0         1
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
- Vibecrafted. | L  ○ Start  ◉ Agents  ○ shell  ○ voc                                                      Composer · cmd
+ Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell  ○ voc                                                  Composer · cmd
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
@@ -32,7 +32,7 @@ SESSIONS 5          ┌ grok · vibecrafted ────────────
    · resume-grok    │                                                                                                  │
    · resume-codex   │     ┌ ❯ Nowy dispatch ─────────────────────────────────────────────────────────── [Anuluj] ┐     │
 04 ◉ vc-release     │     │  ▸ agent    [agy] [claude] [codex] «grok» [junie]                                    │     │
-   · Start here     │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
+   · Launchpad      │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
    ◉ Agents         │     │    sciezka  /srv/vetcoders/vibecrafted                                               │     │
    · shell          │     │  Enter = HEADLESS worker. Bez TTY. Widać go na serwerze / w voc.                     │     │
    · voc            │     └─ ten sam chassis co Nowy agent · inne narodziny ─────────────────────────────────────┘     │

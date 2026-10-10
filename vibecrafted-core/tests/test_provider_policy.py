@@ -112,6 +112,7 @@ def _fake_supervision_provider(path: Path) -> None:
         "capture = pathlib.Path(os.environ['SUPERVISION_CAPTURES']) / f'{role}.json'\n"
         "capture.write_text(json.dumps({\n"
         "  'pid': os.getpid(), 'role': role,\n"
+        "  'color': {k:os.environ.get(k) for k in ('NO_COLOR','NODE_DISABLE_COLORS','ANSI_COLORS_DISABLED','FORCE_COLOR','CLICOLOR','CLICOLOR_FORCE')},\n"
         "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
         "  'session_id': sys.argv[sys.argv.index('--session-id') + 1],\n"
         "}) + '\\n', encoding='utf-8')\n"
@@ -707,6 +708,16 @@ def test_supervised_terminal_semantics_settle_both_processes(
         SUPERVISION_CAPTURES=str(captures),
         PATH=str(fake_bin) + os.pathsep + env["PATH"],
     )
+    env.update(
+        TERM="xterm-256color",
+        COLORTERM="truecolor",
+        NO_COLOR="1",
+        NODE_DISABLE_COLORS="1",
+        ANSI_COLORS_DISABLED="1",
+        FORCE_COLOR="0",
+        CLICOLOR="0",
+        CLICOLOR_FORCE="0",
+    )
     env["AGENT_EXIT" if exit_role == "agent" else "OPERATOR_EXIT"] = str(exit_code)
     completed = subprocess.run(
         [*_interactive_argv(repo), "--operator", "auto"],
@@ -734,6 +745,14 @@ def test_supervised_terminal_semantics_settle_both_processes(
     assert metas["agent"]["terminal_reason"] == child_reason
     assert metas["operator"]["terminal_reason"] == operator_reason
     for role in ("operator", "agent"):
+        assert captured[role]["color"] == {
+            "NO_COLOR": None,
+            "NODE_DISABLE_COLORS": None,
+            "ANSI_COLORS_DISABLED": None,
+            "FORCE_COLOR": "3",
+            "CLICOLOR": "1",
+            "CLICOLOR_FORCE": "1",
+        }
         assert metas[role]["liveness"] == "terminal"
         with pytest.raises(ProcessLookupError):
             os.kill(captured[role]["pid"], 0)
@@ -1317,9 +1336,17 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     assert not resolve_provider_policy(
         provider, "local-worktrees", "bypass", "headless"
     ).supported
+    # local-vm is the local container: supported exactly for the providers its
+    # recipe installs, refused per provider (never globally) otherwise.
+    container = resolve_provider_policy(provider, "local-vm", "bypass", "interactive")
+    if provider in {"claude", "codex", "kimi"}:
+        assert container.supported, container.reason
+    else:
+        assert not container.supported
+        assert "not installed in the local container recipe" in container.reason
     assert (
-        "VM entrypoint"
-        in resolve_provider_policy(provider, "local-vm", "bypass", "interactive").reason
+        "interactive Agent Workspaces only"
+        in resolve_provider_policy(provider, "local-vm", "bypass", "headless").reason
     )
     assert (
         "coming soon"
@@ -1419,6 +1446,78 @@ def test_interactive_workspace_command_wraps_the_exact_init_route(
 
 
 @pytest.mark.parametrize(
+    "provider", ["codex", "claude", "agy", "grok", "junie", "copilot"]
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_interactive_effort_selection(tmp_path, monkeypatch, provider, explicit):
+    _repo(tmp_path)
+    config = tmp_path / "xdg" / "vibecrafted"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text(f'[agents.{provider}]\neffort = "low"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent))
+    command = interactive_workspace_command(
+        provider,
+        "/vc-init",
+        "local-native",
+        "bypass",
+        tmp_path,
+        token_budget="unmetered",
+        model="exact-provider-model",
+        effort="high" if explicit else "",
+    )
+    admission = json.loads(Path(command[-1]).read_text())
+    assert (
+        admission["model_requested"]
+        == admission["model_effective"]
+        == "exact-provider-model"
+    )
+    assert (
+        admission["effort_requested"]
+        == admission["effort_effective"]
+        == ("high" if explicit else "low")
+    )
+    assert admission["effort_source"] == ("cli" if explicit else "config.toml")
+    assert admission["effort_override_supported"] is True
+    assert admission["effort_override_skipped"] is False
+    assert (
+        config / "config.toml"
+    ).read_text() == f'[agents.{provider}]\neffort = "low"\n'
+
+
+@pytest.mark.parametrize(
+    "provider,effort,reason",
+    [
+        ("kimi", "high", "Effort is unavailable"),
+        ("cursor", "high", "Effort is unavailable"),
+    ]
+    + [
+        ("codex", invalid, "effort")
+        for invalid in (" high", "high ", "--high", "high\nlow")
+    ],
+)
+def test_interactive_effort_refuses_before_run_allocation(
+    tmp_path, monkeypatch, provider, effort, reason
+):
+    _repo(tmp_path)
+    # A refused control must not reserve a run or create a worktree.
+    monkeypatch.setattr(
+        "vibecrafted_core.workflow.reserve_run_id",
+        lambda *_: pytest.fail("refused effort allocated a run"),
+    )
+    with pytest.raises(ValueError, match=reason):
+        interactive_workspace_command(
+            provider,
+            "/vc-init",
+            "local-native",
+            "bypass",
+            tmp_path,
+            token_budget="unmetered",
+            effort=effort,
+            execution_runtime="local-worktrees",
+        )
+
+
+@pytest.mark.parametrize(
     ("selection", "runtime", "expected_kind", "expected_budget"),
     [
         (None, "local-native", "bounded", 250_000),
@@ -1442,8 +1541,14 @@ def test_invalid_bounded_quota_fails_closed(selection: str) -> None:
 
 
 def test_unlimited_quota_is_restricted_to_observed_local_native() -> None:
-    with pytest.raises(ValueError, match="User-observed local-native"):
-        resolve_quota_policy("unlimited", runtime="local-worktrees")
+    # Every local interactive environment is watched in a Frame tab; a missing
+    # meter is "no data", not a refusal of the environment.
+    for runtime in ("local-native", "local-worktrees", "local-vm"):
+        assert resolve_quota_policy("unmetered", runtime=runtime).kind == "unmetered"
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unlimited", runtime="local-worktrees", mode="headless")
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unmetered", runtime="cloud-soon")
 
 
 def test_unsupported_provider_quota_fails_before_runtime_truth(
@@ -1892,12 +1997,25 @@ def test_continuity_modes_are_exact_and_fresh_proves_scoped_absence() -> None:
         },
         policy,
     )
-    assert child == {"PATH": "/tools", "HOME": "/user"}
+    assert child == {
+        "PATH": "/tools",
+        "HOME": "/user",
+        "TERM": "xterm-256color",
+        "FORCE_COLOR": "2",
+        "CLICOLOR": "1",
+        "CLICOLOR_FORCE": "1",
+    }
 
 
 def test_full_lineage_requires_explicit_parent_evidence() -> None:
-    with pytest.raises(ValueError, match="parent lineage id"):
+    # Missing lineage is a choice to make, not a malformed identifier, and it
+    # never silently becomes fresh.
+    with pytest.raises(ValueError, match="full-lineage needs a parent lineage"):
         resolve_continuity_policy("full-lineage", provider="claude", env={})
+    with pytest.raises(ValueError, match="well-formed identifier"):
+        resolve_continuity_policy(
+            "full-lineage", provider="claude", parent_lineage_id="bad id", env={}
+        )
     policy = resolve_continuity_policy(
         "full-lineage",
         provider="claude",
@@ -2092,9 +2210,13 @@ def test_runtime_policy_capabilities_require_live_usage_for_worktree_admission(
         caps = spawn.runtime_policy_capabilities(provider)
         assert caps["local-native"]["available"] is True
         assert caps["local-native"]["reason"] == ""
-        assert caps["local-worktrees"]["available"] is False
+        # Environment readiness is separate from usage metering: the worktree
+        # works, and the missing meter is reported as honest "no data".
+        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-worktrees"]["reason"] == ""
         assert caps["local-native"]["usage_capability"]["supported"] is False
-        assert "child-attributable" in caps["local-worktrees"]["reason"]
+        assert caps["local-worktrees"]["metering"]["state"] == "unavailable"
+        assert "no data" in caps["local-worktrees"]["metering"]["note"]
 
 
 def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(
@@ -2391,7 +2513,9 @@ def test_provider_boundary_leaves_a_founder_environment_untouched(
         "PYTHONNOUSERSITE": "1",
     }
 
-    assert _fresh_child_environment(dict(founder), policy) == founder
+    child = _fresh_child_environment(dict(founder), policy)
+    assert {key: child[key] for key in founder} == founder
+    assert child["CLICOLOR"] == "1" and child["CLICOLOR_FORCE"] == "1"
 
 
 def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> None:

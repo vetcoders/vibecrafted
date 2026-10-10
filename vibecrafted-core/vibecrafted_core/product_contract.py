@@ -28,6 +28,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
@@ -1575,7 +1576,7 @@ def _validate_launch_contract(
     ):
         _fail(
             E_ENTRYPOINT,
-            "launch_contract does not encode the canonical Start here entry",
+            "launch_contract does not encode the canonical Launchpad entry",
         )
     environment = raw["environment"]
     if not isinstance(environment, dict):
@@ -1646,13 +1647,168 @@ def _launch_child_path(app: Path, host_path: str | None) -> str:
     return os.pathsep.join(ordered)
 
 
+def _login_shell_probe_environment(host: Mapping[str, str]) -> dict[str, str]:
+    """Read the Founder's startup files, rather than a product ZDOTDIR overlay."""
+    environment = _guest_environment(host)
+    dotdir = environment.get("ZDOTDIR", "")
+    home = environment.get("HOME", "")
+    crafted_home = environment.get("VIBECRAFTED_HOME", f"{home}/.vibecrafted")
+    roots = [
+        environment.get("VIBECRAFTED_ROOT", ""),
+        environment.get("VIBECRAFTED_RUNTIME_ROOT", ""),
+        f"{home}/.config/vibecrafted/vc-terminal",
+        f"{crafted_home}/shell/quick-cmd",
+    ]
+    if dotdir and any(
+        root and (dotdir == root or dotdir.startswith(root.rstrip("/") + "/"))
+        for root in roots
+    ):
+        user_dotdir = environment.get("VIBECRAFTED_USER_ZDOTDIR")
+        if user_dotdir:
+            environment["ZDOTDIR"] = user_dotdir
+        else:
+            environment.pop("ZDOTDIR", None)
+    return environment
+
+
+def _login_shell_fingerprint(environment: Mapping[str, str]) -> tuple[Any, ...]:
+    """Invalidate when the selected shell, startup files or resolver inputs change.
+
+    Sourced plugins are not recursively indexed; restarting the app refreshes
+    those. Missing files have stamps too, so creating an rc file invalidates.
+    """
+    shell = environment.get("SHELL", "/bin/zsh")
+    home = Path(environment.get("HOME", ""))
+    dotdir = Path(environment.get("ZDOTDIR", str(home)))
+    config = Path(environment.get("XDG_CONFIG_HOME", str(home / ".config")))
+    files = [Path(shell)]
+    files.extend(
+        dotdir / name for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin")
+    )
+    files.extend(
+        home / name for name in (".profile", ".bash_profile", ".bash_login", ".bashrc")
+    )
+    files.extend(
+        Path("/etc") / name
+        for name in ("profile", "zshenv", "zprofile", "zshrc", "zlogin")
+    )
+    files.extend([Path("/etc/paths"), config / "fish/config.fish"])
+    for directory in (Path("/etc/paths.d"), config / "fish/conf.d"):
+        try:
+            files.extend(sorted(directory.iterdir()))
+        except OSError:
+            pass
+    stamps = []
+    for path in files:
+        try:
+            metadata = path.stat()
+            stamp = (metadata.st_mtime_ns, metadata.st_ctime_ns, metadata.st_size)
+        except (OSError, ValueError):
+            stamp = None
+        stamps.append((str(path), stamp))
+    return (
+        shell,
+        *(
+            environment.get(name, "")
+            for name in ("HOME", "ZDOTDIR", "PATH", "XDG_CONFIG_HOME")
+        ),
+        tuple(stamps),
+    )
+
+
+@lru_cache(maxsize=32)
+def _probe_login_shell_path(
+    fingerprint: tuple[Any, ...], environment_items: tuple[tuple[str, str], ...]
+) -> str | None:
+    shell = str(fingerprint[0])
+    if not shell.startswith("/") or Path(shell).name not in {
+        "zsh",
+        "bash",
+        "sh",
+        "dash",
+        "ksh",
+        "fish",
+    }:
+        return None
+    marker = "vc_path_" + os.urandom(16).hex()
+    value = "(string join : $PATH)" if Path(shell).name == "fish" else '"$PATH"'
+    command = f"printf '{marker}\\0%s\\0{marker}' {value}"
+    try:
+        process = subprocess.Popen(
+            [shell, "-i", "-l", "-c", command],
+            env=dict(environment_items),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        output, _ = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        # Startup can leave grandchildren holding the pipe. Terminate only
+        # this probe's new process group, then reap its shell.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            # A startup child may have deliberately left the new group while
+            # retaining stdout. Do not let its open pipe defeat the deadline.
+            if process.stdout is not None:
+                process.stdout.close()
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        return None
+    if process.returncode != 0:
+        return None
+    boundary = marker.encode()
+    match = re.search(boundary + b"\x00([^\x00]*)\x00" + boundary, output)
+    if match is None:
+        return None
+    try:
+        path = match[1].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return (
+        path
+        if path and any(entry.startswith("/") for entry in path.split(os.pathsep))
+        else None
+    )
+
+
+def resolve_login_shell_path(host: Mapping[str, str]) -> str:
+    """Bounded, cached login-interactive PATH probe; only PATH is adopted.
+
+    Failures are cached with the same fingerprint as successes. The host PATH
+    stays the fallback; shell-exported variables never bypass the deny-list.
+    """
+    if sys.platform == "win32":
+        return host.get("PATH", "")
+    environment = _login_shell_probe_environment(host)
+    # Startup files can compose PATH from user variables. Preserve that input
+    # environment, but emit only PATH; no rc-exported variables are adopted.
+    return _probe_login_shell_path(
+        _login_shell_fingerprint(environment), tuple(sorted(environment.items()))
+    ) or host.get("PATH", "")
+
+
 def build_launch_environment(
     app_path: str | Path,
     *,
     host_environment: Mapping[str, str] | None = None,
+    probe_user_path: bool | None = None,
 ) -> dict[str, str]:
     """Verify the product and build its child environment: the user's own
-    environment as the base, Vibecrafted pins overlaid on top."""
+    environment as the base, Vibecrafted pins overlaid on top. Process-backed
+    calls recover login-shell PATH; explicit mappings opt in with probe_user_path.
+    """
     raw_app = Path(app_path)
     if raw_app.is_symlink():
         _fail(E_PATH, "app bundle root must not be a symlink")
@@ -1695,9 +1851,13 @@ def build_launch_environment(
     except (OSError, ValueError) as exc:
         _fail(E_PATH, f"VIBECRAFTED_RUNTIME_HOME cannot be created or written: {exc}")
     child = _guest_environment(host)
+    probe_path = (
+        host_environment is None if probe_user_path is None else probe_user_path
+    )
+    user_path = resolve_login_shell_path(host) if probe_path else host.get("PATH")
     child.update(
         {
-            "PATH": _launch_child_path(app, host.get("PATH")),
+            "PATH": _launch_child_path(app, user_path),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_APP_ROOT": str(app),
             "VIBECRAFTED_VC_FRAME_BIN": str(app / _LAUNCH_FRAME),
@@ -3620,8 +3780,8 @@ def _scenario_start_here(
 ) -> Mapping[str, bytes | str]:
     layout = scenario.product_config / "vc-frame/layouts/operator.kdl"
     payload = layout.read_bytes()
-    if b'tab name="Start here"' not in payload:
-        raise RuntimeError("installed operator layout has no Start here tab")
+    if b'tab name="Launchpad"' not in payload:
+        raise RuntimeError("installed operator layout has no Launchpad tab")
     help_output = _scenario_command(
         scenario, [scenario.launchers / "vc-start", "--help"]
     ).stdout

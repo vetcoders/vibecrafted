@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-07",
+  "generated_at": "2026-10-10",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -1196,6 +1196,7 @@
         "scripts/canary_cli.py": [
           "0ccd9b382525a8ede9dee0f7324928a489dbd990",
           "104b9a516f97d690e5262988395d3d31fffa441d",
+          "13a12b0c8ba1aa7dfd04fbe91fc9ca4f36a6cc22",
           "258e044cc309d602c3c05adb5edbb2b310d5fb17",
           "53bb484c99cc726d7e9e7ff53833fc8c140762f7",
           "91363edd6ac8d8a57b25eb3e31a25fa8601aed4f",
@@ -2087,6 +2088,7 @@
           "b127038d21581b4932c6b4c456df9f8a6cdb44f7"
         ],
         "scripts/render_report.py": [
+          "48ab549a202ea2d93b7c7cc75c4493130a8a52f2",
           "fa6fa31a3419a3a2bf8b5abad8690efc5e920aae"
         ]
       }
@@ -2144,7 +2146,8 @@
         ],
         "tools/fleet_scan.py": [
           "77bdb37fb02670b28574e7832e9a3bda19f74807",
-          "90d20cbfe3423a99ad391f7ef74be00c22917630"
+          "90d20cbfe3423a99ad391f7ef74be00c22917630",
+          "da8b2cbd40e581e5276da30014d1cce1380634bc"
         ],
         "tools/hook_bridge.py": [
           "6ce186467e0c39ccb7d645b57c569c93a547eaee",
@@ -2302,7 +2305,8 @@
           "fd1808f44eecddc59d02e6b242dda590357f126d"
         ],
         "agents/openai.yaml": [
-          "38777ab0008045277dd53b60186261062f6a0301"
+          "38777ab0008045277dd53b60186261062f6a0301",
+          "786ce18d3fca0c48395d98b031bb96721ad57cc6"
         ]
       }
     },
@@ -2570,6 +2574,7 @@
         "scripts/intents_cli.py": [
           "234b9ff40267b687e4ddfd63015449fb8979b8c3",
           "6148a918c79b595489ae483a32d13ad9bf88bcd0",
+          "67b0d927c281303118c57fdd4f03975e908006ca",
           "7aa52f455ab36600d902a3509c9618154f051a2a",
           "d5c9a4104c2d6795fa9b19c18d44162633d75ee4"
         ]
@@ -2671,7 +2676,8 @@
           "355a501a387d25578608ffe5a0fdcee25cac1ad1",
           "38777ab0008045277dd53b60186261062f6a0301",
           "3a512b162fe37cc176277536e993d46bd6f4a0ae",
-          "e0c934cdfdf46f00b773c90d66b6c124b5c2f358"
+          "e0c934cdfdf46f00b773c90d66b6c124b5c2f358",
+          "e3d99664e87128b67594fa764cc06d1e979a83ee"
         ]
       }
     },
@@ -3360,12 +3366,14 @@
     },
     "vc-partner": {
       "sha256": [
+        "0278206420bbf67da45395923053a192c4fecd81e31d441eedd9486da1b1817c",
         "06c39e16dc778f85f47665692d8cef8f7b7b958cfccb8698ad2b1345416099cd",
         "081d648153f160cbd96aed766045872cd2e506a42ef31bf5828e929387ac2662",
         "15b7462c9fb81f5e073c83101c0e81a8a329a37000e6c99558187a85e9586a96",
         "1da95d945edc60d592ebbf6510f577b25f27c9506a94c8892229fda303730fc7",
         "2212ee2525a198e3b85b73fa035bdcbe908d3f622f13b7b6f276252278b3cfae",
         "30a79c546fcbcf854cc86d7623806ba631430cb5697f28401374c08bba21c98e",
+        "31545cc2f8a1f1e3c8afb1f7ec9f2fa52ec956d1c6adf5584dda396f7578bcb3",
         "34e1579333ded31ea278dd255a1229d6868b0585ab0d2c0326dde6778b85737b",
         "3dfb875470540cbbc03d0730c09e563a8a3b559e671473e0f62e948d9000deb4",
         "4004c8416fd29d7f7a8daff747534ffaf7f5626ba13d86b99999e1891f7a9cc6",
@@ -3380,22 +3388,27 @@
         "6ad7fe5024c8bd8f7676503c9c905242937790eb2241f13e0175d73e5978daca",
         "6cd9b09593f507f4fb5a12dbdf6290c6931be6139c46a60811e0b537943a236c",
         "6d65fca650a3144ffa327bef3dae0407072055bf77acd5f91a83e798dbb4a6d3",
+        "7552b8bf9e1fe3845bf3d58759e2e999debf9cd3bccd61009f0126c0ec8ded22",
         "7d9475c537a743cdf93cf96c5c920d44627c2e646143977c5c8ce6dcc2140888",
         "86a3fac378b20107564deaf8efda08dcc7e9c75161a0423cea8db83ad547d22a",
         "870be28f05121a08f5759459729b409f27ceb7213ef8c2c106e36cb1949531e7",
         "8844060e98d9ac43114a13df331e5d037c9bd9121ce5e93c258b48cb9d2f03c0",
         "88d07bcfa6823137186c95f4b5e42353d9bf619557ed879dab9687dfed5e87fc",
+        "8b51d9192166beee687b50dd466e5530833f5a4aee4a3d2ef3c0d6a61cfb88fe",
         "8c15082d166b49996e503d60d6ed441dd52a37dc345866a115f4a1c437007b96",
         "93760bdf2c43368b6b4b2a6536aa1c2345206a81f26af56b0192b51bf34373a1",
         "a5fdca7d44e66799d12030cd5d21c3c49c31ce0bdc910ba3289d00bee3a76f49",
         "a8d520dae5eb6b796fd26256767cf482e6227396e6641190157f4f477def6ecd",
+        "afcd478cda0a8f79bcf18d828df4df4c63e0d275d602fabc4d7f64b9ae53e813",
         "b49784bc47c061289cd1c15f5ecdbfcd7d73af1b45e8a686796d419386cf4016",
         "c6aec6c084763df80a5aebbb2728b1fe97e2fd73e090bd793d27b9f6e4738a9b",
+        "c80a5c9fc581c9bc7fcfba6e7af28ad3e00a4dd6b1577106fbf5a7201af84ff4",
         "ca1238fcf79f7602c52f4a974bf66f7d30f7c60c2654e6de0a876578c985e5ba",
         "cc1ee68528fd29fa1d3c5cbdd6e30dd6d4f90d4f6ad40f1d73fd3e4b758c5996",
         "d039f320cbd4f9d9cbf842946b9c18eb4acc86ca84bb85766fa893b5bbd9355c",
         "d564a520152de1fdb4ded21ae0fc41b1d1ef06cccc29ac4591a5ac241dcd8619",
         "e24eabe32b66a773e0ea7f2b5c071d21a4bfa28e0d23e27617fa11247406ac5f",
+        "f2cb4eeb16d03f7c6f62a8f91515bd2efbc8ef2d899b1f7f51393444554a7e2d",
         "f53f1c8738a4fce68fc7f47b3941cdff616da55e4489491620f36ac5ab7468c2",
         "fe236788d47dae4c68eb05aa74d4c3452023fa75586bba903a3e4b8fcf29fd4f",
         "fe53bfc22596839adb95f1de3d1ccfc09797e5c15c522d2545f388328904e4ef",
@@ -3411,37 +3424,53 @@
         ],
         "CONTRACT.md": [
           "4957e1785dc21bb44992e96f45109954650d455a",
+          "6d22ed98f9b5c02330b0a3da8bff89305dd5a327",
+          "c2b918bf2f8ec31544f4d16e7217ace9c393d29c",
+          "d1f4d90ed922c0d5f5c81b939a69c251ee861f13",
+          "e1e600a73ac807db4d1d98515c60bb572f0e7457",
           "ed9a9c81bd401794b3e7bfbcbe4730b92ac064ff",
           "f46699b9f24b30590ac3609e2656a8d2af3076dd"
         ],
         "FLOW.md": [
+          "06d7379ca648db710fb6b1d3d1473b95dc3c4020",
           "359c0f5b1f62b52d8e3b1500fff8865e643e0261",
           "5613e7aca5669f4f9724450fcc34193749c30859",
+          "696f3102746ebc5297ad3c842284f4b107481b3b",
           "704db4370a5919bf6f00b3eab9f4ee38f24e0078",
+          "7d7109175d29b45ec0642363acc0dd8dba292797",
           "7ddd4a6321fc14970b617a5cba500f1fdb5048d2",
+          "91f7e99b11bb2bbcff207a8043f44220141d4da4",
+          "9d8951653e204b3e98334699494bc31c2502f9e6",
           "ae1d136c52280e24941f86fe5886998d90ebd37b",
           "b810dabdd70161ec7bac6556b0fe65c3988917d8",
           "baa4a3fb9880559e7b00268a244af1781c5d313b",
           "fc2abca7f67e3ca4b5dd4e1600fc19dd1a9a5e65"
         ],
         "JOURNAL.md": [
+          "463c133d08b316e9c2d5efb7c99534c271efd31b",
+          "4e91ad7433fb85f6f8190282cf330fb5b8555e7a",
           "7da273c6bd29cf454433183390523cb0c5cc4aa3",
+          "d139673358412d3bb7d31a5d0d590cd2da69f172",
           "f94d3923bfd12b0bae6f803795b4c1c883b26a7a"
         ],
         "README.md": [
+          "1b8ed2fb12a15845f6a0d27119f92c79015f66fb",
           "4365d1121e72bfae9b920f7fe354ea84fdaee87b",
           "59d27a5575a25b154dbc9133317ef30baeb83bca",
           "6b29e98da2deb57e196fc2eba8d06795724d00d2",
           "6de1fb10bdad6be3b6f792f09cbe8c9e882f71d9",
           "8ae07693948b72fe4cbe3427330455204be82f0d",
           "9926208fb7bc7ca0f84e8f159d927b2ff3e9f2d2",
+          "ce4f32a3b5042edb2356bdf4f85afbb32dcfcdfc",
           "e13d6c4747974550b336739c44320bcbc9de539e",
           "e785215fe556cd88cbb1926087ee1a9b72f28d08",
           "ff0b74e88c84508386e0027ed7b3ccf8bff72e56"
         ],
         "RUNTIME.md": [
+          "25ef88adf5877eac14008e34a63af51f40cfffc0",
           "55bfd42c40890a5a3fca2745b6ccebad062571d4",
           "743be16d7fe6172f2ca80cd755fdd774af4ae234",
+          "7fa975d20803ee1e6b497522b2a41aad5923ceff",
           "82aa75d80a5d06016a37b7216b1b1e2cebb8056d",
           "833b39057bf68b8be7108f4092d1df177c67a87a",
           "855a0ecc9cc12572b578049e8a8c760c239bcc71",
@@ -3451,10 +3480,12 @@
           "0007d3826971bd0563d172d1bf670668f69bafce",
           "1499f91de15e3f0e25b845c20da32a78ef3a7a48",
           "163905fcec361b0233032058982821cf5a183596",
+          "19b99ad3aef1f3365a80a47397736bdad82d6d04",
           "1c564c470fb583e74f3398c8e74e06a1fc9d6928",
           "24349e2f5c868202ffe84284efae3243d86df40f",
           "2a056ba7f5323d2eb553a65a1ac0b800fc02d1fe",
           "47282045f6991757be205a4ba47bde8f69ef36fa",
+          "473cc6577fb773a4ec5a9e682eb73dc6a9944635",
           "4c27e0bf42b5a6cbbb94d20b73f3d5b6741303ae",
           "50017620aecabe85027b30e216b32c19247ce7d9",
           "50160f018551e67e154347673d9a86aa7fad7b1a",
@@ -3464,6 +3495,7 @@
           "5747508019d37a801f39f9921d4615ca1b09573c",
           "5b224159bd075b6438de41f1bd72a5d6e1c26b77",
           "656b9169b90a1e6e14787cacecda6be9a9c17ff9",
+          "6df567e8e1cb3fcfb8201552062dc41f6f5a744d",
           "6fa59431943d17672e4db38564c90fc96fd864a3",
           "70e5586e4ec9142a9e44f0bb068377de3cb4f364",
           "73c32a9518b84d08f7027e641d1610c18cd11424",
@@ -3474,13 +3506,17 @@
           "87002d26f09903a506dc3e5939f992608920e9b9",
           "8a1a45b02388fffb53d3dcb0581dab7788f552ab",
           "990ba86b895a4f6fb6c6fe961753f477af0938a8",
+          "99d63369e53930bf0fb72d89c3efda0751837bfc",
           "9ac96e1bc12eef5dfa1ab05ae8169a6ea73ea340",
           "9bc0a3923244101da0ebc1eb2f71ce18980487a5",
           "a0a91aac3764fb5d847331a89c71138e294b78ee",
           "a2553ac8d3a1e7260db11f037330bfc03756fcb9",
+          "abb32bdb3f6b2f5b1d4e54bd38d0fd4e67e93f20",
           "afe2bec29f2782c126731ff3b503adcc4cc35dd2",
           "b8160742f3886030369dff1d0167c9a158a5e825",
+          "bc6c48d55eee4b86d7baee49cbacc091a2ed5aa9",
           "be007131782f00893aef8cf83c630b4d36375350",
+          "c5c9c58a2f9b740dd3cdf884a83667858e0a00cf",
           "cae834b5cb087af2fa93eac7a18b228745619c27",
           "cef3c168914f049d9fee6fde3b9ab3675ed5716a",
           "d2af8277eddddd8e024f0db385ec16e939429f7e",
@@ -3492,10 +3528,15 @@
           "fecddb940c70a6b0cad763bc09917c48651c4a78"
         ],
         "TAXONOMY.md": [
+          "0ce4d761491b14f6c02ce91e05c0df33f798636b",
+          "1941d9f1713a9f7797e893f92a16b6c3a288e71f",
           "31bb668d327a84e68feef7c4d4af6e494e96f872",
-          "4a943d308adf416cb249c7fe57f85f579536a35f"
+          "4a943d308adf416cb249c7fe57f85f579536a35f",
+          "95a978a4cac2b117355c49fcc7c0cc23ca144b43",
+          "f671f417755cef5c65346bb7738730ab62fcf5af"
         ],
         "agents/openai.yaml": [
+          "2ef6622c92ca70fc78a7c3fb5a68d8955efa68d0",
           "553bcf0934a735eeb4bc7d7c48d76b1b7ab1a24c",
           "79adc8cb4d5cecfef69bec63076f15dcb2678738",
           "f27264b32395ea65b319729e0d8694045ae00a26"

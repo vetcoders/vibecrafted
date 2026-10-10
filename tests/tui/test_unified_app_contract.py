@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 
@@ -33,6 +33,31 @@ SCHEMA_PATH = (
     REPO_ROOT
     / "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json"
 )
+
+
+@pytest.mark.parametrize("tab_name", ["Launchpad", "Start here"])
+def test_onboarding_probe_requires_launchpad_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tab_name: str
+) -> None:
+    layout = tmp_path / "vc-frame/layouts/operator.kdl"
+    layout.parent.mkdir(parents=True)
+    payload = f'layout {{ tab name="{tab_name}" {{}} }}'.encode()
+    layout.write_bytes(payload)
+    help_output = b"Create a vc-frame workspace for a repository"
+    scenario = Namespace(product_config=tmp_path, launchers=tmp_path / "bin")
+
+    def command(_scenario, argv):
+        assert argv == [scenario.launchers / "vc-start", "--help"]
+        return subprocess.CompletedProcess(argv, 0, stdout=help_output)
+
+    monkeypatch.setattr(contract, "_scenario_command", command)
+    if tab_name == "Start here":
+        with pytest.raises(RuntimeError, match="has no Launchpad tab"):
+            contract._scenario_start_here(scenario)
+    else:
+        assert contract._scenario_start_here(scenario) == {
+            "onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()
+        }
 
 
 def _sha256(path: Path) -> str:
@@ -1280,7 +1305,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "!entry.starts_with('/')" in launcher
 
 
-def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
+def test_tray_menu_accepts_verified_runtime_from_another_build() -> None:
     app_dir = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
     delegate = (app_dir / "AppDelegate.swift").read_text(encoding="utf-8")
     policy = (app_dir / "RuntimePackMenuPolicy.swift").read_text(encoding="utf-8")
@@ -1311,9 +1336,9 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
         in delegate
     )
     assert "generation: canonicalInstall?.root.lastPathComponent" in delegate
-    # The policy owns the drift rule: generation `X.Y.Z+g<sha>` vs the signed
-    # carrier's full manifest revision; drift is amber (runtime-first upgrades
-    # are legitimate), never silent.
+    # The policy shows carrier identity while the runtime resolver owns the
+    # readiness decision. A different SHA alone cannot make a usable install
+    # look unhealthy.
     assert "func generationRevisionToken(_ generation: String) -> String?" in policy
     assert (
         "func runtimePackMatchesCarrier(generation: String, signedSourceRevision: String) -> Bool"
@@ -1326,7 +1351,7 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
     assert "Runtime already current" in policy
-    assert "the installed runtime moved; update the App to re-sync" in policy
+    assert "Verified installed runtime from another build" in policy
     # The durable lifecycle trail is supervision evidence, but it is not
     # installer behavior: it lives in its own unit so the AppDelegate hub stays
     # a UI/process host (the contract above forbids createDirectory there).
@@ -1396,8 +1421,8 @@ expect(synced.actionsEnabled, "synced actions enabled")
 let drifted = deriveRuntimePackMenuState(
   generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha, runtimeReady: true)
 expect(drifted.header == "Runtime Pack: 4.4.0+gdeadbeef", "drift header")
-expect(drifted.detail.contains("Carrier expects 0a5eaaea"), "drift detail names carrier")
-expect(drifted.health == .transitioning, "drift is amber, not red")
+expect(drifted.detail.contains("Verified installed runtime from another build"), "another build is identified")
+expect(drifted.health == .healthy, "verified runtime stays healthy")
 expect(drifted.actionsEnabled, "drift actions enabled")
 
 let unstamped = deriveRuntimePackMenuState(
@@ -1948,7 +1973,7 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     elif mutation == "applications_path":
         launch["program"] = "/Applications/vc-terminal.app/Contents/MacOS/vc-terminal"
     elif mutation == "direct_alias_session":
-        launch["shell"]["argv"] = ["attach", "--create", "Start here"]
+        launch["shell"]["argv"] = ["attach", "--create", "Launchpad"]
     elif mutation == "unknown_environment":
         launch["environment"]["inject_bundle_paths"]["VC_FRAME_BIN"] = (
             "Contents/Helpers/vc-frame"
@@ -1965,9 +1990,12 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
+@pytest.mark.parametrize("probe_user_path", [None, True])
 def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
 ) -> None:
     """Guest, not landlord: the child environment is the user's own
     environment with the deny-list scrubbed and Vibecrafted pins overlaid;
@@ -1988,7 +2016,21 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
     }
 
-    child = contract.build_launch_environment(app, host_environment=host)
+    probed_path = (
+        f"{tmp_path}/.cargo/bin:{tmp_path}/.local/bin:/opt/homebrew/bin:/usr/bin"
+    )
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        assert environment == host
+        assert probe_user_path is True, (
+            "explicit host mappings must not probe implicitly"
+        )
+        return probed_path
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(
+        app, host_environment=host, probe_user_path=probe_user_path
+    )
 
     resolved = app.resolve()
     assert child == {
@@ -1997,7 +2039,7 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "LANG": "pl_PL.UTF-8",
         "PATH": (
             f"{resolved / 'Contents/Resources/runtime/bin'}:"
-            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            f"{probed_path if probe_user_path else host['PATH']}:/bin:/usr/sbin:/sbin"
         ),
         "SSH_AUTH_SOCK": "/tmp/probe.sock",
         "GITHUB_TOKEN": "user-owned-flows-through",
@@ -2005,6 +2047,37 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_APP_ROOT": str(resolved),
         "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
+
+
+@pytest.mark.parametrize("probe_user_path", [None, False])
+def test_process_launch_environment_adopts_login_path_by_default(
+    tmp_path: Path,
+    macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    host = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "PYTHONPATH": "/poison"}
+    monkeypatch.setattr(contract.os, "environ", host)
+    calls = []
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        calls.append(environment)
+        return f"{tmp_path}/.cargo/bin:/usr/bin"
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(app, probe_user_path=probe_user_path)
+    assert calls == ([host] if probe_user_path is None else [])
+    expected = (
+        f"{tmp_path}/.cargo/bin:/usr/bin:/bin"
+        if probe_user_path is None
+        else host["PATH"]
+    )
+    assert child["PATH"] == (
+        f"{app.resolve()}/Contents/Resources/runtime/bin:{expected}:/usr/sbin:/sbin"
+    )
+    assert "PYTHONPATH" not in child
 
 
 @pytest.mark.parametrize("runtime_home", ["relative/runtime", "APP_DESCENDANT"])

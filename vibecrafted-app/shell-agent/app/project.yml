@@ -35,7 +35,7 @@ targets:
           ./shell-agent/scripts/normalize-bindings.sh shell-agent/app/Vibecrafted/Bridge
     settings:
       base:
-        MARKETING_VERSION: "4.3.3"
+        MARKETING_VERSION: "4.4.0"
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: Vibecrafted/Info.plist
@@ -44,7 +44,6 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
         OTHER_LDFLAGS:
-          - "$(PROJECT_DIR)/../../target/release/libvibecrafted_shell_ffi.a"
           - "-framework"
           - "Security"
           - "-framework"
@@ -68,8 +67,11 @@ targets:
           GCC_OPTIMIZATION_LEVEL: "s"
           SWIFT_COMPILATION_MODE: wholemodule
     dependencies:
+      # One runtime owner: static + dynamic FFI linkage registers the Rust
+      # notification dependency's Objective-C classes twice in this process.
       - framework: ../../target/release/libvibecrafted_shell_ffi.dylib
         embed: true
+        link: true
     postBuildScripts:
       - script: |
           bash $SRCROOT/../scripts/fix-dylib-install-names.sh "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"

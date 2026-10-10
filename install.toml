@@ -80,7 +80,7 @@ Health check, then the product question:
 
   Launch Vibecrafted now? [Y/n]
 
-On Y we open the operator session (vc-start) with the Start here tab —
+On Y we open the operator session (vc-start) with the Launchpad tab —
 the map of the workspace (rail, chrome, keys). That is onboarding content
 already in the frame layout; the installer only wires the door.
 

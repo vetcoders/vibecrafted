@@ -119,7 +119,7 @@ end-to-end privacy admission.
 | resume --session with explicit input                                                                                                    | shared parser -> resume-session                                                                                                                                       | explicit native session; no unrecorded baseline override               | whole plan or stdin, exact model                                          | native session exclusion/PTY acceptance remains open                                                                                 |
 | bare resume, fork, init, partner, operator                                                                                              | shell -> spawn interactive-command -> normalize_launch_spec -> interactive-launch                                                                                     | canonical repo/base/execution; resume preserves recorded checkout      | immutable private admission/source, exact model; fresh child run identity | real PTY fixture cases cover normal and failed provider exits for init/partner/operator/resume; native Frame/fork acceptance pending |
 | dispatch TOML                                                                                                                           | dispatch schema/supervisor -> workflow                                                                                                                                | existing dispatch substrate and baseline policy                        | TOML override / brief model; source and model frozen together             | dependency baseline policy needs final audit; no fleet launched by this worker                                                       |
-| vc-start / vibecrafted start                                                                                                            | shared dashboard parser and create-only owner                                                                                                                         | local path; default Git top-level name                                 | no work/model flags added                                                 | fake-engine and real-PTY fixtures; guest integration pending                                                                         |
+| vc-start / vibecrafted start                                                                                                            | shared dashboard parser; enter live, restore EXITED, or create missing workspace                                                                                      | local path; default Git top-level name                                 | no work/model flags added                                                 | fake-engine and real-PTY fixtures; installed entry acceptance pending                                                                |
 | VOC/App/MCP                                                                                                                             | their owned declarations -> core                                                                                                                                      | capability additions required below                                    | capability additions required below                                       | sibling integrations and installed acceptance pending                                                                                |
 | observe/await/status and other read-only commands                                                                                       | existing observation owners                                                                                                                                           | no meaningless work flags                                              | no prompt launch contract                                                 | unchanged                                                                                                                            |
 
@@ -175,8 +175,9 @@ Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
 after successful creation, carrying the exact root and created-session marker.
 
 Inside Frame, `vc-start` creates an ordinary project session from
-`operator.kdl`, retaining its Start here, Agents, Shell and Voc tabs plus one
-session canvas. CLI entry uses the native action, subject to the source-client
+`operator.kdl`, retaining its Launchpad, Agents and Shell tabs plus one
+session canvas. Voc is not a project tab: its single entry is the global chip
+beside Composer in the topbar. CLI entry uses the native action, subject to the source-client
 restriction below:
 
 ```text
@@ -349,6 +350,39 @@ core and `bin/python3` are mandatory, with no foreign-generation/host fallback.
 `--repo` / `--root` select the work repository and never the code generation.
 VOC consumes the real selected deck catalog; absent provider/environment cells
 remain unavailable, without a locally invented capability list.
+
+## Runtime python pin
+
+The pin belongs to the running runtime; shells only inherit it.
+
+- **Entry pins.** A process entering the runtime -- a public `vc-*` /
+  `vibecrafted` launcher, `bin/vc-terminal`, `bin/vc-frame`, the bash spawn
+  launcher, the headless worker gate (`env_allowlist.filter_headless_worker_env`)
+  -- exports `VIBECRAFTED_PYTHON`, the absolute `bin/python3` of its own
+  generation, and puts that generation's door `config/runtime-pin/bin` first on
+  PATH. A child keeps an inherited pin, so an update never moves a live session.
+- **Door.** `config/runtime-pin/bin/{python,python3}` are one file that execs
+  `$VIBECRAFTED_PYTHON`. A missing, relative, non-executable or self-referential
+  pin (a door, or a script whose shebang finds python on PATH) exits 127 with the
+  reason. There is no fallback to the host python or to the active generation.
+  The door holds only those two names; every other lookup keeps the user's order.
+- **Shells inherit.** zsh startup reorders PATH (`/etc/zprofile` path_helper,
+  personal `~/.zshenv` / `~/.zshrc`). The headless gate and the spawn launcher
+  point `ZDOTDIR` at the generation's guest directory `config/runtime-pin/zsh`,
+  which runs the user's own startup files (`VIBECRAFTED_USER_ZDOTDIR`, default
+  `$HOME`) and then puts the door back in front; product shells (vc-terminal,
+  Frame panes, Quick cmd) get the same from their ZDOTDIR stage files. `zsh -c`,
+  `zsh -l`, `zsh -i`, `sh -c`, `bash -c`, hooks and `#!/usr/bin/env python3`
+  therefore reach one interpreter. `bash -l` reads only the user's own
+  `~/.bash_profile` after path_helper and is not re-pinned.
+- **Framework code never depends on PATH.** Launchers, hooks and pane runners
+  name their interpreter by absolute path; the door is convenience for agents
+  and scripts.
+- **Outside the runtime** nothing changes: no door on PATH, no guest ZDOTDIR,
+  nothing published in `~/.local/bin`, and `python3` stays the user's own.
+
+Proof: `tests/tui/test_runtime_python_pin.py` crosses each boundary against a
+personal profile that prepends a host python at every zsh stage.
 
 ## Correlated interactive Codex fork
 

@@ -6,9 +6,8 @@ import argparse
 import re
 import shlex
 import stat
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 _LAUNCHER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _ENTRYPOINT_TARGET = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*\Z")

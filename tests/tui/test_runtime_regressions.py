@@ -1657,7 +1657,7 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     # test_aicx_resume_fallback_refuses_basename_union_without_origin).
     _git_origin_checkout(repo, "https://github.com/Fixture/repo.git")
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     fresh = now.isoformat().replace("+00:00", "Z")
     pruned_src = tmp_path / "pruned-session.jsonl"  # deliberately absent
     live_src = tmp_path / "live-session.jsonl"
@@ -1785,6 +1785,27 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
     assert result.returncode == 0, result.stderr
     assert "MODE=new_session" in result.stdout
     assert "aicx foundation not found" not in result.stderr
+
+
+def test_aicx_discovery_checks_path_before_homebrew_fallbacks() -> None:
+    """div0, 2026-10-10: aicx installed by npm under /opt/homebrew/bin, but the
+    product shell's PATH does not carry the Homebrew prefix, so bare resume
+    refused workspace entry on a machine with a healthy foundation. Discovery
+    must check PATH before probing standard Homebrew bin dirs explicitly, so
+    the selected binary wins. Homebrew paths cannot be faked under a test HOME,
+    hence this source contract.
+    """
+    source = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"
+    ).read_text()
+    start = source.index("_vetcoders_aicx_bin()")
+    body = source[start : source.index("\n}", start)]
+    for prefix in ("/opt/homebrew/bin/aicx", "/usr/local/bin/aicx"):
+        assert prefix in body, f"discovery does not probe {prefix}"
+    # PATH stays ahead of the Homebrew probe: an operator-chosen aicx (and a
+    # test fake injected via PATH) must win over the system-wide install.
+    assert body.index("$HOME/.cargo/bin/aicx") < body.index("command -v aicx")
+    assert body.index("command -v aicx") < body.index("/opt/homebrew/bin/aicx")
 
 
 def _resume_pack(home: Path, agent: str) -> Path:

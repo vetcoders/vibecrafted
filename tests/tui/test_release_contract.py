@@ -31,6 +31,12 @@ INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
+def _source_gate_workflow(trigger: str = "release.yml") -> str:
+    wrapper = (REPO_ROOT / ".github/workflows" / trigger).read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/source-gate.yml" in wrapper
+    return (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(encoding="utf-8")
+
+
 def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
@@ -96,7 +102,7 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     """
     workflow_path = REPO_ROOT / ".github/workflows/gate-rehearsal.yml"
     assert workflow_path.is_file()
-    text = workflow_path.read_text(encoding="utf-8")
+    text = _source_gate_workflow("gate-rehearsal.yml")
 
     # Forbidden: moving stable channel
     assert "RUSTUP_TOOLCHAIN: stable" not in text
@@ -119,6 +125,19 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     unified_idx = text.index("Run unified product contract gate")
     test_idx = text.index("Run installer and product tests")
     assert prov_idx < unified_idx < test_idx
+
+
+def test_source_and_rehearsal_have_identical_gate_steps() -> None:
+    source = _source_gate_workflow()
+    assert source == _source_gate_workflow("gate-rehearsal.yml")
+    assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in source
+    assert 'rustup default "$RUSTUP_TOOLCHAIN"' in source
+    assert "printf 'RUSTUP_HOME=%s\\n' \"$(rustup show home)\"" in source
+    assert "printf 'CARGO_HOME=%s\\n' \"$HOME/.cargo\"" in source
+    assert '>> "$GITHUB_ENV"' in source
+    assert source.index("Provision pinned Rust toolchain") < source.index(
+        "Run unified product contract gate"
+    )
 
 
 @pytest.mark.parametrize("profile", ["local", "local-classic"])
@@ -779,9 +798,10 @@ def test_linux_install_doctor_rejects_unrunnable_owned_donors(
 
 
 def test_tag_workflow_is_a_read_only_source_gate() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
-    assert "permissions:\n  contents: read" in workflow
+    wrapper = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "permissions:\n  contents: read" in wrapper
     assert "persist-credentials: false" in workflow
     assert 'test "$GITHUB_REF_TYPE" = "tag"' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
@@ -828,7 +848,7 @@ def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
     target is out of scope — those resolve at recipe level and several fall
     back to `uvx`.
     """
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
     run_lines: list[str] = []
     in_run = False
@@ -886,7 +906,7 @@ def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
     one canonically named DMG and one portable tarball, each resolved by the
     publisher from a build script and documented in the kickoff.
     """
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
     assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
     assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
@@ -1203,9 +1223,7 @@ def test_bundle_parity_verifier_uses_artifact_and_isolated_install_roots() -> No
 
 def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    source_workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
-        encoding="utf-8"
-    )
+    source_workflow = _source_gate_workflow()
     release_workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
         encoding="utf-8"
     )
@@ -1263,7 +1281,7 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
     ("donor", "revision"),
     [
         ("terminal", "cfa2c367ed36ba9179a05fff32ab1221060cb04e"),
-        ("frame", "a485821727bb1bc1dc27a17d6db78a375e723e63"),
+        ("frame", "b19487648fba3451f61f153e8cd7b1edac40dfa5"),
     ],
 )
 def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
@@ -1286,6 +1304,8 @@ def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
 
 
 def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
+    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    assert pins["schema"] == "vibecrafted.source-components.v1"
     workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
     linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
     windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
@@ -1293,6 +1313,7 @@ def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
         revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
         assert revision is not None
         sha = revision.group(1)
+        assert pins["components"][f"vc-{donor}"]["revision"] == sha
         assert f'${donor}Revision = "{sha}"' in windows
         assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
         assert f"repository: vetcoders/vc-{donor}" in workflow
@@ -1697,6 +1718,14 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+    assert (
+        'donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"'
+        in builder
+    )
+    assert (
+        'donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"'
+        in builder
+    )
 
     # Regenerated plugin assets are deterministic derived output. Their
     # mutation must not make the binary claim that the immutable donor commit

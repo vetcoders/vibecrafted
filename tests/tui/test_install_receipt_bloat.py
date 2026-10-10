@@ -10,6 +10,9 @@ live layer), and a rollback receipt is only ever read for light attribution
 keys — so the snapshots carry identity and ownership, never the ledger.
 """
 
+import json
+from pathlib import Path
+
 from scripts import vetcoders_install as installer
 
 
@@ -65,6 +68,31 @@ def test_recovery_snapshot_drops_a_stale_nested_snapshot_instead_of_matryoshka()
     previous["preparing_previous_receipt"] = {"version": "4.3.2+gstale"}
     snapshot = installer._recovery_receipt_snapshot(previous)
     assert "preparing_previous_receipt" not in snapshot
+
+
+def test_loader_compacts_legacy_embedded_ledgers(tmp_path: Path) -> None:
+    """A pre-fix on-disk document is healed on load: the dead nested ledger
+    copies go, the live-layer ledger (ownership truth) stays byte-for-byte."""
+    previous = _previous_receipt()
+    previous["preparing_previous_receipt"] = {
+        "version": "4.3.2+gstale",
+        "drift_backup_history": {"/skills/x.md": ["/backups/x"]},
+        "preparing_previous_receipt": {"version": "4.3.1+gdeeper"},
+        "retirement_rollback": {
+            "receipt": {"drift_backup_history": {"/skills/y.md": ["/backups/y"]}}
+        },
+    }
+    path = tmp_path / "install-receipt.json"
+    path.write_text(json.dumps(previous), encoding="utf-8")
+
+    loaded = installer._load_runtime_install_receipt(path)
+
+    assert len(loaded["drift_backup_history"]) == 5000
+    assert "drift_backup_history" not in loaded["retirement_rollback"]["receipt"]
+    saved = loaded["preparing_previous_receipt"]
+    assert saved["drift_backup_history"] == {}
+    assert "preparing_previous_receipt" not in saved
+    assert "drift_backup_history" not in saved["retirement_rollback"]["receipt"]
 
 
 def test_rollback_receipt_keeps_attribution_and_drops_the_ledger():

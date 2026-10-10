@@ -68,7 +68,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from xml.parsers.expat import ExpatError
@@ -941,9 +941,9 @@ def write_start_here_guide(
     store_display = str(store_path)
 
     lines = [
-        "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Start Here",
+        "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Launchpad",
         "",
-        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
         f"Framework version: {framework_version}",
         f"Health: {health_line}",
         "",
@@ -958,7 +958,7 @@ def write_start_here_guide(
         + (", ".join(missing_required) if missing_required else "none required"),
         "",
         "## Simplest path (backyard ride)",
-        "1. `vc-start` — open the operator session (tab **Start here** = map of the workspace)",
+        "1. `vc-start` — open the operator session (tab **Launchpad** = map of the workspace)",
         "2. `vibecrafted doctor` — health of foundations + install truth",
         "3. `vibecrafted init claude` — orient an agent in a real repo",
         '4. `vibecrafted implement codex --prompt "Ship <task>"` — first cut',
@@ -1682,7 +1682,7 @@ def create_teardown_backup(
     records = _teardown_backup_records(inventory)
     if not records:
         return None
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     if dry_run:
         return timestamp
 
@@ -1705,7 +1705,7 @@ def create_teardown_backup(
 
     manifest = {
         "version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "items": manifest_items,
     }
     (backup_dir / RESTORE_MANIFEST_FILE).write_text(
@@ -2152,7 +2152,7 @@ def create_backup(
     dry_run: bool = False,
 ) -> str | None:
     """Snapshot existing state before install. Returns backup timestamp or None."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     backup_dir = _backup_root(store_path) / ts
     anything_backed = False
 
@@ -3000,6 +3000,7 @@ LAUNCHER_WRAPPERS = [
     "vc-doctor",
     "vc-status",
     "vc-update",
+    "vc-reinstall",
     "vc-receipt",
     "vc-scaffold-doctor",
     "vc-agents",
@@ -4089,7 +4090,7 @@ def _write_tools_lease_owner(descriptor: int, operation: str) -> None:
             {
                 "pid": os.getpid(),
                 "operation": operation,
-                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": datetime.now(UTC).isoformat(),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -6601,7 +6602,7 @@ def _legacy_service_mutator_census() -> tuple[_LegacyServiceMutator, ...]:
                     start_token=first_birth[0],
                     started_at=datetime.fromtimestamp(
                         int(seconds) + int(microseconds) / 1_000_000,
-                        tz=timezone.utc,
+                        tz=UTC,
                     ),
                     argv=first_argv,
                 )
@@ -6620,7 +6621,7 @@ def _wait_for_legacy_service_mutator_quiescence(
     """
     if published_at.tzinfo is None:
         raise OSError("runtime publication boundary has no timezone")
-    published_at = published_at.astimezone(timezone.utc)
+    published_at = published_at.astimezone(UTC)
     deadline = time.monotonic() + timeout_seconds
     empty_observations = 0
     last_records: tuple[_LegacyServiceMutator, ...] = ()
@@ -9154,7 +9155,7 @@ def _tools_handoff_publication_boundary(shared_home: Path) -> datetime:
         raise OSError("runtime publication boundary is malformed") from exc
     if boundary.tzinfo is None:
         raise OSError("runtime publication boundary has no timezone")
-    return boundary.astimezone(timezone.utc)
+    return boundary.astimezone(UTC)
 
 
 def _tools_handoff_is_complete_current(
@@ -10462,12 +10463,12 @@ def _sync_control_plane_tree_locked(
             "state": "prepared",
             "old_target": str(old_target) if old_target is not None else "",
             "new_target": str(generation),
-            "prepared_at": datetime.now(timezone.utc).isoformat(),
+            "prepared_at": datetime.now(UTC).isoformat(),
         }
         _atomic_json_file(_tools_handoff_path(dst), handoff)
         _atomic_symlink(generation, dst)
         pointer_swapped = True
-        handoff["published_at"] = datetime.now(timezone.utc).isoformat()
+        handoff["published_at"] = datetime.now(UTC).isoformat()
         _atomic_json_file(_tools_handoff_path(dst), handoff)
         return generation
     except Exception:
@@ -10560,7 +10561,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
         old_target = Path(old_raw)
         if current_target == old_target.resolve(strict=False):
             payload["state"] = "rolled-back"
-            payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            payload["rolled_back_at"] = datetime.now(UTC).isoformat()
             _atomic_json_file(_tools_handoff_file(shared_home), payload)
             return False
     else:
@@ -10569,7 +10570,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
             current_link.exists() or current_link.is_symlink()
         ):
             payload["state"] = "rolled-back"
-            payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            payload["rolled_back_at"] = datetime.now(UTC).isoformat()
             _atomic_json_file(_tools_handoff_file(shared_home), payload)
             return False
     if current_target != new_target.resolve(strict=False):
@@ -10590,7 +10591,7 @@ def _rollback_current_tools_locked(shared_home: Path) -> bool:
                 "runtime pointer changed while rolling back the first generation"
             )
     payload["state"] = "rolled-back"
-    payload["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+    payload["rolled_back_at"] = datetime.now(UTC).isoformat()
     _atomic_json_file(_tools_handoff_file(shared_home), payload)
     if old_target is None:
         try:
@@ -10634,7 +10635,7 @@ def _complete_current_tools_handoff_locked(shared_home: Path) -> bool:
             "at the prepared generation"
         )
     payload["state"] = "complete"
-    payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+    payload["completed_at"] = datetime.now(UTC).isoformat()
     _atomic_json_file(_tools_handoff_file(shared_home), payload)
     _prune_tools_generations_locked(shared_home)
     return True
@@ -10845,7 +10846,7 @@ def _append_layout_transfer(
             "target": str(target),
             "copied": str(len(copied)),
             "conflicts": ",".join(str(path) for path in conflicts),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
     )
 
@@ -10917,7 +10918,7 @@ def transfer_agents_layout(
             copied=copied_names,
             conflicts=conflicts,
         )
-        state.updated_at = datetime.now(timezone.utc).isoformat()
+        state.updated_at = datetime.now(UTC).isoformat()
         state.save(store_path)
     return 0, {
         "source": source,
@@ -11035,7 +11036,7 @@ def prune_orphaned_skills(
         return 0
 
     quarantine_root = _backup_root(store_path) / (
-        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        SHADOW_QUARANTINE_PREFIX + datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     )
     removed = 0
     for location, entry in removable:
@@ -11424,7 +11425,7 @@ def reconcile_shadowed_skill_dirs(
 
     canonical_root = runtime_skills_dir("agents")
     quarantine_root = _backup_root(store_path) / (
-        SHADOW_QUARANTINE_PREFIX + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        SHADOW_QUARANTINE_PREFIX + datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     )
 
     for shadow in detected:
@@ -12159,7 +12160,7 @@ def _available_quarantine_path(dst: Path) -> Path:
     """
     if not (dst.exists() or dst.is_symlink()):
         return dst
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     candidate = dst.with_name(f"{dst.name}-{stamp}-{os.getpid()}")
     counter = 1
     while candidate.exists() or candidate.is_symlink():
@@ -14971,7 +14972,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
     _configure_gemini_plans(dry_run)
 
     # --- Save state ---
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     state = InstallState(
         installed_at=now,
         updated_at=now,
@@ -15239,7 +15240,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         # Log header
         print(f"𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Installer v{fw_ver} — compact mode")
         print(f"Source: {repo_root}")
-        print(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        print(f"Timestamp: {datetime.now(UTC).isoformat()}")
         print()
         _compact_checkpoint(
             out,
@@ -15513,7 +15514,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         _configure_gemini_plans(dry_run)
 
         # Save state
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         state = InstallState(
             installed_at=now,
             updated_at=now,
@@ -17075,6 +17076,7 @@ _RUNTIME_WRAPPER_VERBS = {
     "vc-observe": "observe",
     "vc-operator": "operator",
     "vc-receipt": "receipt",
+    "vc-reinstall": "reinstall",
     "vc-resume": "resume",
     "vc-resume-session": "resume-session",
     "vc-scaffold-doctor": "scaffold-doctor",
@@ -18144,6 +18146,91 @@ def _runtime_retirement_forget_copy_history(
             receipt["drift_backup_history"].pop(destination)
 
 
+def _runtime_launchservices_targets(
+    runtime_home: Path,
+    receipt: Mapping[str, Any],
+    generations: Mapping[str, Mapping[str, Any]],
+    *,
+    active_generation: Path | None = None,
+) -> list[Path]:
+    """Select bundle directories from exact receipted release inventories only."""
+    releases = runtime_home / "releases"
+    owned = set(receipt.get("owned_dirs", []))
+    targets: set[Path] = set()
+    for raw, proof in generations.items():
+        generation = Path(raw)
+        if (
+            raw not in owned
+            or generation.parent != releases
+            or generation == active_generation
+        ):
+            continue
+        for relative, record in proof.get("entries", {}).items():
+            leaf = Path(relative)
+            if (
+                leaf.is_absolute()
+                or ".." in leaf.parts
+                or leaf.as_posix() != relative
+                or leaf.suffix != ".app"
+                or not record
+                or record[0] != "directory"
+            ):
+                continue
+            target = generation / leaf
+            try:
+                _assert_runtime_physical_path(target)
+            except (OSError, RuntimeError):
+                continue
+            targets.add(target)
+    return sorted(targets)
+
+
+def _unregister_runtime_bundles(
+    targets: Sequence[Path],
+    *,
+    dry_run: bool = False,
+    runner: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Best-effort host registry cleanup; never restart the Dock or any app."""
+    result: dict[str, Any] = {
+        "status": "not-needed",
+        "targets": [str(path) for path in targets],
+        "unregistered": [],
+        "residuals": [],
+    }
+    if not targets:
+        return result
+    if dry_run:
+        result["status"] = "dry-run"
+        return result
+    executable = Path(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+    if sys.platform != "darwin" or not executable.is_file():
+        result.update(status="skipped", reason="LaunchServices lsregister unavailable")
+        return result
+    run = runner if runner is not None else subprocess.run
+    for target in targets:
+        try:
+            # Recheck aliases at the side-effect boundary, including absent leaves.
+            _assert_runtime_physical_path(target)
+            completed = run(
+                [str(executable), "-u", str(target)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if completed.returncode:
+                raise RuntimeError(f"lsregister exited {completed.returncode}")
+            result["unregistered"].append(str(target))
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            result["residuals"].append({"path": str(target), "reason": str(exc)})
+    result["status"] = "residual" if result["residuals"] else "unregistered"
+    return result
+
+
 def _finish_runtime_retirement(
     paths: Mapping[str, Path], receipt: dict[str, Any]
 ) -> dict[str, Any]:
@@ -18312,6 +18399,22 @@ def _finish_runtime_retirement_locked(
                     for _, value in _runtime_retirement_references(paths, live)
                 ):
                     continue
+                if allowed_generation:
+                    cleanup = _unregister_runtime_bundles(
+                        _runtime_launchservices_targets(
+                            runtime_home,
+                            live,
+                            {raw: proof},
+                            active_generation=runtime_home
+                            / "releases"
+                            / live["version"],
+                        )
+                    )
+                    result.setdefault("launchservices", []).append(cleanup)
+                    if cleanup["residuals"]:
+                        raise RuntimeError(
+                            "LaunchServices cleanup failed; generation retained for retry"
+                        )
                 _runtime_retirement_delete(path, proof)
             # Remove stale directory ownership in the same atomic receipt write
             # as completing the intent; doctor must never call retirement damage.
@@ -18497,6 +18600,16 @@ def _runtime_launcher_body(
             "unset _vibecrafted_path_entries _vibecrafted_clean_path _vibecrafted_path_entry",
         ]
     )
+    # The runtime python pin. The launcher enters the runtime, so its
+    # children get VIBECRAFTED_PYTHON above and the generation's door in front
+    # of PATH: python and python3 are that interpreter, never the host 3.9.6.
+    # The door holds only those two names; every other lookup keeps the user's
+    # order. (The release-bin strip above also drops an inherited door.)
+    door = generation / "config/runtime-pin/bin"
+    lines.append(
+        f"[[ ! -x {shlex_quote(str(door / 'python3'))} ]] || "
+        f'export PATH={shlex_quote(str(door))}":$PATH"'
+    )
     lines.extend(
         [
             'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
@@ -18504,6 +18617,33 @@ def _runtime_launcher_body(
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Heal receipts checkpointed before the 2026-10-05 bloat fix.
+
+    `_recovery_receipt_snapshot` keeps new documents slim, but a machine that
+    checkpointed earlier still carries the full per-file backup ledger inside
+    `retirement_rollback.receipt` and under `preparing_previous_receipt`.
+    Restore reads those layers only for light attribution keys and overwrites
+    the ledger from the live layer, yet the dead copies keep every later
+    checkpoint above `_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES` for the life of the
+    machine (observed 2026-10-10: a 70 MiB document refused each install).
+    The live-layer ledger is ownership truth and stays untouched.
+    """
+    for holder in (receipt, receipt.get("preparing_previous_receipt")):
+        if not isinstance(holder, dict):
+            continue
+        rollback = holder.get("retirement_rollback")
+        if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
+            rollback["receipt"].pop("drift_backup_history", None)
+            rollback["receipt"].pop("preparing_previous_receipt", None)
+    saved = receipt.get("preparing_previous_receipt")
+    if isinstance(saved, dict):
+        if saved.get("drift_backup_history"):
+            saved["drift_backup_history"] = {}
+        saved.pop("preparing_previous_receipt", None)
+    return receipt
 
 
 def _load_runtime_install_receipt(
@@ -18576,7 +18716,7 @@ def _load_runtime_install_receipt(
             raise RuntimeInstallRefusal(
                 f"invalid runtime receipt field: {receipt_field}"
             )
-    return receipt
+    return _compact_legacy_receipt_layers(receipt)
 
 
 def _checkpoint_runtime_install_receipt(
@@ -22164,9 +22304,7 @@ def _runtime_rescue_allocate_evidence_token(
     occupants; a second snapshot then fails before publication.
     """
     prefix = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-"
-        + str(receipt_sha256)[:12]
+        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + str(receipt_sha256)[:12]
     )
     suffix = 0
     while True:
@@ -23258,7 +23396,7 @@ def _build_runtime_rescue_plan(
                 else "target pack installer already includes --rescue"
             ),
         },
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     input_digest = _canonical_digest(
         {
@@ -24058,7 +24196,11 @@ def _stage_runtime_product_config(
     ):
         if src.is_file() or sys.platform != "win32":
             shutil.copy2(src, dst)
-    python_door = generation / "config/vc-terminal/bin"
+    # The runtime python door lives in the generation (config/runtime-pin) and
+    # every entry puts it on PATH. This ZDOTDIR/bin copy only serves product
+    # shells that started before the pin moved there: their python/python3
+    # functions still name it, and their pin is already exported.
+    python_door = generation / "config/runtime-pin/bin"
     if python_door.is_dir():
         (terminal / "bin").mkdir(exist_ok=True)
         for src in python_door.iterdir():
@@ -24073,6 +24215,11 @@ def _stage_runtime_product_config(
         'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
         encoding="utf-8",
     )
+    # Every zsh started inside a product shell -- `zsh -c`, `zsh -l` after
+    # /etc/zprofile's path_helper, Frame panes -- reads this ZDOTDIR. These
+    # stages put the pinned generation's python door back in front of PATH.
+    for stage in (".zshenv", ".zprofile", ".zlogin"):
+        (terminal / stage).write_text(_PRODUCT_ZDOTDIR_PIN_STAGE, encoding="utf-8")
     for relative in ("atuin/config.toml",):
         destination = staged / relative
         if not destination.exists():
@@ -24545,6 +24692,14 @@ _PRODUCT_TERMINAL_DEBRIS = (
     "vc-terminal/alacritty.toml",
 )
 _PRODUCT_PRIMARY_SHELL_NAME = "launch-primary-shell.zsh"
+# Product ZDOTDIR .zshenv / .zprofile / .zlogin: restore the pinned
+# generation's python door after system and stage startup reorder PATH.
+_PRODUCT_ZDOTDIR_PIN_STAGE = (
+    "# Generated by the Vibecrafted installer. Keeps the runtime python door\n"
+    "# (python/python3 = VIBECRAFTED_PYTHON) first on PATH after zsh startup.\n"
+    '[[ ! -r "${VIBECRAFTED_RUNTIME_ROOT:-}/config/runtime-pin/pin.zsh" ]] \\\n'
+    '  || builtin source "${VIBECRAFTED_RUNTIME_ROOT}/config/runtime-pin/pin.zsh"\n'
+)
 
 
 _FOUNDATION_TOOL_NAMES = (
@@ -24932,7 +25087,7 @@ def _install_runtime_agent_projections(
                     mode=0o644,
                 )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     repo_commit, repo_url, repo_origin = pack_install_identity(generation)
     state = InstallState(
         installed_at=now,
@@ -25688,7 +25843,7 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
         "rolled_back": False,
         "files": [],
         "receipt": "",
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     descriptor: int | None = None
     try:
@@ -26955,7 +27110,7 @@ def _install_runtime_pack(
         "install_pending": True,
         "install_phase": "preparing",
         "preparing_previous_receipt": _recovery_receipt_snapshot(previous),
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": datetime.now(UTC).isoformat(),
         "version": version,
         "payload_root": str(payload_root),
         "app_root": str(app_root) if app_root else "",
@@ -27844,7 +27999,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
             )
     archive = backup_root / (
         "uninstalled-"
-        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        + datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         + "-"
         + os.urandom(6).hex()
         + ".json"
@@ -27860,6 +28015,39 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
         app_root=_receipt_app_root(receipt),
     )
     actions.extend(runtime_actions)
+
+    generation_proofs: dict[str, Any] = {}
+    launchservices_notes: list[dict[str, str]] = []
+    for raw in receipt.get("owned_dirs", []):
+        generation = Path(raw)
+        if generation.parent != runtime_home / "releases":
+            continue
+        proof = receipt.get("retirement_generations", {}).get(raw)
+        if proof is None:
+            try:
+                proof = _runtime_retirement_generation(generation)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                launchservices_notes.append({"path": raw, "reason": str(exc)})
+                continue
+        generation_proofs[raw] = proof
+    launchservices = _unregister_runtime_bundles(
+        _runtime_launchservices_targets(runtime_home, receipt, generation_proofs),
+        dry_run=dry_run,
+    )
+    if launchservices_notes:
+        launchservices["skipped_generations"] = launchservices_notes
+    if launchservices["residuals"]:
+        _runtime_uninstall_result(
+            args,
+            {
+                "schema": "vibecrafted.runtime-uninstall-result.v1",
+                "status": "residual",
+                "actions": actions,
+                "conflicts": [],
+                "launchservices": launchservices,
+            },
+        )
+        return 1
 
     for raw_path in sorted(owned_symlinks, reverse=True):
         path = Path(raw_path)
@@ -27955,6 +28143,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
         "status": "dry-run" if dry_run else ("conflict" if conflicts else "removed"),
         "actions": actions,
         "conflicts": conflicts,
+        "launchservices": launchservices,
     }
     _runtime_uninstall_result(args, result)
     return 1 if conflicts else 0

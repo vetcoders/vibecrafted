@@ -10,7 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self
@@ -2573,7 +2573,7 @@ def test_stop_run_terms_live_launcher_process_group(
                 "agent": "codex",
                 "mode": "workflow",
                 "root": str(tmp_path),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "skill_code": "wflw",
                 "launcher_pid": proc.pid,
                 "launcher_identity": launcher_identity,
@@ -2788,7 +2788,7 @@ def test_stop_run_refuses_live_pid_when_identity_receipt_is_stale(
                 "agent": "codex",
                 "mode": "workflow",
                 "root": str(tmp_path),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "skill_code": "wflw",
                 "worker_pid": proc.pid,
                 "worker_pgid": proc.pid,
@@ -2826,7 +2826,7 @@ def test_stop_run_records_already_dead_launcher_without_error(
             "agent": "codex",
             "mode": "workflow",
             "root": str(tmp_path),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "skill_code": "wflw",
             "launcher_pid": 999999999,
             "liveness": "pid_alive",
@@ -2858,7 +2858,7 @@ def test_stop_run_terminal_record_is_noop(
             "agent": "codex",
             "mode": "workflow",
             "root": str(tmp_path),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "skill_code": "wflw",
             "exit_code": 0,
             "launcher_pid": 999999999,

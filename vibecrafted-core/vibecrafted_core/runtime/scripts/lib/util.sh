@@ -105,6 +105,10 @@ spawn_host_agent_bin_dirs() {
 spawn_prepend_agent_tool_paths() {
   local remainder="${PATH:-}"
   local entry dir result="" consumed=0
+  # The selected generation's python door goes first: python and python3 are
+  # the runtime pin, never a host interpreter. Twin of
+  # runtime_paths.agent_tool_search_path.
+  result="$(spawn_runtime_python_door)" || result=""
 
   while (( ! consumed )); do
     if [[ "$remainder" == *:* ]]; then
@@ -132,6 +136,47 @@ spawn_prepend_agent_tool_paths() {
   done < <(spawn_host_agent_bin_dirs)
 
   export PATH="$result"
+}
+
+# The selected generation's python door (config/runtime-pin/bin), or failure
+# when no generation is selected or it predates the door.
+spawn_runtime_python_door() {
+  local root="${VIBECRAFTED_RUNTIME_ROOT:-}"
+  [[ "$root" == /* ]] || return 1
+  [[ -x "${root%/}/config/runtime-pin/bin/python3" ]] || return 1
+  printf '%s\n' "${root%/}/config/runtime-pin/bin"
+}
+
+# Carry the runtime python pin into the agent this launcher starts. Twin of
+# runtime_paths.pin_runtime_python: an inherited VIBECRAFTED_PYTHON stays (an
+# update never moves a live session); without one the selected generation's
+# bin/python3 is pinned. The door goes first on PATH and ZDOTDIR names the
+# generation's guest directory, which runs the user's own zsh startup and then
+# restores the door, so the agent's nested shells and its login-shell snapshot
+# reach the pin. A product shell ZDOTDIR (vc-terminal, Quick cmd) already
+# restores the door itself and is kept.
+spawn_pin_runtime_python() {
+  local door root guest current
+  door="$(spawn_runtime_python_door)" || return 0
+  root="${VIBECRAFTED_RUNTIME_ROOT%/}"
+  if [[ -z "${VIBECRAFTED_PYTHON:-}" ]]; then
+    export VIBECRAFTED_PYTHON="$root/bin/python3"
+  fi
+  case ":${PATH:-}:" in
+    ":$door:"*) ;;
+    *) spawn_prepend_agent_tool_paths ;;
+  esac
+  guest="$root/config/runtime-pin/zsh"
+  [[ -d "$guest" ]] || return 0
+  current="${ZDOTDIR:-}"
+  case "$current" in
+    "$guest") return 0 ;;
+    "${HOME:-}/.config/vibecrafted/vc-terminal" | "${VIBECRAFTED_HOME:-${HOME:-}/.vibecrafted}/shell/quick-cmd") return 0 ;;
+    */config/runtime-pin/zsh) ;;
+    "") [[ -n "${VIBECRAFTED_USER_ZDOTDIR:-}" ]] || export VIBECRAFTED_USER_ZDOTDIR="${HOME:-}" ;;
+    *) export VIBECRAFTED_USER_ZDOTDIR="$current" ;;
+  esac
+  export ZDOTDIR="$guest"
 }
 
 # RESOLVER TRUTH: This resolver is kept exclusively for runtime-side/split-brain
