@@ -1517,6 +1517,64 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
         return WorkspaceSessionRecord.from_payload(payload)
 
 
+def workspace_return_attachment(
+    workspace_id: str, *, env: Mapping[str, str] | None = None
+) -> RuntimeSessionAttachment | None:
+    """Read the exact WES seat for a project without materializing new identity.
+
+    A hosting instance is preferred only with its complete identity binding.
+    Ambiguous physical seats require an explicit choice on the Frame rail.
+    This is attachment evidence; callers still probe the physical runtime.
+    """
+    record = show_workspace(workspace_id)
+    if record.status != WORKSPACE_STATUS_ACTIVE:
+        raise WorkspaceCatalogError(
+            "Project is buried — recover it explicitly before returning"
+        )
+    environ = os.environ if env is None else env
+    candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
+    for instance in list_instances(workspace_id=record.workspace_id):
+        if (
+            instance.status != INSTANCE_STATUS_LIVE
+            or not instance.vibecrafted_session_id
+        ):
+            continue
+        if (
+            Path(instance.build_id.root).resolve()
+            != Path(record.canonical_root).resolve()
+        ):
+            continue
+        if not workspace_session_path(instance.vibecrafted_session_id).is_file():
+            continue
+        session = read_workspace_session(instance.vibecrafted_session_id)
+        if (
+            session.workspace_id != record.workspace_id
+            or session.workspace_instance_id != instance.workspace_instance_id
+            or session.session_id != instance.vibecrafted_session_id
+        ):
+            raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
+        candidates.extend(
+            (instance, attachment)
+            for attachment in session.attachments
+            if attachment.runtime == "vc-frame" and attachment.state == "live"
+        )
+    preferred = [
+        attachment
+        for instance, attachment in candidates
+        if environ.get(ENV_WORKSPACE_ID) == record.workspace_id
+        and environ.get(ENV_WORKSPACE_INSTANCE_ID) == instance.workspace_instance_id
+        and environ.get(ENV_VIBECRAFTED_SESSION_ID) == instance.vibecrafted_session_id
+        and attachment.runtime_session_id
+        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+    ]
+    seats = preferred or [attachment for _, attachment in candidates]
+    if len(seats) > 1:
+        raise WorkspaceCatalogError(
+            "Multiple workspaces are open for this project — choose one on the Frame rail"
+        )
+    return seats[0] if seats else None
+
+
 def record_runtime_session_attachment(
     *,
     workspace_id: str,
@@ -2529,6 +2587,7 @@ __all__ = [
     "worker_host_display_label",
     "worker_host_session_name",
     "workspace_cli_main",
+    "workspace_return_attachment",
     "workspace_session_path",
     "write_snapshot_manifest",
 ]
