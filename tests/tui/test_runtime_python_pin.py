@@ -25,6 +25,7 @@ from vibecrafted_core.env_allowlist import filter_headless_worker_env
 from vibecrafted_core.runtime_paths import pin_runtime_python
 
 from scripts import vetcoders_install as installer
+from tests._runtime_pack_fixture import seed_runtime_pack
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UTIL_SH = REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/scripts/lib/util.sh"
@@ -223,6 +224,78 @@ def test_guest_zdotdir_follows_a_personal_zdotdir(world: dict[str, Path]) -> Non
     )
     assert "relocated=1" in result.stdout, result.stderr
     _assert_pinned(result)
+
+
+def test_guest_zdotdir_runs_personal_logout(world: dict[str, Path]) -> None:
+    """Guest login shells delegate exit cleanup in the user's own directory."""
+
+    home = world["home"]
+    (home / ".zlogout").write_text('print -r -- "logout=$ZDOTDIR"\n')
+    env = filter_headless_worker_env(_entered(world))
+    # Native zsh runs .zlogout for an interactive login shell.
+    result = _run(["/bin/zsh", "-lic", f'python3 -c "{PROBE}"; exit'], env, home)
+    assert result.returncode == 0, result.stderr
+    assert f"logout={home}" in result.stdout
+    _assert_pinned(result)
+
+
+def test_runtime_pack_preserves_hidden_guest_logout(tmp_path: Path) -> None:
+    """The recursive Runtime Pack config copy and source seal retain .zlogout."""
+
+    relative = Path("config/runtime-pin/zsh/.zlogout")
+    payload = seed_runtime_pack(tmp_path / "pack")
+    assert (payload / relative).read_bytes() == (REPO_ROOT / relative).read_bytes()
+    assert installer._distribution_manifest.path_is_included(relative)
+    assert not installer._distribution_manifest.path_is_forbidden(relative)
+
+
+@pytest.mark.parametrize("stage", [".zprofile", ".zshrc", ".zlogin"])
+@pytest.mark.parametrize("relocation", ["directory", "unset"])
+def test_guest_zdotdir_preserves_native_stage_relocation(
+    world: dict[str, Path], stage: str, relocation: str
+) -> None:
+    """A personal stage owns ZDOTDIR; later stages and logout follow native zsh."""
+
+    home = world["home"]
+    initial = home / "initial-zsh"
+    relocated = home / "relocated-zsh"
+    initial.mkdir()
+    relocated.mkdir()
+    stages = [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"]
+    for directory in (initial, relocated, home):
+        for filename in stages:
+            (directory / filename).write_text(
+                f'print -r -- "{filename}=${{ZDOTDIR-$HOME}}"\n'
+            )
+    change = (
+        f'export ZDOTDIR="{relocated}"'
+        if relocation == "directory"
+        else "unset ZDOTDIR"
+    )
+    with (initial / stage).open("a") as personal:
+        personal.write(f'export PATH="{world["host_bin"]}:$PATH"\n{change}\n')
+
+    native = _run(
+        ["/bin/zsh", "-lic", 'print -r -- "final=${ZDOTDIR-$HOME}"'],
+        _base_env(world, ZDOTDIR=str(initial)),
+        home,
+    )
+    env = pin_runtime_python(_entered(world, ZDOTDIR=str(initial)))
+    pinned = _run(
+        [
+            "/bin/zsh",
+            "-lic",
+            f'print -r -- "final=${{ZDOTDIR-$HOME}}"; python3 -c "{PROBE}"; exit',
+        ],
+        env,
+        home,
+    )
+    assert native.returncode == 0, native.stderr
+    assert pinned.returncode == 0, pinned.stderr
+    assert [
+        line for line in pinned.stdout.splitlines() if not line.startswith("used=")
+    ] == native.stdout.splitlines()
+    _assert_pinned(pinned)
 
 
 def test_spawn_launcher_pins_agent_shells(world: dict[str, Path]) -> None:

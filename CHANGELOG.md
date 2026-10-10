@@ -14,6 +14,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   checkouts supply Git objects without changing their branches or working files.
   Missing sources are fetched into temporary repositories. An explicit
   `RUNTIME_PACK` continues to select an existing pack.
+  The source channel pins Frame 4.4.0 at `b19487648fba3451f61f153e8cd7b1edac40dfa5`,
+  including strider, the Launchpad landing page and the live Sessions rail;
+  Terminal remains at 0.18.0-dev.
 - Project Agents opens the interactive launcher. Launch preferences include
   model and reasoning effort, with provider-specific effort transport verified
   through interactive PTY fixtures.
@@ -35,8 +38,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 - This entry describes the prepared source candidate, not a published release.
   Signed carriers and cold installation remain release acceptance gates.
-- Source builds currently pin Frame 4.3.1 and Terminal 0.18.0-dev. Newer Frame
-  plugin changes and live tab title propagation require separate donor admission.
 - Login Bash can still override runtime Python selection. The `vc-start`
   workspace-name limit and live session/plugin generation concerns remain open.
 

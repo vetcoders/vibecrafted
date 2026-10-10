@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-09",
+  "generated_at": "2026-10-10",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -3439,6 +3439,7 @@
           "704db4370a5919bf6f00b3eab9f4ee38f24e0078",
           "7d7109175d29b45ec0642363acc0dd8dba292797",
           "7ddd4a6321fc14970b617a5cba500f1fdb5048d2",
+          "91f7e99b11bb2bbcff207a8043f44220141d4da4",
           "9d8951653e204b3e98334699494bc31c2502f9e6",
           "ae1d136c52280e24941f86fe5886998d90ebd37b",
           "b810dabdd70161ec7bac6556b0fe65c3988917d8",
@@ -3449,6 +3450,7 @@
           "463c133d08b316e9c2d5efb7c99534c271efd31b",
           "4e91ad7433fb85f6f8190282cf330fb5b8555e7a",
           "7da273c6bd29cf454433183390523cb0c5cc4aa3",
+          "d139673358412d3bb7d31a5d0d590cd2da69f172",
           "f94d3923bfd12b0bae6f803795b4c1c883b26a7a"
         ],
         "README.md": [

@@ -1,4 +1,4 @@
-# Ciągłość `vc-partner`
+# `vc-partner` Continuity
 
 Korzystaj z istniejącego dziennika repo tylko do dopisywania:
 

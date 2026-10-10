@@ -396,7 +396,7 @@ _vetcoders_rewrite_contract_root_argv() {
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
       -f | --file | --task | --session | --run-id | --count | --depth | \
-        --runtime | --model | --base | --execution-runtime | --policy-runtime | --permissions | \
+        --runtime | --model | --effort | --base | --execution-runtime | --policy-runtime | --permissions | \
         --token-budget | --operator | --continuity | --parent-session | \
         --continuity-parent)
         skip=1
