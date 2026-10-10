@@ -329,6 +329,26 @@ def test_no_local_clipboard_provider_still_emits_host_payload(
     assert pane.clipboard.read_bytes() == b"untouched"
 
 
+@pytest.mark.parametrize("editor", EDITORS)
+@pytest.mark.parametrize("script", SCRIPTS)
+@pytest.mark.parametrize("failure", ["exit", "hang"])
+def test_clipboard_helper_failure_is_bounded_and_falls_back(
+    editor_pty, editor, script, failure
+):
+    pane = editor_pty(editor, script, clipboard="wl-copy")
+    pane.executable(
+        pane.root / "bin/pbcopy",
+        "import sys, time\n"
+        + ("time.sleep(3)\n" if failure == "hang" else "")
+        + "sys.exit(1)\n",
+    )
+    started = time.monotonic()
+    assert pane.yank(b"ggVGy") == DRAFT
+    assert time.monotonic() - started < 1.5, "clipboard helper blocked editor input"
+    assert pane.clipboard.read_bytes() == DRAFT
+    pane.finish()
+
+
 PANE_SELECTION_CASES = [
     (
         [

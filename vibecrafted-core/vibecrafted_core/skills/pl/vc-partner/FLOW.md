@@ -1,4 +1,4 @@
-# Przepływ `vc-partner`
+# `vc-partner` Flow
 
 Wybierz najkrótszą wiarygodną drogę do uzgodnionego wyniku, razem z weryfikacją.
 

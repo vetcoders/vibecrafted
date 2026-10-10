@@ -14,6 +14,22 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/build-source-runtime-pack.py"
 
 
+def repository_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
+    }
+
+
+@pytest.fixture
+def inherited_git_location(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reproduce repository-location variables inherited from a foreign hook."""
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "foreign.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "foreign-worktree"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "foreign-index"))
+
+
 def donor(path: Path, cargo_file: str, version: str) -> str:
     (path / cargo_file).parent.mkdir(parents=True)
     if cargo_file == "Cargo.toml":
@@ -21,8 +37,14 @@ def donor(path: Path, cargo_file: str, version: str) -> str:
     else:
         body = f'[package]\nversion = "{version}"\n'
     (path / cargo_file).write_text(body)
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
-    subprocess.run(["git", "-C", str(path), "add", cargo_file], check=True)
+    subprocess.run(
+        ["git", "init", "-q", str(path)], env=repository_environment(), check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "add", cargo_file],
+        env=repository_environment(),
+        check=True,
+    )
     subprocess.run(
         [
             "git",
@@ -36,16 +58,19 @@ def donor(path: Path, cargo_file: str, version: str) -> str:
             "-qm",
             "fixture",
         ],
+        env=repository_environment(),
         check=True,
     )
     return subprocess.check_output(
-        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        env=repository_environment(),
     ).strip()
 
 
 @pytest.mark.parametrize("wrong_version", [False, True])
 def test_source_check_binds_exact_commits_without_touching_donors(
-    tmp_path: Path, wrong_version: bool
+    tmp_path: Path, wrong_version: bool, inherited_git_location: None
 ) -> None:
     frame = tmp_path / "vc-frame"
     terminal = tmp_path / "vc-terminal"
@@ -84,22 +109,30 @@ def test_source_check_binds_exact_commits_without_touching_donors(
         check=False,
     )
     assert (result.returncode == 0) != wrong_version, result.stderr
+    if wrong_version:
+        assert "version at pinned commit is 4.3.1" in result.stderr
     assert (frame / "uncommitted.txt").read_text() == "Founder's work\n"
     assert (
         subprocess.check_output(
-            ["git", "-C", str(frame), "rev-parse", "HEAD"], text=True
+            ["git", "-C", str(frame), "rev-parse", "HEAD"],
+            text=True,
+            env=repository_environment(),
         ).strip()
         == frame_sha
     )
     assert (
         subprocess.check_output(
-            ["git", "-C", str(terminal), "rev-parse", "HEAD"], text=True
+            ["git", "-C", str(terminal), "rev-parse", "HEAD"],
+            text=True,
+            env=repository_environment(),
         ).strip()
         == terminal_sha
     )
 
 
-def test_source_build_passes_pins_to_existing_pack_builder(tmp_path: Path) -> None:
+def test_source_build_passes_pins_to_existing_pack_builder(
+    tmp_path: Path, inherited_git_location: None
+) -> None:
     frame = tmp_path / "vc-frame"
     terminal = tmp_path / "vc-terminal"
     frame_sha = donor(frame, "Cargo.toml", "4.3.1")
@@ -132,6 +165,7 @@ def test_source_build_passes_pins_to_existing_pack_builder(tmp_path: Path) -> No
         '#!/bin/sh\nprintf "%s\\n" "$*" "$VIBECRAFTED_FRAME_REVISION" '
         '"$VIBECRAFTED_TERMINAL_REVISION" "$VIBECRAFTED_FRAME_REPO" '
         '"$VIBECRAFTED_TERMINAL_REPO" > "$CAPTURE"\n'
+        'test -z "${GIT_DIR+x}${GIT_WORK_TREE+x}${GIT_INDEX_FILE+x}"\n'
     )
     fake_make.chmod(0o755)
     result = subprocess.run(
@@ -158,7 +192,7 @@ def test_source_build_passes_pins_to_existing_pack_builder(tmp_path: Path) -> No
 
 
 def test_source_check_fetches_missing_donor_objects_into_temporary_repositories(
-    tmp_path: Path,
+    tmp_path: Path, inherited_git_location: None
 ) -> None:
     frame = tmp_path / "upstream-frame"
     terminal = tmp_path / "upstream-terminal"
@@ -198,7 +232,9 @@ def test_source_check_fetches_missing_donor_objects_into_temporary_repositories(
     assert "vibecrafted-source-donors-" in result.stdout
     assert (
         subprocess.check_output(
-            ["git", "-C", str(frame), "rev-parse", "HEAD"], text=True
+            ["git", "-C", str(frame), "rev-parse", "HEAD"],
+            text=True,
+            env=repository_environment(),
         ).strip()
         == frame_sha
     )

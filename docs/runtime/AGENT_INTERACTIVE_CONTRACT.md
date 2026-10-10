@@ -138,8 +138,10 @@ every provider — bare resume stays interactive.
   `runtime/dev-container` recipe (`vibecrafted_core.dev_container`), with the
   project mounted at `/workspace` and agent history in named volumes. Image
   identity is the recipe digest; a missing/stale image is built inside the
-  Agent tab with visible progress, retry or cancel. Claude, codex and kimi are
-  in the recipe; other providers are refused for that cell only.
+  Agent tab with visible progress, retry or cancel. The recipe installs Claude,
+  Codex, Gemini and Kimi and persists their state in named volumes. Launcher
+  support for this cell is restricted by `CONTAINER_PROVIDERS` to Claude, Codex
+  and Kimi; other providers are refused even when their CLI is in the image.
 - Usage metering is reported, not an environment gate: without a live meter the
   session runs with `--token-budget unmetered` (shown as "no data"). An
   explicit token limit still requires metering and is refused otherwise.

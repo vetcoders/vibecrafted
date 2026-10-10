@@ -730,8 +730,10 @@ def test_parse_contract_fails_closed_on_unknown_flag() -> None:
     assert "Unknown flag: --bogus-flag" in result.stderr
 
 
-def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
+@pytest.mark.parametrize("effort", ["none", "minimal", "high", "max"])
+def test_skill_contract_dispatches_model_and_provider_effort(
     tmp_path: Path,
+    effort: str,
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -763,7 +765,7 @@ def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
                 "_vetcoders_print_launch_receipt() { return 0; }; "
                 "_vetcoders_maybe_spawn_await_pane() { return 0; }; "
                 '_vetcoders_dispatch_skill_prompt() { printf "%s\\n" "$@" > "$MODEL_CAPTURE"; }; '
-                "_vetcoders_skill claude audit --model claude-opus-5 "
+                f"_vetcoders_skill claude audit --model claude-opus-5 --effort {effort} "
                 '--file "$MODEL_BRIEF" --root "$MODEL_ROOT"'
             ),
         ],
@@ -776,7 +778,99 @@ def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
 
     assert result.returncode == 0, result.stderr
     dispatched = capture.read_text(encoding="utf-8").splitlines()
-    assert dispatched[-4:] == ["--root", str(root), "--model", "claude-opus-5"]
+    assert dispatched[-6:] == [
+        "--root",
+        str(root),
+        "--model",
+        "claude-opus-5",
+        "--effort",
+        effort,
+    ]
+
+
+@pytest.mark.parametrize("identity", ["run", "session", "fresh"])
+@pytest.mark.parametrize("input_mode", ["prompt", "file"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "high", "max"])
+def test_noninteractive_resume_transports_provider_effort(
+    tmp_path: Path, identity: str, input_mode: str, effort: str
+) -> None:
+    """Each accepted resume route preserves model/effort at the core boundary."""
+
+    capture = tmp_path / "core-argv"
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("continue\n")
+    identity_args = {
+        "run": "--run-id work-260816-213657-08420",
+        "session": "--session abc12345-1234-1234-1234-abc123456789",
+        "fresh": "",
+    }[identity]
+    input_args = (
+        "--prompt continue"
+        if input_mode == "prompt"
+        else f"--file {shlex.quote(str(prompt_file))}"
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                f'_vetcoders_run_core_cli() {{ printf "%s\\n" "$@" > {shlex.quote(str(capture))}; }}; '
+                f"_vetcoders_resume_agent codex {identity_args} {input_args} "
+                f"--model gpt-6 --effort {effort}"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text().splitlines()
+    assert (
+        argv[:2]
+        == {
+            "run": ["codex", "resume"],
+            "session": ["resume-session", "codex"],
+            "fresh": ["workflow", "codex"],
+        }[identity]
+    )
+    assert argv[argv.index("--model") + 1] == "gpt-6"
+    assert argv[argv.index("--effort") + 1] == effort
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/bin/zsh"])
+def test_root_rewrite_keeps_effort_values_as_values(shell: str) -> None:
+    """A provider-bound effort value cannot be mistaken for another root flag."""
+
+    result = subprocess.run(
+        [
+            shell,
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                "_vetcoders_rewrite_contract_root_argv /normalized/repo "
+                "--root relative --effort --root --model gpt-6; "
+                'printf "%s\\n" "${_vetcoders_contract_argv[@]}"'
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "--root",
+        "/normalized/repo",
+        "--effort",
+        "--root",
+        "--model",
+        "gpt-6",
+    ]
 
 
 def test_parse_contract_double_dash_still_passes_literal_dash_text() -> None:

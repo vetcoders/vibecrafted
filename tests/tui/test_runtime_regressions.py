@@ -1787,12 +1787,13 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
     assert "aicx foundation not found" not in result.stderr
 
 
-def test_aicx_discovery_probes_the_homebrew_prefixes_before_path() -> None:
+def test_aicx_discovery_checks_path_before_homebrew_fallbacks() -> None:
     """div0, 2026-10-10: aicx installed by npm under /opt/homebrew/bin, but the
     product shell's PATH does not carry the Homebrew prefix, so bare resume
     refused workspace entry on a machine with a healthy foundation. Discovery
-    must probe the standard Homebrew bin dirs explicitly (they cannot be faked
-    under a test HOME, hence a source contract), before the PATH fallback.
+    must check PATH before probing standard Homebrew bin dirs explicitly, so
+    the selected binary wins. Homebrew paths cannot be faked under a test HOME,
+    hence this source contract.
     """
     source = (
         REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"

@@ -85,12 +85,16 @@ def ensure_generation_python() -> None:
         __import__("tomllib")
         core = __import__("vibecrafted_core")
         core_path = Path(core.__file__).resolve()
-        if (
-            not in_tree
-            and selected
-            and Path(selected).resolve() not in core_path.parents
-        ):
-            raise ImportError("core belongs to a different Runtime Pack")
+        if not in_tree and selected:
+            if Path(selected).resolve() not in core_path.parents:
+                raise ImportError("core belongs to a different Runtime Pack")
+            # Keep the executable's lexical path: a generation venv may
+            # symlink CPython outside its root while retaining its own identity.
+            if (
+                Path(os.path.abspath(selected))
+                not in Path(os.path.abspath(sys.executable)).parents
+            ):
+                raise ImportError("Python belongs to a different Runtime Pack")
     except (ImportError, SyntaxError):
         pass
     else:
@@ -99,14 +103,15 @@ def ensure_generation_python() -> None:
     # than comparing executable paths and looping on a broken generation.
     attempt = os.environ.get("VIBECRAFTED_PANE_PYTHON_ATTEMPT", "")
     if attempt != str(Path(__file__).resolve()):
-        here = os.path.realpath(sys.executable)
+        here = os.path.abspath(sys.executable)
         for wanted in _generation_python_candidates():
-            if not os.access(wanted, os.X_OK) or os.path.realpath(wanted) == here:
+            if not os.access(wanted, os.X_OK) or os.path.abspath(wanted) == here:
                 continue
             if (
                 selected
                 and not in_tree
-                and Path(selected).resolve() not in Path(wanted).resolve().parents
+                and Path(os.path.abspath(selected))
+                not in Path(os.path.abspath(wanted)).parents
             ):
                 continue
             os.environ["VIBECRAFTED_PANE_PYTHON_ATTEMPT"] = str(

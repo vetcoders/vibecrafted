@@ -30,9 +30,21 @@ COMPONENTS = {
 }
 
 
+def repository_environment() -> dict[str, str]:
+    """Keep caller settings while isolating Git from a foreign hook's repository."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
+    }
+
+
 def git(*args: str, cwd: Path) -> str:
     return subprocess.check_output(
-        ["git", "-C", str(cwd), *args], text=True, stderr=subprocess.DEVNULL
+        ["git", "-C", str(cwd), *args],
+        text=True,
+        stderr=subprocess.DEVNULL,
+        env=repository_environment(),
     ).strip()
 
 
@@ -99,7 +111,11 @@ def select_repository(
             return candidate.resolve()
     destination = scratch / name
     destination.mkdir()
-    subprocess.run(["git", "init", "--quiet", str(destination)], check=True)
+    subprocess.run(
+        ["git", "init", "--quiet", str(destination)],
+        env=repository_environment(),
+        check=True,
+    )
     subprocess.run(
         [
             "git",
@@ -112,6 +128,7 @@ def select_repository(
             pin["repository"],
             pin["revision"],
         ],
+        env=repository_environment(),
         check=True,
     )
     if not has_commit(destination, pin["revision"]):
@@ -122,7 +139,8 @@ def select_repository(
 def verify_version(name: str, pin: dict[str, str], repo: Path) -> None:
     _, _, manifest_path, table = COMPONENTS[name]
     blob = subprocess.check_output(
-        ["git", "-C", str(repo), "show", f"{pin['revision']}:{manifest_path}"]
+        ["git", "-C", str(repo), "show", f"{pin['revision']}:{manifest_path}"],
+        env=repository_environment(),
     )
     version = tomllib.loads(blob.decode("utf-8"))[table][
         "package" if table == "workspace" else "version"
@@ -160,7 +178,7 @@ def main() -> int:
             )
         if args.check:
             return 0
-        environment = os.environ.copy()
+        environment = repository_environment()
         for name, repository in repositories.items():
             repo_var, revision_var, _, _ = COMPONENTS[name]
             environment[repo_var] = str(repository)

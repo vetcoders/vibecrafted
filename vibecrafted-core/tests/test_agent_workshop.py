@@ -2962,6 +2962,30 @@ def test_slots_keep_their_own_environment_permissions_mode_and_memory(
     assert again.runtime == workshop.RUNTIME_POLICIES.index("local-worktrees")
 
 
+def test_remove_agent_after_launch_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    form, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    form.add_agent()
+    form.launch()
+    assert sum("new-tab" in call for call in calls) == len(form.launch_results) == 2
+    results = list(form.launch_results)
+
+    form.add_agent()
+    assert form.active_slot == 2
+    form.remove_agent()
+
+    assert len(form.agent_slots) == 2
+    assert form.active_slot == 1
+    assert form.launch_results == results
+    # Removing an existing launched slot still removes its matching result.
+    form.remove_agent()
+    assert form.launch_results == results[:1]
+
+
 @pytest.mark.parametrize("runtime", ["local-native", "local-worktrees", "local-vm"])
 @pytest.mark.parametrize("mode", ["init", "resume", "partner", "operator"])
 def test_launch_matrix_three_environments_by_four_modes(
