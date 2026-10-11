@@ -152,8 +152,10 @@ from vibecrafted_core.spawn import (
     OPERATOR_POLICIES,
     PERMISSION_POLICIES,
     RUNTIME_POLICIES,
+    _parse_dt,
     continuity_policy_capabilities,
     interactive_resume_support,
+    native_catalog_session_candidates,
     resolve_operator_agent_policy,
     resolve_provider_policy,
     resumable_interactive_runs,
@@ -681,6 +683,8 @@ def public_reason(reason: str) -> str:
     # uninstalled provider).
     if "owner/repo" in low or "git origin" in low:
         return "Parent sessions need a git origin"
+    if "native session catalog" in low:
+        return "Earlier sessions are unavailable right now"
     if "session catalog" in low or "aicx" in low:
         return "Parent sessions are unavailable right now"
     if "workspace does not exist" in low:
@@ -2016,7 +2020,7 @@ class Workshop:
         if not self._resume_mode():
             return f"Parent    {self.continuity_parent or '(none)'}"
         if (
-            self.resume_run_id
+            self.session
             and self.resume_candidates
             and 0 <= self.resume_index < len(self.resume_candidates)
         ):
@@ -2032,21 +2036,49 @@ class Workshop:
     def _refresh_resume_candidates(self) -> None:
         provider = AGENTS[self.agent]
         runtime_name = RUNTIME_POLICIES[self.runtime]
+        catalog_error = ""
         try:
             self.resume_candidates = resumable_interactive_runs(
                 provider, self.path, runtime_name
             )
+            if runtime_name == "local-native":
+                recorded = {item["session_id"]: item for item in self.resume_candidates}
+                try:
+                    native = native_catalog_session_candidates(provider, self.path)
+                except (OSError, ValueError) as exc:
+                    catalog_error = f"native session catalog unavailable: {exc}"
+                    native = []
+                for item in native:
+                    if item["session_id"] in recorded:
+                        # Preserve a proven run's route while using native activity
+                        # for recency; catalog existence does not prove a run.
+                        recorded[item["session_id"]] = {
+                            **recorded[item["session_id"]],
+                            "updated_at": item["updated_at"],
+                        }
+                    else:
+                        recorded[item["session_id"]] = item
+                self.resume_candidates = sorted(
+                    recorded.values(),
+                    key=lambda item: (
+                        _parse_dt(item.get("updated_at"))
+                        or _parse_dt("1970-01-01T00:00:00Z")
+                    ),
+                    reverse=True,
+                )
         except (OSError, ValueError) as exc:
             self.resume_candidates = []
             self.resume_error = f"session catalog unavailable: {exc}"
             return
         self.resume_index = -1
         label = RUNTIME_LABELS.get(runtime_name, runtime_name)
-        self.resume_error = (
+        self.resume_error = catalog_error or (
             ""
             if self.resume_candidates
             else f"no earlier {provider} session in {label} for {Path(self.path).name}"
         )
+        if catalog_error:
+            self.error = public_reason(catalog_error) or catalog_error
 
     def _cycle_resume(self, delta: int) -> None:
         if self.resume_candidates is None:
@@ -2591,6 +2623,8 @@ class Workshop:
             self.error = ""
             self._opened = False
             self._launch_one()
+            selections[index] = self._snapshot()
+            self.agent_slots[index] = dict(selections[index])
             self.launch_results[index] = {
                 "status": "opened" if self._opened else "failed",
                 "reason": self.error,
@@ -2614,6 +2648,14 @@ class Workshop:
             self._refresh_resume_candidates()
         typed = self.session.strip()
         if typed:
+            if typed in {"current", "last"} and runtime_name == "local-native":
+                from vibecrafted_core.workflow import resolve_session_selection
+
+                selection = resolve_session_selection(
+                    provider, typed, normalized_workspace(self.path)
+                )
+                typed = selection["agent_session_id"]
+                self.session = typed  # pin before passing the target into Frame
             for candidate in self.resume_candidates or []:
                 if candidate["session_id"] == typed:
                     return candidate["run_id"], typed

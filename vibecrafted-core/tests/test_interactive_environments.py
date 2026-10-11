@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core import dev_container, spawn
@@ -26,6 +27,161 @@ from vibecrafted_core.spawn import (
 )
 
 UNMETERED = ProviderUsageCapability("codex", False, reason="no live usage side channel")
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_native_catalog_requires_exact_provider_checkout_and_native_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    monkeypatch.setattr(
+        aicx_session_chain, "project_filter_for_root", lambda _: "vetcoders/fixture"
+    )
+    provider_home = tmp_path / "provider-home"
+    store = (
+        provider_home
+        / f".{provider}"
+        / ("projects/-checkout" if provider == "claude" else "sessions/2026/10/11")
+    )
+    store.mkdir(parents=True)
+    for native in ("verified", "wrong-provider", "sibling", "missing-root", "last"):
+        name = (
+            f"{native}.jsonl"
+            if provider == "claude"
+            else f"rollout-2026-10-11T03-00-00-{native}.jsonl"
+        )
+        (store / name).write_text("{}\n")
+    records = [
+        aicx_session_chain.SessionRecord(
+            session_id=native,
+            agent=agent,
+            repo_path=checkout,
+            project="vetcoders/fixture",
+            updated_at="2026-10-11T03:00:00Z",
+        )
+        for native, agent, checkout in (
+            ("verified", provider, str(root)),
+            ("wrong-provider", "grok", str(root)),
+            ("sibling", provider, str(root.parent / "sibling")),
+            ("missing-root", provider, ""),
+            ("missing-file", provider, str(root)),
+            ("last", provider, str(root)),
+        )
+    ]
+
+    class Catalog(aicx_session_chain.SessionChain):
+        def list_sessions(self, **kwargs: object) -> SimpleNamespace:
+            assert kwargs["project"] == "vetcoders/fixture"
+            assert kwargs["root"] == root
+            assert kwargs["agent"] == provider
+            return SimpleNamespace(sessions=records, warnings=[])
+
+    candidates = spawn.native_catalog_session_candidates(
+        provider, root, chain=Catalog(), env={"HOME": str(provider_home)}
+    )
+    assert [item["session_id"] for item in candidates] == ["verified"]
+    assert candidates[0]["run_id"] == ""
+    assert candidates[0]["root"] == str(root)
+    assert candidates[0]["identity_source"] == "native_provider_catalog"
+
+
+def test_native_catalog_deduplicates_and_sorts_utc_recency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    monkeypatch.setattr(
+        aicx_session_chain, "project_filter_for_root", lambda _: "vetcoders/fixture"
+    )
+    store = tmp_path / ".claude/projects/-checkout"
+    store.mkdir(parents=True)
+    for native in ("latest", "earlier", "unknown-time"):
+        (store / f"{native}.jsonl").write_text("{}\n")
+    records = [
+        aicx_session_chain.SessionRecord(
+            session_id=native,
+            agent="claude",
+            repo_path=str(tmp_path),
+            updated_at=stamp,
+        )
+        for native, stamp in (
+            ("latest", "2026-10-11T03:00:00Z"),
+            ("earlier", "2026-10-11T04:00:00+02:00"),
+            ("latest", "2026-10-11T02:00:00Z"),
+            ("unknown-time", "invalid"),
+        )
+    ]
+    catalog = SimpleNamespace(
+        list_sessions=lambda **_: SimpleNamespace(sessions=records)
+    )
+    candidates = spawn.native_catalog_session_candidates(
+        "claude", tmp_path, chain=catalog, env={"HOME": str(tmp_path)}
+    )
+    assert [item["session_id"] for item in candidates] == [
+        "latest",
+        "earlier",
+        "unknown-time",
+    ]
+    assert candidates[0]["updated_at"] == "2026-10-11T03:00:00Z"
+    assert candidates[0]["timestamp"] > candidates[1]["timestamp"]
+    assert candidates[2]["timestamp"] is None
+
+
+def test_native_catalog_cannot_fallback_to_unscoped_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    monkeypatch.setattr(aicx_session_chain, "project_filter_for_root", lambda _: "")
+    catalog = SimpleNamespace(
+        list_sessions=lambda **_: pytest.fail("unscoped catalog query")
+    )
+    assert (
+        spawn.native_catalog_session_candidates("claude", tmp_path, chain=catalog) == []
+    )
+
+
+def test_native_catalog_distinguishes_retrieval_failure_from_empty_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    monkeypatch.setattr(
+        aicx_session_chain, "project_filter_for_root", lambda _: "vetcoders/fixture"
+    )
+    catalog = SimpleNamespace(
+        list_sessions=lambda **_: SimpleNamespace(
+            sessions=[], empty_kind="retrieval_unavailable"
+        )
+    )
+    with pytest.raises(ValueError, match="native session catalog unavailable"):
+        spawn.native_catalog_session_candidates("claude", tmp_path, chain=catalog)
+    catalog.list_sessions = lambda **_: SimpleNamespace(
+        sessions=[], empty_kind="empty_project"
+    )
+    assert (
+        spawn.native_catalog_session_candidates("claude", tmp_path, chain=catalog) == []
+    )
+
+
+def test_native_catalog_names_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    monkeypatch.setattr(
+        aicx_session_chain, "project_filter_for_root", lambda _: "vetcoders/fixture"
+    )
+
+    def unavailable(**_: object) -> None:
+        raise OSError("catalog executable disappeared")
+
+    catalog = SimpleNamespace(list_sessions=unavailable)
+    with pytest.raises(ValueError, match="native session catalog unavailable"):
+        spawn.native_catalog_session_candidates("claude", tmp_path, chain=catalog)
 
 
 def _git(repo: Path, *args: str) -> str:

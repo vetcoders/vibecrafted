@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from vibecrafted_core import spawn
 from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config
 
 SCRIPT = (
@@ -18,6 +19,161 @@ SCRIPT = (
     / "vc-frame"
     / "vc-agent-workshop.py"
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_native_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        spawn, "native_catalog_session_candidates", lambda *_a, **_k: [], raising=False
+    )
+
+
+def test_native_catalog_session_is_offered_and_resumed_without_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.launch_mode = workshop.LAUNCH_MODES.index("resume")
+    recorded = {
+        "run_id": "init-tracked",
+        "session_id": "tracked",
+        "root": str(tmp_path),
+        "updated_at": "2026-09-29T03:00:00Z",
+        "branch": "",
+    }
+    native = {
+        "run_id": "",
+        "session_id": "native-session",
+        "root": str(tmp_path),
+        "updated_at": "2026-10-11T03:00:00Z",
+        "timestamp": 1791687600.0,
+        "identity_source": "native_provider_catalog",
+        "branch": "",
+    }
+    monkeypatch.setattr(workshop, "resumable_interactive_runs", lambda *_: [recorded])
+    monkeypatch.setattr(
+        workshop,
+        "native_catalog_session_candidates",
+        lambda *_: [
+            native,
+            {**native, "session_id": "tracked", "updated_at": recorded["updated_at"]},
+        ],
+        raising=False,
+    )
+    launched._cycle_resume(1)
+    assert launched.session == "native-session"
+    assert launched.resume_run_id == ""
+    assert len(launched.resume_candidates) == 2
+    assert (
+        next(
+            item
+            for item in launched.resume_candidates
+            if item["session_id"] == "tracked"
+        )["run_id"]
+        == "init-tracked"
+    )
+    launched.launch()
+    assert launched.error == ""
+    command = calls[0][calls[0].index("--") + 1 :]
+    assert command[command.index("--session") + 1] == "native-session"
+    assert "--run-id" not in command
+
+
+@pytest.mark.parametrize("selector", ["current", "last"])
+def test_workshop_pins_alias_to_native_id_before_opening_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str
+) -> None:
+    from vibecrafted_core import workflow
+
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.session = selector
+    monkeypatch.setattr(workshop, "resumable_interactive_runs", lambda *_: [])
+
+    def resolve(provider, token, root):
+        assert provider == "codex" and token == selector and Path(root) == tmp_path
+        return {"agent_session_id": "pinned-native", "source_run_id": ""}
+
+    monkeypatch.setattr(workflow, "resolve_session_selection", resolve)
+    launched.launch()
+    assert launched.error == ""
+    command = calls[0][calls[0].index("--") + 1 :]
+    assert command[command.index("--session") + 1] == "pinned-native"
+    assert selector not in command
+    assert launched.session == "pinned-native"
+
+
+@pytest.mark.parametrize("reason", ["no native session", "last is ambiguous"])
+def test_workshop_alias_failure_precedes_any_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    from vibecrafted_core import workflow
+
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.session = "last"
+    monkeypatch.setattr(workshop, "resumable_interactive_runs", lambda *_: [])
+
+    def resolve(*_):
+        raise ValueError(reason)
+
+    monkeypatch.setattr(workflow, "resolve_session_selection", resolve)
+    launched.launch()
+    assert calls == []
+    assert reason in launched.error
+
+
+def test_workshop_catalog_failure_keeps_exact_choices_but_refuses_last_before_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workflow
+
+    workshop = _load()
+    launched, calls = _prepare_launch(
+        workshop, tmp_path, monkeypatch, destination="vibecrafted", live=["vibecrafted"]
+    )
+    launched.session = "last"
+    old = {
+        "run_id": "old-run",
+        "session_id": "old-session",
+        "updated_at": "2026-09-29T03:00:00Z",
+    }
+    monkeypatch.setattr(workshop, "resumable_interactive_runs", lambda *_: [old])
+
+    def unavailable(*_):
+        raise ValueError("native session catalog unavailable: retrieval_unavailable")
+
+    monkeypatch.setattr(workshop, "native_catalog_session_candidates", unavailable)
+    monkeypatch.setattr(spawn, "native_catalog_session_candidates", unavailable)
+    cp = tmp_path / "cp"
+    path = cp / "runtime_runs/old-run/meta.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "agent_session_id": "old-session",
+                "root": str(tmp_path),
+                "started_at": "2026-09-29T03:00:00Z",
+                "run_id": "old-run",
+            }
+        )
+    )
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: cp)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
+    launched._refresh_resume_candidates()
+    assert launched.resume_candidates == [old]
+    assert "catalog unavailable" in launched.resume_error
+    calls.clear()
+    launched.launch()
+    assert calls == []
+    assert "Earlier sessions are unavailable" in launched.error
 
 
 def _load() -> ModuleType:

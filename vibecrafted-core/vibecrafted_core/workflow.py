@@ -5555,7 +5555,8 @@ def resolve_session_selection(
 ) -> dict[str, Any]:
     """Resolve public current/last without global recency or implicit cloning.
 
-    Last is the newest recorded native session in this exact checkout/provider;
+    Last compares recorded run starts and verified native catalog activity in
+    this exact checkout/provider;
     equal timestamps for different sessions are ambiguous, never arbitrary.
     Current requires explicit process context and agrees with recorded ownership.
     """
@@ -5645,6 +5646,17 @@ def resolve_session_selection(
                 continue
             if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:
                 candidates[native] = (timestamp, row)
+        from .spawn import native_catalog_session_candidates
+
+        native_candidates = native_catalog_session_candidates(provider, selected_root)
+        for row in native_candidates:
+            native = row["session_id"]
+            timestamp = row.get("timestamp")
+            if (
+                timestamp is not None
+                and timestamp > candidates.get(native, (float("-inf"), {}))[0]
+            ):
+                candidates[native] = (timestamp, row)
         if not candidates:
             raise ValueError(
                 "no recorded native session for selected repository/provider"
@@ -5656,13 +5668,20 @@ def resolve_session_selection(
                 "last is ambiguous: equal timestamps for different native sessions"
             )
         token = winners[0]
-        provenance = "repository_provider_latest_started"
+        provenance = (
+            "native_provider_catalog_latest_updated"
+            if candidates[token][1].get("identity_source") == "native_provider_catalog"
+            else "repository_provider_latest_started"
+        )
     result = resolve_fork_source(provider, session=token, require_native_fork=False)
     if not result.get("accepted"):
         raise ValueError(str(result.get("detail") or result.get("reason")))
     recorded_root = result.get("source_root")
     if recorded_root and str(Path(recorded_root).resolve()) != selected_root:
         raise ValueError("selected session belongs to a different repository checkout")
+    if provenance == "native_provider_catalog_latest_updated":
+        # Catalog existence is native-session truth, never historical run proof.
+        result = {**result, "source_run_id": "", "source_root": selected_root}
     return {
         **result,
         "session_selector": selector,

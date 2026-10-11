@@ -4,7 +4,92 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from vibecrafted_core import workflow
+from vibecrafted_core import spawn, workflow
+
+
+@pytest.fixture(autouse=True)
+def isolated_native_catalog(monkeypatch):
+    monkeypatch.setattr(
+        spawn, "native_catalog_session_candidates", lambda *_a, **_k: [], raising=False
+    )
+
+
+def test_last_includes_native_history_without_laundering_unknown_run(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
+    unknown = {
+        "run_id": "rsme-unknown",
+        "agent": "claude",
+        "root": str(tmp_path),
+        "provider_session_id": "native-catalog-session",
+        "agent_session_id": "",
+        "native_identity_status": "unknown",
+    }
+    path = tmp_path / "runtime_runs/rsme-unknown/meta.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(unknown))
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        spawn,
+        "native_catalog_session_candidates",
+        lambda agent, root: [
+            {
+                "session_id": "native-catalog-session",
+                "run_id": "",
+                "root": str(root),
+                "timestamp": 100.0,
+                "identity_source": "native_provider_catalog",
+            }
+        ],
+    )
+    selected = workflow.resolve_session_selection("claude", "last", tmp_path)
+    assert selected["agent_session_id"] == "native-catalog-session"
+    assert selected["source_run_id"] == ""
+    assert selected["identity_source"] == "native_provider_catalog_latest_updated"
+    assert path.read_bytes() == before
+
+
+def test_last_merges_recorded_and_native_sessions_and_refuses_distinct_tie(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime
+
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
+    record(tmp_path, "older", "tracked", tmp_path)
+    stamp = datetime.fromisoformat("2026-09-10T09:00:00+00:00").timestamp()
+    rows = [{"session_id": "native", "timestamp": stamp}]
+    monkeypatch.setattr(spawn, "native_catalog_session_candidates", lambda *_: rows)
+    selected = workflow.resolve_session_selection("codex", "last", tmp_path)
+    assert selected["agent_session_id"] == "native"
+    assert selected["source_run_id"] == ""
+    rows.append({"session_id": "native", "timestamp": stamp})
+    assert (
+        workflow.resolve_session_selection("codex", "last", tmp_path)[
+            "agent_session_id"
+        ]
+        == "native"
+    )
+    rows.append({"session_id": "other", "timestamp": stamp})
+    with pytest.raises(ValueError, match="ambiguous"):
+        workflow.resolve_session_selection("codex", "last", tmp_path)
+
+
+def test_last_cannot_claim_old_receipt_is_latest_when_catalog_is_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
+    record(tmp_path, "older", "tracked", tmp_path)
+
+    def unavailable(*_):
+        raise ValueError("native session catalog unavailable: retrieval_unavailable")
+
+    monkeypatch.setattr(spawn, "native_catalog_session_candidates", unavailable)
+    with pytest.raises(ValueError, match="native session catalog unavailable"):
+        workflow.resolve_session_selection("codex", "last", tmp_path)
 
 
 def record(home, name, native, root, agent="codex", stamp="2026-09-09T09:00:00Z"):

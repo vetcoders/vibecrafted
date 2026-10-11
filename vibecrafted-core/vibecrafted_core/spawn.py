@@ -26,6 +26,7 @@ from shutil import which
 from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
+from .aicx_session_chain import SessionChain
 from .clock import utc_now_iso
 from .control_plane import (
     ControlPlaneLockBusy,
@@ -1541,6 +1542,106 @@ def provider_session_exists(
         return any(path.is_file() for path in store.glob(pattern))
     except OSError:
         return False
+
+
+def native_catalog_session_candidates(
+    provider: str,
+    root: str | os.PathLike[str],
+    *,
+    chain: SessionChain | None = None,
+    env: Mapping[str, str] | None = None,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Existing host conversations, independent of control-plane run proof.
+
+    AICX's owner/repo catalog can include sibling worktrees. Native resume
+    additionally requires this exact checkout, provider and existing provider
+    file. An ID discovered here never proves that a historical run opened it.
+    """
+    from .aicx_session_chain import (
+        CliSessionChain,
+        SessionChainError,
+        project_filter_for_root,
+    )
+
+    # These are the provider stores provider_session_exists actually verifies.
+    if provider not in {"claude", "codex"}:
+        return []
+    selected_root = Path(root).expanduser().resolve()
+    project = project_filter_for_root(selected_root)
+    if not project:
+        return []
+    environment = os.environ if env is None else env
+    if chain is None:
+        aicx = which("aicx", path=environment.get("PATH"))
+        if not aicx:
+            raise ValueError(
+                "native session catalog unavailable: aicx executable not found"
+            )
+        chain = CliSessionChain(aicx)
+    try:
+        listing = chain.list_sessions(
+            project=project,
+            root=selected_root,
+            agent=provider,
+            hours=24 * 30,
+            limit=limit,
+        )
+    except SessionChainError as exc:
+        raise ValueError(f"native session catalog unavailable: {exc.kind}") from exc
+    except OSError as exc:
+        raise ValueError(
+            "native session catalog unavailable: transport failed"
+        ) from exc
+    if getattr(listing, "empty_kind", "none") == "retrieval_unavailable":
+        raise ValueError("native session catalog unavailable: retrieval_unavailable")
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in listing.sessions:
+        native = row.session_id
+        if (
+            row.agent != provider
+            or not row.repo_path
+            or native in {"current", "last", "previous"}
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", native) is None
+        ):
+            continue
+        try:
+            if Path(row.repo_path).expanduser().resolve() != selected_root:
+                continue
+        except (OSError, RuntimeError):
+            continue
+        if not provider_session_exists(provider, native, env=environment):
+            continue
+        timestamp = None
+        try:
+            instant = dt.datetime.fromisoformat(row.updated_at)
+            if instant.tzinfo is not None:
+                timestamp = instant.astimezone(dt.UTC).timestamp()
+        except ValueError:
+            pass
+        candidate = {
+            "run_id": "",
+            "session_id": native,
+            "environment": "local-native",
+            "root": str(selected_root),
+            "branch": "",
+            "updated_at": row.updated_at,
+            "timestamp": timestamp,
+            "identity_source": "native_provider_catalog",
+        }
+        previous = candidates.get(native)
+        if previous is None or (
+            timestamp is not None
+            and (previous["timestamp"] is None or timestamp > previous["timestamp"])
+        ):
+            candidates[native] = candidate
+    return sorted(
+        candidates.values(),
+        key=lambda item: (
+            item["timestamp"] if item["timestamp"] is not None else float("-inf")
+        ),
+        reverse=True,
+    )
 
 
 def resumable_interactive_runs(
