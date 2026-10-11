@@ -13,9 +13,12 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PORTABLE = REPO_ROOT / "scripts" / "build-portable-release.sh"
 RELEASE = REPO_ROOT / "scripts" / "build-vibecrafted-release.sh"
+PACKAGER = REPO_ROOT / "scripts" / "package-runtime-pack.sh"
 
 
 def _run(
@@ -44,7 +47,206 @@ def _run(
         text=True,
         capture_output=True,
         check=False,
+        timeout=10,
     )
+
+
+def _cleanup_script(builder: Path) -> str:
+    text = builder.read_text(encoding="utf-8")
+    if builder == PORTABLE:
+        return text[
+            text.index("cleanup_failed_portable() {") : text.index("# The packer")
+        ]
+    start = text.index("\n", text.index('work="$(mktemp -d ')) + 1
+    return text[start : text.index('root="$work/VibecraftedRuntime"')]
+
+
+def _failing_owned_rm() -> str:
+    return r"""
+rm() {
+  if [[ "$1" == -rf ]]; then
+    [[ "${!#}" == "$OWNED_DIR" ]] || exit 97
+    local count=0
+    if [[ -f "$COUNT_FILE" ]]; then read -r count < "$COUNT_FILE"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$COUNT_FILE"
+    if ((count <= RM_FAILURES)); then return 1; fi
+  fi
+  command rm "$@"
+}
+sleep() { :; }
+"""
+
+
+@pytest.mark.parametrize("builder", [PORTABLE, PACKAGER], ids=["portable", "packager"])
+@pytest.mark.parametrize("rm_failures", [2, 99], ids=["transient", "permanent"])
+@pytest.mark.parametrize("status", [0, 17], ids=["ready", "failed"])
+def test_owned_cleanup_retries_and_preserves_build_status(
+    tmp_path: Path, builder: Path, rm_failures: int, status: int
+) -> None:
+    owned = tmp_path / "private-staging"
+    owned.mkdir()
+    (owned / ".DS_Store").write_bytes(b"host metadata")
+    sibling = tmp_path / "donor-cache"
+    sibling.write_bytes(b"foreign")
+    outputs = [
+        tmp_path / name for name in ("candidate.tar.gz", "checksum", "output.json")
+    ]
+    for output in outputs:
+        output.write_bytes(b"candidate")
+    count = tmp_path / "rm-count"
+    script = (
+        "set -euo pipefail\n"
+        + _failing_owned_rm()
+        + _cleanup_script(builder)
+        + f"exit {status}\n"
+    )
+    result = _run(
+        script,
+        {
+            "OWNED_DIR": str(owned),
+            "WORK_DIR": str(owned),
+            "work": str(owned),
+            "COUNT_FILE": str(count),
+            "RM_FAILURES": str(rm_failures),
+            "PORTABLE": str(outputs[0]),
+            "PORTABLE_CHECKSUM": str(outputs[1]),
+            "PORTABLE_OUTPUT": str(outputs[2]),
+            "PORTABLE_READY": "1" if status == 0 else "0",
+        },
+    )
+    assert result.returncode == status, result.stderr
+    assert count.read_text().strip() == "3"
+    assert owned.exists() == (rm_failures == 99)
+    assert sibling.read_bytes() == b"foreign"
+    if rm_failures == 99:
+        assert "warning: could not remove temporary directory" in result.stderr
+        assert str(owned) in result.stderr
+    else:
+        assert "warning" not in result.stderr
+    for output in outputs:
+        assert output.exists() == (builder == PACKAGER or status == 0)
+
+
+@pytest.mark.parametrize("signal,status", [("INT", 130), ("TERM", 143), ("HUP", 129)])
+def test_packager_signal_preserves_failure_and_cleans_once(
+    tmp_path: Path, signal: str, status: int
+) -> None:
+    owned = tmp_path / "private-staging"
+    owned.mkdir()
+    count = tmp_path / "rm-count"
+    result = _run(
+        "set -euo pipefail\n"
+        + _failing_owned_rm()
+        + _cleanup_script(PACKAGER)
+        + f"kill -s {signal} $$\nprintf 'unexpected-continued\\n'\n",
+        {
+            "OWNED_DIR": str(owned),
+            "work": str(owned),
+            "COUNT_FILE": str(count),
+            "RM_FAILURES": "2",
+        },
+    )
+    assert result.returncode == status, result.stderr
+    assert count.read_text().strip() == "3"
+    assert not owned.exists()
+    assert "unexpected-continued" not in result.stdout
+
+
+def test_portable_output_cleanup_failure_preserves_build_failure(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "refused.tar.gz"
+    output.write_bytes(b"refused")
+    result = _run(
+        "set -euo pipefail\n"
+        "rm() { return 1; }\n" + _cleanup_script(PORTABLE) + "exit 23\n",
+        {
+            "WORK_DIR": "",
+            "PORTABLE_READY": "0",
+            "PORTABLE": str(output),
+            "PORTABLE_CHECKSUM": str(output) + ".sha256",
+            "PORTABLE_OUTPUT": str(tmp_path / "output.json"),
+        },
+    )
+    assert result.returncode == 23
+    assert "warning: could not remove refused outputs" in result.stderr
+    assert output.read_bytes() == b"refused"
+
+
+def _materialize_script() -> str:
+    text = RELEASE.read_text(encoding="utf-8")
+    start = text.index("materialize_runtime_payload() {")
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+@pytest.mark.parametrize("rm_failures", [2, 99], ids=["transient", "permanent"])
+def test_materialize_cleanup_retries_and_refuses_exhaustion(
+    tmp_path: Path, rm_failures: int
+) -> None:
+    build = tmp_path / "unified-release"
+    owned = build / "runtime-pack-payload" / "VibecraftedRuntime"
+    owned.mkdir(parents=True)
+    (owned / ".DS_Store").write_bytes(b"host metadata")
+    sibling = build / "cargo"
+    sibling.mkdir()
+    sentinel = sibling / "keep"
+    sentinel.write_bytes(b"foreign")
+    count = tmp_path / "rm-count"
+    script = (
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        "die() { printf 'FATAL: %s\\n' \"$*\" >&2; exit 1; }\n"
+        "mkdir() { printf 'materialization-started\\n'; exit 0; }\n"
+        + _failing_owned_rm()
+        + _materialize_script()
+        + 'materialize_runtime_payload "$OWNED_DIR" a b c d e f g h i j\n'
+    )
+    result = _run(
+        script,
+        {
+            "BUILD_DIR": str(build),
+            "OWNED_DIR": str(owned),
+            "COUNT_FILE": str(count),
+            "RM_FAILURES": str(rm_failures),
+        },
+    )
+    assert count.read_text().strip() == "3"
+    assert sentinel.read_bytes() == b"foreign"
+    if rm_failures == 99:
+        assert result.returncode == 1
+        assert (
+            "could not clear owned Runtime Pack payload after 3 attempts"
+            in result.stderr
+        )
+        assert "materialization-started" not in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "materialization-started" in result.stdout
+        assert not owned.exists()
+
+
+@pytest.mark.parametrize("target", ["", "cargo"])
+def test_materialize_cleanup_refuses_unowned_path(tmp_path: Path, target: str) -> None:
+    build = tmp_path / "unified-release"
+    sibling = build / "cargo"
+    sibling.mkdir(parents=True)
+    sentinel = sibling / "keep"
+    sentinel.write_bytes(b"foreign")
+    result = _run(
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        "die() { printf 'FATAL: %s\\n' \"$*\" >&2; exit 1; }\n"
+        "rm() { printf 'unexpected-remove\\n'; exit 97; }\n"
+        + _materialize_script()
+        + 'materialize_runtime_payload "$TARGET" a b c d e f g h i j\n',
+        {"BUILD_DIR": str(build), "TARGET": str(sibling) if target else ""},
+    )
+    assert result.returncode == 1
+    assert "refusing to clear unowned Runtime Pack payload" in result.stderr
+    assert "unexpected-remove" not in result.stdout
+    assert sentinel.read_bytes() == b"foreign"
 
 
 def test_fail_g1_portable_hygiene_failure_removes_unpublished_tarball(
@@ -67,15 +269,7 @@ PORTABLE_CHECKSUM={checksum.as_posix()!r}
 PORTABLE_OUTPUT={output.as_posix()!r}
 PORTABLE_READY=0
 WORK_DIR=""
-cleanup_failed_portable() {{
-  if [[ -n "${{WORK_DIR:-}}" ]]; then
-    rm -rf "$WORK_DIR"
-  fi
-  if [[ "${{PORTABLE_READY:-0}}" != 1 ]]; then
-    rm -f "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"
-  fi
-}}
-trap cleanup_failed_portable EXIT
+{_cleanup_script(PORTABLE)}
 die() {{
   printf 'FATAL: %s\n' "$*" >&2
   printf 'FATAL: %s\n' "$*"
@@ -104,12 +298,7 @@ PORTABLE_CHECKSUM=""
 PORTABLE_OUTPUT=""
 PORTABLE_READY=0
 WORK_DIR=""
-cleanup_failed_portable() {{
-  if [[ "${{PORTABLE_READY:-0}}" != 1 ]]; then
-    rm -f "$PORTABLE"
-  fi
-}}
-trap cleanup_failed_portable EXIT
+{_cleanup_script(PORTABLE)}
 PORTABLE_READY=1
 """
     result = _run(script)

@@ -948,10 +948,21 @@ materialize_runtime_payload() {
   local control_observe_source="$9"
   local admin_source="${10}"
   local procs_source="${11}"
-  local canonical_deck python_seed seed_python python_home
+  local canonical_deck python_seed seed_python python_home _attempt
 
   log "Materializing the App-independent Runtime Pack payload"
-  rm -rf "$runtime"
+  [[ "$runtime" == "$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime" ]] \
+    || die "refusing to clear unowned Runtime Pack payload: $runtime"
+  # Host metadata can recreate .DS_Store during removal. Unlike EXIT cleanup,
+  # this reset must succeed before any bytes are materialized into the payload.
+  for _attempt in 1 2 3; do
+    if rm -rf -- "$runtime" 2>/dev/null; then
+      break
+    fi
+    [[ "$_attempt" != 3 ]] \
+      || die "could not clear owned Runtime Pack payload after 3 attempts: $runtime"
+    sleep 0.05
+  done
   mkdir -p "$runtime/bin" "$runtime/libexec" "$runtime/scripts" \
     "$runtime/vibecrafted-core" "$runtime/vibecrafted-mcp" \
     "$runtime/config" "$runtime/server/site"
