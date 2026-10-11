@@ -9,12 +9,13 @@ use crate::launch::{
     Presentation, SandboxChoice, build_launch_command,
 };
 use crate::layout::PaneId;
-use crate::memory::{self, MemoryState};
+use crate::memory::MemoryState;
 use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionControlState};
 use crate::observe::{self, ObserveHealth, ObserveState};
 use crate::polarize::{PolarizeBand, PolarizeIntent};
 use crate::refresh::{
-    RefreshJob, RefreshNeeds, RefreshResult, RefreshState, TranscriptJob, TranscriptResult,
+    ProjectionLoadState, RefreshJob, RefreshNeeds, RefreshResult, RefreshState, TranscriptJob,
+    TranscriptResult,
 };
 use crate::skills_catalog::{self, SkillPayloadKind};
 use crate::state::{
@@ -485,18 +486,14 @@ pub struct RepoEdit {
 
 impl App {
     pub fn new(config: AppConfig) -> anyhow::Result<Self> {
-        let state = ControlPlaneState::load(&config.state_root)
-            .unwrap_or_else(|_| ControlPlaneState::empty(&config.state_root));
-        trace_expensive_refresh("control_plane");
-        let runs = render_runs(&state);
+        let state = ControlPlaneState::empty(&config.state_root);
         let launch_presentation = config.presentation;
         let mission_artifact_root = mission_control::default_artifact_root();
         let observe_origin = config.server.clone();
-        let memory_project = memory::default_project(&config.repo);
         let mut app = Self {
             config,
             state,
-            runs,
+            runs: Vec::new(),
             selected: 0,
             active_tab: AppTab::Monitor.index(),
             launch_kind: LaunchKind::Workflow,
@@ -531,13 +528,14 @@ impl App {
                 origin: observe_origin,
                 ..ObserveState::default()
             },
-            memory: MemoryState {
-                project: memory_project,
-                ..MemoryState::default()
-            },
+            memory: MemoryState::default(),
             interaction: InteractionState::default(),
             repo_edit: RepoEdit::default(),
-            refresh: RefreshState::default(),
+            refresh: RefreshState {
+                pending: RefreshNeeds::everything(),
+                projection: ProjectionLoadState::Loading,
+                ..RefreshState::default()
+            },
             home_rows_memo: HomeRowsMemo::default(),
         };
         apply_run_filters(
@@ -547,13 +545,8 @@ impl App {
             &app.config.repo,
         );
         app.sync_selection();
-        app.refresh_mux();
-        app.refresh_polarize();
-        app.refresh_mission_control();
-        let _ = app.refresh_observe();
-        app.refresh_memory();
         let path = rmcp_mux::ipc::server::socket_path();
-        let summaries = std::sync::Arc::new(std::sync::RwLock::new(app.mux_summaries.clone()));
+        let summaries = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         app.mux_subscriber = Some(crate::mux::MuxSubscriber::start(path, summaries));
         Ok(app)
     }
@@ -576,7 +569,17 @@ impl App {
         if self.refresh.pending.is_empty() {
             return None;
         }
-        let needs = std::mem::take(&mut self.refresh.pending);
+        if self.refresh.projection == ProjectionLoadState::Loading
+            && !self.refresh.pending.control_plane
+            && !self.refresh.pending.force_control_plane
+        {
+            return None;
+        }
+        let mut needs = std::mem::take(&mut self.refresh.pending);
+        if self.refresh.projection == ProjectionLoadState::Loading && needs.memory {
+            needs.memory = false;
+            self.refresh.pending.memory = true;
+        }
         self.refresh.requested_generation += 1;
         Some(RefreshJob {
             generation: self.refresh.requested_generation,
@@ -630,11 +633,18 @@ impl App {
                 });
             }
         }
+        if let Some(memory) = result.memory {
+            if current_repo {
+                self.memory = memory;
+            } else {
+                self.refresh_memory();
+            }
+        }
         true
     }
 
-    /// Reload the canonical control-plane projection inline. Startup and tests
-    /// only: the running console hands this read to the refresh worker.
+    /// Reload the canonical control-plane projection inline for explicit
+    /// noninteractive callers and tests; the console uses the refresh worker.
     pub fn refresh_control_plane(&mut self) {
         let loaded =
             ControlPlaneState::load(&self.config.state_root).map_err(|error| error.to_string());
@@ -650,11 +660,13 @@ impl App {
             Ok(state) => {
                 trace_expensive_refresh("control_plane");
                 self.state = state;
+                self.refresh.projection = ProjectionLoadState::Ready;
             }
             Err(error) => {
                 self.append_status(format!("control-plane unavailable: {error}"));
                 if self.state.runs.is_empty() && self.state.retained_runs.is_empty() {
                     self.state = ControlPlaneState::empty(&self.config.state_root);
+                    self.refresh.projection = ProjectionLoadState::Unavailable(error);
                 }
             }
         }
@@ -1177,8 +1189,12 @@ impl App {
     }
 
     pub fn refresh_memory(&mut self) {
-        let project = memory::default_project(&self.config.repo);
-        self.memory = memory::load_continuity(&project);
+        self.memory.error = None;
+        self.memory.lines = vec!["Loading AICX continuity…".to_string()];
+        self.request_refresh(RefreshNeeds {
+            memory: true,
+            ..RefreshNeeds::default()
+        });
     }
 
     pub fn refresh_mission_control(&mut self) {
@@ -2063,10 +2079,7 @@ impl App {
         // Live runs are scoped to the workspace and the AICX project is derived
         // from it; continuity itself reloads when the memory overlay opens.
         self.refresh_rendered_runs();
-        self.memory = MemoryState {
-            project: memory::default_project(&self.config.repo),
-            ..MemoryState::default()
-        };
+        self.memory = MemoryState::default();
         self.request_refresh(RefreshNeeds {
             polarize: true,
             mission_control: true,

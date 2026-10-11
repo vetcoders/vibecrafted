@@ -30,6 +30,8 @@ pub struct RefreshNeeds {
     pub force_control_plane: bool,
     pub polarize: bool,
     pub mission_control: bool,
+    /// Continuity is read only when the person asks for Memory.
+    pub memory: bool,
 }
 
 impl RefreshNeeds {
@@ -39,6 +41,7 @@ impl RefreshNeeds {
             force_control_plane: true,
             polarize: true,
             mission_control: true,
+            memory: false,
         }
     }
 
@@ -52,12 +55,21 @@ impl RefreshNeeds {
             force_control_plane: self.force_control_plane || other.force_control_plane,
             polarize: self.polarize || other.polarize,
             mission_control: self.mission_control || other.mission_control,
+            memory: self.memory || other.memory,
         }
     }
 
     fn touches_mission_control(self) -> bool {
-        !self.is_empty()
+        self.control_plane || self.force_control_plane || self.polarize || self.mission_control
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProjectionLoadState {
+    Loading,
+    #[default]
+    Ready,
+    Unavailable(String),
 }
 
 /// The console's side of the hand-off: reads not yet handed to the worker,
@@ -67,6 +79,7 @@ pub struct RefreshState {
     pub pending: RefreshNeeds,
     pub requested_generation: u64,
     pub applied_generation: u64,
+    pub projection: ProjectionLoadState,
 }
 
 /// One hand-off to the worker, numbered so its answer can be ordered.
@@ -101,6 +114,7 @@ pub struct RefreshResult {
     pub control_plane: Option<Result<ControlPlaneState, String>>,
     pub polarize: Option<Vec<PolarizeIntent>>,
     pub mission_control: Option<MissionControlState>,
+    pub memory: Option<crate::memory::MemoryState>,
 }
 
 /// The reads a refresh performs. Production uses the canonical loaders; tests
@@ -115,6 +129,10 @@ pub trait RefreshSource: Send + 'static {
         artifact_root: &Path,
         intents: &[PolarizeIntent],
     ) -> MissionControlState;
+    fn memory(&mut self, repo: &Path) -> crate::memory::MemoryState {
+        let project = crate::memory::default_project(repo);
+        crate::memory::load_continuity(&project)
+    }
 }
 
 /// The loaders the console used to call inline.
@@ -413,6 +431,7 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
         control_plane: None,
         polarize: None,
         mission_control: None,
+        memory: None,
     };
     let needs = job.needs;
     if needs.control_plane || needs.force_control_plane {
@@ -443,6 +462,9 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
     if needs.touches_mission_control() {
         result.mission_control =
             Some(source.mission_control(&cache.state, &job.artifact_root, &cache.intents));
+    }
+    if needs.memory {
+        result.memory = Some(source.memory(&job.repo));
     }
     result
 }

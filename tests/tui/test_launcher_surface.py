@@ -10,6 +10,44 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def test_tui_enters_voc_without_foreground_control_plane_sync(tmp_path: Path) -> None:
+    deck = (REPO_ROOT / "scripts/vibecrafted").read_text(encoding="utf-8")
+    start = deck.index("cmd_tui() {")
+    stop = deck.index("\n_help_topic_alias()", start)
+    binary = tmp_path / "voc"
+    binary.write_text(
+        "#!/bin/sh\nprintf 'VOC entered %s\\n' \"$*\"\n", encoding="utf-8"
+    )
+    binary.chmod(0o755)
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            deck[start:stop],
+            "_is_help_flag() { return 1; }",
+            "_voc_app_dir() { return 1; }",
+            "_runtime_payload_root() { printf '%s\\n' \"$TEST_ROOT\"; }",
+            "_resolve_voc_binary() { printf '%s\\n' \"$TEST_ROOT/voc\"; }",
+            "_repo_source_root() { printf '%s\\n' \"$TEST_ROOT\"; }",
+            "_sync_control_plane_best_effort() { echo 'foreground sync invoked'; return 83; }",
+            "crafted_home=$TEST_ROOT/home",
+            "crafted_tools=$TEST_ROOT/tools",
+            "cmd_tui --repo /selected/project",
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TEST_ROOT": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "VOC entered" in result.stdout
+    assert "--repo /selected/project" in result.stdout
+    assert "foreground sync" not in result.stdout
+
+
 def _run_launcher_help(tmp_path: Path, *args: str) -> str:
     home = tmp_path / "home"
     env = os.environ.copy()

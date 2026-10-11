@@ -7,6 +7,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// PATH for the `aicx` subprocess: absolute inherited entries, minus the
 /// generation `bin/` that would shadow the Founder's own `aicx` (Homebrew /
@@ -132,15 +133,18 @@ pub fn default_project(launch_root: &Path) -> String {
 }
 
 pub fn load_continuity(project: &str) -> MemoryState {
-    let output = aicx()
-        .args(["continuity", "show", "-p", project, "-H", "24"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+    let mut command = aicx();
+    command.args(["continuity", "show", "-p", project, "-H", "24"]);
+    load_continuity_command(project, command, crate::launch::CATALOG_ANSWER_DEADLINE)
+}
+
+fn load_continuity_command(project: &str, command: Command, deadline: Duration) -> MemoryState {
+    let output = crate::launch::run_bounded_read(command, deadline, "aicx continuity");
 
     match output {
-        Ok(result) if result.status.success() => {
+        Ok(crate::launch::LauncherRun::Completed { output: result, .. })
+            if result.status.success() =>
+        {
             let text = String::from_utf8_lossy(&result.stdout);
             let lines: Vec<String> = text
                 .lines()
@@ -158,7 +162,7 @@ pub fn load_continuity(project: &str) -> MemoryState {
                 error: None,
             }
         }
-        Ok(result) => MemoryState {
+        Ok(crate::launch::LauncherRun::Completed { output: result, .. }) => MemoryState {
             project: project.to_string(),
             lines: Vec::new(),
             error: Some(
@@ -168,6 +172,19 @@ pub fn load_continuity(project: &str) -> MemoryState {
                     .unwrap_or("aicx continuity failed")
                     .to_string(),
             ),
+        },
+        Ok(crate::launch::LauncherRun::Undecided { .. }) => MemoryState {
+            project: project.to_string(),
+            error: Some(format!(
+                "AICX continuity did not answer within {}s; press m to retry",
+                deadline.as_secs().max(1)
+            )),
+            ..MemoryState::default()
+        },
+        Ok(crate::launch::LauncherRun::Unobservable { error, .. }) => MemoryState {
+            project: project.to_string(),
+            error: Some(error),
+            ..MemoryState::default()
         },
         Err(error) => MemoryState {
             project: project.to_string(),
@@ -213,6 +230,41 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn continuity_deadline_cancels_and_reaps_only_its_query_child() {
+        let dir = tempdir().unwrap();
+        let pid_file = dir.path().join("query.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf '%s' $$ > \"$1\"; exec /bin/sleep 10", "query"])
+            .arg(&pid_file);
+        let started = std::time::Instant::now();
+        let state = load_continuity_command("test/project", command, Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(state.error.as_deref().unwrap().contains("did not answer"));
+        assert_eq!(state.project, "test/project");
+        let pid = fs::read_to_string(pid_file).unwrap();
+        let status = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "timed out query was cancelled and reaped"
+        );
+    }
+
+    #[test]
+    fn continuity_uses_the_existing_concurrent_output_capture() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "i=0; while [ $i -lt 10000 ]; do printf 'diagnostic payload..............................\\n' >&2; i=$((i + 1)); done; printf 'continuity ready\\n'"]);
+        let state = load_continuity_command("test/project", command, Duration::from_secs(10));
+        assert_eq!(state.lines, vec!["continuity ready"]);
+        assert!(state.error.is_none());
+    }
 
     #[test]
     fn user_tool_path_skips_generation_bin() {
