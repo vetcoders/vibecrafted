@@ -140,7 +140,18 @@ def test_operator_continue_run_uses_provider_session_after_stall(
         "agent_session_id": "988ace3a-5cb9-4cae-a229-20e1d3222d45",
         "runtime_session_id": "01a02548-3097-7cd2-b7b2-61e218253026",
     }
-    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: dict(parent))
+    monkeypatch.setattr(
+        workflow,
+        "lookup_runtime_run_meta",
+        lambda token: dict(parent) if token == parent["run_id"] else None,
+    )
+    lifecycle_lookups: list[str] = []
+
+    def fresh_lookup(run_id: str) -> dict[str, Any]:
+        lifecycle_lookups.append(run_id)
+        return dict(parent)
+
+    monkeypatch.setattr(workflow, "lookup_run", fresh_lookup)
     monkeypatch.setattr(workflow, "_native_resume_meta", lambda *_a, **_k: dict(parent))
     monkeypatch.setattr(workflow, "_worker_process_alive", lambda _run: False)
     seen: dict[str, Any] = {}
@@ -169,6 +180,7 @@ def test_operator_continue_run_uses_provider_session_after_stall(
 
     assert result["accepted"] is True
     assert result["resume_of"] == "owne-260822-093025-32039"
+    assert lifecycle_lookups == [parent["run_id"]]
     assert seen["agent_session_id"] == "988ace3a-5cb9-4cae-a229-20e1d3222d45"
     assert "stalled ownership run" in str(seen.get("prompt") or "")
 

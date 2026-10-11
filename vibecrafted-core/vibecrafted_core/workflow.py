@@ -32,6 +32,7 @@ from .control_plane import (
     RunNotResolved,
     _await_child_runs,
     await_run,
+    bare_run_id,
     control_plane_home,
     ensure_session_id,
     lookup_run,
@@ -5454,12 +5455,68 @@ def looks_like_control_plane_run_id(value: str) -> bool:
     return any(part.isdigit() for part in rest.split("-"))
 
 
+def _read_identity_run_facts(run_id: str) -> dict[str, Any] | None:
+    """Read recorded identity without lifecycle synchronization or discovery."""
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    try:
+        meta = lookup_runtime_run_meta(target)
+        snapshot = lookup_run_snapshot(target)
+        if snapshot is None and any(
+            path.exists()
+            for path in (
+                run_snapshot_dir() / f"{target}.json",
+                run_snapshot_dir() / "archive" / f"{target}.json",
+            )
+        ):
+            raise ValueError("identity facts unavailable: invalid run snapshot")
+    except OSError as exc:
+        raise ValueError(
+            "identity facts unavailable: recorded facts could not be read"
+        ) from exc
+    if meta is None:
+        return snapshot
+    if not meta or str(meta.get("run_id") or target) != target:
+        raise ValueError("identity facts unavailable: invalid canonical run metadata")
+    for key in ("agent", "root"):
+        canonical = str(meta.get(key) or "")
+        projected = str((snapshot or {}).get(key) or "")
+        if key == "root" and canonical and projected:
+            try:
+                canonical = str(Path(canonical).resolve())
+                projected = str(Path(projected).resolve())
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(
+                    "identity facts unavailable: recorded root could not be resolved"
+                ) from exc
+        if canonical and projected and canonical != projected:
+            raise ValueError(f"identity facts unavailable: conflicting recorded {key}")
+    merged = _merge_run_and_meta(meta, snapshot or {})
+    # Canonical blanks are uncertainty, never permission to reuse an old
+    # projection's provider identity or its root/provider attribution.
+    # Projected runtime aliases remain evidence for namespace refusals.
+    for key in (
+        "agent",
+        "root",
+        "agent_session_id",
+        "session_id",
+        "native_identity_status",
+    ):
+        merged[key] = meta.get(key, "")
+    merged["run_id"] = target
+    return merged
+
+
 def classify_resume_identity(token: str) -> str:
     """Classify a resume token as run_id, provider session, or Vibecrafted session."""
     text = str(token or "").strip()
     if not text:
         return "empty"
-    if looks_like_control_plane_run_id(text) or lookup_run(text) is not None:
+    if (
+        looks_like_control_plane_run_id(text)
+        or _read_identity_run_facts(text) is not None
+    ):
         return "run_id"
     found = find_run_for_identity_token(text)
     if found is None:
@@ -5488,7 +5545,7 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
     text = str(token or "").strip()
     if not text:
         return None
-    direct = lookup_run(text)
+    direct = _read_identity_run_facts(text)
     if direct is not None:
         return direct
     root = control_plane_home() / "runtime_runs"
@@ -5500,8 +5557,10 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        raise ValueError(
+            "identity facts unavailable: runtime metadata could not be read"
+        ) from exc
     for path in metas[:300]:
         payload = _read_json_object(path)
         for key in (
@@ -5512,8 +5571,12 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
         ):
             if str(payload.get(key) or "").strip() != text:
                 continue
-            run_id = str(payload.get("run_id") or path.parent.name)
-            return lookup_run(run_id) or payload
+            run_id = path.parent.name
+            if str(payload.get("run_id") or run_id) != run_id:
+                raise ValueError(
+                    "identity facts unavailable: invalid canonical run metadata"
+                )
+            return _read_identity_run_facts(run_id) or {**payload, "run_id": run_id}
     return None
 
 

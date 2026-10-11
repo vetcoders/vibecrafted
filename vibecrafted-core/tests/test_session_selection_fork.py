@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from vibecrafted_core import spawn, workflow
+from vibecrafted_core import control_plane, spawn, workflow
 
 
 @pytest.fixture(autouse=True)
@@ -12,6 +12,249 @@ def isolated_native_catalog(monkeypatch):
     monkeypatch.setattr(
         spawn, "native_catalog_session_candidates", lambda *_a, **_k: [], raising=False
     )
+
+
+@pytest.fixture
+def read_only_identity_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
+    monkeypatch.setattr(control_plane, "control_plane_home", lambda: tmp_path)
+
+    def forbidden_lookup(_):
+        pytest.fail("native identity selection must not synchronize control plane")
+
+    monkeypatch.setattr(workflow, "lookup_run", forbidden_lookup)
+    return tmp_path
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_native_last_and_pinned_admission_never_synchronize_control_plane(
+    read_only_identity_storage, monkeypatch, recorded
+):
+    root = read_only_identity_storage
+    if recorded:
+        record(root, "work-recorded", "native-session", root, agent="claude")
+    monkeypatch.setattr(
+        spawn,
+        "native_catalog_session_candidates",
+        lambda *_: [
+            {
+                "session_id": "native-session",
+                "timestamp": 2_000_000_000.0,
+                "identity_source": "native_provider_catalog",
+            }
+        ],
+    )
+    selected = workflow.resolve_session_selection("claude", "last", root)
+    assert selected["source_run_id"] == ""
+    assert (
+        workflow.resolve_session_selection(
+            "claude", "native-session", root, selection=selected
+        )
+        == selected
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("run_shape", "control-plane run id"),
+        ("uuid_run", "control-plane run id"),
+        ("runtime", "runtime_session_id"),
+        ("shared_runtime", "runtime_session_id"),
+        ("provider", "recorded=claude requested=codex"),
+        ("root", "different repository checkout"),
+    ],
+)
+def test_read_only_native_selection_preserves_identity_guards(
+    read_only_identity_storage, kind, message
+):
+    root = read_only_identity_storage
+    native = "00000000-0000-4000-8000-000000000001"
+    run_id = native if kind == "uuid_run" else "work-261011-000000-fixture"
+    record(
+        root,
+        run_id,
+        native,
+        root / "sibling" if kind == "root" else root,
+        agent="claude" if kind == "provider" else "codex",
+    )
+    token = run_id if kind in {"run_shape", "uuid_run"} else native
+    if kind in {"runtime", "shared_runtime"}:
+        path = root / "runtime_runs" / run_id / "meta.json"
+        payload = json.loads(path.read_text())
+        payload["runtime_session_id"] = native
+        if kind == "runtime":
+            payload["agent_session_id"] = "other-native-session"
+        path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=message):
+        workflow.resolve_session_selection("codex", token, root)
+
+
+@pytest.mark.parametrize("corruption", ["unreadable", "mismatch", "transport"])
+def test_read_only_identity_names_unavailable_canonical_facts(
+    read_only_identity_storage, monkeypatch, corruption
+):
+    root = read_only_identity_storage
+    token = "00000000-0000-4000-8000-000000000001"
+    path = root / "runtime_runs" / token / "meta.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "[]" if corruption == "unreadable" else json.dumps({"run_id": "different"})
+    )
+    if corruption == "transport":
+
+        def unavailable(_):
+            raise OSError("read failed")
+
+        monkeypatch.setattr(workflow, "lookup_runtime_run_meta", unavailable)
+    with pytest.raises(ValueError, match="identity facts unavailable"):
+        workflow.resolve_session_selection("codex", token, root)
+
+
+def test_read_only_identity_rejects_mismatched_record_for_native_token(
+    read_only_identity_storage,
+):
+    root = read_only_identity_storage
+    record(root, "work-recorded", "native-session", root)
+    path = root / "runtime_runs/work-recorded/meta.json"
+    payload = json.loads(path.read_text())
+    payload["run_id"] = "work-other"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="identity facts unavailable"):
+        workflow.resolve_session_selection("codex", "native-session", root)
+
+
+def test_read_only_identity_does_not_fill_unknown_native_identity_from_projection(
+    read_only_identity_storage, monkeypatch
+):
+    root = read_only_identity_storage
+    run_id = "work-recorded"
+    record(root, run_id, "", root)
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run_snapshot",
+        lambda _: {
+            "run_id": run_id,
+            "agent": "codex",
+            "agent_session_id": "stale-native",
+            "session_id": "stale-native",
+            "native_identity_status": "proven",
+            "root": str(root),
+        },
+    )
+    found = workflow.find_run_for_identity_token(run_id)
+    assert found["agent_session_id"] == ""
+    assert found["session_id"] == ""
+    assert found["native_identity_status"] == ""
+    assert found["agent"] == "codex"
+    assert found["root"] == str(root)
+
+
+def test_read_only_identity_retains_projected_runtime_namespace_guard(
+    read_only_identity_storage, monkeypatch
+):
+    root = read_only_identity_storage
+    run_id = "work-recorded"
+    token = "00000000-0000-4000-8000-000000000001"
+    record(root, run_id, token, root)
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run_snapshot",
+        lambda target: (
+            {"run_id": run_id, "runtime_session_id": token}
+            if target == run_id
+            else None
+        ),
+    )
+    with pytest.raises(ValueError, match="runtime_session_id"):
+        workflow.resolve_session_selection("codex", token, root)
+
+
+@pytest.mark.parametrize("key", ["agent", "root"])
+def test_read_only_identity_refuses_conflicting_projected_attribution(
+    read_only_identity_storage, monkeypatch, key
+):
+    root = read_only_identity_storage
+    run_id = "work-recorded"
+    record(root, run_id, "native-session", root)
+    projected = {"run_id": run_id, "agent": "codex", "root": str(root)}
+    projected[key] = "claude" if key == "agent" else str(root / "sibling")
+    monkeypatch.setattr(workflow, "lookup_run_snapshot", lambda _: projected)
+    with pytest.raises(ValueError, match=f"conflicting recorded {key}"):
+        workflow.find_run_for_identity_token(run_id)
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError])
+def test_read_only_identity_names_unresolvable_recorded_root(
+    read_only_identity_storage, monkeypatch, error
+):
+    root = read_only_identity_storage
+    run_id = "work-recorded"
+    record(root, run_id, "native-session", root)
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run_snapshot",
+        lambda _: {"run_id": run_id, "agent": "codex", "root": str(root)},
+    )
+
+    def unavailable(_):
+        raise error("resolve failed")
+
+    monkeypatch.setattr(Path, "resolve", unavailable)
+    with pytest.raises(ValueError, match="identity facts unavailable: recorded root"):
+        workflow.find_run_for_identity_token(run_id)
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("payload", ["[]", '{"run_id": "different"}', "{"])
+def test_read_only_identity_names_invalid_existing_snapshot(
+    read_only_identity_storage, archived, payload
+):
+    root = read_only_identity_storage
+    token = "00000000-0000-4000-8000-000000000001"
+    directory = root / "runs" / "archive" if archived else root / "runs"
+    directory.mkdir(parents=True)
+    (directory / f"{token}.json").write_text(payload)
+    with pytest.raises(
+        ValueError, match="identity facts unavailable: invalid run snapshot"
+    ):
+        workflow.resolve_session_selection("codex", token, root)
+
+
+def test_unrecorded_exact_native_identity_remains_unattributed(
+    read_only_identity_storage,
+):
+    root = read_only_identity_storage
+    selected = workflow.resolve_session_selection("codex", "native-session", root)
+    assert selected["agent_session_id"] == "native-session"
+    assert selected["source_run_id"] == ""
+    assert selected["source_root"] == ""
+
+
+def test_run_id_action_still_uses_fresh_lifecycle_lookup(
+    read_only_identity_storage, monkeypatch
+):
+    root = read_only_identity_storage
+    run_id = "work-261011-000000-fixture"
+    record(root, run_id, "old-native", root)
+    fresh = {
+        "run_id": run_id,
+        "agent": "codex",
+        "agent_session_id": "fresh-native",
+        "root": str(root),
+    }
+    calls = []
+
+    def lookup(token):
+        calls.append(token)
+        return fresh
+
+    monkeypatch.setattr(workflow, "lookup_run", lookup)
+    monkeypatch.setattr(workflow, "_native_resume_meta", lambda *_: {})
+    selected = workflow.resolve_fork_source("codex", run_id=run_id)
+    assert selected["accepted"]
+    assert selected["agent_session_id"] == "fresh-native"
+    assert calls == [run_id]
 
 
 def test_last_includes_native_history_without_laundering_unknown_run(
