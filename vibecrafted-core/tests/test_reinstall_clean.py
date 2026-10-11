@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from vibecrafted_core import frame_layout, process_control, reinstall_clean
+from vibecrafted_core import (
+    frame_layout,
+    process_control,
+    reinstall_clean,
+    runtime_paths,
+)
 from vibecrafted_core.reinstall_clean import (
     MANIFEST_SCHEMA,
     PROVEN,
@@ -1275,6 +1280,464 @@ def test_resolve_source_requires_a_vibecrafted_checkout(tmp_path: Path) -> None:
     assert reinstall_clean.resolve_source(None, nested) == checkout
     assert reinstall_clean.resolve_source(str(checkout), tmp_path) == checkout
     assert reinstall_clean.resolve_source(str(tmp_path / "missing"), checkout) is None
+
+
+@pytest.fixture
+def source_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Installed generation and Git doubles: provisioning never uses the network."""
+    generation = tmp_path / "runtime" / "releases" / "installed"
+    generation.mkdir(parents=True)
+    revision = "a" * 40
+    provenance = generation / "source-provenance.json"
+    provenance.write_text(
+        json.dumps({"owner_repo": "vetcoders/vibecrafted", "source_revision": revision})
+    )
+    volume = tmp_path / "large-build-volume"
+    volume.mkdir()
+    cwd = tmp_path / "outside-checkout"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TMPDIR", str(volume))
+    monkeypatch.setenv("GIT_DIR", "/foreign/repo/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/foreign/repo")
+    monkeypatch.setattr(
+        reinstall_clean,
+        "__file__",
+        str(
+            generation / "vibecrafted-core" / "vibecrafted_core" / "reinstall_clean.py"
+        ),
+    )
+    monkeypatch.setattr(runtime_paths, "resolve_active_generation", lambda: generation)
+    state: dict[str, Any] = {
+        "generation": generation,
+        "provenance": provenance,
+        "revision": revision,
+        "volume": volume,
+        "cwd": cwd,
+        "calls": [],
+        "head": revision,
+    }
+
+    def git(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[:4] == ["git", "-c", "core.hooksPath=/dev/null", "-C"]
+        source = Path(command[4])
+        args = command[5:]
+        state["source"] = source
+        state["calls"].append(args)
+        assert source.parent == volume
+        assert source.stat().st_mode & 0o777 == 0o700
+        assert "GIT_DIR" not in kwargs["env"]
+        assert "GIT_WORK_TREE" not in kwargs["env"]
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert kwargs["check"] is True
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        if args[0] == state.get("fail_step"):
+            raise state["failure"]
+        if args[0] == "checkout":
+            (source / "scripts").mkdir()
+            for name in ("Makefile", "scripts/vetcoders_install.py"):
+                if name != state.get("missing"):
+                    (source / name).write_text(
+                        "install:\n" if name == "Makefile" else ""
+                    )
+        return subprocess.CompletedProcess(command, 0, stdout=state["head"], stderr="")
+
+    monkeypatch.setattr(subprocess, "run", git)
+    return state
+
+
+def test_source_candidates_precede_provisioning(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def checkout(name: str) -> Path:
+        path = source_fetch["cwd"] / name
+        (path / "scripts").mkdir(parents=True)
+        (path / "Makefile").write_text("install:\n")
+        (path / "scripts/vetcoders_install.py").write_text("")
+        return path
+
+    explicit, local, package = (
+        checkout(name) for name in ("explicit", "local", "package")
+    )
+    monkeypatch.setattr(reinstall_clean, "__file__", str(package / "core/pkg/file.py"))
+    nested = local / "docs"
+    nested.mkdir()
+    assert reinstall_clean.resolve_source(str(explicit), nested) == explicit
+    assert reinstall_clean.resolve_source(None, nested) == local
+    assert reinstall_clean.resolve_source(None, source_fetch["cwd"]) == package
+    assert reinstall_clean.resolve_source(str(local / "missing"), nested) is None
+    assert source_fetch["calls"] == []
+
+
+def test_provision_source_fetches_only_exact_main_revision(
+    source_fetch: dict[str, Any],
+) -> None:
+    source = reinstall_clean.provision_source()
+    try:
+        assert source_fetch["calls"] == [
+            ["init", "--template="],
+            ["remote", "add", "origin", "https://github.com/vetcoders/vibecrafted"],
+            ["fetch", "--depth", "1", "origin", source_fetch["revision"]],
+            ["checkout", "--detach", "FETCH_HEAD"],
+            ["rev-parse", "HEAD"],
+        ]
+        assert (source / "Makefile").is_file()
+        assert (source / "scripts/vetcoders_install.py").is_file()
+    finally:
+        shutil.rmtree(source)
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        (None, "source-provenance-unavailable"),
+        ("not json", "source-provenance-unavailable"),
+        ({"owner_repo": "vetcoders/vibecrafted"}, "source-revision-unavailable"),
+        (
+            {"owner_repo": "vetcoders/vibecrafted", "source_revision": "main"},
+            "source-revision-unavailable",
+        ),
+        (
+            {"owner_repo": "../wrong", "source_revision": "a" * 40},
+            "source-owner-invalid",
+        ),
+    ],
+)
+def test_provision_source_refuses_invalid_provenance(
+    source_fetch: dict[str, Any],
+    payload: Any,
+    reason: str,
+) -> None:
+    if payload is None:
+        source_fetch["provenance"].unlink()
+    else:
+        source_fetch["provenance"].write_text(
+            payload if isinstance(payload, str) else json.dumps(payload)
+        )
+    with pytest.raises(reinstall_clean.ReinstallError, match=reason) as error:
+        reinstall_clean.provision_source()
+    assert "--source <checkout>" in str(error.value)
+    assert source_fetch["calls"] == []
+    assert list(source_fetch["volume"].iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(128, "git fetch"),
+        FileNotFoundError("git missing"),
+        subprocess.TimeoutExpired("git fetch", 120),
+    ],
+)
+def test_provision_source_git_failure_cleans_temp(
+    source_fetch: dict[str, Any],
+    failure: Exception,
+) -> None:
+    source_fetch.update(fail_step="fetch", failure=failure)
+    with pytest.raises(
+        reinstall_clean.ReinstallError, match="source-provision-failed"
+    ) as error:
+        reinstall_clean.provision_source()
+    assert "restore network access" in str(error.value)
+    assert list(source_fetch["volume"].iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "invalid", ["head", "Makefile", "scripts/vetcoders_install.py"]
+)
+def test_provision_source_validates_checkout_and_cleans_on_error(
+    source_fetch: dict[str, Any],
+    invalid: str,
+) -> None:
+    if invalid == "head":
+        source_fetch["head"] = "b" * 40
+    else:
+        source_fetch["missing"] = invalid
+    with pytest.raises(
+        reinstall_clean.ReinstallError,
+        match="source-revision-mismatch|source-checkout-invalid",
+    ):
+        reinstall_clean.provision_source()
+    assert list(source_fetch["volume"].iterdir()) == []
+
+
+def test_provision_source_requires_active_generation(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing() -> Path:
+        raise runtime_paths.GenerationResolutionError("no active generation")
+
+    monkeypatch.setattr(runtime_paths, "resolve_active_generation", missing)
+    with pytest.raises(
+        reinstall_clean.ReinstallError, match="source-provenance-unavailable"
+    ):
+        reinstall_clean.provision_source()
+    assert source_fetch["calls"] == []
+
+
+@pytest.mark.parametrize(
+    "mode,rc",
+    [
+        (["--dry-run"], 0),
+        (["--yes", "--pack", "/missing-pack"], 2),
+        ([], 1),
+        (["--yes", "--foreground"], 2),
+        (["--dry-run", "--source", "/missing-checkout"], 2),
+    ],
+)
+def test_cli_provisioning_cleanup_without_execution(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: list[str],
+    rc: int,
+) -> None:
+    manifest = take(source_fetch["cwd"] / "world")
+    manifest["ownership"]["blocking_ancestors"] = [123]
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", lambda **_: manifest)
+    monkeypatch.setattr(reinstall_clean, "_confirm", lambda args: args.yes)
+    monkeypatch.setattr(
+        reinstall_clean, "execute", lambda *a, **k: pytest.fail("executor must not run")
+    )
+    assert reinstall_clean.main(["--clean", *mode]) == rc
+    assert list(source_fetch["volume"].iterdir()) == []
+    if "--source" in mode:
+        assert source_fetch["calls"] == []
+    else:
+        assert source_fetch["calls"][-1] == ["rev-parse", "HEAD"]
+
+
+def test_cli_fetch_failure_is_preflight_refusal_before_kill(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = take(source_fetch["cwd"] / "world")
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", lambda **_: manifest)
+    monkeypatch.setattr(
+        reinstall_clean, "kill_clean", lambda *a, **k: pytest.fail("kill must not run")
+    )
+    monkeypatch.setattr(
+        reinstall_clean,
+        "_detach_executor",
+        lambda *a, **k: pytest.fail("detach must not run"),
+    )
+    source_fetch.update(
+        fail_step="fetch", failure=subprocess.CalledProcessError(128, "git")
+    )
+    assert reinstall_clean.main(["--clean", "--yes", "--foreground"]) == 2
+    plan = json.loads(
+        next(reinstall_clean.reinstall_runs_root().glob("*/plan.json")).read_text()
+    )
+    assert plan["ready"] is False
+    assert "source-provision-failed" in " ".join(plan["preflight"])
+    assert list(source_fetch["volume"].iterdir()) == []
+
+
+@pytest.mark.parametrize("detach_fails", [False, True])
+def test_cli_transfers_temp_ownership_only_after_successful_detach(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    detach_fails: bool,
+) -> None:
+    manifest = take(source_fetch["cwd"] / "world")
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", lambda **_: manifest)
+    captured: list[str] = []
+
+    def popen(command: list[str], **kwargs: Any) -> Any:
+        captured.extend(command)
+        if detach_fails:
+            raise OSError("cannot detach")
+        return type("Process", (), {"pid": 9876})()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    if detach_fails:
+        with pytest.raises(OSError, match="cannot detach"):
+            reinstall_clean.main(["--clean", "--yes"])
+        assert list(source_fetch["volume"].iterdir()) == []
+    else:
+        assert reinstall_clean.main(["--clean", "--yes"]) == 0
+        source = source_fetch["source"]
+        try:
+            assert source.is_dir()  # alive until detached executor finishes install
+            assert captured[captured.index("--source") + 1] == str(source)
+            assert "--temporary-source" in captured
+        finally:
+            shutil.rmtree(source)
+
+
+def test_explicit_source_is_never_transferred_as_disposable(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = reinstall_clean.provision_source()
+    manifest = take(source_fetch["cwd"] / "world")
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", lambda **_: manifest)
+    captured: list[str] = []
+
+    def popen(command: list[str], **kwargs: Any) -> Any:
+        captured.extend(command)
+        return type("Process", (), {"pid": 9876})()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    try:
+        assert reinstall_clean.main(["--clean", "--yes", "--source", str(source)]) == 0
+        assert "--temporary-source" not in captured
+        assert (
+            source.is_dir()
+        )  # even a temp-looking explicit checkout belongs to its caller
+    finally:
+        shutil.rmtree(source)
+
+
+def test_cli_foreground_transfers_cleanup_to_executor(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = take(source_fetch["cwd"] / "world")
+    manifest["ownership"]["blocking_ancestors"] = []
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", lambda **_: manifest)
+
+    def execute(run_dir: Path, **kwargs: Any) -> int:
+        source = Path(kwargs["source"])
+        assert kwargs["temporary_source"] is True
+        assert kwargs["parent_pid"] == -1
+        assert source_fetch["calls"][-1] == ["rev-parse", "HEAD"]
+        assert source.is_dir()
+        shutil.rmtree(
+            source
+        )  # executor owns it, caller must not try to remove it again
+        return 0
+
+    monkeypatch.setattr(reinstall_clean, "execute", execute)
+    assert reinstall_clean.main(["--clean", "--yes", "--foreground"]) == 0
+    assert list(source_fetch["volume"].iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "ok",
+        "kill-fails",
+        "install-fails",
+        "install-raises",
+        "snapshot-raises",
+        "invalid-checkout",
+        "cleanup-fails",
+        "already-cleaned",
+    ],
+)
+def test_executor_cleans_temp_before_handover_and_on_failure(
+    source_fetch: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    source = reinstall_clean.provision_source()
+    manifest = take(source_fetch["cwd"] / "world")
+    events: list[str] = []
+    real_rmtree = shutil.rmtree
+    if outcome == "cleanup-fails":
+
+        def cleanup_fails(path: Path, **kwargs: Any) -> None:
+            if path == source:
+                raise PermissionError("cleanup denied")
+            real_rmtree(path, **kwargs)
+
+        monkeypatch.setattr(shutil, "rmtree", cleanup_fails)
+    monkeypatch.setattr(
+        reinstall_clean, "_live_dependencies", lambda: (FakeProcs([], {}), None, None)
+    )
+
+    def snapshot(**kwargs: Any) -> dict[str, Any]:
+        if outcome == "snapshot-raises":
+            raise OSError("snapshot failed")
+        return manifest
+
+    monkeypatch.setattr(reinstall_clean, "take_live_snapshot", snapshot)
+
+    def kill(*args: Any, **kwargs: Any) -> None:
+        assert source.is_dir()
+        events.append("kill")
+        if outcome == "kill-fails":
+            raise reinstall_clean.ReinstallError("kill failed")
+
+    monkeypatch.setattr(reinstall_clean, "kill_clean", kill)
+
+    def install(command: list[str], **kwargs: Any) -> int:
+        assert source.is_dir()
+        assert command == ["make", "-C", str(source), "install"]
+        events.append("install")
+        if outcome == "install-raises":
+            raise OSError("install failed")
+        if outcome == "already-cleaned":
+            real_rmtree(source)
+        return 1 if outcome == "install-fails" else 0
+
+    monkeypatch.setattr(reinstall_clean, "run_install", install)
+    launcher_dir = source_fetch["cwd"] / "launchers"
+    launcher_dir.mkdir()
+    (launcher_dir / "vibecrafted").write_text("")
+    monkeypatch.setattr(
+        reinstall_clean, "vibecrafted_launcher_bin", lambda: launcher_dir
+    )
+
+    class Handover(BaseException):
+        pass
+
+    def execve(*args: Any) -> None:
+        if outcome == "cleanup-fails":
+            receipt = json.loads(
+                (source_fetch["cwd"] / "run/receipts/source-cleanup.json").read_text()
+            )
+            assert receipt["status"] == "failed"
+            assert source.is_dir()
+        else:
+            assert not source.exists()  # real execve never executes Python finally
+        events.append("handover")
+        raise Handover()
+
+    monkeypatch.setattr(os, "execve", execve)
+    if outcome == "invalid-checkout":
+        (source / "Makefile").unlink()
+        assert (
+            reinstall_clean.execute(
+                source_fetch["cwd"] / "run",
+                source=str(source),
+                pack=None,
+                parent_pid=-1,
+                temporary_source=True,
+            )
+            == 2
+        )
+        assert events == []
+    else:
+        expected = (
+            OSError if outcome in {"install-raises", "snapshot-raises"} else Handover
+        )
+        with pytest.raises(expected):
+            reinstall_clean.execute(
+                source_fetch["cwd"] / "run",
+                source=str(source),
+                pack=None,
+                parent_pid=-1,
+                temporary_source=True,
+            )
+        if outcome in {"ok", "cleanup-fails", "already-cleaned"}:
+            assert events == ["kill", "install", "handover"]
+    if outcome == "cleanup-fails":
+        real_rmtree(source)
+    assert not source.exists()
+
+
+def test_full_install_keeps_foundations_and_service_reconciliation() -> None:
+    root = Path(__file__).resolve().parents[2]
+    makefile = (root / "Makefile").read_text()
+    install = makefile.split("\ninstall:\n", 1)[1].split(
+        "\n# Retained public spelling", 1
+    )[0]
+    assert "scripts/build-source-runtime-pack.py" in install
+    assert "scripts/install-foundations.sh loctree aicx prview screenscribe" in install
+    assert "reconcile-server-service" in install
 
 
 @pytest.mark.parametrize("bad_lineage", [False, True])

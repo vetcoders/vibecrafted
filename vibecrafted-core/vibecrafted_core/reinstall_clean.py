@@ -24,7 +24,9 @@ Phases (each one leaves a durable receipt in the artifacts plane):
    2026-10-10): the old generation stays on disk after an install, so the
    worker finishes untouched; only a dispatcher whose run meta is terminal
    or missing falls into the kill.
-3. INSTALL: ``make -C <checkout> install [RUNTIME_PACK=<pack>]``.
+3. INSTALL: ``make -C <checkout> install [RUNTIME_PACK=<pack>]``. Without a
+   local checkout, preflight fetches the active generation's exact source
+   revision into a private temporary checkout before anything is stopped.
 4. RESURRECT: run by the newly installed launcher, so env, pins and colours come
    from the new generation.  Layouts are rewritten (chrome through the
    generation-agnostic ``pane-python``, agent panes through
@@ -37,8 +39,7 @@ pack, never as a guessed attach.
 
 Not in v1, on purpose: scrollback replay, live PTY children (an open editor
 comes back as a suspended command the Founder re-runs), per-pane cwd beyond what
-the layout records, Linux/Windows execution, and an install path without a
-source checkout.
+the layout records, and Linux/Windows execution.
 """
 
 from __future__ import annotations
@@ -1456,6 +1457,94 @@ def resolve_source(explicit: str | None, cwd: Path) -> Path | None:
     return None
 
 
+def provision_source() -> Path:
+    """Fetch this generation's source; the caller owns cleanup after success."""
+    from .runtime_paths import GenerationResolutionError, resolve_active_generation
+
+    override = "pass --source <checkout>"
+    remedy = f"{override} or restore network access"
+    try:
+        generation = resolve_active_generation()
+        provenance = json.loads(
+            (generation / "source-provenance.json").read_text(encoding="utf-8")
+        )
+    except (GenerationResolutionError, OSError, UnicodeError, ValueError) as exc:
+        raise ReinstallError(
+            f"source-provenance-unavailable: active generation provenance required; {override}"
+        ) from exc
+    owner = provenance.get("owner_repo") if isinstance(provenance, dict) else None
+    revision = (
+        provenance.get("source_revision") if isinstance(provenance, dict) else None
+    )
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ReinstallError(
+            f"source-revision-unavailable: provenance requires a full source_revision SHA; {override}"
+        )
+    if (
+        not isinstance(owner, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", owner)
+        is None
+    ):
+        raise ReinstallError(
+            f"source-owner-invalid: provenance requires an owner_repo GitHub slug; {override}"
+        )
+    try:
+        source = Path(
+            tempfile.mkdtemp(
+                prefix="vibecrafted-reinstall-source-",
+                dir=os.environ.get("TMPDIR") or None,
+            )
+        ).resolve()
+    except OSError as exc:
+        raise ReinstallError(
+            "source-temp-unavailable: cannot create checkout under TMPDIR; "
+            "set TMPDIR to a writable volume or pass --source <checkout>"
+        ) from exc
+    # Foreign worktree/hook Git state must not redirect the temporary repository.
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    step = "init"
+    ready = False
+    try:
+        for command in (
+            ["init", "--template="],
+            ["remote", "add", "origin", f"https://github.com/{owner}"],
+            ["fetch", "--depth", "1", "origin", revision],
+            ["checkout", "--detach", "FETCH_HEAD"],
+            ["rev-parse", "HEAD"],
+        ):
+            step = command[0]
+            result = subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source), *command],
+                check=True,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                timeout=120,
+            )
+        if result.stdout.strip() != revision:
+            raise ReinstallError(
+                f"source-revision-mismatch: fetched HEAD differs from source_revision; {remedy}"
+            )
+        if resolve_source(str(source), source) is None:
+            raise ReinstallError(
+                "source-checkout-invalid: fetched revision lacks Makefile or "
+                f"scripts/vetcoders_install.py; {remedy}"
+            )
+        ready = True
+        return source
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReinstallError(
+            f"source-provision-failed: git {step} failed; {remedy}"
+        ) from exc
+    finally:
+        if not ready:
+            shutil.rmtree(source)
+
+
 def install_command(source: Path, pack: Path | None) -> list[str]:
     command = ["make", "-C", str(source), "install"]
     if pack is not None:
@@ -1513,6 +1602,8 @@ def build_plan(
     pack: Path | None,
     launcher: Path,
     run_meta: Callable[[str], dict[str, Any] | None] = default_run_meta,
+    source_error: str | None = None,
+    temporary_source: bool = False,
 ) -> dict[str, Any]:
     """Phases 2-4 as data: what would be killed, installed and brought back."""
     ownership = manifest.get("ownership") or {}
@@ -1521,7 +1612,8 @@ def build_plan(
         preflight.append(ownership.get("reason") or "process census unavailable")
     if source is None:
         preflight.append(
-            "no vibecrafted checkout found for `make install`; pass --source <checkout>"
+            source_error
+            or "no vibecrafted checkout found for `make install`; pass --source <checkout>"
         )
     if pack is not None and not pack.is_file():
         preflight.append(f"runtime pack not found: {pack}")
@@ -1615,6 +1707,7 @@ def build_plan(
         },
         "install": {
             "source": str(source) if source else None,
+            "temporary_source": temporary_source,
             "pack": str(pack) if pack else None,
             "command": install_command(source, pack) if source else None,
         },
@@ -2538,7 +2631,9 @@ def _confirm(args: argparse.Namespace) -> bool:
     return reply.strip() == "reinstall"
 
 
-def _detach_executor(run_dir: Path, source: Path, pack: Path | None) -> int:
+def _detach_executor(
+    run_dir: Path, source: Path, pack: Path | None, *, temporary_source: bool = False
+) -> int:
     """Start the executor in its own session; it outlives this pane and its Frame."""
     log = run_dir / "logs" / "executor.log"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -2556,6 +2651,8 @@ def _detach_executor(run_dir: Path, source: Path, pack: Path | None) -> int:
     ]
     if pack is not None:
         command += ["--pack", str(pack)]
+    if temporary_source:
+        command.append("--temporary-source")
     with log.open("ab") as handle:
         process = subprocess.Popen(
             command,
@@ -2574,56 +2671,105 @@ def _detach_executor(run_dir: Path, source: Path, pack: Path | None) -> int:
 
 
 def execute(
-    run_dir: Path, *, source: str | None, pack: str | None, parent_pid: int
+    run_dir: Path,
+    *,
+    source: str | None,
+    pack: str | None,
+    parent_pid: int,
+    temporary_source: bool = False,
 ) -> int:
     """Executor: authoritative snapshot, kill, install, then the new launcher."""
-    deadline = time.monotonic() + 15
-    while parent_pid > 0 and os.getppid() == parent_pid and time.monotonic() < deadline:
-        time.sleep(0.2)
-    print(f"[{_iso()}] executor {os.getpid()} ppid {os.getppid()}", flush=True)
-    procs, ownership, _ = _live_dependencies()
-    manifest = take_live_snapshot(mode="execute", save_sessions=True)
-    store_manifest(run_dir, manifest)
-    source_path = resolve_source(source, Path.home()) if source else None
-    pack_path = Path(pack).expanduser() if pack else None
-    launcher = vibecrafted_launcher_bin() / "vibecrafted"
-    plan = build_plan(manifest, source=source_path, pack=pack_path, launcher=launcher)
-    write_json(run_dir / "plan.json", plan)
-    write_receipt(run_dir, "phase-1-snapshot", "ok", summary=manifest["summary"])
-    if not plan["ready"]:
-        write_receipt(run_dir, "phase-2-kill", "refused", preflight=plan["preflight"])
-        print("preflight refused; nothing was stopped", flush=True)
+    cleanup_path = Path(source) if temporary_source and source else None
+    if temporary_source and (
+        cleanup_path is None
+        or not cleanup_path.name.startswith("vibecrafted-reinstall-source-")
+    ):
+        print("invalid temporary source handoff; nothing was stopped", flush=True)
         return 2
-    kill: dict[str, Any] = {}
     try:
-        kill_clean(
+        deadline = time.monotonic() + 15
+        while (
+            parent_pid > 0
+            and os.getppid() == parent_pid
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.2)
+        print(f"[{_iso()}] executor {os.getpid()} ppid {os.getppid()}", flush=True)
+        procs, ownership, _ = _live_dependencies()
+        manifest = take_live_snapshot(mode="execute", save_sessions=True)
+        store_manifest(run_dir, manifest)
+        source_path = resolve_source(source, Path.home()) if source else None
+        pack_path = Path(pack).expanduser() if pack else None
+        launcher = vibecrafted_launcher_bin() / "vibecrafted"
+        plan = build_plan(
             manifest,
-            ownership,
-            table=procs.table(),
-            config_dir=config_dir(),
-            detail=kill,
+            source=source_path,
+            pack=pack_path,
+            launcher=launcher,
+            temporary_source=temporary_source,
         )
-    except (ReinstallError, OSError) as exc:
-        write_receipt(run_dir, "phase-2-kill", "failed", error=str(exc), **kill)
-        write_receipt(run_dir, "phase-3-install", "skipped", reason="kill clean failed")
-        print(f"kill clean failed: {exc}; install skipped, resurrecting", flush=True)
-    else:
-        write_receipt(run_dir, "phase-2-kill", "ok", **kill)
-        install_log = run_dir / "logs" / "install.log"
-        install_rc = run_install(
-            plan["install"]["command"],
-            log_path=install_log,
-            env=scrubbed_env(os.environ),
-        )
-        write_receipt(
-            run_dir,
-            "phase-3-install",
-            "ok" if install_rc == 0 else "failed",
-            rc=install_rc,
-            command=plan["install"]["command"],
-            log=str(install_log),
-        )
-    write_json(run_dir / "kill-service.json", {"service": kill.get("service")})
+        write_json(run_dir / "plan.json", plan)
+        write_receipt(run_dir, "phase-1-snapshot", "ok", summary=manifest["summary"])
+        if not plan["ready"]:
+            write_receipt(
+                run_dir, "phase-2-kill", "refused", preflight=plan["preflight"]
+            )
+            print("preflight refused; nothing was stopped", flush=True)
+            return 2
+        kill: dict[str, Any] = {}
+        try:
+            kill_clean(
+                manifest,
+                ownership,
+                table=procs.table(),
+                config_dir=config_dir(),
+                detail=kill,
+            )
+        except (ReinstallError, OSError) as exc:
+            write_receipt(run_dir, "phase-2-kill", "failed", error=str(exc), **kill)
+            write_receipt(
+                run_dir, "phase-3-install", "skipped", reason="kill clean failed"
+            )
+            print(
+                f"kill clean failed: {exc}; install skipped, resurrecting", flush=True
+            )
+        else:
+            write_receipt(run_dir, "phase-2-kill", "ok", **kill)
+            install_log = run_dir / "logs" / "install.log"
+            install_rc = run_install(
+                plan["install"]["command"],
+                log_path=install_log,
+                env=scrubbed_env(os.environ),
+            )
+            write_receipt(
+                run_dir,
+                "phase-3-install",
+                "ok" if install_rc == 0 else "failed",
+                rc=install_rc,
+                command=plan["install"]["command"],
+                log=str(install_log),
+            )
+        write_json(run_dir / "kill-service.json", {"service": kill.get("service")})
+    finally:
+        # execve never unwinds Python finally blocks: cleanup precedes handover.
+        if cleanup_path is not None:
+            try:
+                shutil.rmtree(cleanup_path)
+            except FileNotFoundError:
+                pass  # already removed; recovery must still run
+            except OSError as exc:
+                # A cleanup failure must not strand the world after kill clean.
+                print(f"source cleanup failed: {cleanup_path}; {exc}", flush=True)
+                try:
+                    write_receipt(
+                        run_dir,
+                        "source-cleanup",
+                        "failed",
+                        source=str(cleanup_path),
+                        error=str(exc),
+                    )
+                except OSError:
+                    pass  # the transcript still records the failure
     handover = without_python_path(scrubbed_env(os.environ))
     if launcher.is_file():
         print(f"[{_iso()}] handing over to {launcher}", flush=True)
@@ -2720,7 +2866,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="snapshot + plan only; stops, installs and starts nothing",
+        help="snapshot + source preflight + plan; stops, installs and starts no runtime",
     )
     parser.add_argument(
         "--pack",
@@ -2731,7 +2877,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source",
         default="",
-        help="vibecrafted checkout that owns `make install` (default: discovered)",
+        help=(
+            "checkout for make install (default: local checkout or exact active "
+            "generation revision fetched into TMPDIR)"
+        ),
     )
     parser.add_argument(
         "--yes",
@@ -2762,6 +2911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         inner.add_argument("--run-dir", required=True)
         inner.add_argument("--parent-pid", type=int, default=0)
         inner.add_argument("--source", default="")
+        inner.add_argument("--temporary-source", action="store_true")
         inner.add_argument(
             "--pack",
             type=lambda value: str(Path(value).expanduser().resolve()) if value else "",
@@ -2773,6 +2923,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source=ns.source or None,
             pack=ns.pack or None,
             parent_pid=ns.parent_pid,
+            temporary_source=ns.temporary_source,
         )
     args = build_parser().parse_args(raw)
     if args.resurrect:
@@ -2791,57 +2942,81 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
     source = resolve_source(args.source or None, Path.cwd())
-    pack = Path(args.pack).expanduser() if args.pack else None
-    plan = build_plan(
-        manifest,
-        source=source,
-        pack=pack,
-        launcher=vibecrafted_launcher_bin() / "vibecrafted",
-    )
-    run_dir = new_run_dir("dry-run" if args.dry_run else "run")
-    store_manifest(run_dir, manifest)
-    write_json(run_dir / "plan.json", plan)
-    write_receipt(
-        run_dir,
-        "phase-1-snapshot",
-        "ok",
-        summary=manifest["summary"],
-        mode=manifest["mode"],
-    )
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "manifest": json.loads((run_dir / "manifest.json").read_text()),
-                    "plan": plan,
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
+    temporary_source = False
+    source_error = None
+    if source is None and not args.source:
+        try:
+            source = provision_source()
+        except ReinstallError as exc:
+            source_error = str(exc)
+        else:
+            temporary_source = True
+    try:
+        pack = Path(args.pack).expanduser() if args.pack else None
+        plan = build_plan(
+            manifest,
+            source=source,
+            pack=pack,
+            launcher=vibecrafted_launcher_bin() / "vibecrafted",
+            source_error=source_error,
+            temporary_source=temporary_source,
         )
-    else:
-        print(render_summary(manifest, plan, run_dir), end="")
-    if args.dry_run:
-        return 0 if plan["ready"] else 2
-    if not plan["ready"]:
-        print("✗ preflight refused; nothing was stopped.", file=sys.stderr)
-        return 2
-    if not _confirm(args):
-        return 1
-    assert source is not None  # plan["ready"] proves a checkout
-    if args.foreground:
-        blocking = manifest["ownership"].get("blocking_ancestors") or []
-        if blocking:
+        run_dir = new_run_dir("dry-run" if args.dry_run else "run")
+        store_manifest(run_dir, manifest)
+        write_json(run_dir / "plan.json", plan)
+        write_receipt(
+            run_dir,
+            "phase-1-snapshot",
+            "ok",
+            summary=manifest["summary"],
+            mode=manifest["mode"],
+        )
+        if args.json:
             print(
-                "✗ --foreground would leave the process tree that runs this command "
-                f"alive (pids {blocking}); run without --foreground to detach.",
-                file=sys.stderr,
+                json.dumps(
+                    {
+                        "manifest": json.loads((run_dir / "manifest.json").read_text()),
+                        "plan": plan,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
             )
+        else:
+            print(render_summary(manifest, plan, run_dir), end="")
+        if args.dry_run:
+            return 0 if plan["ready"] else 2
+        if not plan["ready"]:
+            print("✗ preflight refused; nothing was stopped.", file=sys.stderr)
             return 2
-        return execute(
-            run_dir, source=str(source), pack=args.pack or None, parent_pid=-1
-        )
-    return _detach_executor(run_dir, source, pack)
+        if not _confirm(args):
+            return 1
+        assert source is not None  # plan["ready"] proves a checkout
+        if args.foreground:
+            blocking = manifest["ownership"].get("blocking_ancestors") or []
+            if blocking:
+                print(
+                    "✗ --foreground would leave the process tree that runs this command "
+                    f"alive (pids {blocking}); run without --foreground to detach.",
+                    file=sys.stderr,
+                )
+                return 2
+            executor_temporary = temporary_source
+            temporary_source = False  # executor takes ownership, including error paths
+            return execute(
+                run_dir,
+                source=str(source),
+                pack=args.pack or None,
+                parent_pid=-1,
+                temporary_source=executor_temporary,
+            )
+        rc = _detach_executor(run_dir, source, pack, temporary_source=temporary_source)
+        if rc == 0:
+            temporary_source = False  # successful Popen transfers cleanup to the child
+        return rc
+    finally:
+        if temporary_source and source is not None:
+            shutil.rmtree(source)
 
 
 if __name__ == "__main__":
