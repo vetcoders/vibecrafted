@@ -53,8 +53,8 @@ fi
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
 terminal_revision="cfa2c367ed36ba9179a05fff32ab1221060cb04e"
 terminal_archive_sha256="ea2f893250a42b0b2722e835e990d6c8169e4e65d817b99fc951c1f2de128c94"
-frame_revision="bf13d4df7bd0f23adb525dafa42f5ef029f829cd"
-frame_archive_sha256="172a4df5dca821c0d94505972344416eebd175dd865455e03f57781587cf1dd2"
+frame_revision="bc8b8d97153e92b2018ad51cfd3039035428679f"
+frame_archive_sha256="a9196b04f6b2159436a7683a7b622db6b26f3ab45494cd4b2ef50cbac91a6d95"
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 payload="$work/payload"
