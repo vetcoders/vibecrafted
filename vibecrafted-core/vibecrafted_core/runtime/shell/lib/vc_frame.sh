@@ -141,12 +141,23 @@ _vetcoders_has_owned_vc_terminal_entry() {
   # Once accepted, retain the boundary only in this shell. Do not export it to
   # a provider or another agent generation: descendants have their own cwd and
   # surface contract and must be admitted independently.
-  [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" ]] && return 0
-  [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" ]] || return 1
   local front_door=""
   front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
-  [[ -n "$front_door" && "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
+  [[ -n "$front_door" ]] || return 1
+  [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" &&
+    "${_VETCODERS_OWNED_TERMINAL_ENTRY_SHELL:-}" == "$$" &&
+    "${_VETCODERS_OWNED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] && return 0
+  [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" &&
+    "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
   _VETCODERS_OWNED_TERMINAL_ENTRY=1
+  _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL="$$"
+  _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER="$front_door"
+  # `set -a` must not turn a same-shell cache into descendant admission.
+  if [[ -n "${BASH_VERSION:-}" ]]; then
+    export -n _VETCODERS_OWNED_TERMINAL_ENTRY _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER
+  else
+    typeset +x _VETCODERS_OWNED_TERMINAL_ENTRY _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER
+  fi
   unset VIBECRAFTED_TERMINAL_ENTRY VIBECRAFTED_TERMINAL_ENTRY_OWNER
   return 0
 }
@@ -392,9 +403,9 @@ PY
   # only the ABSENCE of a rejection — the shape a real window has, but not
   # proof of one, and it must not be reported as if we had seen it open.
   if [[ -n "$admit_status" ]]; then
-    printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
+    printf 'Opened the Vibecrafted terminal for this project.\n' >&2
   else
-    printf 'No TTY here — the Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2
+    printf 'The Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2
   fi
   printf '  project: %s\n' "$project_root" >&2
   printf '  entry:   %s' "${front_door##*/}" >&2

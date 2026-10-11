@@ -216,6 +216,7 @@ def test_split_tty_enters_project_without_prompting_or_changing_old_host(
         "_vetcoders_start_host_generation() { printf '4.3.1+gf8debfd6\\n'; }; vc-start",
         shell=shell,
         tty=True,
+        owned_terminal=True,
         developer_root=True,
         extra_env={
             "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",

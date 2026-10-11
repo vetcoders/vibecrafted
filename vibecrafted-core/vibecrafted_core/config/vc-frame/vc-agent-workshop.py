@@ -457,9 +457,9 @@ def launch_failure_reason(result: Any, fallback: str) -> str:
 def ensure_live_destination(
     workspace: Path, session: str, live_names: list[str]
 ) -> LiveDestination:
-    """Let the selected product entry open a missing project, then admit its WES seat.
+    """Prepare a missing project in the selected runtime, then admit its WES seat.
 
-    vc-start owns creation, resurrection and host projection. Names and command
+    The shell workspace owner creates and resurrects in the background. Names and command
     output alone are never destination authority. Bind its child to one WES
     identity so recovery can be read from that exact receipt.
     """
@@ -482,19 +482,18 @@ def ensure_live_destination(
         root = env.get("VIBECRAFTED_RUNTIME_ROOT", "")
         if not root:
             raise ValueError("a selected Runtime Pack is required to open this project")
-        creator = Path(root) / "bin" / "vc-start"
-        if not creator.is_file() or not os.access(creator, os.X_OK):
-            raise ValueError("vc-start is missing from the selected Runtime Pack")
-        frame = creator.parent / "vc-frame"
+        runtime_bin = Path(env["VIBECRAFTED_RUNTIME_BIN"])
+        frame = runtime_bin / "vc-frame"
         if not frame.is_file() or not os.access(frame, os.X_OK):
             raise ValueError("vc-frame is missing from the selected Runtime Pack")
+        env["VIBECRAFTED_VC_FRAME_BIN"] = str(frame)
         identity = resolve_run_workspace_identity(root=workspace, env=env)
         env.update(identity.to_env())
         env["VIBECRAFTED_WORKSPACE_ROOT"] = str(workspace)
-        # The selected generation owns both its public entry and the Frame it probes.
-        env["PATH"] = os.pathsep.join((str(creator.parent), env.get("PATH", "")))
+        # The selected generation owns both the internal facade and its engine.
+        env["PATH"] = os.pathsep.join((str(runtime_bin), env.get("PATH", "")))
         result = subprocess.run(
-            [str(creator), "resume", "--repo", str(workspace)],
+            workspace_shell_argv(env, workspace, session, prepare=True),
             cwd=str(workspace),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -504,7 +503,9 @@ def ensure_live_destination(
             timeout=PROJECT_OPEN_TIMEOUT,
         )
         if result.returncode != 0:
-            reason = launch_failure_reason(result, "vc-start refused the project")
+            reason = launch_failure_reason(
+                result, "workspace preparation refused the project"
+            )
             raise ValueError(reason)
         deadline = time.monotonic() + PROJECT_LIVE_TIMEOUT
         while True:
@@ -539,13 +540,50 @@ def ensure_live_destination(
                     )
             if time.monotonic() >= deadline:
                 raise ValueError(
-                    "vc-start returned without an owned live Frame destination"
+                    "workspace preparation returned without an owned live Frame destination"
                 )
             time.sleep(0.1)
     except subprocess.TimeoutExpired as exc:
-        raise ValueError("Project could not be opened: vc-start timed out") from exc
+        raise ValueError(
+            "Project could not be opened: workspace preparation timed out"
+        ) from exc
     except (OSError, ValueError, WorkspaceCatalogError) as exc:
         raise ValueError(f"Project could not be opened: {exc}") from exc
+
+
+def workspace_shell_argv(
+    environment: Mapping[str, str], workspace: Path, session: str, *, prepare: bool
+) -> list[str]:
+    """Address existing workspace owners with data argv, never a public GUI entry."""
+    root = Path(environment["VIBECRAFTED_RUNTIME_ROOT"])
+    facade = root / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+    if not facade.is_file() or any(
+        path.is_symlink() for path in (facade, *facade.parents)
+    ):
+        raise ValueError(
+            "physical shell facade is missing from the selected Runtime Pack"
+        )
+    script = 'source "$1" || exit $?; '
+    if prepare:
+        script += (
+            '_vetcoders_start_validate_workspace_name "$3" || exit $?; '
+            '_vetcoders_product_entry_prepare "$2" || exit $?; '
+            '_vetcoders_start_launch_workspace "$3" "$2" background'
+        )
+    else:
+        script += '_vetcoders_start_enter_workspace_session "$4" "$3"'
+    return [
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+        script,
+        "workshop-workspace",
+        str(facade),
+        str(workspace),
+        session,
+        str(Path(environment["VIBECRAFTED_RUNTIME_BIN"]) / "vc-frame"),
+    ]
 
 
 def launch_pane_argv(
@@ -2762,15 +2800,27 @@ class Workshop:
         current = current_frame_session()
         if current != destination:
             try:
+                switch = (
+                    workspace_shell_argv(
+                        admitted.environment, workspace, destination, prepare=False
+                    )
+                    if admitted.environment
+                    else [pane[0], *attach_session_argv(destination)[1:]]
+                )
                 attached = subprocess.run(
-                    [pane[0], *attach_session_argv(destination)[1:]],
+                    switch,
                     check=False,
                     capture_output=True,
                     text=True,
                     **frame_kwargs,
+                    **(
+                        {"cwd": str(workspace), "timeout": PROJECT_OPEN_TIMEOUT}
+                        if admitted.environment
+                        else {}
+                    ),
                 )
-            except FileNotFoundError:
-                self.error = "vc-frame is not available in this Runtime Pack"
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                self.error = f"Agent opened in {destination}, but that session could not be shown: {exc}"
                 return
             if attached.returncode != 0:
                 self.error = launch_failure_reason(

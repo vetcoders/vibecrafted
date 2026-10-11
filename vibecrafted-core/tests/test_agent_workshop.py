@@ -925,6 +925,9 @@ def _prepare_project_creation(
         binary = generation / "bin" / name
         binary.write_text("#!/bin/sh\nexit 0\n")
         binary.chmod(0o755)
+    facade = generation / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+    facade.parent.mkdir(parents=True)
+    facade.write_text("# physical selected-generation facade fixture\n")
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(generation))
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", "/foreign-generation/bin")
     monkeypatch.setenv("VIBECRAFTED_PYTHON", "/foreign-generation/python3")
@@ -957,11 +960,18 @@ def _prepare_project_creation(
 
     def run(command: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(command)
-        if command[0] == str(generation / "bin" / "vc-start"):
+        if command == workshop.workspace_shell_argv(
+            kwargs["env"], project, "target", prepare=True
+        ):
             assert progress_draws == ["Opening project…"]
             assert launched.notice == "Opening project…"
             assert launched.error == ""
-            assert command == [command[0], "resume", "--repo", str(project)]
+            assert command[-4:] == [
+                str(facade),
+                str(project),
+                "target",
+                str(generation / "bin" / "vc-frame"),
+            ]
             assert kwargs["cwd"] == str(project)
             child = kwargs["env"]
             assert isinstance(child, dict)
@@ -969,6 +979,9 @@ def _prepare_project_creation(
             assert child["VIBECRAFTED_WORKSPACE_ROOT"] == str(project)
             assert child["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
             assert child["VIBECRAFTED_PYTHON"] == str(generation / "bin" / "python3")
+            assert child["VIBECRAFTED_VC_FRAME_BIN"] == str(
+                generation / "bin" / "vc-frame"
+            )
             assert str(child["PATH"]).split(os.pathsep)[0] == str(generation / "bin")
             assert kwargs["timeout"] <= 60
             if recovery:
@@ -991,6 +1004,12 @@ def _prepare_project_creation(
             )
             # Text is not routing authority, even if it names another live session.
             return SimpleNamespace(returncode=0, stdout="source-host", stderr="")
+        if command == workshop.workspace_shell_argv(
+            kwargs["env"], project, target, prepare=False
+        ):
+            assert kwargs["cwd"] == str(project)
+            assert kwargs["timeout"] <= 60
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         assert command[0] == str(generation / "bin" / "vc-frame")
         assert kwargs["env"]["VIBECRAFTED_RUNTIME_ROOT"] == str(generation)
         assert kwargs["env"]["VIBECRAFTED_HOME"] == os.environ["VIBECRAFTED_HOME"]
@@ -1004,7 +1023,7 @@ def _prepare_project_creation(
 def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery: bool
 ) -> None:
-    _workshop, launched, calls, generation = _prepare_project_creation(
+    workshop, launched, calls, generation = _prepare_project_creation(
         tmp_path, monkeypatch, recovery=recovery
     )
 
@@ -1013,7 +1032,13 @@ def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destinati
     assert launched.mode == "launcher"
     assert launched.error == ""
     assert launched.notice == ""
-    assert calls[0][0] == str(generation / "bin" / "vc-start")
+    env = {
+        "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+        "VIBECRAFTED_RUNTIME_BIN": str(generation / "bin"),
+    }
+    assert calls[0] == workshop.workspace_shell_argv(
+        env, Path(launched.path), "target", prepare=True
+    )
     destination = "target-recovery" if recovery else "target"
     assert calls[1][:5] == [
         str(generation / "bin" / "vc-frame"),
@@ -1022,7 +1047,9 @@ def test_launch_opens_missing_project_before_agent_and_admits_wes_live_destinati
         "action",
         "new-tab",
     ]
-    assert calls[2] == [str(generation / "bin" / "vc-frame"), "attach", destination]
+    assert calls[2] == workshop.workspace_shell_argv(
+        env, Path(launched.path), destination, prepare=False
+    )
 
 
 @pytest.mark.parametrize(
@@ -1035,8 +1062,13 @@ def test_missing_project_creation_failure_never_launches_agent(
         tmp_path, monkeypatch
     )
     if failure in {"missing-binary", "missing-frame"}:
-        name = "vc-frame" if failure == "missing-frame" else "vc-start"
-        (generation / "bin" / name).unlink()
+        if failure == "missing-frame":
+            (generation / "bin" / "vc-frame").unlink()
+        else:
+            (
+                generation
+                / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+            ).unlink()
     else:
 
         def failed(command: list[str], **_kwargs: object) -> SimpleNamespace:
