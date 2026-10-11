@@ -5540,7 +5540,9 @@ def classify_resume_identity(token: str) -> str:
     return "unknown"
 
 
-def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
+def find_run_for_identity_token(
+    token: str, *, require_unique_root: bool = False
+) -> dict[str, Any] | None:
     """Resolve a token against run ids and recorded session fields."""
     text = str(token or "").strip()
     if not text:
@@ -5561,7 +5563,10 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
         raise ValueError(
             "identity facts unavailable: runtime metadata could not be read"
         ) from exc
-    for path in metas[:300]:
+    selected = None
+    recorded_roots: set[str] = set()
+    recorded_agents: set[str] = set()
+    for path in metas if require_unique_root else metas[:300]:
         payload = _read_json_object(path)
         for key in (
             "agent_session_id",
@@ -5576,8 +5581,34 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
                 raise ValueError(
                     "identity facts unavailable: invalid canonical run metadata"
                 )
-            return _read_identity_run_facts(run_id) or {**payload, "run_id": run_id}
-    return None
+            facts = _read_identity_run_facts(run_id) or {**payload, "run_id": run_id}
+            if not require_unique_root:
+                return facts
+            if text in {
+                str(facts.get("runtime_session_id") or "").strip(),
+                str(facts.get("vibecrafted_session_id") or "").strip(),
+            }:
+                raise ValueError(
+                    "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                    "not a provider session"
+                )
+            if facts.get("agent"):
+                recorded_agents.add(str(facts["agent"]).strip().lower())
+                if len(recorded_agents) > 1:
+                    raise ValueError("conflicting recorded session providers")
+            if facts.get("root"):
+                try:
+                    recorded_roots.add(str(Path(facts["root"]).expanduser().resolve()))
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(
+                        "identity facts unavailable: recorded root"
+                    ) from exc
+                if len(recorded_roots) > 1:
+                    raise ValueError("conflicting recorded session checkouts")
+            if selected is None:
+                selected = facts
+            break
+    return selected
 
 
 FORK_SOURCE_SCHEMA = "vibecrafted.fork_source.v1"
@@ -5615,6 +5646,7 @@ def resolve_session_selection(
     *,
     environment: dict[str, str] | None = None,
     selection: dict[str, Any] | None = None,
+    infer_recorded_root: bool = False,
 ) -> dict[str, Any]:
     """Resolve public current/last without global recency or implicit cloning.
 
@@ -5736,10 +5768,26 @@ def resolve_session_selection(
             if candidates[token][1].get("identity_source") == "native_provider_catalog"
             else "repository_provider_latest_started"
         )
-    result = resolve_fork_source(provider, session=token, require_native_fork=False)
+    result = resolve_fork_source(
+        provider,
+        session=token,
+        require_native_fork=False,
+        require_unique_root=True,
+    )
     if not result.get("accepted"):
         raise ValueError(str(result.get("detail") or result.get("reason")))
     recorded_root = result.get("source_root")
+    if infer_recorded_root and selector.strip() not in {"current", "last", "previous"}:
+        if not recorded_root:
+            raise ValueError(
+                "selected session has no recorded repository checkout; pass --repo"
+            )
+        # A native UUID names its existing checkout when the caller supplied
+        # no repository override. Never infer from recency, basename or a
+        # transcript's later tool cwd; the canonical run owns this fact.
+        selected_root = select_repository(
+            recorded_root, require_git=True, label="resume session checkout"
+        ).path
     if recorded_root and str(Path(recorded_root).resolve()) != selected_root:
         raise ValueError("selected session belongs to a different repository checkout")
     if provenance == "native_provider_catalog_latest_updated":
@@ -5759,6 +5807,7 @@ def resolve_fork_source(
     run_id: str = "",
     session: str = "",
     require_native_fork: bool = True,
+    require_unique_root: bool = False,
 ) -> dict[str, Any]:
     """Resolve the stable provider identity a ``vibecrafted fork`` branches from.
 
@@ -5841,7 +5890,11 @@ def resolve_fork_source(
                 ),
                 session=target_session,
             )
-        found = find_run_for_identity_token(target_session) or {}
+        found = (
+            find_run_for_identity_token(target_session, require_unique_root=True)
+            if require_unique_root
+            else find_run_for_identity_token(target_session)
+        ) or {}
         recorded_agent = str(found.get("agent") or "").strip().lower()
         if recorded_agent and recorded_agent != normalized_agent:
             return _fork_source_rejection(

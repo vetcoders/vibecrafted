@@ -404,6 +404,7 @@ _vetcoders_resume_agent() {
   fi
   local _vetcoders_contract_allow_model=1
   local _vetcoders_contract_single_prompt=1
+  local _vetcoders_contract_allow_session_selection=1
   _vetcoders_parse_contract "$@" || return 1
   case "${_vetcoders_contract_runtime:-}" in
     ""|headless|terminal|visible|plain) ;;
@@ -480,16 +481,16 @@ _vetcoders_resume_agent() {
   # Promote the first tail token only when it looks like a session id (not a
   # free-form prompt word).
   if [[ -z "$_vetcoders_contract_session" && -n "$_vetcoders_contract_tail" ]]; then
-    local -a _resume_positional=()
-    read -r -a _resume_positional <<<"$_vetcoders_contract_tail"
-    local _maybe_session="${_resume_positional[0]:-}"
+    # The shared parser joins tail tokens with spaces. Parameter expansion
+    # preserves that contract in both bash and zsh (read -a is bash-only).
+    local _maybe_session="${_vetcoders_contract_tail%% *}"
     # UUIDs / long hex / codex-style tokens; short words stay as prompt text.
     # A dash-leading token is never a session id — long flags like
     # --dangerously-skip-permissions would otherwise satisfy the length regex.
     if [[ "$_maybe_session" != -* ]] &&
       [[ "$_maybe_session" =~ ^[0-9a-fA-F-]{8,}$ || "$_maybe_session" =~ ^[0-9a-zA-Z_-]{16,}$ ]]; then
       _vetcoders_contract_session="$_maybe_session"
-      local _resume_rest="${_vetcoders_contract_tail#"${_resume_positional[0]}"}"
+      local _resume_rest="${_vetcoders_contract_tail#"$_maybe_session"}"
       _resume_rest="${_resume_rest# }"
       if [[ "$_vetcoders_contract_prompt" == "$_vetcoders_contract_tail" ]]; then
         _vetcoders_contract_prompt="$_resume_rest"
@@ -556,7 +557,8 @@ _vetcoders_resume_agent() {
   # Missing owned interpreter/import-root is a real refusal. Prove it before
   # AICX continuity or provider composition so a broken/foreign owner cannot
   # assemble a pack and then fail.
-  _vetcoders_core_python_spec >/dev/null || return 1
+  local resume_python_spec=""
+  resume_python_spec="$(_vetcoders_core_python_spec)" || return 1
 
   [[ -z "$_vetcoders_contract_count" ]] || {
     echo "--count is only supported by vibecrafted marbles." >&2
@@ -566,6 +568,34 @@ _vetcoders_resume_agent() {
     echo "--depth is only supported by vibecrafted marbles." >&2
     return 1
   }
+
+  # An exact native identity owns its default checkout. Resolve and validate
+  # it before opening a detached terminal, while an explicit --repo/--root
+  # still binds. Ambient worker roots are defaults, never user overrides.
+  # The child receives the existing typed selection receipt and absolute root,
+  # then revalidates both through session-source before any provider admission.
+  if [[ -n "$_vetcoders_contract_session" ]] &&
+    [[ "$_vetcoders_contract_session" != current && "$_vetcoders_contract_session" != last && "$_vetcoders_contract_session" != previous ]]; then
+    local resume_repository_explicit="${_vetcoders_contract_root:-}"
+    local resume_selection="" resume_selected_root="" selection_python=""
+    local -a selection_args=(session-source "$tool" --session "$_vetcoders_contract_session" --root "$(_vetcoders_effective_project_root)")
+    [[ -n "$resume_repository_explicit" ]] || selection_args+=(--infer-recorded-root)
+    [[ -z "$_vetcoders_contract_session_selection" ]] || selection_args+=(--session-selection "$_vetcoders_contract_session_selection")
+    resume_selection="$(_vetcoders_run_core_cli "${selection_args[@]}")" || return 1
+    selection_python="${resume_python_spec%%$'\t'*}"
+    resume_selected_root="$("$selection_python" -c 'import json,sys; print(json.loads(sys.argv[1])["selection_root"])' "$resume_selection")" || return 1
+    [[ -n "$resume_selected_root" ]] || { echo "resume: incomplete session selection receipt" >&2; return 1; }
+    # Prefix transport flags so an existing literal `--` retains its payload.
+    if [[ -z "$resume_repository_explicit" ]]; then
+      _vetcoders_resume_public_argv=(--root "$resume_selected_root" "${_vetcoders_resume_public_argv[@]}")
+    fi
+    if [[ -z "$_vetcoders_contract_session_selection" ]]; then
+      _vetcoders_resume_public_argv=(--session-selection "$resume_selection" "${_vetcoders_resume_public_argv[@]}")
+    fi
+    _vetcoders_contract_root="$resume_selected_root"
+    _vetcoders_contract_session_selection="$resume_selection"
+    resume_declared_root="$resume_selected_root"
+  fi
 
   # Admission is deliberately before AICX: a public no-TTY request must hand
   # the declaration to its visible terminal child before composing continuity

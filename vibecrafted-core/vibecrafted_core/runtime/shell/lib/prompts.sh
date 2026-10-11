@@ -29,6 +29,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_file_explicit=""
   _vetcoders_contract_task=""
   _vetcoders_contract_session=""
+  _vetcoders_contract_session_selection=""
   _vetcoders_contract_run_id=""
   _vetcoders_contract_count=""
   _vetcoders_contract_depth=""
@@ -128,6 +129,15 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --session" >&2; return 1; }
         _vetcoders_contract_session="$1"
+        ;;
+      --session-selection)
+        [[ -n "${_vetcoders_contract_allow_session_selection:-}" ]] || {
+          printf 'Session selection receipts apply only to resume.\n' >&2
+          return 1
+        }
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --session-selection" >&2; return 1; }
+        _vetcoders_contract_session_selection="$1"
         ;;
       --run-id)
         shift
@@ -395,7 +405,7 @@ _vetcoders_rewrite_contract_root_argv() {
         ;;
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
-      -f | --file | --task | --session | --run-id | --count | --depth | \
+      -f | --file | --task | --session | --session-selection | --run-id | --count | --depth | \
         --runtime | --model | --effort | --base | --execution-runtime | --policy-runtime | --permissions | \
         --token-budget | --operator | --continuity | --parent-session | \
         --continuity-parent)

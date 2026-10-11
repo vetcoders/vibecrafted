@@ -281,11 +281,43 @@ def _probe_codex_resume_contract(
     env["TEST_ATTACH_CAPTURE"] = str(probe.attach_capture)
     env["TEST_CORE_ARGV"] = str(probe.core_argv_capture)
     env["TEST_CORE_STDIN"] = str(probe.core_stdin_capture)
+    env["TEST_CORE_PYTHON"] = sys.executable
+    env["TEST_CORE_ROOT"] = str(REPO_ROOT / "vibecrafted-core")
     env["TEST_OPERATOR_AVAILABLE"] = "1" if operator_available else ""
     if operator_available:
         # Headless requests only enter the visible-host branch when an operator
         # surface is already known; interactive Codex may also prepare one.
         env["VIBECRAFTED_OPERATOR_SESSION"] = "operator-session"
+
+    # Exact default resume now needs canonical checkout facts before host
+    # admission. The mode-contract fixture owns these facts; session-source
+    # runs the actual resolver while task commands retain the argv/stdin spy.
+    native = ""
+    if "--session" in args:
+        native = args[args.index("--session") + 1]
+    elif args and re.fullmatch(r"[0-9a-fA-F-]{8,}", args[0]):
+        native = args[0]
+    if native and native not in {"current", "last", "previous"}:
+        selected_root = REPO_ROOT
+        for flag in ("--repo", "--root"):
+            if flag in args:
+                selected_root = Path(args[args.index(flag) + 1]).resolve()
+        meta = (
+            probe.home
+            / ".vibecrafted/control_plane/runtime_runs/fixture-source/meta.json"
+        )
+        meta.parent.mkdir(parents=True)
+        meta.write_text(
+            json.dumps(
+                {
+                    "run_id": "fixture-source",
+                    "agent": agent,
+                    "agent_session_id": native,
+                    "root": str(selected_root),
+                }
+            ),
+            encoding="utf-8",
+        )
 
     resume_invocation = f"vc-resume {shlex.quote(agent)}"
     if runtime is not None:
@@ -333,6 +365,10 @@ def _probe_codex_resume_contract(
                     "  fi",
                     "}",
                     "_vetcoders_run_core_cli() {",
+                    '  if [[ "$1" == session-source ]]; then',
+                    '    PYTHONPATH="$TEST_CORE_ROOT" "$TEST_CORE_PYTHON" -m vibecrafted_core.cli "$@"',
+                    "    return $?",
+                    "  fi",
                     '  printf \'%s\\0\' "$@" > "$TEST_CORE_ARGV"',
                     '  cat > "$TEST_CORE_STDIN"',
                     "}",

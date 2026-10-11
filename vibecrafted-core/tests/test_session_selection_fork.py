@@ -377,7 +377,7 @@ def test_last_scopes_provider_checkout_and_refuses_tie(tmp_path, monkeypatch):
 def test_current_requires_explicit_unambiguous_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
-    monkeypatch.setattr(workflow, "find_run_for_identity_token", lambda _: None)
+    monkeypatch.setattr(workflow, "find_run_for_identity_token", lambda _, **kw: None)
     with pytest.raises(ValueError, match="explicit"):
         workflow.resolve_session_selection("codex", "current", tmp_path, environment={})
     assert (
@@ -423,7 +423,7 @@ def test_two_native_task_forks_preserve_source_and_private_input(
         ],
         check=True,
     )
-    monkeypatch.setattr(workflow, "find_run_for_identity_token", lambda _: None)
+    monkeypatch.setattr(workflow, "find_run_for_identity_token", lambda _, **kw: None)
     monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
     from vibecrafted_core.workflow_runtime import native_resume_argv
 
@@ -972,6 +972,180 @@ def test_selection_handoff_does_not_reselect_last(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="does not match"):
         workflow.resolve_session_selection(
             "codex", "newer", tmp_path, selection=selection
+        )
+
+
+def test_exact_resume_infers_recorded_checkout_only_when_defaulted(
+    read_only_identity_storage,
+):
+    home = read_only_identity_storage
+    caller = home / "caller"
+    checkout = home / "worker"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    record(home, "source", "native-session", checkout, agent="claude")
+    record(home, "continued", "native-session", checkout, agent="claude")
+    selected = workflow.resolve_session_selection(
+        "claude", "native-session", caller, infer_recorded_root=True
+    )
+    assert selected["selection_root"] == str(checkout)
+    assert selected["agent_session_id"] == "native-session"
+    with pytest.raises(ValueError, match="different repository checkout"):
+        workflow.resolve_session_selection("claude", "native-session", caller)
+    assert (
+        workflow.resolve_session_selection(
+            "claude", "native-session", checkout, selection=selected
+        )
+        == selected
+    )
+    for name in ("source", "continued"):
+        record(home, name, "native-session", caller, agent="claude")
+    with pytest.raises(ValueError, match="different repository checkout"):
+        workflow.resolve_session_selection(
+            "claude", "native-session", checkout, selection=selected
+        )
+
+
+@pytest.mark.parametrize("failure", ["unknown", "missing", "nongit", "conflicting"])
+def test_default_exact_resume_refuses_unproven_checkout(
+    read_only_identity_storage, failure
+):
+    home = read_only_identity_storage
+    checkout = home / "worker"
+    if failure != "missing":
+        checkout.mkdir()
+    if failure != "unknown":
+        record(home, "source", "native-session", checkout, agent="claude")
+    if failure == "conflicting":
+        record(home, "other", "native-session", home / "sibling", agent="claude")
+    message = {
+        "unknown": "no recorded repository checkout",
+        "missing": "not an existing directory",
+        "nongit": "not inside a Git repository",
+        "conflicting": "conflicting recorded session checkouts",
+    }[failure]
+    with pytest.raises(ValueError, match=message):
+        workflow.resolve_session_selection(
+            "claude", "native-session", home, infer_recorded_root=True
+        )
+
+
+@pytest.mark.parametrize("verb", ["resume-session", "workflow"])
+def test_cli_exact_resume_defaults_to_native_checkout(
+    read_only_identity_storage, monkeypatch, verb
+):
+    from vibecrafted_core import cli
+
+    home = read_only_identity_storage
+    caller, checkout = home / "caller", home / "worker"
+    for path in (caller, checkout):
+        path.mkdir()
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+    monkeypatch.chdir(caller)
+    record(home, "source", "native-session", checkout, agent="claude")
+    captured = []
+
+    def launch(*args, **kwargs):
+        captured.append(kwargs)
+        return {"accepted": True}
+
+    monkeypatch.setattr(cli, "manual_resume_session", launch)
+    identity = "--agent-session-id" if verb == "resume-session" else "--session"
+    argv = [verb, "claude", identity, "native-session", "--prompt", "fixture", "--json"]
+    assert cli.main(argv) == 0
+    assert len(captured) == 1
+    assert Path(captured[0]["root"]) == checkout
+    assert captured[0]["launch_meta"]["session_selection"]["selection_root"] == str(
+        checkout
+    )
+    assert cli.main([*argv, "--repo", str(caller)]) == 2
+    assert len(captured) == 1
+
+
+@pytest.mark.parametrize("selector", ["current", "last"])
+def test_default_checkout_inference_keeps_current_last_scoped(
+    read_only_identity_storage, selector
+):
+    home = read_only_identity_storage
+    record(home, "source", "native-session", home / "worker", agent="claude")
+    message = (
+        "different repository checkout"
+        if selector == "current"
+        else "no recorded native session"
+    )
+    with pytest.raises(ValueError, match=message):
+        workflow.resolve_session_selection(
+            "claude",
+            selector,
+            home,
+            environment={"CLAUDE_CODE_SESSION_ID": "native-session"},
+            infer_recorded_root=True,
+        )
+
+
+def test_default_checkout_checks_conflicting_record_older_than_lookup_window(
+    read_only_identity_storage,
+):
+    import os
+
+    home = read_only_identity_storage
+    checkout = home / "worker"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    record(home, "old", "native-session", home / "other", agent="claude")
+    os.utime(home / "runtime_runs/old/meta.json", (1, 1))
+    for index in range(301):
+        record(home, f"unrelated-{index}", f"other-{index}", home)
+    record(home, "source", "native-session", checkout, agent="claude")
+    with pytest.raises(ValueError, match="conflicting recorded session checkouts"):
+        workflow.resolve_session_selection(
+            "claude", "native-session", home, infer_recorded_root=True
+        )
+
+
+def test_default_checkout_refuses_conflicting_providers_for_same_native_id(
+    read_only_identity_storage,
+):
+    home = read_only_identity_storage
+    record(home, "older", "native-session", home, agent="codex")
+    record(home, "newer", "native-session", home, agent="claude")
+    with pytest.raises(ValueError, match="conflicting recorded session providers"):
+        workflow.resolve_session_selection(
+            "claude", "native-session", home, infer_recorded_root=True
+        )
+
+
+def test_default_checkout_does_not_restore_blank_canonical_root_from_older_record(
+    read_only_identity_storage,
+):
+    home = read_only_identity_storage
+    record(home, "older", "native-session", home, agent="claude")
+    record(home, "newer", "native-session", home, agent="claude")
+    meta = home / "runtime_runs/newer/meta.json"
+    payload = json.loads(meta.read_text())
+    payload["root"] = ""
+    meta.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="no recorded repository checkout"):
+        workflow.resolve_session_selection(
+            "claude", "native-session", home, infer_recorded_root=True
+        )
+
+
+@pytest.mark.parametrize("namespace", ["runtime_session_id", "vibecrafted_session_id"])
+def test_default_checkout_refuses_older_runtime_alias_for_same_native_id(
+    read_only_identity_storage, namespace
+):
+    home = read_only_identity_storage
+    subprocess.run(["git", "init", "-q", str(home)], check=True)
+    record(home, "older", "different-native", home, agent="claude")
+    meta = home / "runtime_runs/older/meta.json"
+    payload = json.loads(meta.read_text())
+    payload[namespace] = "native-session"
+    meta.write_text(json.dumps(payload))
+    record(home, "newer", "native-session", home, agent="claude")
+    with pytest.raises(ValueError, match="runtime_session_id"):
+        workflow.resolve_session_selection(
+            "claude", "native-session", home, infer_recorded_root=True
         )
 
 

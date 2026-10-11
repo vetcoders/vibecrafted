@@ -463,10 +463,11 @@ def test_workflow_session_calls_manual_resume_and_never_launch_workflow(
     monkeypatch.setattr(
         cli,
         "resolve_session_selection",
-        lambda agent, token, root: {
+        lambda agent, token, root, **kwargs: {
             "agent_session_id": token,
             "session_selector": token,
             "identity_source": "explicit_session",
+            "selection_root": str(root),
         },
     )
     monkeypatch.setattr(

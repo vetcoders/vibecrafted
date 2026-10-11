@@ -314,6 +314,7 @@ def _fake_generation(
         "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
         " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', ''),"
         " 'created': os.environ.get('VIBECRAFTED_START_CREATED_SESSION', '')}))\n"
+        f"open({str(capture) + '.calls'!r}, 'a').write('1\\n')\n"
         f"sys.exit({terminal_exit})\n",
     )
     for verb in front_doors:
@@ -2180,6 +2181,155 @@ def test_primary_shell_routes_every_product_verb(tmp_path: Path) -> None:
         "--runtime",
         "terminal",
     ]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    "declaration,ambient,override",
+    [
+        ("--session", "", ""),
+        ("--session", "SPAWN_ROOT", ""),
+        ("--session", "VIBECRAFTED_ROOT", ""),
+        ("positional", "", ""),
+        ("literal", "", ""),
+        ("--session", "SPAWN_ROOT", "../worker-checkout"),
+    ],
+)
+def test_exact_resume_checkout_is_pinned_before_terminal_and_primary_shell(
+    tmp_path: Path, shell: str, declaration: str, ambient: str, override: str
+) -> None:
+    native = "00000000-0000-4000-8000-000000000001"
+    checkout = _commit_fixture_repo(tmp_path / "worker-checkout")
+    meta = tmp_path / "home/.vibecrafted/control_plane/runtime_runs/source/meta.json"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": "source",
+                "agent": "claude",
+                "agent_session_id": native,
+                "root": str(checkout),
+            }
+        )
+    )
+    session_arg = {"--session": "--session ", "positional": "", "literal": "-- "}[
+        declaration
+    ] + native
+    root_arg = f" --root {shlex.quote(override)}" if override else ""
+    result, launch = _run_entry(
+        tmp_path,
+        f"vc-resume claude {session_arg}{root_arg}",
+        shell=shell,
+        extra_env={ambient: str(tmp_path / "mlx-batch-runner")} if ambient else None,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert launch is not None
+    assert _working_directory(launch) == checkout
+    hosted = _hosted_argv(launch)
+    args = _resume_front_door_args(hosted)
+    if declaration == "--session":
+        assert _flag_value(args, "--session") == native
+    else:
+        assert native in args
+    assert Path(_flag_value(args, "--root")) == checkout
+    selection = json.loads(_flag_value(args, "--session-selection"))
+    assert selection["selection_root"] == str(checkout)
+    assert selection["agent_session_id"] == native
+    if declaration == "literal":
+        assert args.index("--session-selection") < args.index("--")
+        assert args.index("--root") < args.index("--")
+    assert _parent_aicx_calls(tmp_path) == []
+
+    # Cross the actual primary-shell selector with an owned product sentinel,
+    # not a provider or a second terminal host. The public vector must survive.
+    captured = tmp_path / "primary-reentry.json"
+    front_door = _write(
+        Path(hosted[1]),
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        f"open({str(captured)!r}, 'w').write(json.dumps({{'cwd': os.getcwd(), 'argv': sys.argv[1:]}}))\n",
+    )
+    env = {k: v for k, v in os.environ.items() if k not in PUBLIC_ENTRY_ISOLATE_ENV}
+    env.update(
+        HOME=str(tmp_path / "home"),
+        VIBECRAFTED_HOME=str(tmp_path / "home/.vibecrafted"),
+    )
+    child = subprocess.run(
+        ["bash", str(PRIMARY_SHELL), str(front_door), *args],
+        check=False,
+        cwd=checkout,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    payload = json.loads(captured.read_text())
+    assert Path(payload["cwd"]) == checkout
+    assert payload["argv"] == args
+    assert json.loads((tmp_path / "terminal-launch.json").read_text()) == launch
+    assert (tmp_path / "terminal-launch.json.calls").read_text().splitlines() == ["1"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["explicit", "missing", "conflicting", "provider", "unknown"]
+)
+def test_exact_resume_checkout_refusal_precedes_terminal(
+    tmp_path: Path, failure: str
+) -> None:
+    native = "00000000-0000-4000-8000-000000000001"
+    checkout = tmp_path / "worker-checkout"
+    if failure != "missing":
+        _commit_fixture_repo(checkout)
+    if failure != "unknown":
+        meta = (
+            tmp_path / "home/.vibecrafted/control_plane/runtime_runs/source/meta.json"
+        )
+        meta.parent.mkdir(parents=True)
+        meta.write_text(
+            json.dumps(
+                {
+                    "run_id": "source",
+                    "agent": "codex" if failure == "provider" else "claude",
+                    "agent_session_id": native,
+                    "root": str(checkout),
+                }
+            )
+        )
+        if failure == "conflicting":
+            other = meta.parent.parent / "other/meta.json"
+            other.parent.mkdir()
+            other.write_text(
+                json.dumps(
+                    {
+                        "run_id": "other",
+                        "agent": "claude",
+                        "agent_session_id": native,
+                        "root": str(tmp_path / "sibling"),
+                    }
+                )
+            )
+    override = (
+        f" --root {shlex.quote(str(tmp_path / 'mlx-batch-runner'))}"
+        if failure == "explicit"
+        else ""
+    )
+    result, launch = _run_entry(
+        tmp_path,
+        f"vc-resume claude --session {native}{override}",
+        expect_launch=False,
+    )
+    assert result.returncode != 0
+    assert launch is None, "a refused native session must not open a terminal first"
+    expected = {
+        "explicit": "different repository checkout",
+        "missing": "not an existing directory",
+        "conflicting": "conflicting recorded session checkouts",
+        "provider": "recorded=codex requested=claude",
+        "unknown": "no recorded repository checkout",
+    }[failure]
+    assert expected in result.stderr
+    assert _parent_aicx_calls(tmp_path) == []
 
 
 # --------------------------------------------------------------------------
