@@ -946,25 +946,9 @@ pub fn UsagePage() -> impl IntoView {
                         </select></label>
                         <label><span>"Provider"</span><select id="usage-provider" name="provider">
                             <option value="">"all"</option>
-                            <option value="agy">"agy"</option>
-                            <option value="claude">"claude"</option>
-                            <option value="codex">"codex"</option>
-                            <option value="copilot">"copilot"</option>
-                            <option value="cursor">"cursor"</option>
-                            <option value="grok">"grok"</option>
-                            <option value="junie">"junie"</option>
-                            <option value="kimi">"kimi"</option>
                         </select></label>
                         <label><span>"Agent"</span><select id="usage-agent" name="agent">
                             <option value="">"all"</option>
-                            <option value="agy">"agy"</option>
-                            <option value="claude">"claude"</option>
-                            <option value="codex">"codex"</option>
-                            <option value="copilot">"copilot"</option>
-                            <option value="cursor">"cursor"</option>
-                            <option value="grok">"grok"</option>
-                            <option value="junie">"junie"</option>
-                            <option value="kimi">"kimi"</option>
                         </select></label>
                         <label><span>"Model"</span><select id="usage-model" name="model">
                             <option value="">"all"</option>
@@ -1208,17 +1192,21 @@ fn usage_dashboard_script() -> &'static str {
   root.querySelectorAll('[data-usage-dim]').forEach((button) => {
     button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
   });
-  const populateModelPicker = (models) => {
-    const select = byId('usage-model');
+  // Pickers are populated from the API's own dimension names so a selected
+  // value always round-trips through the filter contract; a current selection
+  // that is unknown or no longer measured stays selectable (stale-visible).
+  const populatePicker = (id, items) => {
+    const select = byId(id);
     if (!select) return;
-    const current = params.get('model') || select.value || '';
+    const key = id.replace('usage-', '');
+    const current = params.get(key) || select.value || '';
     const seen = new Set();
     select.replaceChildren();
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = 'all';
     select.appendChild(defaultOpt);
-    for (const item of models || []) {
+    for (const item of items || []) {
       const name = item.name;
       if (name && name !== 'unknown' && !seen.has(name)) {
         seen.add(name);
@@ -1248,7 +1236,9 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
-    populateModelPicker(report.dimensions && report.dimensions.models);
+    populatePicker('usage-provider', report.dimensions && report.dimensions.providers);
+    populatePicker('usage-agent', report.dimensions && report.dimensions.agents);
+    populatePicker('usage-model', report.dimensions && report.dimensions.models);
     body.replaceChildren();
     const runs = report.runs || [];
     for (const run of runs) {
@@ -1266,7 +1256,7 @@ fn usage_dashboard_script() -> &'static str {
       const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
       const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
       if (run.failure) state.title = run.failure;
-      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok')) tr.className = 'is-attention';
+      if (run.failure_kind || (run.status && !['completed', 'ok', 'observed', 'aggregate'].includes(run.status))) tr.className = 'is-attention';
       if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
       tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
     }
@@ -5675,6 +5665,16 @@ pub(crate) mod tests {
         assert!(usage.contains("id=\"usage-chart-cost\""));
         assert!(usage.contains("recorded_at"));
         assert!(!usage.contains("innerHTML"));
+        // Provider/Agent/Model are pickers fed by the API's own dimension
+        // names, never a hand-maintained list that can drift from the data.
+        assert!(usage.contains("populatePicker('usage-provider'"));
+        assert!(usage.contains("populatePicker('usage-agent'"));
+        assert!(usage.contains("populatePicker('usage-model'"));
+        assert!(usage.contains("id=\"usage-provider\""));
+        assert!(usage.contains("<select id=\"usage-provider\""));
+        // Local observations and day aggregates are honest states, not
+        // attention-signalled lifecycle failures.
+        assert!(usage.contains("'observed', 'aggregate'"));
     }
 
     #[test]

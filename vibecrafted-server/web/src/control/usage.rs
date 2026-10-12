@@ -15,12 +15,33 @@ pub struct UsageQuery {
     provider: Option<String>,
     agent: Option<String>,
     model: Option<String>,
+    collect: Option<String>,
 }
 
 pub async fn usage(
     Extension(plane): Extension<ControlPlane>,
     Query(query): Query<UsageQuery>,
 ) -> Response {
+    // Explicit operator-requested collection: one bounded vc-server-owned pass
+    // over the provider engines. Default stays read-only so refreshes never
+    // trigger scans or network probes.
+    let collection = match query.collect.as_deref() {
+        Some("1" | "true" | "yes") => {
+            let home = plane.home();
+            Some(
+                tokio::task::spawn_blocking(move || control_core::collect_local_usage(&home))
+                    .await
+                    .unwrap_or_else(|error| control_core::CollectionReport {
+                        schema: control_core::COLLECTION_SCHEMA.to_string(),
+                        generated_at: Utc::now().to_rfc3339(),
+                        ok: false,
+                        outcomes: Vec::new(),
+                        error: Some(format!("collection task failed: {error}")),
+                    }),
+            )
+        }
+        _ => None,
+    };
     let window = query.window.as_deref().unwrap_or("24h");
     let since = match window {
         "24h" => Some(Duration::hours(24)),
@@ -53,7 +74,7 @@ pub async fn usage(
         )
             .into_response());
     }
-    let report = plane.usage_report(
+    let mut report = plane.usage_report(
         Utc::now(),
         UsageFilter {
             since,
@@ -63,6 +84,7 @@ pub async fn usage(
             model: model.expect("validated model"),
         },
     );
+    report.collection = collection;
     no_store(Json(report).into_response())
 }
 

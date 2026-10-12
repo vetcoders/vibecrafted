@@ -6,6 +6,16 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Quota-card tests mutate process-wide `VIBECRAFTED_*_QUOTA_JSON` env vars;
+/// serialize them so parallel test threads never observe each other's cards.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use leptos::config::{Env, LeptosOptions};
@@ -141,6 +151,7 @@ async fn usage_api_projects_filters_totals_and_validation() {
 
 #[tokio::test]
 async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
+    let _guard = env_lock();
     let home = TestHome::new();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -313,4 +324,104 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
         std::env::remove_var("VIBECRAFTED_CODEX_QUOTA_JSON");
         std::env::remove_var("VIBECRAFTED_CURSOR_QUOTA_JSON");
     }
+}
+
+#[tokio::test]
+async fn quota_dashboard_serializes_agent_key_alongside_id() {
+    let _guard = env_lock();
+    let home = TestHome::new();
+    // Point every provider at a nonexistent file so no host monitor leaks in.
+    unsafe {
+        for agent in [
+            "AGY", "KIMI", "CODEX", "CLAUDE", "GROK", "JUNIE", "COPILOT", "CURSOR",
+        ] {
+            std::env::set_var(
+                format!("VIBECRAFTED_{agent}_QUOTA_JSON"),
+                "/nonexistent/quota.json",
+            );
+        }
+    }
+    let (status, _, board) = get(&home.0, "/api/usage/quota").await;
+    unsafe {
+        for agent in [
+            "AGY", "KIMI", "CODEX", "CLAUDE", "GROK", "JUNIE", "COPILOT", "CURSOR",
+        ] {
+            std::env::remove_var(format!("VIBECRAFTED_{agent}_QUOTA_JSON"));
+        }
+    }
+    assert_eq!(status, StatusCode::OK);
+    let agents = board["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 8);
+    for card in agents {
+        let id = card["id"].as_str().expect("id");
+        assert_eq!(card["agent"].as_str().expect("agent key"), id);
+    }
+}
+
+#[tokio::test]
+async fn quota_collect_failure_is_honest_and_never_blocks_the_board() {
+    let _guard = env_lock();
+    let home = TestHome::new();
+    // A non-executable regular file is a deterministic spawn failure: the test
+    // never runs a real Python, so collection drivers and provider probes stay
+    // out of the test host entirely.
+    let not_python = home.0.join("not-python");
+    fs::write(&not_python, b"not a python").expect("not-python");
+    unsafe {
+        std::env::set_var("VIBECRAFTED_PYTHON", &not_python);
+        for agent in [
+            "AGY", "KIMI", "CODEX", "CLAUDE", "GROK", "JUNIE", "COPILOT", "CURSOR",
+        ] {
+            std::env::set_var(
+                format!("VIBECRAFTED_{agent}_QUOTA_JSON"),
+                "/nonexistent/quota.json",
+            );
+        }
+    }
+    let (status, _, board) = get(&home.0, "/api/usage/quota?collect=1").await;
+    unsafe {
+        std::env::remove_var("VIBECRAFTED_PYTHON");
+        for agent in [
+            "AGY", "KIMI", "CODEX", "CLAUDE", "GROK", "JUNIE", "COPILOT", "CURSOR",
+        ] {
+            std::env::remove_var(format!("VIBECRAFTED_{agent}_QUOTA_JSON"));
+        }
+    }
+    assert_eq!(status, StatusCode::OK);
+    let collection = &board["collection"];
+    assert_eq!(collection["schema"], "vibecrafted.usage-collection.v1");
+    assert_eq!(collection["ok"], false);
+    assert!(
+        collection["error"]
+            .as_str()
+            .expect("error")
+            .contains("failed to start")
+            || collection["error"]
+                .as_str()
+                .expect("error")
+                .contains("not present")
+    );
+    // The board still serves its honest absent cards.
+    let agents = board["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 8);
+    assert!(agents.iter().all(|card| card["status"] == "absent"));
+}
+
+#[tokio::test]
+async fn usage_report_collect_failure_is_surfaced_not_silent() {
+    let _guard = env_lock();
+    let home = TestHome::new();
+    let not_python = home.0.join("not-python");
+    fs::write(&not_python, b"not a python").expect("not-python");
+    unsafe {
+        std::env::set_var("VIBECRAFTED_PYTHON", &not_python);
+    }
+    let (status, _, report) = get(&home.0, "/api/usage?window=all&collect=1").await;
+    unsafe {
+        std::env::remove_var("VIBECRAFTED_PYTHON");
+    }
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["collection"]["ok"], false);
+    assert_eq!(report["schema"], "vibecrafted.usage-report.v1");
+    assert_eq!(report["totals"]["runs"], 1);
 }

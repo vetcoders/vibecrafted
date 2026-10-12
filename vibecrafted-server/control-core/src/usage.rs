@@ -45,6 +45,9 @@ pub struct UsageReport {
     pub dimensions: UsageDimensions,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
+    /// Present only when the request explicitly asked for a collection pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<crate::collect::CollectionReport>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,18 +162,8 @@ impl ControlPlane {
         });
         recover_lazy_transcripts(&runtime_runs, &mut runs);
 
-        let mut vc_session_ids = std::collections::HashSet::new();
-        for run in &runs {
-            if let Some(session_id) = run.provider_session_id.as_str() {
-                if !session_id.is_empty() && session_id != "unknown" {
-                    vc_session_ids.insert(session_id.to_string());
-                }
-            }
-        }
-
         let telemetry_dir = self.home().join("telemetry");
-        let local_runs =
-            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, cutoff, &filter);
+        let local_runs = read_local_telemetry_runs(&telemetry_dir, &runs, cutoff, &filter);
         runs.extend(local_runs);
 
         runs.sort_by(|left, right| {
@@ -204,6 +197,7 @@ impl ControlPlane {
             runs,
             totals,
             dimensions,
+            collection: None,
         }
     }
 }
@@ -411,14 +405,57 @@ fn canonical_provider_for(agent: &str) -> &'static str {
     }
 }
 
+/// What the VC control-plane runs already represent, used to keep local
+/// provider telemetry from silently double-counting VC-originated sessions.
+#[derive(Default)]
+struct VcAttribution {
+    /// Provider session ids already represented by a VC run's meta.
+    session_ids: std::collections::HashSet<String>,
+    /// (agent, model, day) -> tokens already represented by VC runs whose
+    /// model and token total are both measured; exact deduction is safe.
+    known_by_agent_model_day: BTreeMap<(String, String, String), u64>,
+    /// (agent, day) pairs containing VC runs whose token total or model is
+    /// unmeasured: the archive remainder for that day cannot be recovered.
+    unattributable_agent_days: std::collections::BTreeSet<(String, String)>,
+}
+
+fn vc_attribution(vc_runs: &[UsageRun]) -> VcAttribution {
+    let mut attribution = VcAttribution::default();
+    for run in vc_runs {
+        if let Some(session_id) = run.provider_session_id.as_str() {
+            if !session_id.is_empty() && session_id != "unknown" {
+                attribution.session_ids.insert(session_id.to_string());
+            }
+        }
+        let agent = run.agent.as_str().unwrap_or("").to_ascii_lowercase();
+        let day = run.recorded_at.get(..10).unwrap_or("").to_string();
+        if agent.is_empty() || day.is_empty() {
+            continue;
+        }
+        let model = run.model.as_str().unwrap_or("").to_string();
+        match (run.tokens.tokens_total.as_u64(), model.is_empty()) {
+            (Some(total), false) => {
+                let key = (agent, model, day);
+                let entry = attribution.known_by_agent_model_day.entry(key).or_insert(0);
+                *entry = entry.saturating_add(total);
+            }
+            _ => {
+                attribution.unattributable_agent_days.insert((agent, day));
+            }
+        }
+    }
+    attribution
+}
+
 fn read_local_telemetry_runs(
     telemetry_dir: &Path,
-    vc_session_ids: &std::collections::HashSet<String>,
+    vc_runs: &[UsageRun],
     cutoff: Option<DateTime<Utc>>,
     filter: &UsageFilter,
 ) -> Vec<UsageRun> {
     let mut local_runs = Vec::new();
     let mut seen_session_ids = std::collections::HashSet::new();
+    let attribution = vc_attribution(vc_runs);
 
     for agent in USAGE_PROVIDER_ADAPTERS {
         let scan_cache_path = telemetry_dir.join(agent).join("scan-cache.json");
@@ -441,7 +478,7 @@ fn read_local_telemetry_runs(
 
                             // Deduplication: skip if session was run via VC or already seen in another local file
                             if !session_id.is_empty() {
-                                if vc_session_ids.contains(&session_id)
+                                if attribution.session_ids.contains(&session_id)
                                     || seen_session_ids.contains(&session_id)
                                 {
                                     continue;
@@ -564,8 +601,12 @@ fn read_local_telemetry_runs(
                                 provider: provider_val,
                                 agent: agent_val,
                                 model: model_val,
-                                status: "completed".to_string(),
-                                exit_code: Some(0),
+                                // A local scan record proves a provider session file
+                                // existed with tokens; it says nothing about how the
+                                // session ended. Honest state, never a fabricated
+                                // completed/exit-0 lifecycle truth.
+                                status: "observed".to_string(),
+                                exit_code: None,
                                 recorded_at: recorded_dt.to_rfc3339(),
                                 tokens,
                                 cost,
@@ -631,17 +672,114 @@ fn read_local_telemetry_runs(
                             .unwrap_or(0);
                         let total_tokens = input_tokens + output_tokens + cache_create + cache_read;
 
-                        let tokens = UsageTokens {
-                            schema: "vibecrafted.usage.v1".to_string(),
-                            unit: "tokens".to_string(),
-                            source: "local_archive".to_string(),
-                            events: 1,
-                            tokens_input: json!(input_tokens),
-                            tokens_cached_input: json!(cache_read),
-                            tokens_cache_write: json!(cache_create),
-                            tokens_output: json!(output_tokens),
-                            tokens_total: json!(total_tokens),
-                            semantics: BTreeMap::new(),
+                        // The archive day row aggregates every session of that
+                        // day, including VC-launched ones. Deduct exactly the
+                        // VC-represented tokens for the same (agent, model,
+                        // day); when any VC run on that day is unmeasured or
+                        // unmodeled, the remainder is unrecoverable and stays
+                        // unknown instead of becoming a fabricated number.
+                        let agent_day = (agent.to_string(), day.to_string());
+                        if attribution.unattributable_agent_days.contains(&agent_day) {
+                            let tokens = UsageTokens {
+                                schema: "vibecrafted.usage.v1".to_string(),
+                                unit: "tokens".to_string(),
+                                source: "local_archive".to_string(),
+                                events: 1,
+                                tokens_input: unknown(
+                                    "archive day includes VC runs with unmeasured tokens or model",
+                                ),
+                                tokens_cached_input: unknown(
+                                    "archive day includes VC runs with unmeasured tokens or model",
+                                ),
+                                tokens_cache_write: unknown(
+                                    "archive day includes VC runs with unmeasured tokens or model",
+                                ),
+                                tokens_output: unknown(
+                                    "archive day includes VC runs with unmeasured tokens or model",
+                                ),
+                                tokens_total: unknown(
+                                    "archive day includes VC runs with unmeasured tokens or model",
+                                ),
+                                semantics: BTreeMap::new(),
+                            };
+                            let cost = UsageCost {
+                                amount: unknown("cost not recorded for local archive"),
+                                currency: None,
+                                unit: Some("USD".to_string()),
+                                source: "local_archive".to_string(),
+                            };
+                            let run = UsageRun {
+                                run_id: format!("archive-{agent}-{day}-{model_str}"),
+                                provider: json!(canonical_provider_for(agent)),
+                                agent: json!(agent),
+                                model: json!(model_str),
+                                status: "aggregate".to_string(),
+                                exit_code: None,
+                                recorded_at,
+                                tokens,
+                                cost,
+                                failure_kind: None,
+                                failure: None,
+                                provider_session_id: unknown(
+                                    "archive day aggregation has no session id",
+                                ),
+                                telemetry_source: "local_archive".to_string(),
+                                unpriced_models: Vec::new(),
+                            };
+                            if matches_filter(&run, filter) {
+                                local_runs.push(run);
+                            }
+                            continue;
+                        }
+
+                        let deducted = attribution
+                            .known_by_agent_model_day
+                            .get(&(agent.to_string(), model_str.to_string(), day.to_string()))
+                            .copied()
+                            .unwrap_or(0)
+                            .min(total_tokens);
+                        if deducted == total_tokens && total_tokens > 0 {
+                            // Fully represented by VC runs already in the report.
+                            continue;
+                        }
+                        let remainder = total_tokens - deducted;
+
+                        let tokens = if deducted > 0 {
+                            let mut semantics = BTreeMap::new();
+                            semantics.insert("vc_deducted_tokens".to_string(), json!(deducted));
+                            UsageTokens {
+                                schema: "vibecrafted.usage.v1".to_string(),
+                                unit: "tokens".to_string(),
+                                source: "local_archive".to_string(),
+                                events: 1,
+                                tokens_input: unknown(
+                                    "component split not recoverable after VC deduction",
+                                ),
+                                tokens_cached_input: unknown(
+                                    "component split not recoverable after VC deduction",
+                                ),
+                                tokens_cache_write: unknown(
+                                    "component split not recoverable after VC deduction",
+                                ),
+                                tokens_output: unknown(
+                                    "component split not recoverable after VC deduction",
+                                ),
+                                tokens_total: json!(remainder),
+                                semantics,
+                            }
+                        } else {
+                            UsageTokens {
+                                schema: "vibecrafted.usage.v1".to_string(),
+                                unit: "tokens".to_string(),
+                                source: "local_archive".to_string(),
+                                events: 1,
+                                tokens_input: json!(input_tokens),
+                                tokens_cached_input: json!(cache_read),
+                                tokens_cache_write: json!(cache_create),
+                                tokens_output: json!(output_tokens),
+                                tokens_total: json!(total_tokens),
+                                semantics: BTreeMap::new(),
+                            }
                         };
                         let cost = UsageCost {
                             amount: unknown("cost not recorded for local archive"),
@@ -654,8 +792,10 @@ fn read_local_telemetry_runs(
                             provider: json!(canonical_provider_for(agent)),
                             agent: json!(agent),
                             model: json!(model_str),
-                            status: "completed".to_string(),
-                            exit_code: Some(0),
+                            // A day aggregate is not a session lifecycle: it
+                            // never claims completed/exit-0 truth.
+                            status: "aggregate".to_string(),
+                            exit_code: None,
                             recorded_at,
                             tokens,
                             cost,
@@ -897,7 +1037,7 @@ fn lazy_telemetry(jobs: &[Value]) -> Option<BTreeMap<String, Value>> {
     Some(by_id)
 }
 
-fn telemetry_python() -> Option<Command> {
+pub(crate) fn telemetry_python() -> Option<Command> {
     let executable = explicit_python("VIBECRAFTED_PYTHON")
         .or_else(runtime_python)
         .unwrap_or_else(|| PathBuf::from("python3"));
@@ -910,13 +1050,13 @@ fn telemetry_python() -> Option<Command> {
     Some(command)
 }
 
-fn runtime_python() -> Option<PathBuf> {
+pub(crate) fn runtime_python() -> Option<PathBuf> {
     let root = std::env::var("VIBECRAFTED_RUNTIME_ROOT").ok()?;
     let path = PathBuf::from(root.trim()).join("bin/python3");
     path.is_file().then_some(path)
 }
 
-fn explicit_python(name: &str) -> Option<PathBuf> {
+pub(crate) fn explicit_python(name: &str) -> Option<PathBuf> {
     let value = std::env::var(name).ok()?;
     let path = PathBuf::from(value.trim());
     if path.is_absolute() && path.is_file() {
@@ -926,7 +1066,7 @@ fn explicit_python(name: &str) -> Option<PathBuf> {
     }
 }
 
-fn source_core_dir() -> Option<PathBuf> {
+pub(crate) fn source_core_dir() -> Option<PathBuf> {
     // Release binaries must not carry the checkout. `env!("CARGO_MANIFEST_DIR")`
     // is a string literal rustc's `--remap-path-prefix` cannot rewrite, and one
     // copy of it in control-core showed up as the snapshot path in voc,

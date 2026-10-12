@@ -55,6 +55,9 @@ pub mod usage_junie;
 pub mod usage_kimi;
 pub mod workspace;
 
+pub mod collect;
+
+pub use collect::{COLLECTION_SCHEMA, CollectionOutcome, CollectionReport, collect_local_usage};
 pub use events::{
     ConnectionWindow, EventBatch, EventStream, STREAM_BATCH_MAX_BYTES, STREAM_BATCH_MAX_EVENTS,
     STREAM_LINE_MAX_BYTES, STREAM_SEGMENT_SCHEMA, StreamBatch, StreamBoundary, StreamCursor,

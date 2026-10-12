@@ -91,7 +91,7 @@ def test_dispatch_plan_keeps_plan_route(monkeypatch):
     monkeypatch.setattr(
         dispatch_cli,
         "diagnose_file",
-        lambda path: calls.append(path) or SimpleNamespace(ok=False),
+        lambda path, **_kwargs: calls.append(path) or SimpleNamespace(ok=False),
     )
     monkeypatch.setattr(dispatch_cli, "_print_doctor", lambda *a, **k: None)
     assert cli.main(["dispatch", "plan.toml", "--doctor"]) == 1
@@ -252,7 +252,7 @@ def test_agent_named_plan_file_remains_a_plan(monkeypatch, tmp_path):
     monkeypatch.setattr(
         dispatch_cli,
         "diagnose_file",
-        lambda path: calls.append(path) or SimpleNamespace(ok=False),
+        lambda path, **_kwargs: calls.append(path) or SimpleNamespace(ok=False),
     )
     monkeypatch.setattr(dispatch_cli, "_print_doctor", lambda *a, **k: None)
     assert dispatch_cli.main(["codex", "--doctor"]) == 1

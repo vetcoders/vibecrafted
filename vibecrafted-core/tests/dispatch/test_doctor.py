@@ -487,3 +487,231 @@ prompt = "run kimi cut"
     )
     assert report.ok is False
     assert any("meta.repo" in err.path for err in report.errors)
+
+
+def _quota_plan(tmp_path: Path, agent: str, model_line: str = "") -> Path:
+    plan = tmp_path / f"plan-{agent}.dispatch.toml"
+    plan.write_text(
+        f"""schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "{agent}"
+workflow = "implement"
+{model_line}prompt = "run {agent} cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ exit_code = 0 }}
+""",
+        encoding="utf-8",
+    )
+    return plan
+
+
+def _serve_quota_payload(payload: dict) -> tuple[str, object]:
+    """Serve one quota-dashboard payload over loopback HTTP; returns (url, server)."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}", server
+
+
+def _quota_card(agent: str, status: str, **extra: object) -> dict:
+    card: dict = {
+        "id": agent,
+        "name": agent.title(),
+        "present": True,
+        "status": status,
+        "headline": status,
+        "detail": "",
+        "stale": False,
+        "age_s": 3,
+        "model": None,
+        "account": None,
+        "pool": None,
+        "source": "vc-server",
+        "bars": [],
+    }
+    card.update(extra)
+    return card
+
+
+def test_quota_preflight_missing_observation_warns_unknown(tmp_path: Path) -> None:
+    """Parent counterexample: a needed pool without any observation must be a
+    visible unknown warning, not 0 errors / 0 warnings."""
+    home = tmp_path / "home"
+    home.mkdir()
+    plan = _quota_plan(tmp_path, "codex")
+
+    report = diagnose_file(plan, check_quotas=True, home=home)
+
+    assert report.ok is True
+    assert not report.errors
+    unknown = [w for w in report.warnings if "unknown" in w.message]
+    assert unknown, report.warnings
+    assert any(w.path == "quota.openai" for w in unknown)
+    assert any("no local observation" in w.message for w in unknown)
+
+
+def test_quota_preflight_malformed_fraction_warns_unknown_without_raising(
+    tmp_path: Path,
+) -> None:
+    """Parent counterexample: fraction='invalid' must degrade to an explicit
+    unknown/malformed warning, never an uncaught ValueError."""
+    home = tmp_path / "home"
+    codex = home / "telemetry" / "codex"
+    codex.mkdir(parents=True)
+    (codex / "quota.json").write_text(
+        json.dumps(
+            {"agent": "codex", "fraction": "invalid", "updated_at": time.time()}
+        ),
+        encoding="utf-8",
+    )
+    plan = _quota_plan(tmp_path, "codex")
+
+    report = diagnose_file(plan, check_quotas=True, home=home)
+
+    assert report.ok is True
+    assert any(
+        "malformed" in w.message and "unknown" in w.message for w in report.warnings
+    ), report.warnings
+
+
+def test_quota_preflight_consumes_real_server_card_by_id(tmp_path: Path) -> None:
+    """The server serializes cards with `id`; the doctor must not drop them."""
+    home = tmp_path / "home"
+    home.mkdir()
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [_quota_card("codex", "blocked", pool="openai")],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        plan = _quota_plan(tmp_path, "codex")
+        report = diagnose_file(plan, check_quotas=True, home=home, server_url=url)
+    finally:
+        server.shutdown()
+
+    assert report.ok is False
+    assert any(
+        "quota confirmed exhausted for agent 'codex'" in error.message
+        for error in report.errors
+    )
+    assert any(error.path == "quota.openai" for error in report.errors)
+
+
+def test_quota_preflight_server_stale_blocked_is_unconfirmed_warning(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [
+            _quota_card("codex", "blocked", pool="openai", stale=True, age_s=900)
+        ],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        plan = _quota_plan(tmp_path, "codex")
+        report = diagnose_file(plan, check_quotas=True, home=home, server_url=url)
+    finally:
+        server.shutdown()
+
+    assert report.ok is True
+    assert not report.errors
+    assert any("stale" in w.message for w in report.warnings)
+
+
+def test_quota_preflight_server_absent_card_is_visible_unknown(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [_quota_card("codex", "absent", pool="openai", present=False)],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        plan = _quota_plan(tmp_path, "codex")
+        report = diagnose_file(plan, check_quotas=True, home=home, server_url=url)
+    finally:
+        server.shutdown()
+
+    assert report.ok is True
+    assert any(
+        "unknown" in w.message and "absent" in w.message for w in report.warnings
+    ), report.warnings
+
+
+def test_quota_preflight_scopes_messages_to_effective_model(tmp_path: Path) -> None:
+    """The gate reasons over the plan's effective model selection, not only the
+    bare agent name: the scope must be visible in the refusal."""
+    home = tmp_path / "home"
+    home.mkdir()
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [_quota_card("codex", "blocked", pool="openai")],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        plan = _quota_plan(tmp_path, "codex", model_line='model = "gpt-5.6-terra"\n')
+        report = diagnose_file(plan, check_quotas=True, home=home, server_url=url)
+    finally:
+        server.shutdown()
+
+    assert report.ok is False
+    message = next(
+        error.message
+        for error in report.errors
+        if "quota confirmed exhausted" in error.message
+    )
+    assert "gpt-5.6-terra" in message
+    assert "via cli" in message  # the TOML cut pin resolves as a CLI-grade pin
+
+
+def test_doctor_main_probes_configured_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """doctor.main must reach the central server path from operator config."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [_quota_card("codex", "blocked", pool="openai")],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        config_dir = tmp_path / "xdg" / "vibecrafted"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text(
+            f'[server]\npublic_url = "{url}"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        plan = _quota_plan(tmp_path, "codex")
+        code = main([str(plan), "--check-quotas", "--json"])
+    finally:
+        server.shutdown()
+
+    assert code == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False
+    assert any(
+        "quota confirmed exhausted for agent 'codex'" in error["message"]
+        for error in out["errors"]
+    )

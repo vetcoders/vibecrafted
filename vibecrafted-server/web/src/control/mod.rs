@@ -63,8 +63,9 @@
 //!
 //! * `GET /api/usage` — canonical per-run token and cost report. Currencies
 //!   stay separate; unknown measurements stay unknown.
-//! * `GET /api/usage/quota` — live agy/kimi quota cards from the local monitor
-//!   files. Missing files are absent, not errors.
+//! * `GET /api/usage/quota` — live provider-neutral quota cards from local
+//!   monitor snapshots; `?collect=1` runs one bounded collection pass first.
+//!   Missing files are absent cards, not errors.
 //!
 //! The Loctree report and AICX routes are not part of this router: they carry
 //! their own boundaries and live in [`crate::tools`].

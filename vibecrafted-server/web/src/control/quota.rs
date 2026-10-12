@@ -1,15 +1,16 @@
 //! Live agent-quota board for the usage page.
 //!
-//! Reads the files `agy-monitor` and `kimi-monitor` already write. No daemon,
-//! no second accounting engine, no network. A missing file is an absent card,
-//! not an error — the operator may not run that agent.
+//! Reads the local quota snapshots of every supported provider. No daemon, no
+//! second accounting engine, no network on the read path. A missing file is
+//! an absent card, not an error — the operator may not run that agent.
+//! `?collect=1` runs one bounded vc-server-owned collection pass first.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Extension, Query};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
@@ -31,6 +32,7 @@ pub struct QuotaQuery {
     pub pool: Option<String>,
     pub model: Option<String>,
     pub account: Option<String>,
+    pub collect: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,11 +40,17 @@ struct QuotaDashboard {
     schema: &'static str,
     generated_at: String,
     agents: Vec<QuotaAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection: Option<control_core::CollectionReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaAgent {
     pub id: &'static str,
+    /// Duplicate of `id` under the dimension name API consumers key on; the
+    /// dispatch doctor matches cards by `agent` and must not drop the real
+    /// response because only `id` was serialized.
+    pub agent: &'static str,
     pub name: &'static str,
     pub present: bool,
     pub status: &'static str,
@@ -72,7 +80,31 @@ pub struct QuotaBar {
     pub level: &'static str,
 }
 
-pub async fn quota(Query(query): Query<QuotaQuery>) -> Response {
+pub async fn quota(
+    Extension(plane): Extension<control_core::ControlPlane>,
+    Query(query): Query<QuotaQuery>,
+) -> Response {
+    // Explicit operator-requested collection: one bounded pass over every
+    // provider engine, never a permanent child. Default stays read-only so
+    // the UI's refresh polling never triggers scans or network probes.
+    let collection = match query.collect.as_deref() {
+        Some("1" | "true" | "yes") => {
+            let home = plane.home();
+            Some(
+                tokio::task::spawn_blocking(move || control_core::collect_local_usage(&home))
+                    .await
+                    .unwrap_or_else(|error| control_core::CollectionReport {
+                        schema: control_core::COLLECTION_SCHEMA.to_string(),
+                        generated_at: Utc::now().to_rfc3339(),
+                        ok: false,
+                        outcomes: Vec::new(),
+                        error: Some(format!("collection task failed: {error}")),
+                    }),
+            )
+        }
+        _ => None,
+    };
+
     let mut agents = vec![
         read_agy(),
         read_fleet_agent("claude", "Claude"),
@@ -144,6 +176,7 @@ pub async fn quota(Query(query): Query<QuotaQuery>) -> Response {
         schema: SCHEMA,
         generated_at: Utc::now().to_rfc3339(),
         agents,
+        collection,
     };
     no_store(Json(body).into_response())
 }
@@ -217,6 +250,7 @@ fn project(
         Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
         Source::Unreadable { label, error } => QuotaAgent {
             id,
+            agent: id,
             name,
             present: true,
             status: "unknown",
@@ -256,6 +290,7 @@ fn project(
             }
             QuotaAgent {
                 id,
+                agent: id,
                 name,
                 present: true,
                 status: fields.status,
@@ -356,6 +391,7 @@ fn absent(
 ) -> QuotaAgent {
     QuotaAgent {
         id,
+        agent: id,
         name,
         present: false,
         status: "absent",

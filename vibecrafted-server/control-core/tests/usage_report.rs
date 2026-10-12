@@ -439,3 +439,169 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
 
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn local_scan_sessions_are_observed_not_fabricated_completed() {
+    let home = fixture_home("observed-not-completed");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+    let codex_cache_dir = home.join("telemetry/codex");
+    fs::create_dir_all(&codex_cache_dir).unwrap();
+    let mtime = now.timestamp() as f64 - 600.0;
+    let codex_cache = json!({
+        "files": {
+            "/tmp/store/session_local.jsonl": {
+                "record": {
+                    "agent": "codex",
+                    "id": "sess-local-1",
+                    "model": "gpt-5.6-terra",
+                    "mtime": mtime,
+                    "processed_total": 42,
+                    "native": {"input_tokens": 30, "output_tokens": 12}
+                }
+            }
+        }
+    });
+    fs::write(
+        codex_cache_dir.join("scan-cache.json"),
+        serde_json::to_vec(&codex_cache).unwrap(),
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+    let local = report
+        .runs
+        .iter()
+        .find(|run| run.provider_session_id == "sess-local-1")
+        .expect("local session");
+    assert_eq!(local.status, "observed");
+    assert_eq!(local.exit_code, None);
+    assert_eq!(report.totals.runs_failed, 0);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn archive_fallback_deducts_vc_represented_tokens_and_stays_honest() {
+    let home = fixture_home("archive-dedup");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+
+    // VC run on 2026-10-11, codex, model gpt-5.6-terra, 150 known tokens.
+    write_meta(
+        &home,
+        "vc-codex-day",
+        json!({
+            "run_id": "vc-codex-day",
+            "agent": "codex",
+            "provider": "openai",
+            "agent_model": "gpt-5.6-terra",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-10-11T10:00:00Z",
+            "usage": {"events": 1, "tokens_total": 150},
+            "cost": {"amount": 0.1, "currency": "USD", "source": "provider_reported"}
+        }),
+    );
+
+    // Archive day row for the same day/model: 500 total (150 VC + 350 local).
+    let archive_dir = home.join("telemetry/archive");
+    fs::create_dir_all(&archive_dir).unwrap();
+    fs::write(
+        archive_dir.join("codex.jsonl"),
+        "{\"day\":\"2026-10-11\",\"model\":\"gpt-5.6-terra\",\"input_tokens\":300,\"output_tokens\":200,\"cache_creation_tokens\":0,\"cache_read_tokens\":0}\n",
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+
+    let archive = report
+        .runs
+        .iter()
+        .find(|run| run.run_id == "archive-codex-2026-10-11-gpt-5.6-terra")
+        .expect("archive remainder row");
+    assert_eq!(archive.status, "aggregate");
+    assert_eq!(archive.exit_code, None);
+    assert_eq!(archive.tokens.tokens_total, 350);
+    assert_eq!(archive.tokens.semantics["vc_deducted_tokens"], 150);
+    // The component split is not recoverable after deduction: unknown, not fabricated.
+    assert_eq!(archive.tokens.tokens_input["value"], "unknown");
+    // 150 (VC) + 350 (remainder) = 500 total; no double count.
+    assert_eq!(report.totals.tokens_total_known, 500);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn archive_row_fully_represented_by_vc_runs_is_not_duplicated() {
+    let home = fixture_home("archive-fully-vc");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+    write_meta(
+        &home,
+        "vc-codex-full",
+        json!({
+            "run_id": "vc-codex-full",
+            "agent": "codex",
+            "agent_model": "gpt-5.6-terra",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-10-11T10:00:00Z",
+            "usage": {"events": 1, "tokens_total": 500},
+            "cost": {"amount": 0.1, "currency": "USD", "source": "provider_reported"}
+        }),
+    );
+    let archive_dir = home.join("telemetry/archive");
+    fs::create_dir_all(&archive_dir).unwrap();
+    fs::write(
+        archive_dir.join("codex.jsonl"),
+        "{\"day\":\"2026-10-11\",\"model\":\"gpt-5.6-terra\",\"input_tokens\":300,\"output_tokens\":200}\n",
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+    assert_eq!(report.totals.runs, 1);
+    assert!(
+        report
+            .runs
+            .iter()
+            .all(|run| !run.run_id.starts_with("archive-"))
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn archive_day_with_unmeasured_vc_run_stays_unknown_not_fabricated() {
+    let home = fixture_home("archive-unknown-vc");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+    write_meta(
+        &home,
+        "vc-codex-unknown",
+        json!({
+            "run_id": "vc-codex-unknown",
+            "agent": "codex",
+            "agent_model": "gpt-5.6-terra",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-10-11T10:00:00Z"
+        }),
+    );
+    let archive_dir = home.join("telemetry/archive");
+    fs::create_dir_all(&archive_dir).unwrap();
+    fs::write(
+        archive_dir.join("codex.jsonl"),
+        "{\"day\":\"2026-10-11\",\"model\":\"gpt-5.6-terra\",\"input_tokens\":300,\"output_tokens\":200}\n",
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+    let archive = report
+        .runs
+        .iter()
+        .find(|run| run.run_id == "archive-codex-2026-10-11-gpt-5.6-terra")
+        .expect("archive row remains visible");
+    assert_eq!(archive.status, "aggregate");
+    assert_eq!(archive.tokens.tokens_total["value"], "unknown");
+    assert!(
+        archive.tokens.tokens_total["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("unmeasured")
+    );
+    fs::remove_dir_all(home).ok();
+}

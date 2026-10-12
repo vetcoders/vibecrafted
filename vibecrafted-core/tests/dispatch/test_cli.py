@@ -10,7 +10,9 @@ import pytest
 from vibecrafted_core import cli as root_cli
 from vibecrafted_core.dispatch import cli as dispatch_cli
 from vibecrafted_core.dispatch import supervisor as supervisor_module
+from vibecrafted_core.dispatch.schema import parse_dispatch
 from vibecrafted_core.dispatch.supervisor import CellRun
+from vibecrafted_core.dispatch.worktrees import canonical_artifact_root
 
 pytestmark = pytest.mark.usefixtures("worker_claims")
 
@@ -67,13 +69,28 @@ prompt = "hello {{baton}}"
     return dispatch_file, reports, tracker
 
 
-def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys) -> None:
+def _isolate_quota_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point the doctor's server probe at a closed loopback port so tests never
+    depend on a host vc-server answering the default origin."""
+    config_dir = tmp_path / "xdg" / "vibecrafted"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        '[server]\npublic_url = "http://127.0.0.1:1"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
+def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys, monkeypatch) -> None:
+    _isolate_quota_server(monkeypatch, tmp_path)
     dispatch_file, _, _ = _dispatch_file(tmp_path)
 
     assert dispatch_cli.main([str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert "dispatch-doctor: ok" in captured.out
+    # An unmonitored needed pool stays a visible unknown, never silent.
+    assert "quota.openai" in captured.out
+    assert "unknown" in captured.out
 
 
 @pytest.mark.parametrize("mode", [["--doctor"], []])
@@ -173,7 +190,9 @@ def test_doctor_override_keeps_red_evidence(tmp_path: Path, capsys) -> None:
     assert payload["baseline"]["allow_red_baseline"] is True
     assert payload["baseline"]["verification"]["ok"] is False
     assert payload["baseline"]["verification"]["checks"][0]["exit_code"] == 7
-    assert "--allow-red-baseline" in payload["warnings"][0]["message"]
+    assert any(
+        "--allow-red-baseline" in warning["message"] for warning in payload["warnings"]
+    )
 
 
 def test_duplicate_command_retains_implicit_zero_exit(tmp_path: Path, capsys) -> None:
@@ -305,14 +324,16 @@ def test_cli_doctor_rejects_conductor_invalid_fixture(capsys) -> None:
 
 
 def test_root_cli_dispatch_subcommand_routes_to_dispatch_cli(
-    tmp_path: Path, capsys
+    tmp_path: Path, capsys, monkeypatch
 ) -> None:
+    _isolate_quota_server(monkeypatch, tmp_path)
     dispatch_file, _, _ = _dispatch_file(tmp_path)
 
     assert root_cli.main(["dispatch", str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert "dispatch-doctor: ok" in captured.out
+    assert "quota.openai" in captured.out
 
 
 @pytest.mark.parametrize("command", ["echo red", "echo ok; exit 7", "echo ok"])
@@ -396,6 +417,7 @@ prompt = "next cut"
 def test_cli_refuses_batch_when_needed_pool_exhausted(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    _isolate_quota_server(monkeypatch, tmp_path)
     dispatch_file, _, _ = _dispatch_file(tmp_path)
     home = tmp_path / "home"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
@@ -432,6 +454,7 @@ def test_cli_refuses_batch_when_needed_pool_exhausted(
 def test_cli_ignore_usage_quota_warnings_allows_admission_and_records_receipt(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    _isolate_quota_server(monkeypatch, tmp_path)
     dispatch_file, _, _ = _dispatch_file(tmp_path)
     home = tmp_path / "home"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
@@ -460,3 +483,126 @@ def test_cli_ignore_usage_quota_warnings_allows_admission_and_records_receipt(
     )
     captured = capsys.readouterr()
     assert "dispatch dry-run: rendered 1 prompt(s)" in captured.out
+
+
+def _serve_quota_payload(payload: dict) -> tuple[str, object]:
+    """Serve one quota-dashboard payload over loopback HTTP; returns (url, server)."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}", server
+
+
+def test_cli_dispatch_server_confirmed_exhaustion_zero_start(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Real server response -> public dispatch CLI refuses before first launch."""
+    dispatch_file, _, _ = _dispatch_file(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "generated_at": "2026-10-12T00:00:00Z",
+        "agents": [
+            {
+                # The server serializes `id` (and `agent`); the doctor must
+                # consume the projected card instead of dropping the response.
+                "id": "codex",
+                "name": "Codex",
+                "present": True,
+                "status": "blocked",
+                "headline": "EXHAUSTED",
+                "detail": "quota exhausted",
+                "stale": False,
+                "age_s": 5,
+                "model": "gpt-5.6-terra",
+                "account": None,
+                "pool": "openai",
+                "source": "~/.vibecrafted/telemetry/codex/quota.json",
+                "bars": [],
+            }
+        ],
+    }
+    url, server = _serve_quota_payload(payload)
+    try:
+        config_dir = tmp_path / "xdg" / "vibecrafted"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text(
+            f'[server]\npublic_url = "{url}"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+        def forbidden_launch(*args, **kwargs):
+            pytest.fail("confirmed exhaustion must refuse before any launch")
+
+        monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden_launch)
+        assert dispatch_cli.main([str(dispatch_file), "--json"]) == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["ok"] is False
+        assert any(
+            "quota confirmed exhausted for agent 'codex'" in error["message"]
+            for error in out["errors"]
+        )
+        assert any(error["path"] == "quota.openai" for error in out["errors"])
+    finally:
+        server.shutdown()
+
+
+def test_cli_override_receipt_write_failure_refuses_launch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A batch may not start when its durable override receipt cannot persist."""
+    _isolate_quota_server(monkeypatch, tmp_path)
+    dispatch_file, _, _ = _dispatch_file(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    codex_telemetry = home / "telemetry" / "codex"
+    codex_telemetry.mkdir(parents=True)
+    import time
+
+    (codex_telemetry / "quota.json").write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "status": "blocked",
+                "quota": {"fraction": 1.0, "status": "RESOURCE_EXHAUSTED"},
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dispatch_cli, "reserve_run_id", lambda _skill: "testrun-fixed")
+    dispatch = parse_dispatch(dispatch_file.read_text(encoding="utf-8"))
+
+    artifacts_dir = (
+        canonical_artifact_root(dispatch.meta.repo)
+        / "plans"
+        / "dispatch"
+        / "testrun-fixed"
+    )
+    artifacts_dir.mkdir(parents=True)
+    # A directory at the receipt path makes the write fail with OSError.
+    (artifacts_dir / "quota-override-receipt.json").mkdir()
+
+    def forbidden_launch(*args, **kwargs):
+        pytest.fail("override without a durable receipt must never launch")
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden_launch)
+    assert dispatch_cli.main([str(dispatch_file), "--ignore-usage-quota-warnings"]) == 1
+    captured = capsys.readouterr()
+    assert "quota override receipt could not be persisted" in captured.err

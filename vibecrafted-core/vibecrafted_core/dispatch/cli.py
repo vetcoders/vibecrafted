@@ -16,7 +16,13 @@ from typing import Any
 
 from vibecrafted_core.workflow import reserve_run_id
 
-from .doctor import DoctorError, DoctorReport, DoctorWarning, diagnose_file
+from .doctor import (
+    DoctorError,
+    DoctorReport,
+    DoctorWarning,
+    default_server_url,
+    diagnose_file,
+)
 from .model import (
     BASE_CUT_PREFIX,
     STATE_VERIFIED,
@@ -166,11 +172,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
 
+    server_url, server_note = default_server_url()
     report = diagnose_file(
         source,
         check_quotas=True,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=server_url,
     )
+    if server_note:
+        report = replace(
+            report,
+            warnings=(*report.warnings, DoctorWarning("quota.server", server_note)),
+        )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
         return 1
@@ -214,13 +227,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
     if report.quota_override_receipt is not None:
+        # The override decision must be durable BEFORE any worker launches; a
+        # batch that cannot record its own override receipt may not proceed.
+        receipt_path = artifacts_dir / "quota-override-receipt.json"
         try:
-            (artifacts_dir / "quota-override-receipt.json").write_text(
-                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
+            receipt_path.write_text(
+                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2)
+                + "\n",
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            print(
+                f"quota override receipt could not be persisted at {receipt_path}: "
+                f"{exc}; refusing to launch without a durable override decision",
+                file=sys.stderr,
+            )
+            return 1
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung
