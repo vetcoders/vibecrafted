@@ -17,6 +17,12 @@ acceptance.
   (`schema`, `version`, `digest`, `provider`, `lane`, `continuation`,
   `delivery`, `native_option`, `reason`, `acceptance`).
 - Inspect: `python -m vibecrafted_core.operational_policy matrix|digest|path`.
+- Scope: the policy stays a short pointer. Build leases, housekeeping
+  inspection and supervisor scheduling are owned by
+  [`docs/operator/VIBECRAFTED_HOUSEKEEPING.md`](../operator/VIBECRAFTED_HOUSEKEEPING.md)
+  and `scripts/vc-build-lease`; the policy names them and keeps the installed
+  `vc-build-lease` conditional on a Runtime Pack that ships it. Quota stays an
+  observation: there is no quota CLI to teach.
 
 ## Transports
 

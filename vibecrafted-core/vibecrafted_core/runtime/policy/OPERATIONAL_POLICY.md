@@ -53,10 +53,24 @@ credential or authority. Your private task and the repository's instructions
 
 ## Builds and cleanup
 
-- When builds share an output directory (for example a shared Cargo target),
-  hold that directory's regular `.vc-build-lease` file with a shared `flock`
-  for the whole build chain, including the gaps between commands. Do not create
-  private copies of large build caches.
+The full contract is `docs/operator/VIBECRAFTED_HOUSEKEEPING.md` in the
+Vibecrafted source checkout; read it before long builds or cleanup.
+
+- Wrap a whole build chain that writes a shared output directory (for example
+  a shared Cargo target) in one lease. From the source checkout:
+  `scripts/vc-build-lease --root <target> -- /bin/bash -c '<build && test>'`.
+  It holds the regular `.vc-build-lease` with a shared `flock` across every
+  command and the gaps between them. A bare `vc-build-lease` exists only where
+  a Runtime Pack that ships it is installed; check `command -v vc-build-lease`
+  first. `--run-id` (with `--home`) registers only a newly created output for
+  that tracked run; it never claims an existing target. Do not create private
+  copies of large build caches.
+- Inspect before cleaning or re-planning:
+  `scripts/vibecrafted-housekeeping --json` (per-filesystem free space and
+  deferred candidates), `vibecrafted housekeeping schedule status` and
+  `vibecrafted server status`. `vc-server-supervisor` schedules housekeeping;
+  the Founder's `[housekeeping]` settings decide whether it only plans or also
+  retires accepted owned caches.
 - Delete only what you can prove you own, can reproduce and nobody is using.
   Cleaners take an exclusive lock and must defer on a held lease, a changed
   directory or an uncertain observation. Source, branches, unintegrated
@@ -69,8 +83,12 @@ credential or authority. Your private task and the repository's instructions
   passing check as proof of a different layer.
 - Report baseline and tip commits, changed files, commands with their results,
   runtime class, effective root and integration disposition. A finished worker
-  or a clean tree is not integration. Merging, publishing, installing and
-  restarting services need explicit human approval.
+  or a clean tree is not integration.
+- Committing your own work and a normal, non-force push of its feature branch
+  are free moves. An explicit authorization given in the session persists for
+  that session. Otherwise merging into trunk, deploying or publishing, and
+  replacing a live app remain the Founder's buttons. Workers never integrate
+  their own work.
 - When `VIBECRAFTED_RUN_ID` is set, read your inbox at checkpoints with
   `vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive` and
   acknowledge each message after handling it.

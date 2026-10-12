@@ -92,10 +92,22 @@ def test_policy_teaches_only_commands_the_installed_cli_exposes(capsys) -> None:
         "Agent-Operator",
         "explicit override",
         "integration",
+        # Build leases and housekeeping: point at the canonical guide and the
+        # source command; installed availability stays conditional.
+        "docs/operator/VIBECRAFTED_HOUSEKEEPING.md",
+        "scripts/vc-build-lease --root",
+        "command -v vc-build-lease",
+        "vc-server-supervisor",
+        # Authority: feature-branch push is free; trunk/deploy/live app are not.
+        "non-force push of its feature branch are free moves",
+        "remain the Founder's buttons",
+        "Workers never integrate",
     ):
         assert topic in text, topic
-    # No future quota/capacity API is advertised as working.
+    # No future quota/capacity API is advertised as working, and the stale
+    # "everything needs fresh human approval" wording is gone.
     assert "no command yet" in text
+    assert "need explicit human approval" not in text
     deck = (PACKAGE / "deck" / "vibecrafted").read_text(encoding="utf-8")
     verbs = set(re.findall(r"`vibecrafted ([a-z][a-z-]*)", text))
     assert verbs >= {"usage", "doctor", "message"}
