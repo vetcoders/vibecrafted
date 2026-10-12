@@ -2589,3 +2589,170 @@ def test_launch_environment_is_guest_not_landlord(tmp_path: Path) -> None:
     assert "_guest_environment(host)" in source
     assert "_launch_child_path(app" in source
     assert "_LAUNCH_INHERITED_ENV" not in source
+
+
+@pytest.fixture
+def restored_interactive_seats(tmp_path, monkeypatch):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    seats = []
+    for index in range(3):
+        seats.append(
+            wc.resolve_run_workspace_identity(
+                root=repo,
+                env={},
+                runtime_session_id=f"restored-{index}",
+                runtime_state="missing",
+                socket_dir="/private-test-sockets",
+            )
+        )
+        wc.record_runtime_session_attachment(
+            workspace_id=seats[-1].workspace_id,
+            vibecrafted_session_id=seats[-1].vibecrafted_session_id,
+            workspace_instance_id=seats[-1].workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=f"restored-{index}",
+            state="missing",
+            socket_dir="/private-test-sockets",
+        )
+    for key, value in seats[-1].to_env().items():
+        monkeypatch.setenv(key, value)
+    return repo, seats
+
+
+def test_interactive_admission_binds_exact_restored_seat(restored_interactive_seats):
+    repo, seats = restored_interactive_seats
+    command = interactive_workspace_command(
+        "codex",
+        "/vc-resume",
+        "local-native",
+        "bypass",
+        repo,
+        continuity="fresh",
+        token_budget="unmetered",
+    )
+    admission = json.loads(Path(command[-1]).read_bytes())
+    for key, value in seats[-1].to_meta_fields().items():
+        assert admission[key] == value
+
+
+@pytest.mark.parametrize("ambient", ["empty", "foreign"])
+def test_interactive_admission_replay_preserves_seat_without_ambient_context(
+    restored_interactive_seats, monkeypatch, capsys, tmp_path, ambient
+):
+    from vibecrafted_core import spawn
+
+    repo, seats = restored_interactive_seats
+    command = interactive_workspace_command(
+        "codex",
+        "/vc-resume",
+        "local-native",
+        "bypass",
+        repo,
+        continuity="fresh",
+        token_budget="unmetered",
+    )
+    path = Path(command[-1])
+    admission = json.loads(path.read_bytes())
+    # Independent durable input also exercises replay against the old composer.
+    admission.update(seats[-1].to_meta_fields())
+    path.write_text(json.dumps(admission))
+    for key in seats[-1].to_env():
+        monkeypatch.delenv(key, raising=False)
+    if ambient == "foreign":
+        from vibecrafted_core import workspace_catalog as wc
+
+        foreign_root = tmp_path / "foreign"
+        _repo(foreign_root)
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+        for key, value in foreign.to_env().items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(spawn, "_resolve_agent_command", lambda *args: [sys.executable])
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *a, **k: ProviderUsageCapability("codex", False),
+    )
+    prepared = []
+    real_prepare = spawn.prepare_interactive_workspace_launch
+
+    def prepare_then_stop(**kwargs):
+        launch = real_prepare(**kwargs)
+        prepared.append(launch)
+        raise ValueError("private fixture reached provider boundary")
+
+    monkeypatch.setattr(
+        spawn, "prepare_interactive_workspace_launch", prepare_then_stop
+    )
+    assert main(command[command.index("interactive-launch") :]) == 2
+    assert "private fixture reached provider boundary" in capsys.readouterr().err
+    assert len(prepared) == 1
+    launch = prepared[0]
+    for key, value in seats[-1].to_meta_fields().items():
+        assert launch.receipt[key] == value
+
+
+@pytest.mark.parametrize(
+    "invalid", ["foreign", "partial", "unknown", "inconsistent", "unreadable", "stale"]
+)
+def test_interactive_exact_admission_refuses_invalid_seat(
+    restored_interactive_seats, monkeypatch, tmp_path, invalid
+):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo, seats = restored_interactive_seats
+    admission = seats[-1].to_meta_fields()
+    if invalid == "foreign":
+        foreign_root = tmp_path / "foreign"
+        _repo(foreign_root)
+        admission = wc.resolve_run_workspace_identity(
+            root=foreign_root, env={}
+        ).to_meta_fields()
+    elif invalid == "partial":
+        del admission["vibecrafted_session_id"]
+    elif invalid == "unknown":
+        admission["workspace_instance_id"] = wc.new_uuid7()
+    elif invalid == "inconsistent":
+        admission["vibecrafted_session_id"] = seats[0].vibecrafted_session_id
+    elif invalid == "unreadable":
+        wc.instance_path(seats[-1].workspace_instance_id).write_text("{broken")
+    elif invalid == "stale":
+        path = wc.instance_path(seats[-1].workspace_instance_id)
+        payload = json.loads(path.read_bytes())
+        payload["status"] = wc.INSTANCE_STATUS_STALE
+        path.write_text(json.dumps(payload))
+    with pytest.raises((ValueError, wc.WorkspaceCatalogError)):
+        prepare_interactive_workspace_launch(
+            provider="codex",
+            runtime="local-native",
+            permissions="bypass",
+            selected_root=repo,
+            prompt="private recovery fixture",
+            executable=sys.executable,
+            publish=False,
+            quota_policy=resolve_quota_policy("unmetered", runtime="local-native"),
+            usage_capability=ProviderUsageCapability("codex", False),
+            workspace_identity=admission,
+        )
+
+
+def test_interactive_unselected_same_build_remains_ambiguous(
+    restored_interactive_seats,
+):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo, _seats = restored_interactive_seats
+    with pytest.raises(wc.WorkspaceCatalogError, match="multiple live instances"):
+        prepare_interactive_workspace_launch(
+            provider="codex",
+            runtime="local-native",
+            permissions="bypass",
+            selected_root=repo,
+            prompt="private recovery fixture",
+            executable=sys.executable,
+            publish=False,
+            quota_policy=resolve_quota_policy("unmetered", runtime="local-native"),
+            usage_capability=ProviderUsageCapability("codex", False),
+        )

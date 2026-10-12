@@ -2165,9 +2165,14 @@ def interactive_workspace_command(
     admission["agent_session_id"] = bound_native
     admission["native_child_session_id"] = bound_native
     admission["native_identity_status"] = "proven" if bound_native else "unknown"
-    workspace_id = _workspace_identity_for_prompt(spec.root, admission)
-    if workspace_id:
-        admission["workspace_id"] = workspace_id
+    from .workspace_catalog import resolve_run_workspace_identity
+
+    # Bind the selected seat before continuity scrubbing or terminal handoff.
+    # The catalog owner validates inherited context against the explicit root.
+    identity = resolve_run_workspace_identity(
+        root=spec.root, env=os.environ, create_if_missing=True
+    )
+    admission.update(identity.to_meta_fields())
     if parent:
         admission["baseline_sha"] = parent.get("baseline_sha", "")
         admission["runtime_class"] = parent.get("runtime_class", "living-tree")
@@ -2306,6 +2311,7 @@ def prepare_interactive_workspace_launch(
     usage_capability: ProviderUsageCapability | None = None,
     provider_session_id: str | None = None,
     continuity_material: ContinuityMaterial | None = None,
+    workspace_identity: Mapping[str, Any] | None = None,
 ) -> InteractiveWorkspaceLaunch:
     """Resolve identity/root and publish truth only after launch preparation succeeds."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -2338,7 +2344,29 @@ def prepare_interactive_workspace_launch(
         WorktreeManager,
     )
     from .workflow import reserve_run_id
-    from .workspace_catalog import resolve_run_workspace_identity
+    from .workspace_catalog import read_catalog, resolve_run_workspace_identity
+
+    identity_fields = {
+        "workspace_id": "VIBECRAFTED_WORKSPACE_ID",
+        "vibecrafted_session_id": "VIBECRAFTED_SESSION_ID",
+        "workspace_instance_id": "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
+    }
+    selected_identity = dict(workspace_identity or {})
+    exact_seat = any(
+        selected_identity.get(key)
+        for key in ("vibecrafted_session_id", "workspace_instance_id")
+    )
+    identity_env = {}
+    if exact_seat:
+        if not all(selected_identity.get(key) for key in identity_fields):
+            raise ValueError("interactive workspace identity is incomplete")
+        record = read_catalog().workspaces.get(selected_identity["workspace_id"])
+        if record is None or Path(record.canonical_root).resolve() != parent:
+            raise ValueError("interactive workspace identity belongs to another root")
+        identity_env = {
+            env_key: str(selected_identity[key])
+            for key, env_key in identity_fields.items()
+        }
 
     effective_run_id = run_id or reserve_run_id("init")
     geometry: WorktreeGeometry | None = None
@@ -2354,8 +2382,13 @@ def prepare_interactive_workspace_launch(
 
     try:
         identity = resolve_run_workspace_identity(
-            root=parent, env={}, create_if_missing=True
+            root=parent, env=identity_env, create_if_missing=True
         )
+        if exact_seat and any(
+            identity.to_meta_fields()[key] != selected_identity[key]
+            for key in identity_fields
+        ):
+            raise ValueError("interactive workspace identity changed before launch")
         now_iso = dt.datetime.now(dt.UTC).isoformat()
         run_dir = control_plane_home() / "runtime_runs" / effective_run_id
         prompt_path = run_dir / "prompt.md"
@@ -2828,6 +2861,7 @@ def launch_interactive_workspace(
         usage_capability=capability,
         provider_session_id=provider_session_id,
         continuity_material=continuity_material,
+        workspace_identity=admission,
     )
     launch.receipt.update(admission)
     # A requested ID is not a provider acknowledgement. Codex fork does not
@@ -3562,6 +3596,7 @@ def _launch_supervised_interactive_workspace(
         usage_capability=child_capability,
         provider_session_id=child_session_id,
         continuity_material=continuity_material,
+        workspace_identity=admission,
     )
     if child_capability.supported and provider == "claude":
         try:
