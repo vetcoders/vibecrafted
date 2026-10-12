@@ -127,6 +127,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="RUN_ID",
         help="remove only settled per-cut worktrees/targets; retain branches and evidence",
     )
+    parser.add_argument(
+        "--ignore-usage-quota-warnings",
+        action="store_true",
+        help="bypass confirmed quota exhaustion admission gate; record deliberate override receipt",
+    )
     return parser
 
 
@@ -161,7 +166,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
 
-    report = diagnose_file(source)
+    report = diagnose_file(
+        source,
+        check_quotas=True,
+        ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+    )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
         return 1
@@ -204,6 +213,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
+    if report.quota_override_receipt is not None:
+        try:
+            (artifacts_dir / "quota-override-receipt.json").write_text(
+                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung
