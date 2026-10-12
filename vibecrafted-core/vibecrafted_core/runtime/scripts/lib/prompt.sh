@@ -158,6 +158,22 @@ spawn_append_prompt_body() {
   ' "$source_file" >> "$target_file"
 }
 
+# Render the Vibecrafted operational policy block ahead of the task body.
+# The text lives once in the packaged runtime/policy resource; the Python
+# owner (vibecrafted_core.operational_policy) decides the transport. Shell
+# spawners compose provider argv themselves, so the policy always rides this
+# private prompt file. A render failure stops the launch: an agent must not
+# start silently without the policy.
+spawn_append_operational_policy() {
+  local target_file="$1"
+  local agent="$2"
+  local block
+
+  block="$(spawn_python_module vibecrafted_core.operational_policy turn "$agent" --lane legacy_shell)" \
+    || spawn_die "operational policy could not be rendered for ${agent}"
+  printf '%s\n\n---\n\n' "$block" >> "$target_file"
+}
+
 spawn_build_research_runtime_prompt() {
   local source_file="$1"
   local runtime_file="$2"
@@ -172,6 +188,7 @@ spawn_build_research_runtime_prompt() {
 
 EOF_RESEARCH_PROMPT
 
+  spawn_append_operational_policy "$runtime_file" "$agent"
   spawn_append_prompt_body "$source_file" "$runtime_file"
 
   cat >> "$runtime_file" <<EOF_RESEARCH_CONTRACT
@@ -244,6 +261,7 @@ spawn_build_runtime_prompt() {
   fi
 
   spawn_write_frontmatter "$runtime_file" "$agent" "$model" "prompt"
+  spawn_append_operational_policy "$runtime_file" "$agent"
 
   # Strip existing frontmatter (so we don't have double) and append the plan
   spawn_append_prompt_body "$source_file" "$runtime_file"
