@@ -487,3 +487,103 @@ prompt = "run kimi cut"
     )
     assert report.ok is False
     assert any("meta.repo" in err.path for err in report.errors)
+
+
+def _plan(path: Path, cuts: str) -> Path:
+    path.write_text(
+        'schema = "vibecrafted.dispatch.v1"\n[meta]\nrepo = "/tmp/repo"\n' + cuts,
+        encoding="utf-8",
+    )
+    return path
+
+
+_ONE_CUT = """
+[[cuts]]
+id = "c1"
+agent = "{agent}"
+{model_line}workflow = "implement"
+prompt = "run"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ exit_code = 0 }}
+"""
+
+
+def test_missing_quota_observation_is_unknown_not_silent(tmp_path: Path) -> None:
+    plan = _plan(
+        tmp_path / "plan.dispatch.toml", _ONE_CUT.format(agent="codex", model_line="")
+    )
+    report = diagnose_file(plan, check_quotas=True, home=tmp_path / "home")
+    assert report.errors == ()
+    assert report.ok is True
+    assert any(
+        "unknown" in warning.message and "codex" in warning.message
+        for warning in report.warnings
+    )
+
+
+def test_invalid_fraction_is_a_warning(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    quota = home / "telemetry" / "codex"
+    quota.mkdir(parents=True)
+    (quota / "quota.json").write_text(
+        json.dumps({"status": "ok", "fraction": "invalid", "updated_at": time.time()}),
+        encoding="utf-8",
+    )
+    plan = _plan(
+        tmp_path / "plan.dispatch.toml", _ONE_CUT.format(agent="codex", model_line="")
+    )
+    report = diagnose_file(plan, check_quotas=True, home=home)
+    assert report.errors == ()
+    assert any("malformed" in warning.message for warning in report.warnings)
+
+
+def test_effective_model_scope_and_shared_pool(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    quota = home / "telemetry" / "kimi"
+    quota.mkdir(parents=True)
+    (quota / "quota.json").write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "model": "other-model",
+                "fraction": 1.0,
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    mismatched = _plan(
+        tmp_path / "mismatch.dispatch.toml",
+        _ONE_CUT.format(agent="kimi", model_line='model = "kimi-k2"\n'),
+    )
+    mismatch_report = diagnose_file(mismatched, check_quotas=True, home=home)
+    assert mismatch_report.errors == ()
+    assert any(
+        "does not prove" in warning.message for warning in mismatch_report.warnings
+    )
+
+    (quota / "quota.json").write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "model": "kimi-k2",
+                "account": "pool-a",
+                "fraction": 1.0,
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    shared = _plan(
+        tmp_path / "shared.dispatch.toml",
+        _ONE_CUT.format(agent="kimi", model_line='model = "kimi-k2"\n')
+        + _ONE_CUT.format(agent="kimi", model_line='model = "kimi-k2"\n').replace(
+            'id = "c1"', 'id = "c2"'
+        ),
+    )
+    shared_report = diagnose_file(shared, check_quotas=True, home=home)
+    assert shared_report.ok is False
+    assert any(error.path == "quota.moonshot" for error in shared_report.errors)
+    assert any("model 'kimi-k2'" in error.message for error in shared_report.errors)
+    assert any("account 'pool-a'" in error.message for error in shared_report.errors)

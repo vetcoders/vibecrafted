@@ -946,14 +946,14 @@ pub fn UsagePage() -> impl IntoView {
                         </select></label>
                         <label><span>"Provider"</span><select id="usage-provider" name="provider">
                             <option value="">"all"</option>
-                            <option value="agy">"agy"</option>
-                            <option value="claude">"claude"</option>
-                            <option value="codex">"codex"</option>
-                            <option value="copilot">"copilot"</option>
+                            <option value="google">"google"</option>
+                            <option value="anthropic">"anthropic"</option>
+                            <option value="openai">"openai"</option>
+                            <option value="github">"github"</option>
                             <option value="cursor">"cursor"</option>
-                            <option value="grok">"grok"</option>
-                            <option value="junie">"junie"</option>
-                            <option value="kimi">"kimi"</option>
+                            <option value="xai">"xai"</option>
+                            <option value="jetbrains">"jetbrains"</option>
+                            <option value="moonshot">"moonshot"</option>
                         </select></label>
                         <label><span>"Agent"</span><select id="usage-agent" name="agent">
                             <option value="">"all"</option>
@@ -975,7 +975,8 @@ pub fn UsagePage() -> impl IntoView {
                 <section class="quota-board" aria-label="Live agent quota" data-quota-board>
                     <div class="control-panel-head">
                         <h2>"Live quota"</h2>
-                        <span id="quota-status">"local monitors"</span>
+                        <span id="quota-status">"not loaded"</span>
+                        <button type="button" id="quota-refresh" class="server-console-link">"Refresh"</button>
                     </div>
                     <div id="quota-agents" class="quota-agents"></div>
                     <p class="control-plane-meta">"Provider-neutral local quota for all 8 native providers. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
@@ -1120,7 +1121,7 @@ fn quota_dashboard_script() -> &'static str {
   const render = (payload) => {
     host.replaceChildren();
     for (const agent of payload.agents || []) host.append(card(agent));
-    status.textContent = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
+    status.textContent = payload.generated_at ? 'Updated ' + payload.generated_at : 'vc-server quota';
   };
   const load = async () => {
     try {
@@ -1132,8 +1133,9 @@ fn quota_dashboard_script() -> &'static str {
       status.textContent = 'Live quota unavailable: ' + error.message;
     }
   };
+  const refresh = document.getElementById('quota-refresh');
+  if (refresh) refresh.addEventListener('click', load);
   load();
-  setInterval(load, 15000);
 })();"#
 }
 
@@ -1208,6 +1210,29 @@ fn usage_dashboard_script() -> &'static str {
   root.querySelectorAll('[data-usage-dim]').forEach((button) => {
     button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
   });
+  const mergePicker = (selectId, param, items) => {
+    const select = byId(selectId);
+    if (!select) return;
+    const current = params.get(param) || '';
+    const seen = new Set(Array.from(select.options).map((option) => option.value));
+    for (const item of items || []) {
+      const name = item && item.name;
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      if (current === name) opt.selected = true;
+      select.appendChild(opt);
+    }
+    if (current && !seen.has(current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = current;
+      opt.selected = true;
+      select.appendChild(opt);
+    }
+  };
   const populateModelPicker = (models) => {
     const select = byId('usage-model');
     if (!select) return;
@@ -1219,8 +1244,8 @@ fn usage_dashboard_script() -> &'static str {
     defaultOpt.textContent = 'all';
     select.appendChild(defaultOpt);
     for (const item of models || []) {
-      const name = item.name;
-      if (name && name !== 'unknown' && !seen.has(name)) {
+      const name = item && item.name;
+      if (name && !seen.has(name)) {
         seen.add(name);
         const opt = document.createElement('option');
         opt.value = name;
@@ -1248,6 +1273,8 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
+    mergePicker('usage-provider', 'provider', report.dimensions && report.dimensions.providers);
+    mergePicker('usage-agent', 'agent', report.dimensions && report.dimensions.agents);
     populateModelPicker(report.dimensions && report.dimensions.models);
     body.replaceChildren();
     const runs = report.runs || [];
@@ -5660,6 +5687,11 @@ pub(crate) mod tests {
         assert!(aicx.contains("location.search"));
         assert!(aicx.contains("Search AICX"));
         assert!(usage.contains("Cost &amp; usage"));
+        assert!(usage.contains("value=\"anthropic\""));
+        assert!(usage.contains("value=\"openai\""));
+        assert!(usage.contains("value=\"moonshot\""));
+        assert!(usage.contains("id=\"quota-refresh\""));
+        assert!(!usage.contains("setInterval"));
         assert!(usage.contains("id=\"usage-filter-form\""));
         assert!(usage.contains("/api/usage?"));
         assert!(usage.contains("data-quota-board"));

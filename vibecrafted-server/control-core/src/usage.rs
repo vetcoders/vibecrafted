@@ -160,17 +160,34 @@ impl ControlPlane {
         recover_lazy_transcripts(&runtime_runs, &mut runs);
 
         let mut vc_session_ids = std::collections::HashSet::new();
+        let mut vc_run_ids = std::collections::HashSet::new();
+        let mut vc_agent_days = std::collections::HashSet::new();
         for run in &runs {
+            if !run.run_id.is_empty() {
+                vc_run_ids.insert(run.run_id.clone());
+            }
             if let Some(session_id) = run.provider_session_id.as_str() {
                 if !session_id.is_empty() && session_id != "unknown" {
                     vc_session_ids.insert(session_id.to_string());
                 }
             }
+            if let Some(agent) = run.agent.as_str() {
+                let day = run.recorded_at.get(..10).unwrap_or("");
+                if day.len() == 10 && day.as_bytes().get(4) == Some(&b'-') {
+                    vc_agent_days.insert((agent.to_ascii_lowercase(), day.to_string()));
+                }
+            }
         }
 
         let telemetry_dir = self.home().join("telemetry");
-        let local_runs =
-            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, cutoff, &filter);
+        let local_runs = read_local_telemetry_runs(
+            &telemetry_dir,
+            &vc_session_ids,
+            &vc_run_ids,
+            &vc_agent_days,
+            cutoff,
+            &filter,
+        );
         runs.extend(local_runs);
 
         runs.sort_by(|left, right| {
@@ -414,6 +431,8 @@ fn canonical_provider_for(agent: &str) -> &'static str {
 fn read_local_telemetry_runs(
     telemetry_dir: &Path,
     vc_session_ids: &std::collections::HashSet<String>,
+    vc_run_ids: &std::collections::HashSet<String>,
+    vc_agent_days: &std::collections::HashSet<(String, String)>,
     cutoff: Option<DateTime<Utc>>,
     filter: &UsageFilter,
 ) -> Vec<UsageRun> {
@@ -440,25 +459,48 @@ fn read_local_telemetry_runs(
                                 .to_string();
 
                             // Deduplication: skip if session was run via VC or already seen in another local file
+                            let record_run_id = record
+                                .get("run_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
                             if !session_id.is_empty() {
                                 if vc_session_ids.contains(&session_id)
+                                    || vc_run_ids.contains(&session_id)
                                     || seen_session_ids.contains(&session_id)
                                 {
                                     continue;
                                 }
                                 seen_session_ids.insert(session_id.clone());
                             }
-
-                            let mtime = record.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
-                            let recorded_dt = DateTime::from_timestamp(
-                                mtime as i64,
-                                ((mtime.fract() * 1_000_000_000.0) as u32).min(999_999_999),
-                            )
-                            .unwrap_or_else(Utc::now);
-
-                            if cutoff.is_some_and(|c| recorded_dt < c) {
+                            if !record_run_id.is_empty() && vc_run_ids.contains(record_run_id) {
                                 continue;
                             }
+
+                            let mtime = record.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
+                            let recorded_at = if mtime <= 0.0 {
+                                if cutoff.is_some() {
+                                    continue;
+                                }
+                                "unknown".to_string()
+                            } else {
+                                match DateTime::from_timestamp(
+                                    mtime as i64,
+                                    ((mtime.fract() * 1_000_000_000.0) as u32).min(999_999_999),
+                                ) {
+                                    Some(recorded_dt) => {
+                                        if cutoff.is_some_and(|c| recorded_dt < c) {
+                                            continue;
+                                        }
+                                        recorded_dt.to_rfc3339()
+                                    }
+                                    None => {
+                                        if cutoff.is_some() {
+                                            continue;
+                                        }
+                                        "unknown".to_string()
+                                    }
+                                }
+                            };
 
                             let rec_agent = record
                                 .get("agent")
@@ -564,9 +606,14 @@ fn read_local_telemetry_runs(
                                 provider: provider_val,
                                 agent: agent_val,
                                 model: model_val,
-                                status: "completed".to_string(),
-                                exit_code: Some(0),
-                                recorded_at: recorded_dt.to_rfc3339(),
+                                status: record
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .filter(|status| !status.is_empty())
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                exit_code: record.get("exit_code").and_then(Value::as_i64),
+                                recorded_at,
                                 tokens,
                                 cost,
                                 failure_kind: None,
@@ -605,42 +652,64 @@ fn read_local_telemetry_runs(
                         let Some(day) = row.get("day").and_then(Value::as_str) else {
                             continue;
                         };
-                        let model_str = row
+                        if vc_agent_days.contains(&(agent.to_ascii_lowercase(), day.to_string())) {
+                            continue;
+                        }
+                        let model_value = row
                             .get("model")
                             .and_then(Value::as_str)
-                            .unwrap_or("unknown");
+                            .filter(|model| !model.is_empty() && *model != "unknown")
+                            .map(|model| json!(model))
+                            .unwrap_or_else(|| unknown("archive day omitted the model"));
                         let recorded_at = format!("{day}T12:00:00Z");
-                        let recorded_dt = parse_timestamp(&recorded_at).unwrap_or_else(Utc::now);
+                        let Some(recorded_dt) = parse_timestamp(&recorded_at) else {
+                            continue;
+                        };
                         if cutoff.is_some_and(|c| recorded_dt < c) {
                             continue;
                         }
 
-                        let input_tokens =
-                            row.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                        let output_tokens = row
-                            .get("output_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let cache_create = row
-                            .get("cache_creation_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let cache_read = row
-                            .get("cache_read_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let total_tokens = input_tokens + output_tokens + cache_create + cache_read;
+                        let input_tokens = row.get("input_tokens").and_then(Value::as_u64);
+                        let output_tokens = row.get("output_tokens").and_then(Value::as_u64);
+                        let cache_create = row.get("cache_creation_tokens").and_then(Value::as_u64);
+                        let cache_read = row.get("cache_read_tokens").and_then(Value::as_u64);
+                        let total_tokens = match (input_tokens, output_tokens, cache_create, cache_read)
+                        {
+                            (Some(input), Some(output), Some(create), Some(read)) => {
+                                Some(input + output + create + read)
+                            }
+                            _ => None,
+                        };
+                        let number_or_unknown = |value: Option<u64>, reason: &str| match value {
+                            Some(number) => json!(number),
+                            None => unknown(reason),
+                        };
 
                         let tokens = UsageTokens {
                             schema: "vibecrafted.usage.v1".to_string(),
                             unit: "tokens".to_string(),
-                            source: "local_archive".to_string(),
+                            source: "vc-server:local_archive".to_string(),
                             events: 1,
-                            tokens_input: json!(input_tokens),
-                            tokens_cached_input: json!(cache_read),
-                            tokens_cache_write: json!(cache_create),
-                            tokens_output: json!(output_tokens),
-                            tokens_total: json!(total_tokens),
+                            tokens_input: number_or_unknown(
+                                input_tokens,
+                                "archive day omitted input tokens",
+                            ),
+                            tokens_cached_input: number_or_unknown(
+                                cache_read,
+                                "archive day omitted cache read tokens",
+                            ),
+                            tokens_cache_write: number_or_unknown(
+                                cache_create,
+                                "archive day omitted cache write tokens",
+                            ),
+                            tokens_output: number_or_unknown(
+                                output_tokens,
+                                "archive day omitted output tokens",
+                            ),
+                            tokens_total: number_or_unknown(
+                                total_tokens,
+                                "archive day omitted a token total",
+                            ),
                             semantics: BTreeMap::new(),
                         };
                         let cost = UsageCost {
@@ -649,13 +718,22 @@ fn read_local_telemetry_runs(
                             unit: Some("USD".to_string()),
                             source: "local_archive".to_string(),
                         };
+                        let model_key = model_value
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_string();
                         let run = UsageRun {
-                            run_id: format!("archive-{agent}-{day}-{model_str}"),
+                            run_id: format!("archive-{agent}-{day}-{model_key}"),
                             provider: json!(canonical_provider_for(agent)),
                             agent: json!(agent),
-                            model: json!(model_str),
-                            status: "completed".to_string(),
-                            exit_code: Some(0),
+                            model: model_value,
+                            status: row
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .filter(|status| !status.is_empty())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            exit_code: row.get("exit_code").and_then(Value::as_i64),
                             recorded_at,
                             tokens,
                             cost,
@@ -664,7 +742,7 @@ fn read_local_telemetry_runs(
                             provider_session_id: unknown(
                                 "archive day aggregation has no session id",
                             ),
-                            telemetry_source: "local_archive".to_string(),
+                            telemetry_source: "vc-server:local_archive".to_string(),
                             unpriced_models: Vec::new(),
                         };
                         if matches_filter(&run, filter) {

@@ -439,3 +439,109 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
 
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn archive_rows_do_not_fabricate_completion_or_double_count_vc_days() {
+    let home = fixture_home("archive-honest");
+    let day = "2026-10-12";
+    write_meta(
+        &home,
+        "vc-kimi-1",
+        json!({
+            "run_id": "vc-kimi-1",
+            "agent": "kimi",
+            "provider": "moonshot",
+            "agent_model": "kimi-k2",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": format!("{day}T09:00:00Z"),
+            "usage": {
+                "schema": "vibecrafted.usage.v1",
+                "unit": "tokens",
+                "source": "provider_stream",
+                "events": 1,
+                "tokens_total": 40
+            },
+            "provider_session_id": "sess-kimi-vc"
+        }),
+    );
+    let archive = home.join("telemetry/archive");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(
+        archive.join("kimi.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "day": day,
+                "model": "kimi-k2",
+                "input_tokens": 10
+            }),
+            json!({
+                "day": "2026-10-11",
+                "model": "unknown"
+            })
+        ),
+    )
+    .unwrap();
+    let codex_cache = home.join("telemetry/codex");
+    fs::create_dir_all(&codex_cache).unwrap();
+    fs::write(
+        codex_cache.join("scan-cache.json"),
+        serde_json::to_vec(&json!({
+            "files": {
+                "a.jsonl": {"record": {"id": "", "agent": "codex", "mtime": 0}},
+                "b.jsonl": {"record": {"id": "", "agent": "codex", "mtime": 0}}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 18, 0, 0).unwrap();
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+    let kimi_meta: Vec<_> = report
+        .runs
+        .iter()
+        .filter(|run| run.agent == "kimi" && run.telemetry_source == "meta")
+        .collect();
+    assert_eq!(kimi_meta.len(), 1);
+    assert!(
+        !report.runs.iter().any(|run| {
+            run.telemetry_source == "vc-server:local_archive" && run.recorded_at.starts_with(day)
+        }),
+        "archive day overlapping a VC run is omitted"
+    );
+    assert!(report
+        .runs
+        .iter()
+        .all(|run| run.status != "completed" || run.telemetry_source == "meta"));
+    assert!(report
+        .runs
+        .iter()
+        .all(|run| run.exit_code != Some(0) || run.telemetry_source == "meta"));
+    let local_codex: Vec<_> = report
+        .runs
+        .iter()
+        .filter(|run| run.telemetry_source == "local_session")
+        .collect();
+    assert_eq!(local_codex.len(), 2);
+    assert!(local_codex.iter().all(|run| run.status == "unknown"));
+    assert!(local_codex.iter().all(|run| run.exit_code.is_none()));
+    let archive_runs: Vec<_> = report
+        .runs
+        .iter()
+        .filter(|run| run.telemetry_source == "vc-server:local_archive")
+        .collect();
+    assert_eq!(archive_runs.len(), 1);
+    assert_eq!(archive_runs[0].status, "unknown");
+    assert!(archive_runs[0].exit_code.is_none());
+    assert_eq!(
+        archive_runs[0]
+            .tokens
+            .tokens_total
+            .get("value")
+            .and_then(|value| value.as_str()),
+        Some("unknown")
+    );
+    fs::remove_dir_all(home).ok();
+}

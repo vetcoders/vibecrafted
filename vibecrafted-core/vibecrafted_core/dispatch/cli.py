@@ -16,7 +16,14 @@ from typing import Any
 
 from vibecrafted_core.workflow import reserve_run_id
 
-from .doctor import DoctorError, DoctorReport, DoctorWarning, diagnose_file
+from .doctor import (
+    DoctorError,
+    DoctorReport,
+    DoctorWarning,
+    diagnose_file,
+    publish_quota_override,
+    resolve_quota_server_url,
+)
 from .model import (
     BASE_CUT_PREFIX,
     STATE_VERIFIED,
@@ -132,6 +139,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="bypass confirmed quota exhaustion admission gate; record deliberate override receipt",
     )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="quota server origin; empty disables the probe; omitted uses the configured server",
+    )
     return parser
 
 
@@ -170,6 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source,
         check_quotas=True,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=resolve_quota_server_url(args.server_url),
     )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
@@ -212,15 +225,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
-    _copy_validated_source(source, artifacts_dir)
     if report.quota_override_receipt is not None:
         try:
-            (artifacts_dir / "quota-override-receipt.json").write_text(
-                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            publish_quota_override(
+                artifacts_dir / "quota-override-receipt.json",
+                report.quota_override_receipt,
             )
-        except OSError:
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"quota override receipt failed: {exc}", file=sys.stderr)
+            return 1
+    _copy_validated_source(source, artifacts_dir)
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung

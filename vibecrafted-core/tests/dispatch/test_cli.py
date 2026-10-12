@@ -4,6 +4,8 @@ import json
 import os
 import shlex
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -73,7 +75,8 @@ def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys) -> None:
     assert dispatch_cli.main([str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert "dispatch-doctor: ok" in captured.out
+    assert "quota for agent 'codex' is unknown" in captured.out
 
 
 @pytest.mark.parametrize("mode", [["--doctor"], []])
@@ -173,7 +176,9 @@ def test_doctor_override_keeps_red_evidence(tmp_path: Path, capsys) -> None:
     assert payload["baseline"]["allow_red_baseline"] is True
     assert payload["baseline"]["verification"]["ok"] is False
     assert payload["baseline"]["verification"]["checks"][0]["exit_code"] == 7
-    assert "--allow-red-baseline" in payload["warnings"][0]["message"]
+    assert any(
+        "--allow-red-baseline" in warning["message"] for warning in payload["warnings"]
+    )
 
 
 def test_duplicate_command_retains_implicit_zero_exit(tmp_path: Path, capsys) -> None:
@@ -312,7 +317,8 @@ def test_root_cli_dispatch_subcommand_routes_to_dispatch_cli(
     assert root_cli.main(["dispatch", str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert "dispatch-doctor: ok" in captured.out
+    assert "quota for agent 'codex' is unknown" in captured.out
 
 
 @pytest.mark.parametrize("command", ["echo red", "echo ok; exit 7", "echo ok"])
@@ -460,3 +466,94 @@ def test_cli_ignore_usage_quota_warnings_allows_admission_and_records_receipt(
     )
     captured = capsys.readouterr()
     assert "dispatch dry-run: rendered 1 prompt(s)" in captured.out
+
+
+def _quota_server(payload: dict) -> tuple[ThreadingHTTPServer, str]:
+    body = json.dumps(payload).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_server_quota_blocks_dispatch_before_launch(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    server, url = _quota_server(
+        {
+            "agents": [
+                {
+                    "id": "codex",
+                    "status": "blocked",
+                    "fraction": 1.0,
+                    "stale": False,
+                    "age_s": 5,
+                    "pool": "openai",
+                }
+            ]
+        }
+    )
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        dispatch_cli, "run_dispatch", lambda *args, **kwargs: pytest.fail("launch")
+    )
+    try:
+        code = dispatch_cli.main([str(plan), "--server-url", url, "--json"])
+    finally:
+        server.shutdown()
+    captured = capsys.readouterr()
+    assert code == 1
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "quota confirmed exhausted" in payload["errors"][0]["message"]
+    assert "dispatch admission started" not in captured.out
+
+
+def test_override_receipt_failure_prevents_launch(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    plan, _, _ = _dispatch_file(tmp_path)
+    server, url = _quota_server(
+        {
+            "agents": [
+                {
+                    "id": "codex",
+                    "status": "blocked",
+                    "fraction": 1.0,
+                    "stale": False,
+                    "age_s": 4,
+                }
+            ]
+        }
+    )
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        dispatch_cli, "_artifacts_dir", lambda *args, **kwargs: blocker / "run"
+    )
+    monkeypatch.setattr(
+        dispatch_cli, "run_dispatch", lambda *args, **kwargs: pytest.fail("launch")
+    )
+    try:
+        code = dispatch_cli.main(
+            [str(plan), "--server-url", url, "--ignore-usage-quota-warnings"]
+        )
+    finally:
+        server.shutdown()
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "quota override receipt failed" in captured.err
+    assert "dispatch admission started" not in captured.out
