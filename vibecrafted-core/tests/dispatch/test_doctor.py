@@ -444,6 +444,271 @@ prompt = "run kimi cut"
     assert report.quota_override_receipt["overrides"][0]["pool"] == "moonshot"
 
 
+def test_quota_preflight_malformed_fraction_does_not_crash(
+    tmp_path: Path,
+) -> None:
+    """fraction='invalid' must be reported as a malformed warning, not raise."""
+    home = tmp_path / "home"
+    kimi_telemetry = home / "telemetry" / "kimi"
+    kimi_telemetry.mkdir(parents=True)
+    (kimi_telemetry / "quota.json").write_text(
+        json.dumps(
+            {
+                "agent": "kimi",
+                "limits": {"five_hour": {"fraction": "invalid"}},
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "kimi"
+workflow = "implement"
+prompt = "run kimi cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    report = diagnose_file(plan, check_quotas=True, home=home)
+    assert report.ok is True
+    assert not report.errors
+    assert any(
+        "malformed" in w.message or "invalid" in w.message.lower()
+        for w in report.warnings
+    ), report.warnings
+
+
+def test_quota_preflight_missing_observation_warns_unknown(
+    tmp_path: Path,
+) -> None:
+    """Needed codex with NO observation at all must be visible unknown."""
+    home = tmp_path / "home"
+    # Do not create any codex telemetry — no observation exists.
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "codex"
+workflow = "implement"
+prompt = "run codex cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    report = diagnose_file(plan, check_quotas=True, home=home)
+    assert report.ok is True
+    assert not report.errors
+    assert any(
+        "unmeasured" in w.message or "unknown" in w.message for w in report.warnings
+    ), report.warnings
+
+
+def test_quota_preflight_server_response_uses_id_key(
+    tmp_path: Path,
+) -> None:
+    """Server /api/usage/quota serializes QuotaAgent.id; doctor must read that key.
+
+    Drives the central vc-server path end-to-end through diagnose_file with a
+    server_url that returns a stub payload, proving the response is no longer
+    dropped because the doctor looked for the wrong key.
+    """
+    from vibecrafted_core.dispatch import doctor as doctor_module
+
+    home = tmp_path / "home"
+    kimi_telemetry = home / "telemetry" / "kimi"
+    kimi_telemetry.mkdir(parents=True)
+    (kimi_telemetry / "quota.json").write_text(
+        json.dumps(
+            {
+                "agent": "kimi",
+                "status": "ok",
+                "limits": {"five_hour": {"fraction": 0.4}},
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "kimi"
+workflow = "implement"
+prompt = "run kimi cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    server_payload = {
+        "agents": [
+            {
+                "id": "kimi",  # server uses `id`, doctor used to look for `agent`
+                "name": "Kimi",
+                "present": True,
+                "status": "blocked",
+                "headline": "blocked",
+                "detail": "no quota",
+                "stale": False,
+                "age_s": 1,
+                "model": "moonshot-v1-128k",
+                "account": "primary",
+                "pool": "moonshot",
+                "source": "live",
+            }
+        ]
+    }
+
+    captured: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=1.0):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["accept"] = req.headers.get("Accept")
+
+        class _Resp:
+            def __init__(self) -> None:
+                self.status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(server_payload).encode("utf-8")
+
+        return _Resp()
+
+    original = doctor_module.urllib.request.urlopen
+    doctor_module.urllib.request.urlopen = fake_urlopen
+    try:
+        report = diagnose_file(
+            plan,
+            check_quotas=True,
+            server_url="http://127.0.0.1:8765",
+            home=home,
+        )
+    finally:
+        doctor_module.urllib.request.urlopen = original
+
+    assert captured.get("url") == "http://127.0.0.1:8765/api/usage/quota"
+    # Server payload must reach the diagnosis: blocked kimi is now seen as
+    # exhausted (no override), not silently dropped as zero-observation.
+    assert report.ok is False
+    assert any(
+        "kimi" in err.message
+        and ("exhausted" in err.message or "blocked" in err.message)
+        for err in report.errors
+    ), report.errors
+
+
+def test_quota_preflight_override_receipt_write_failure_is_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Failed override receipt publication must NOT silently proceed.
+
+    A dispatch with --ignore-usage-quota-warnings must persist the override
+    receipt before any launch; if the write fails the operator must see the
+    failure and the launch must be refused.
+    """
+    from vibecrafted_core.dispatch import cli as dispatch_cli
+
+    home = tmp_path / "home"
+    kimi_telemetry = home / "telemetry" / "kimi"
+    kimi_telemetry.mkdir(parents=True)
+    (kimi_telemetry / "quota.json").write_text(
+        json.dumps(
+            {
+                "agent": "kimi",
+                "status": "blocked",
+                "limits": {"five_hour": {"fraction": 1.0}},
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Use a real git repo so the dispatch CLI can resolve artifact identity.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.com/testorg/testrepo"],
+        cwd=repo,
+        check=True,
+    )
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        f"""schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "{repo}"
+[[cuts]]
+id = "c1"
+agent = "kimi"
+workflow = "implement"
+prompt = "run kimi cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ exit_code = 0 }}
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    # Patch the writer before the dispatch CLI attempts the write so the
+    # override receipt write raises OSError.
+    import pathlib
+
+    real_write_text = pathlib.Path.write_text
+
+    def _failing_write_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self.name == "quota-override-receipt.json":
+            raise OSError("simulated: read-only filesystem")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", _failing_write_text)
+
+    code = dispatch_cli.main(
+        [
+            str(plan),
+            "--ignore-usage-quota-warnings",
+            "--dry-run",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code != 0, (
+        "override receipt write failure must not return 0; got "
+        f"stdout={captured.out!r} stderr={captured.err!r}"
+    )
+    combined = captured.out + captured.err
+    assert "receipt" in combined.lower() or "read-only" in combined.lower(), combined
+
+
 def test_quota_preflight_override_does_not_bypass_unrelated_admission(
     tmp_path: Path,
 ) -> None:

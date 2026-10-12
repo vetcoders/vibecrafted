@@ -73,7 +73,11 @@ def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys) -> None:
     assert dispatch_cli.main([str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    # codex has no telemetry in this fixture → the doctor emits an explicit
+    # "unmeasured" warning before the trailing "dispatch-doctor: ok" line.
+    assert "dispatch-doctor: ok" in captured.out
+    assert "warning: quota.openai" in captured.out
+    assert "no quota observation" in captured.out
 
 
 @pytest.mark.parametrize("mode", [["--doctor"], []])
@@ -173,7 +177,11 @@ def test_doctor_override_keeps_red_evidence(tmp_path: Path, capsys) -> None:
     assert payload["baseline"]["allow_red_baseline"] is True
     assert payload["baseline"]["verification"]["ok"] is False
     assert payload["baseline"]["verification"]["checks"][0]["exit_code"] == 7
-    assert "--allow-red-baseline" in payload["warnings"][0]["message"]
+    # The new "no quota observation" warning is emitted first for codex with
+    # no telemetry; the --allow-red-baseline warning is recorded alongside it.
+    assert any("--allow-red-baseline" in w["message"] for w in payload["warnings"]), (
+        payload["warnings"]
+    )
 
 
 def test_duplicate_command_retains_implicit_zero_exit(tmp_path: Path, capsys) -> None:
@@ -312,7 +320,10 @@ def test_root_cli_dispatch_subcommand_routes_to_dispatch_cli(
     assert root_cli.main(["dispatch", str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    # codex has no telemetry in this fixture → the doctor emits an explicit
+    # "unmeasured" warning before the trailing "dispatch-doctor: ok" line.
+    assert "dispatch-doctor: ok" in captured.out
+    assert "warning: quota.openai" in captured.out
 
 
 @pytest.mark.parametrize("command", ["echo red", "echo ok; exit 7", "echo ok"])

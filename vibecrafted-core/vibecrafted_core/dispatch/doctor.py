@@ -118,6 +118,132 @@ def _resolve_candidate_files(agent: str, home: Path | None = None) -> list[Path]
     return out
 
 
+def _safe_float_with_warning(
+    value: Any,
+    *,
+    field: str,
+    agent: str,
+    pool: str,
+    warnings: list[DoctorWarning],
+) -> float | None:
+    """Coerce a quota value to float; malformed input downgrades to a warning."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        warnings.append(
+            DoctorWarning(
+                f"quota.{pool}",
+                f"quota snapshot for agent '{agent}' has malformed "
+                f"{field}={value!r}; treated as unmeasured",
+            )
+        )
+        return None
+
+
+def _extract_fraction(
+    payload: dict[str, Any],
+    agent: str,
+    pool: str,
+    warnings: list[DoctorWarning],
+) -> float | None:
+    """Resolve a normalized fraction for the agent's known payload shape.
+
+    Returns the largest observed fraction for kimi, the first fraction for
+    agy / generic agents, or None when no usable value is present.
+    """
+    if agent == "kimi":
+        limits = (
+            payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
+        )
+        f5 = (
+            limits.get("five_hour", {}).get("fraction")
+            if isinstance(limits.get("five_hour"), dict)
+            else None
+        )
+        fm = (
+            limits.get("monthly", {}).get("fraction")
+            if isinstance(limits.get("monthly"), dict)
+            else None
+        )
+        fracs = [
+            f
+            for f in (
+                _safe_float_with_warning(
+                    f5,
+                    field="limits.five_hour.fraction",
+                    agent=agent,
+                    pool=pool,
+                    warnings=warnings,
+                ),
+                _safe_float_with_warning(
+                    fm,
+                    field="limits.monthly.fraction",
+                    agent=agent,
+                    pool=pool,
+                    warnings=warnings,
+                ),
+            )
+            if f is not None
+        ]
+        fraction = max(fracs) if fracs else None
+        if fraction is None:
+            fraction = _safe_float_with_warning(
+                payload.get("fraction"),
+                field="fraction",
+                agent=agent,
+                pool=pool,
+                warnings=warnings,
+            )
+        return fraction
+    if agent == "agy":
+        quota_obj = (
+            payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
+        )
+        fraction = _safe_float_with_warning(
+            quota_obj.get("fraction"),
+            field="quota.fraction",
+            agent=agent,
+            pool=pool,
+            warnings=warnings,
+        )
+        if fraction is None:
+            fraction = _safe_float_with_warning(
+                payload.get("fraction"),
+                field="fraction",
+                agent=agent,
+                pool=pool,
+                warnings=warnings,
+            )
+        if fraction is None:
+            fraction = _safe_float_with_warning(
+                payload.get("utilization"),
+                field="utilization",
+                agent=agent,
+                pool=pool,
+                warnings=warnings,
+            )
+        return fraction
+    quota_obj = payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
+    fraction = _safe_float_with_warning(
+        quota_obj.get("fraction"),
+        field="quota.fraction",
+        agent=agent,
+        pool=pool,
+        warnings=warnings,
+    )
+    if fraction is None:
+        fraction = _safe_float_with_warning(
+            payload.get("fraction"),
+            field="fraction",
+            agent=agent,
+            pool=pool,
+            warnings=warnings,
+        )
+    return fraction
+
+
 def diagnose_quotas(
     dispatch: Dispatch,
     *,
@@ -149,9 +275,15 @@ def diagnose_quotas(
                 with urllib.request.urlopen(req, timeout=1.0) as resp:
                     if resp.status == 200:
                         payload = json.loads(resp.read().decode("utf-8"))
+                        # Server serializes QuotaAgent.id; tolerate either
+                        # `id` (canonical) or `agent` (legacy alias).
                         for item in payload.get("agents", []):
-                            if isinstance(item, dict) and "agent" in item:
-                                server_agents[str(item["agent"]).lower()] = item
+                            if not isinstance(item, dict):
+                                continue
+                            server_id = item.get("id") or item.get("agent")
+                            if not server_id:
+                                continue
+                            server_agents[str(server_id).lower()] = item
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
                 server_agents.clear()
 
@@ -165,9 +297,18 @@ def diagnose_quotas(
         if agent in server_agents:
             info = server_agents[agent]
             status = str(info.get("status") or "ok").lower()
-            fraction = float(info.get("fraction") or 0.0)
+
+            def _safe_server_float(value: Any) -> float:
+                if value is None:
+                    return 0.0
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            fraction = _safe_server_float(info.get("fraction"))
             stale = bool(info.get("stale", False))
-            age_s = float(info.get("age_s") or 0.0)
+            age_s = _safe_server_float(info.get("age_s"))
 
             if status == "blocked":
                 if stale:
@@ -239,6 +380,18 @@ def diagnose_quotas(
                     break
 
         if not found_file:
+            # No telemetry / scan-cache observed for this agent at all.
+            # An unmeasured pool must be visible unknown, not silently
+            # treated as healthy. Cursor is documented as cloud-only and
+            # always unmeasured — the explicit warning lives further down.
+            if agent != "cursor":
+                warnings.append(
+                    DoctorWarning(
+                        f"quota.{pool}",
+                        f"no quota observation found for agent '{agent}'; "
+                        f"treated as unmeasured",
+                    )
+                )
             continue
 
         if parsed_data is None:
@@ -272,68 +425,20 @@ def diagnose_quotas(
             )
             continue
 
-        fraction = None
+        fraction = _extract_fraction(payload, agent, pool, warnings)
+        status_str = str(
+            (payload.get("quota") or {}).get("status") or payload.get("status") or ""
+        )
         is_exhausted = False
         is_unmeasured = False
-
-        if agent == "kimi":
-            limits = (
-                payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
-            )
-            f5 = (
-                limits.get("five_hour", {}).get("fraction")
-                if isinstance(limits.get("five_hour"), dict)
-                else None
-            )
-            fm = (
-                limits.get("monthly", {}).get("fraction")
-                if isinstance(limits.get("monthly"), dict)
-                else None
-            )
-            fracs = [float(f) for f in (f5, fm) if f is not None]
-            fraction = max(fracs) if fracs else None
-            if fraction is None and payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-            status_str = str(payload.get("status") or "")
-            is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
-                "blocked",
-                "exhausted",
-                "RESOURCE_EXHAUSTED",
-            }
-        elif agent == "agy":
-            quota_obj = (
-                payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
-            )
-            if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
-            elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-            elif payload.get("utilization") is not None:
-                fraction = float(payload["utilization"])
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
-            is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
-                "blocked",
-                "exhausted",
-                "RESOURCE_EXHAUSTED",
-            }
+        if status_str in {"unavailable", "empty"} or fraction is None:
+            is_unmeasured = True
         else:
-            quota_obj = (
-                payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
-            )
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
-            if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
-            elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-
-            if status_str in {"unavailable", "empty"} or fraction is None:
-                is_unmeasured = True
-            else:
-                is_exhausted = (fraction >= 1.0) or status_str in {
-                    "blocked",
-                    "exhausted",
-                    "RESOURCE_EXHAUSTED",
-                }
+            is_exhausted = (fraction >= 1.0) or status_str in {
+                "blocked",
+                "exhausted",
+                "RESOURCE_EXHAUSTED",
+            }
 
         if is_unmeasured:
             warnings.append(
@@ -663,6 +768,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=False,
         help="bypass quota exhaustion errors and record override receipt",
     )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="optional vc-server base URL to source canonical quota telemetry",
+    )
     args = parser.parse_args(argv)
 
     report = diagnose_file(
@@ -670,6 +780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=args.run_id,
         check_quotas=args.check_quotas or args.ignore_usage_quota_warnings,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=args.server_url,
     )
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))

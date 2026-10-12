@@ -132,6 +132,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="bypass confirmed quota exhaustion admission gate; record deliberate override receipt",
     )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="optional vc-server base URL; canonical quota telemetry takes precedence over local files",
+    )
     return parser
 
 
@@ -170,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source,
         check_quotas=True,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=args.server_url,
     )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
@@ -201,6 +207,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             else 1
         )
 
+    # Persist the override receipt BEFORE dry-run / launch so a write failure
+    # aborts the dispatch; the durable decision must be on disk before any
+    # prompt is rendered.
+    if report.quota_override_receipt is not None:
+        if args.dry_run:
+            override_run_id = args.resume or reserve_run_id("dispatch")
+            override_artifacts = _artifacts_dir(dispatch, run_id=override_run_id)
+            _copy_validated_source(source, override_artifacts)
+        else:
+            override_artifacts = None  # set below in the launch path
+        if override_artifacts is None:
+            override_artifacts = _artifacts_dir(
+                dispatch, run_id=(args.resume or reserve_run_id("dispatch"))
+            )
+            _copy_validated_source(source, override_artifacts)
+        receipt_path = override_artifacts / "quota-override-receipt.json"
+        try:
+            receipt_path.write_text(
+                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            message = (
+                "refusing to launch: quota override receipt could not be "
+                f"persisted to {receipt_path}: {exc}"
+            )
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "quota_override_receipt_failed",
+                            "message": message,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print(message, file=sys.stderr)
+            return 1
+
     if args.dry_run:
         dry_result = _dry_run(source, dispatch, run_id=args.resume)
         if args.json:
@@ -213,14 +260,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
-    if report.quota_override_receipt is not None:
-        try:
-            (artifacts_dir / "quota-override-receipt.json").write_text(
-                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung
