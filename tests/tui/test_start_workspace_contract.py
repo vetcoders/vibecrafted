@@ -467,12 +467,15 @@ if [[ "$1 $2" == "workspace session-owner" ]]; then
       *) shift ;;
     esac
   done
+  owner=""
   if [[ -f "${log}.owners" ]]; then
     while IFS=$'\t' read -r known_name known_socket known_root; do
       [[ "$known_name" == "$name" && "$known_socket" == "$socket" ]] || continue
-      printf '%s\\n' "$known_root"
+      [[ -z "$owner" || "$owner" == "$known_root" ]] || exit 2
+      owner="$known_root"
     done < "${log}.owners"
   fi
+  [[ -z "$owner" ]] || printf '%s\\n' "$owner"
   exit 0
 fi
 if [[ "$1 $2" == "workspace session-attach" ]]; then
@@ -735,6 +738,279 @@ class Scene:
             for line in self.terminal_log.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["live", "dead", "missing", "history", "ambiguous", "mismatch", "contradictory"],
+)
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("origin", ["owned", "foreign"])
+def test_wes_public_start_build_transition_preserves_exact_seat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, shell: str, origin: str
+) -> None:
+    """Real catalog + public parser, with only the native engine replaced.
+
+    The entry receipt models the real terminal child, not an origin-policy mock.
+    A private PTY drives the actual attach boundary without a GUI/provider.
+    """
+    from vibecrafted_core import workspace_catalog as wc
+
+    scene = Scene(
+        tmp_path,
+        project="selected",
+        git=True,
+        live=["selected"] if state != "dead" and state != "missing" else (),
+        dead=["selected"] if state == "dead" else (),
+    )
+    shutil.copytree(
+        SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame",
+        scene.generation / "vibecrafted-core/vibecrafted_core/config/vc-frame",
+    )
+    _seed_committed_git(scene.generation, home=scene.home)
+    env = scene.env(
+        {
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                scene.generation / "bin/vibecrafted"
+            ),
+        }
+    )
+    if origin == "foreign":
+        env.pop("VIBECRAFTED_TERMINAL_ENTRY")
+        env.pop("VIBECRAFTED_TERMINAL_ENTRY_OWNER")
+    native_receipts = tmp_path / "native-terminal.jsonl"
+    native_done = tmp_path / "native-done.jsonl"
+    _write(
+        scene.generation / "bin/vc-terminal",
+        (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(),
+    )
+    _write(
+        scene.home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[terminal]\n"
+    )
+    _write(
+        scene.home / ".config/vibecrafted/vc-terminal/launch-primary-shell.zsh",
+        PRIMARY_SHELL.read_text().replace("exec /bin/zsh -d -l", "exit 0"),
+    )
+    _write(
+        scene.generation / "libexec/vc-terminal",
+        f"#!{sys.executable}\nimport json,os,pty,sys\n"
+        "args=sys.argv[1:]; boundary=args.index('-e')\n"
+        "os.chdir(args[args.index('--working-directory')+1])\n"
+        f"with open({str(native_receipts)!r}, 'a') as f:\n"
+        " f.write(json.dumps({'cwd':os.getcwd(),'argv':args,'identity':{key:os.environ.get(key) for key in "
+        f"{(wc.ENV_WORKSPACE_ID, wc.ENV_VIBECRAFTED_SESSION_ID, wc.ENV_WORKSPACE_INSTANCE_ID, wc.ENV_BUILD_ID)!r}"
+        + "}})+'\\n')\n"
+        "rc=pty.spawn(['/bin/bash',*args[boundary+1:]])\n"
+        f"with open({str(native_done)!r}, 'a') as f: f.write(json.dumps({{'status':rc}})+'\\n')\n"
+        "sys.exit(os.waitstatus_to_exitcode(rc))\n",
+    )
+    _write(
+        scene.generation / "bin/vc-start",
+        "#!/bin/bash\n"
+        f"export VIBECRAFTED_CORE_DIR={shlex.quote(str(SOURCE_CORE_DIR))}\n"
+        f"source {shlex.quote(str(SHELL_SH))}\n"
+        f"_vetcoders_vc_frame_loaded_root={shlex.quote(str(scene.generation))}\n"
+        'vc-start "$@"\n',
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    first = wc.resolve_run_workspace_identity(root=scene.root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=first.workspace_id,
+        vibecrafted_session_id=first.vibecrafted_session_id,
+        workspace_instance_id=first.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="selected",
+        state="live",
+        socket_dir=env["VC_FRAME_SOCKET_DIR"],
+    )
+    old_session = wc.read_workspace_session(first.vibecrafted_session_id).to_payload()
+    old_instance = wc.instance_path(first.workspace_instance_id).read_bytes()
+    (scene.root / "README").write_text("new revision\n")
+    _seed_committed_git(scene.root, home=scene.home)
+    expected = first
+    if state == "history":
+        expected = wc.resolve_run_workspace_identity(root=scene.root, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=expected.workspace_id,
+            vibecrafted_session_id=expected.vibecrafted_session_id,
+            workspace_instance_id=expected.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="selected",
+            state="live",
+            socket_dir=env["VC_FRAME_SOCKET_DIR"],
+        )
+        old_instance = wc.instance_path(expected.workspace_instance_id).read_bytes()
+        old_session = wc.read_workspace_session(
+            expected.vibecrafted_session_id
+        ).to_payload()
+    env.update(first.to_env())
+    if state in ("ambiguous", "mismatch"):
+        second = wc.materialize_instance(
+            workspace_id=first.workspace_id,
+            root=scene.root,
+            vibecrafted_session_id=wc.new_uuid7(),
+            build_id=first.build_id,
+        )
+        if state == "mismatch":
+            env[wc.ENV_WORKSPACE_INSTANCE_ID] = second.workspace_instance_id
+        else:
+            wc.record_runtime_session_attachment(
+                workspace_id=first.workspace_id,
+                vibecrafted_session_id=second.vibecrafted_session_id,
+                workspace_instance_id=second.workspace_instance_id,
+                runtime="vc-frame",
+                runtime_session_id="selected",
+                state="live",
+                socket_dir=env["VC_FRAME_SOCKET_DIR"],
+            )
+    elif state == "contradictory":
+        path = wc.instance_path(first.workspace_instance_id)
+        payload = json.loads(path.read_text())
+        payload["vibecrafted_session_id"] = wc.new_uuid7()
+        path.write_text(json.dumps(payload))
+    preserved = {
+        str(p): p.read_bytes()
+        for folder in [wc.instances_dir(), wc.sessions_dir()]
+        for p in folder.glob("*.json")
+    }
+
+    _write(
+        scene.owner,
+        f"#!{sys.executable}\nimport sys\n"
+        f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
+        "if sys.argv[1:2] == ['workspace']:\n"
+        "    from vibecrafted_core.cli import main\n"
+        "    sys.exit(main(sys.argv[1:]))\n"
+        "sys.exit(0)\n",
+    )
+    script = _entry_script(scene, "vc-start --repo " + shlex.quote(str(scene.root)))
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pty,sys;sys.exit(pty.spawn("
+            + repr(_shell_argv(shell, script))
+            + "))",
+        ],
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    if state in ("ambiguous", "mismatch", "contradictory"):
+        assert "RC=[2]" in run.stdout, run.stdout + run.stderr
+        assert "ownership" in run.stdout or "ambiguous live seats" in run.stdout
+        assert not native_receipts.exists()
+        assert not _creates(scene.calls())
+        assert not any(
+            c.get("attached") or "switch-session" in c["argv"] for c in scene.calls()
+        )
+        assert {
+            str(p): p.read_bytes()
+            for folder in [wc.instances_dir(), wc.sessions_dir()]
+            for p in folder.glob("*.json")
+        } == preserved
+        return
+    assert "RC=[0]" in run.stdout, run.stdout + run.stderr
+    if origin == "foreign":
+        deadline = time.monotonic() + 35
+        while not native_done.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert native_done.exists(), (
+            scene.home / ".vibecrafted/logs/terminal-startup.log"
+        ).read_text()
+        assert json.loads(native_done.read_text().splitlines()[0])["status"] == 0
+    entered = [c for c in scene.calls() if c.get("attached") == "selected"]
+    assert len(entered) == 1
+    identity = entered[0]["workspace_identity"]
+    sid = identity[wc.ENV_VIBECRAFTED_SESSION_ID]
+    iid = identity[wc.ENV_WORKSPACE_INSTANCE_ID]
+    bound = wc.read_workspace_session(sid)
+    assert bound.workspace_instance_id == iid
+    if state in ("live", "history"):
+        assert sid == expected.vibecrafted_session_id
+        assert iid == expected.workspace_instance_id
+        assert identity[wc.ENV_BUILD_ID] == expected.build_id.rendered
+        assert wc.instance_path(iid).read_bytes() == old_instance
+        assert wc.read_workspace_session(sid).to_payload() == old_session
+        assert not _creates(scene.calls())
+        assert {
+            str(p): p.read_bytes()
+            for folder in [wc.instances_dir(), wc.sessions_dir()]
+            for p in folder.glob("*.json")
+        } == preserved
+    else:
+        assert sid != first.vibecrafted_session_id
+        assert iid != first.workspace_instance_id
+        old = wc.read_workspace_session(first.vibecrafted_session_id)
+        assert old.workspace_instance_id == first.workspace_instance_id
+        assert (
+            old.attachments[0].attachment_id
+            == old_session["attachments"][0]["attachment_id"]
+        )
+        assert old.attachments[0].state == state
+        assert bound.attachments[0].state == "live"
+        restored = [
+            c
+            for c in scene.calls()
+            if c.get("created") == "selected" or c.get("resurrected") == "selected"
+        ]
+        assert len(restored) == 1
+    snapshot = {
+        str(p): p.read_bytes()
+        for folder in [wc.instances_dir(), wc.sessions_dir()]
+        for p in folder.glob("*.json")
+    }
+    # A second ordinary invocation still inherits the old shell identity.
+    again = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pty,sys;sys.exit(pty.spawn("
+            + repr(_shell_argv(shell, script))
+            + "))",
+        ],
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    assert "RC=[0]" in again.stdout, again.stdout + again.stderr
+    if origin == "foreign":
+        deadline = time.monotonic() + 35
+        while (
+            len(native_done.read_text().splitlines()) < 2
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        done = [json.loads(line) for line in native_done.read_text().splitlines()]
+        assert done == [{"status": 0}, {"status": 0}]
+        launches = [
+            json.loads(line) for line in native_receipts.read_text().splitlines()
+        ]
+        assert len(launches) == 2
+        assert all(
+            item["cwd"] == str(scene.root)
+            and item["identity"][wc.ENV_VIBECRAFTED_SESSION_ID] == sid
+            and item["identity"][wc.ENV_WORKSPACE_INSTANCE_ID] == iid
+            for item in launches
+        )
+    else:
+        assert not native_receipts.exists()
+    assert len([c for c in scene.calls() if c.get("attached") == "selected"]) == 2
+    assert {
+        str(p): p.read_bytes()
+        for folder in [wc.instances_dir(), wc.sessions_dir()]
+        for p in folder.glob("*.json")
+    } == snapshot
 
 
 def _shell_argv(shell: str, script: str) -> list[str]:
@@ -2218,9 +2494,8 @@ def test_no_tty_peer_start_switches_only_for_unique_source_client(
 def test_the_terminal_child_enters_the_session_its_parent_created(
     tmp_path: Path,
 ) -> None:
-    """The child shape: boundary set, created-marker naming the live session,
-    a real PTY. The inventory says `live`, and only because the marker names
-    this very start does the child enter instead of refusing."""
+    """An admitted terminal child enters its parent's exact LIVE WES seat
+    without creating a session, opening a window or rewriting ownership."""
     scene = Scene(tmp_path, project="mlx-batch-runner", live=("mlx-batch-runner",))
     result = _run(
         scene,
@@ -2245,12 +2520,17 @@ def test_the_terminal_child_enters_the_session_its_parent_created(
     assert attaches[0]["stdin_tty"] is True
     assert not _creates(calls), "the child created a second time"
     assert scene.terminal_launches(wait=0.5) == [], "the child opened another terminal"
-    # The WES binding names the session this start entered, in the product
-    # socket namespace.
+    # Returning to a validated LIVE WES seat reads its exact identity without
+    # rewriting the attachment already owned by the parent.
     binds = [c for c in scene.owner_calls() if c.startswith("workspace session-attach")]
-    assert binds and all("--runtime-session-id mlx-batch-runner" in b for b in binds), (
-        binds
-    )
+    assert not binds, binds
+    resolves = [c for c in scene.owner_calls() if c.startswith("workspace resolve")]
+    assert resolves, scene.owner_calls()
+    for resolve in resolves:
+        assert f"--root {scene.root}" in resolve, resolve
+        assert "--runtime-session-id mlx-batch-runner" in resolve, resolve
+        assert f"--socket-dir {scene.tmp_path / 'sock'}" in resolve, resolve
+        assert "--runtime-state live" in resolve, resolve
 
 
 def test_a_child_without_a_created_marker_enters_the_live_workspace(
@@ -2904,13 +3184,14 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         assert listing.stdout.count(session) == 1, listing.stdout
         assert state() == "live"
 
-        # The public entry reaches terminal escalation; this isolated sandbox
-        # intentionally has no installed terminal front door.
+        # This lower-level creator deliberately has no WES seat. Public entry
+        # refuses that unbound native session before opening any terminal.
         entry = shell(
             f'vc-start --repo {shlex.quote(str(repo))}\nprintf "RC=[%s]\\n" "$?"'
         )
-        assert "RC=[1]" in entry.stdout, entry.stdout + entry.stderr
-        assert "no installed vc-start front door" in entry.stderr
+        assert "RC=[2]" in entry.stdout, entry.stdout + entry.stderr
+        assert "no consistent live WES identity" in entry.stderr
+        assert "no installed vc-start front door" not in entry.stderr
         assert state() == "live"
 
         # Do not race the serializer: the EXITED record asserted below is a
@@ -2958,6 +3239,8 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         "invalid-name",
         "stale-engine",
         "symlink-facade",
+        "live-build",
+        "live-history",
     ],
 )
 def test_workshop_missing_destination_prepares_in_background_and_switches_once(
@@ -2975,7 +3258,11 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
     )
 
     scene = Scene(
-        tmp_path, project="selected", live=["workday-440"], clients=["workday-440"]
+        tmp_path,
+        project="selected",
+        live=["workday-440"],
+        clients=["workday-440"],
+        git=route.startswith("live-"),
     )
     if route == "no-client":
         scene.clients_file.write_text("")
@@ -2995,7 +3282,41 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     identity = resolve_run_workspace_identity(root=scene.root)
-    for key, value in identity.to_env().items():
+    if route.startswith("live-"):
+        from vibecrafted_core import workspace_catalog as wc
+
+        wc.record_runtime_session_attachment(
+            workspace_id=identity.workspace_id,
+            vibecrafted_session_id=identity.vibecrafted_session_id,
+            workspace_instance_id=identity.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="selected",
+            state="live",
+            socket_dir=env["VC_FRAME_SOCKET_DIR"],
+        )
+        (scene.table / "live/selected").write_text("layout { pane; }\n")
+        (scene.root / "README").write_text("changed project\n")
+        _seed_committed_git(scene.root, home=scene.home)
+        inherited = identity
+        if route == "live-history":
+            identity = resolve_run_workspace_identity(root=scene.root, env={})
+            wc.record_runtime_session_attachment(
+                workspace_id=identity.workspace_id,
+                vibecrafted_session_id=identity.vibecrafted_session_id,
+                workspace_instance_id=identity.workspace_instance_id,
+                runtime="vc-frame",
+                runtime_session_id="selected",
+                state="live",
+                socket_dir=env["VC_FRAME_SOCKET_DIR"],
+            )
+        snapshot = {
+            str(p): p.read_bytes()
+            for folder in [wc.instances_dir(), wc.sessions_dir()]
+            for p in folder.glob("*.json")
+        }
+    else:
+        inherited = identity
+    for key, value in inherited.to_env().items():
         monkeypatch.setenv(key, value)
     (scene.generation / "VERSION").write_text("4.4.0+g00000000\n")
     (scene.generation / "bin" / "python3").symlink_to(sys.executable)
@@ -3075,12 +3396,34 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
         assert not _creates(scene.calls())
         assert not scene.terminal_launches(wait=0.1)
         return
-    if route == "prepare":
+    if route == "prepare" or route.startswith("live-"):
         admitted = workshop.ensure_live_destination(
             scene.root, "selected", ["workday-440"]
         )
         assert admitted.session == "selected"
         assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
+        if route.startswith("live-"):
+            assert (
+                admitted.environment[wc.ENV_VIBECRAFTED_SESSION_ID]
+                == identity.vibecrafted_session_id
+            )
+            assert (
+                admitted.environment[wc.ENV_WORKSPACE_INSTANCE_ID]
+                == identity.workspace_instance_id
+            )
+            assert admitted.environment[wc.ENV_BUILD_ID] == identity.build_id.rendered
+            assert {
+                str(p): p.read_bytes()
+                for folder in [wc.instances_dir(), wc.sessions_dir()]
+                for p in folder.glob("*.json")
+            } == snapshot
+            assert not _creates(scene.calls())
+            assert not scene.terminal_launches(wait=0.1)
+            assert not any(
+                "switch-session" in c["argv"] or c.get("attached")
+                for c in scene.calls()
+            )
+            return
     else:
         from types import SimpleNamespace
 

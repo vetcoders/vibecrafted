@@ -941,12 +941,6 @@ def _prepare_project_creation(
         live=["source-host"],
         current="source-host",
     )
-    monkeypatch.setattr(
-        workshop,
-        "resolve_run_workspace_identity",
-        lambda **_kwargs: identity,
-        raising=False,
-    )
     progress_draws: list[str] = []
     monkeypatch.setattr(
         launched, "draw", lambda: progress_draws.append(launched.notice)
@@ -975,7 +969,6 @@ def _prepare_project_creation(
             assert kwargs["cwd"] == str(project)
             child = kwargs["env"]
             assert isinstance(child, dict)
-            assert child["VIBECRAFTED_SESSION_ID"] == identity.vibecrafted_session_id
             assert child["VIBECRAFTED_WORKSPACE_ROOT"] == str(project)
             assert child["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
             assert child["VIBECRAFTED_PYTHON"] == str(generation / "bin" / "python3")
@@ -1003,7 +996,17 @@ def _prepare_project_creation(
                 replaces_runtime_session_id="target" if recovery else None,
             )
             # Text is not routing authority, even if it names another live session.
-            return SimpleNamespace(returncode=0, stdout="source-host", stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        **identity.to_env(),
+                        "VIBECRAFTED_OPERATOR_SESSION": "target",
+                        "VIBECRAFTED_WORKSPACE_ROOT": str(project),
+                    }
+                ),
+                stderr="",
+            )
         if command == workshop.workspace_shell_argv(
             kwargs["env"], project, target, prepare=False
         ):
@@ -1228,15 +1231,10 @@ def test_empty_destination_refuses_before_project_or_agent_creation(
 def test_missing_project_refuses_storage_root_before_creator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vibecrafted_core.workspace_catalog import resolve_run_workspace_identity
-
-    workshop, launched, calls, _generation = _prepare_project_creation(
+    _workshop, launched, calls, _generation = _prepare_project_creation(
         tmp_path, monkeypatch
     )
     launched.path = os.environ["VIBECRAFTED_HOME"]
-    monkeypatch.setattr(
-        workshop, "resolve_run_workspace_identity", resolve_run_workspace_identity
-    )
 
     launched.launch()
 

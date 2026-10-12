@@ -66,7 +66,10 @@ _vetcoders_product_core_cli() {
 
 _vetcoders_product_workspace_prepare() {
   local requested_root="${1:-}"
+  local runtime_session="${2:-}" runtime_state="${3:-}" socket_dir=""
   local line key value resolved resolve_status=0
+  local -a resolve_args=()
+  _vetcoders_start_wes_return_session=""
   if [[ -z "$requested_root" ]]; then
     requested_root="$(pwd -P)" || return $?
   fi
@@ -76,15 +79,19 @@ _vetcoders_product_workspace_prepare() {
     unset VIBECRAFTED_BUILD_ID VIBECRAFTED_OPERATOR_SESSION VIBECRAFTED_WORKSPACE_ROOT
     return 0
   fi
+  resolve_args=(workspace resolve --root "$requested_root" --env)
+  if [[ -n "$runtime_session" || -n "$runtime_state" ]]; then
+    socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return $?
+    resolve_args+=(--runtime-session-id "$runtime_session" --socket-dir "$socket_dir" --runtime-state "$runtime_state")
+  fi
   resolved="$(
-    _vetcoders_product_core_cli \
-      workspace resolve --root "$requested_root" --env
+    _vetcoders_product_core_cli "${resolve_args[@]}"
   )" || resolve_status=$?
   if [[ "$resolve_status" -ne 0 || -z "$resolved" ]]; then
     [[ "$resolve_status" -ne 0 ]] || resolve_status=1
     printf "vc-start: could not resolve requested workspace root '%s' (status %s).\n" \
       "$requested_root" "$resolve_status" >&2
-    printf "vc-start: clear stale VIBECRAFTED_WORKSPACE_* values or re-run from the intended root.\n" >&2
+    printf "vc-start: inconsistent workspace ownership requires explicit recovery; no seat was adopted.\n" >&2
     return "$resolve_status"
   fi
   while IFS= read -r line; do
@@ -100,6 +107,8 @@ _vetcoders_product_workspace_prepare() {
     VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
     export VIBECRAFTED_OPERATOR_SESSION
   fi
+  [[ "$runtime_state" != live ]] || _vetcoders_start_wes_return_session="$runtime_session"
+  return 0
 }
 
 # ONE canonical workspace owner for both public interactive entries.
@@ -598,6 +607,7 @@ _vetcoders_start_open_terminal_if_needed() {
 # state. Configuration publication belongs exclusively to explicit installation.
 _vetcoders_product_entry_prepare() {
   local requested_root="${1:-}" owner_root required entry_status=0
+  local runtime_session="${2:-}" runtime_state="${3:-}"
   [[ -n "$requested_root" ]] || requested_root="$(pwd -P)" || return $?
   unset VIBECRAFTED_PRODUCT_ENTRY VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
 
@@ -668,7 +678,7 @@ _vetcoders_product_entry_prepare() {
   else
     printf 'vc-start: preparing workspace %s...\n' "$(_vetcoders_shell_quote "$requested_root")" >&2
   fi
-  _vetcoders_product_workspace_prepare "$requested_root" || {
+  _vetcoders_product_workspace_prepare "$requested_root" "$runtime_session" "$runtime_state" || {
     entry_status=$?
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
     return "$entry_status"
@@ -1264,8 +1274,8 @@ _vetcoders_start_refuse_existing_workspace() {
 }
 
 # WES is the existing ownership ledger. A known same-name session for a
-# different root is ambiguous; an older unbound Frame session can still be
-# entered by its exact name.
+# different root is ambiguous. LIVE return also requires a coherent WES seat
+# during preparation, before terminal handoff.
 _vetcoders_start_check_existing_owner() {
   local name="${1:-}" state="${2:-}" root="${3:-}" socket_dir="" owner=""
   socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 4
@@ -1651,6 +1661,9 @@ _vetcoders_start_create_before_terminal() {
   _vetcoders_require_vc_frame || return 1
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  # The creator must carry a coherent WES pair before the engine can become
+  # live. Its terminal child then returns to that exact recorded seat.
+  _vetcoders_product_workspace_prepare "$root" "$session_name" missing || return $?
   _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" || rc=$?
   if ((rc == 3)); then
     _vetcoders_start_read_inventory_state "$session_name"
@@ -1658,8 +1671,13 @@ _vetcoders_start_create_before_terminal() {
     case "$state" in
       live|dead)
         _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
-        [[ "$state" == live ]] && return 0
-        _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name"
+        if [[ "$state" == live ]]; then
+          _vetcoders_product_workspace_prepare "$root" "$session_name" live
+          return $?
+        fi
+        _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
+        _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
+        _vetcoders_record_vc_frame_attachment live "$session_name"
         return $?
         ;;
       *) _vetcoders_start_refuse_inventory "$session_name"; return $? ;;
@@ -1701,6 +1719,9 @@ _vetcoders_start_launch_workspace() {
   if [[ "$state" == live || "$state" == dead ]]; then
     _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
   fi
+  if [[ "$state" == live && "${_vetcoders_start_wes_return_session:-}" != "$session_name" ]]; then
+    _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
+  fi
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$session_name"
@@ -1717,7 +1738,10 @@ _vetcoders_start_launch_workspace() {
         case "$state" in
           live|dead)
             _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
-            if [[ "$state" == dead ]]; then
+            if [[ "$state" == live ]]; then
+              _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
+            else
+              _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
               _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
             fi
             ;;
@@ -1731,7 +1755,9 @@ _vetcoders_start_launch_workspace() {
       fi
       ;;
   esac
-  _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+  if [[ "${_vetcoders_start_wes_return_session:-}" != "$session_name" ]]; then
+    _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+  fi
   unset VIBECRAFTED_START_CREATED_SESSION
   export VIBECRAFTED_OPERATOR_SESSION="$session_name"
   [[ "$entry_mode" != background ]] || return 0
@@ -2027,13 +2053,19 @@ _vetcoders_start_entry() {
   if [[ "$state" == dead || "$state" == live ]]; then
     _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
   fi
+  if [[ "$state" == live ]]; then
+    # Ambiguous or inconsistent WES seats refuse before a terminal window.
+    _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
+  fi
 
   # Foreign terminals, including Frame frontends of unknown host provenance,
   # create here and enter only in the owned terminal child. No foreign switch.
   if ! _vetcoders_start_is_owned_terminal_child; then
     if [[ "$state" == dead ]]; then
       vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
+      _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
       _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
+      _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
     elif [[ "$state" == missing ]]; then
       _vetcoders_start_create_before_terminal "$session_name" "$root" || return $?
       if [[ "${_vetcoders_start_preterminal_created:-0}" == 1 ]]; then
@@ -2055,6 +2087,6 @@ _vetcoders_start_entry() {
   fi
 
   # 4+5 in the physical product terminal or its admitted re-entry child.
-  _vetcoders_product_entry_prepare "$root" || return $?
+  _vetcoders_product_entry_prepare "$root" "$session_name" "$state" || return $?
   _vetcoders_start_launch_workspace "$session_name" "$root"
 }

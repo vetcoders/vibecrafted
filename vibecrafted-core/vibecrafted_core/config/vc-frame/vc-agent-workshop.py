@@ -168,7 +168,6 @@ from vibecrafted_core.workspace_catalog import (
     read_catalog,
     read_workspace_session,
     resolve_operator_place_session,
-    resolve_run_workspace_identity,
 )
 
 AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot")
@@ -487,8 +486,6 @@ def ensure_live_destination(
         if not frame.is_file() or not os.access(frame, os.X_OK):
             raise ValueError("vc-frame is missing from the selected Runtime Pack")
         env["VIBECRAFTED_VC_FRAME_BIN"] = str(frame)
-        identity = resolve_run_workspace_identity(root=workspace, env=env)
-        env.update(identity.to_env())
         env["VIBECRAFTED_WORKSPACE_ROOT"] = str(workspace)
         # The selected generation owns both the internal facade and its engine.
         env["PATH"] = os.pathsep.join((str(runtime_bin), env.get("PATH", "")))
@@ -507,20 +504,42 @@ def ensure_live_destination(
                 result, "workspace preparation refused the project"
             )
             raise ValueError(reason)
+        # The selected shell owns observation and materialization. Its existing
+        # CLI JSON projection carries the exact resulting pair back to Python.
+        identity = json.loads(result.stdout)
+        keys = (
+            "VIBECRAFTED_WORKSPACE_ID",
+            "VIBECRAFTED_SESSION_ID",
+            "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
+            "VIBECRAFTED_BUILD_ID",
+            "VIBECRAFTED_OPERATOR_SESSION",
+            "VIBECRAFTED_WORKSPACE_ROOT",
+        )
+        if (
+            not isinstance(identity, dict)
+            or any(
+                not isinstance(identity.get(key), str) or not identity[key]
+                for key in keys
+            )
+            or identity["VIBECRAFTED_WORKSPACE_ROOT"] != str(workspace)
+        ):
+            raise ValueError("workspace preparation returned invalid identity")
+        env.update({key: identity[key] for key in keys})
         deadline = time.monotonic() + PROJECT_LIVE_TIMEOUT
         while True:
             names, error = list_live_frame_sessions(env=env)
             if error:
                 raise ValueError(error)
             try:
-                receipt = read_workspace_session(identity.vibecrafted_session_id)
+                receipt = read_workspace_session(identity["VIBECRAFTED_SESSION_ID"])
             except WorkspaceCatalogError:
                 receipt = None
             if receipt is not None:
                 if (
-                    receipt.workspace_id != identity.workspace_id
-                    or receipt.workspace_instance_id != identity.workspace_instance_id
-                    or receipt.session_id != identity.vibecrafted_session_id
+                    receipt.workspace_id != identity["VIBECRAFTED_WORKSPACE_ID"]
+                    or receipt.workspace_instance_id
+                    != identity["VIBECRAFTED_WORKSPACE_INSTANCE_ID"]
+                    or receipt.session_id != identity["VIBECRAFTED_SESSION_ID"]
                 ):
                     raise ValueError(
                         "Frame receipt does not belong to the selected project"
@@ -567,8 +586,15 @@ def workspace_shell_argv(
     if prepare:
         script += (
             '_vetcoders_start_validate_workspace_name "$3" || exit $?; '
-            '_vetcoders_product_entry_prepare "$2" || exit $?; '
-            '_vetcoders_start_launch_workspace "$3" "$2" background'
+            '_vetcoders_start_read_inventory_state "$3"; '
+            'state="$_vetcoders_start_inventory_state"; '
+            'if [[ "$state" == error ]]; then _vetcoders_start_refuse_inventory "$3"; exit $?; fi; '
+            'if [[ "$state" == live || "$state" == dead ]]; then '
+            '_vetcoders_start_check_existing_owner "$3" "$state" "$2" || exit $?; fi; '
+            '_vetcoders_product_entry_prepare "$2" "$3" "$state" || exit $?; '
+            '_vetcoders_start_launch_workspace "$3" "$2" background >&2 || exit $?; '
+            '_vetcoders_product_core_cli workspace resolve --root "$2" --json '
+            '--runtime-session-id "$3" --socket-dir "$(_vetcoders_vc_frame_socket_dir)" --runtime-state live'
         )
     else:
         script += '_vetcoders_start_enter_workspace_session "$4" "$3"'
