@@ -1,23 +1,8 @@
-"""Automatic scheduling for `scripts/vibecrafted_housekeeping.py`, the
-receipt-driven disk-space reclaim planner/executor for `VIBECRAFTED_HOME`.
+"""Supervisor-owned housekeeping scheduling.
 
-The planner+executor already exists and is safe on its own (retention-days
-aging, live-process protection, an exact `--confirm` token gate on deletion,
-and receipts under `store/housekeeping/`); what was missing was any automatic
-trigger for it. This module renders and installs a macOS LaunchAgent that
-runs it on a recurring interval.
-
-Two separate, Founder-owned opt-ins gate everything here:
-
-- `[housekeeping].enabled` must be `true` before `install_housekeeping_schedule`
-  will install anything at all.
-- `[housekeeping].auto_execute` must *also* be `true` before the installed
-  schedule ever appends `--execute --confirm <token>` to the scheduled run.
-  Left at its default (`false`), an installed schedule only ever writes a
-  read-only plan receipt -- it never deletes anything on its own.
-
-Deleting data is a Founder-button action; this module only ever presses that
-button when the Founder has explicitly told it to, in their own config file.
+[housekeeping].enabled and auto_execute remain independent Founder settings.
+Install registers an exact script digest; it creates no daemon or LaunchAgent.
+Legacy migration requires an explicit prior ownership digest and preserves config.
 """
 
 from __future__ import annotations
@@ -27,20 +12,28 @@ import importlib.util
 import json
 import os
 import plistlib
+import subprocess
 import sys
+import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .server_config import HousekeepingConfig, config_path, load_housekeeping_config
+from .server_config import (
+    HousekeepingConfig,
+    ServerConfigError,
+    config_path,
+    load_housekeeping_config,
+)
 from .server_supervisor import (
-    SupervisorError,
     _atomic_private_write,
-    _ensure_owned_directory,
     _fsync_directory,
     _launch_domain,
     _launchctl,
+    _read_owned_text,
+    _sha256_file,
     _validate_owned_regular_file,
 )
 
@@ -109,79 +102,15 @@ def default_paths(
     )
 
 
-def _housekeeping_confirm_token(script_path: Path) -> str:
-    """Dynamically import the standalone housekeeping script to read its
-    `CONFIRM_TOKEN`, so the destructive-execute confirmation string has a
-    single source of truth instead of a duplicated literal."""
-
-    try:
-        validated = _validate_owned_regular_file(script_path)
-    except SupervisorError as exc:
-        raise HousekeepingScheduleError(str(exc)) from exc
-    spec = importlib.util.spec_from_file_location(
-        "_vibecrafted_housekeeping_script", validated
+def render_housekeeping_launch_agent_plist(*args: Any, **kwargs: Any) -> bytes:
+    """Retired: scheduling belongs to vc-server-supervisor, not another plist."""
+    raise HousekeepingScheduleError(
+        "separate housekeeping LaunchAgent retired; use supervisor scheduling"
     )
-    if spec is None or spec.loader is None:
-        raise HousekeepingScheduleError(f"cannot load housekeeping script: {validated}")
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise HousekeepingScheduleError(
-            f"cannot import housekeeping script {validated}: {exc}"
-        ) from exc
-    token = getattr(module, "CONFIRM_TOKEN", None)
-    if not isinstance(token, str) or not token:
-        raise HousekeepingScheduleError(
-            f"housekeeping script has no CONFIRM_TOKEN: {validated}"
-        )
-    return token
 
 
-def render_housekeeping_launch_agent_plist(
-    config: HousekeepingConfig,
-    paths: HousekeepingSchedulePaths,
-    *,
-    python_executable: Path | None = None,
-) -> bytes:
-    """Pure-ish function (only ensures the plist/log directories exist):
-    build the launchd plist bytes for the housekeeping schedule.
-
-    `RunAtLoad` is always False -- the schedule only ever fires on its
-    `StartInterval`, never at install or login time. `--execute --confirm
-    <token>` is appended to `ProgramArguments` only when `config.auto_execute`
-    is True; otherwise the scheduled run only ever plans."""
-
-    interpreter = python_executable or Path(sys.executable)
-    for directory in (paths.launch_agent_file.parent, paths.stdout_log.parent):
-        _ensure_owned_directory(directory)
-    arguments: list[str] = [
-        str(interpreter),
-        str(paths.script_path),
-        "--home",
-        str(paths.vibecrafted_home),
-        "--retention-days",
-        str(config.retention_days),
-        "--json",
-    ]
-    if config.auto_execute:
-        token = _housekeeping_confirm_token(paths.script_path)
-        arguments += ["--execute", "--confirm", token]
-    payload: dict[str, Any] = {
-        "Label": HOUSEKEEPING_LAUNCH_AGENT_LABEL,
-        "AssociatedBundleIdentifiers": ["io.vetcoders.vibecrafted"],
-        "ProgramArguments": arguments,
-        "StartInterval": max(1, config.interval_hours) * 3600,
-        "RunAtLoad": False,
-        "ProcessType": "Background",
-        "StandardOutPath": str(paths.stdout_log),
-        "StandardErrorPath": str(paths.stderr_log),
-        "EnvironmentVariables": {
-            "HOME": str(paths.operator_home),
-            "VIBECRAFTED_HOME": str(paths.vibecrafted_home),
-        },
-    }
-    return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
+def _owner_file(paths: HousekeepingSchedulePaths) -> Path:
+    return paths.vibecrafted_home / "server" / "housekeeping.owner.json"
 
 
 def install_housekeeping_schedule(
@@ -191,82 +120,257 @@ def install_housekeeping_schedule(
     python_executable: Path | None = None,
     activate: bool = True,
 ) -> bool:
-    """Require `config.enabled` (the Founder's own opt-in) and atomically
-    write the rendered plist; returns whether the content actually changed.
-    Best-effort `launchctl bootstrap` activation unless `activate=False`."""
-
+    """Register the script for the supervisor; preserve both config switches."""
     if not config.enabled:
-        raise HousekeepingScheduleError(
-            "[housekeeping].enabled is false; set it to true in "
-            f"{config_path()} before installing the automatic schedule"
-        )
-    rendered = render_housekeeping_launch_agent_plist(
-        config, paths, python_executable=python_executable
+        raise HousekeepingScheduleError("[housekeeping].enabled is false")
+    script = _validate_owned_regular_file(paths.script_path)
+    payload = (
+        json.dumps(
+            {
+                "schema": "vibecrafted.supervisor-housekeeping.v1",
+                "owner": "vc-server-supervisor",
+                "script": str(script),
+                "sha256": _sha256_file(script),
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n"
     )
-    try:
-        changed = _atomic_private_write(paths.launch_agent_file, rendered)
-    except SupervisorError as exc:
-        raise HousekeepingScheduleError(str(exc)) from exc
-    if activate:
-        _activate(paths)
-    return changed
+    return _atomic_private_write(_owner_file(paths), payload)
 
 
 def uninstall_housekeeping_schedule(
-    paths: HousekeepingSchedulePaths,
-    *,
-    deactivate: bool = True,
+    paths: HousekeepingSchedulePaths, *, deactivate: bool = True
 ) -> bool:
-    """Best-effort `launchctl bootout` then delete the LaunchAgent plist.
-    Returns whether a plist was actually removed."""
-
-    if deactivate:
-        _deactivate(paths)
-    path = paths.launch_agent_file
+    """Remove only our script registration. Never rewrite Founder config."""
+    path = _owner_file(paths)
     if not path.exists() and not path.is_symlink():
         return False
-    try:
-        _validate_owned_regular_file(path, allow_symlink=False)
-    except SupervisorError as exc:
-        raise HousekeepingScheduleError(str(exc)) from exc
+    _validate_owned_regular_file(path, allow_symlink=False)
+    owner = json.loads(path.read_text())
+    if (
+        owner.get("schema") != "vibecrafted.supervisor-housekeeping.v1"
+        or owner.get("owner") != "vc-server-supervisor"
+    ):
+        raise HousekeepingScheduleError("foreign housekeeping registration retained")
     path.unlink()
     _fsync_directory(path.parent)
     return True
 
 
 def housekeeping_schedule_installed(paths: HousekeepingSchedulePaths) -> bool:
-    """True when a (non-symlink, regular-file) LaunchAgent plist is present."""
-
-    return (
-        paths.launch_agent_file.is_file() and not paths.launch_agent_file.is_symlink()
-    )
+    return _owner_file(paths).is_file() and not _owner_file(paths).is_symlink()
 
 
-def _launch_target() -> str:
-    """Fully-qualified launchd service target for the housekeeping schedule."""
+def retire_legacy_schedule(
+    paths: HousekeepingSchedulePaths, *, expected_sha256: str, deactivate: bool = False
+) -> bool:
+    """Explicit migration with an exact prior installer digest; names are insufficient."""
+    path = paths.launch_agent_file
+    if not path.exists() and not path.is_symlink():
+        return False
+    _validate_owned_regular_file(path, allow_symlink=False)
+    if not expected_sha256 or _sha256_file(path) != expected_sha256:
+        raise HousekeepingScheduleError(
+            "legacy schedule ownership digest mismatch; retained"
+        )
+    payload = plistlib.loads(path.read_bytes())
+    if payload.get("Label") != HOUSEKEEPING_LAUNCH_AGENT_LABEL:
+        raise HousekeepingScheduleError("foreign schedule retained")
+    if deactivate:
+        result = _launchctl(
+            ["bootout", f"{_launch_domain()}/{HOUSEKEEPING_LAUNCH_AGENT_LABEL}"]
+        )
+        if result.returncode != 0:
+            raise HousekeepingScheduleError(
+                "legacy schedule bootout not confirmed; retained"
+            )
+    if _sha256_file(path) != expected_sha256:
+        raise HousekeepingScheduleError(
+            "legacy schedule changed during migration; retained"
+        )
+    path.unlink()
+    _fsync_directory(path.parent)
+    return True
 
-    return f"{_launch_domain()}/{HOUSEKEEPING_LAUNCH_AGENT_LABEL}"
 
+class SupervisorHousekeeping:
+    """In-process schedule. Config is re-read; errors never become permission."""
 
-def _activate(paths: HousekeepingSchedulePaths) -> None:
-    """Best-effort `launchctl bootstrap`; failures are swallowed since the
-    plist alone is still correct and macOS will pick up the schedule after
-    the Founder's next login regardless."""
+    def __init__(
+        self,
+        supervisor_config: Any,
+        *,
+        clock: Any = time.monotonic,
+        background: bool = False,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        self.supervisor_config = supervisor_config
+        self.clock = clock
+        self.next_run: float | None = None
+        self.last_config: HousekeepingConfig | None = None
+        self.error: str | None = None
+        self.background = background
+        self.stop_event = stop_event or threading.Event()
+        self.thread: threading.Thread | None = None
+        self._owner_offset = 0
 
-    try:
-        _launchctl(["bootstrap", _launch_domain(), str(paths.launch_agent_file)])
-    except SupervisorError:
-        pass
+    def tick(self) -> bool:
+        if self.background:
+            if self.stop_event.is_set() or (self.thread and self.thread.is_alive()):
+                return False
+            self.thread = threading.Thread(
+                target=self._tick_sync,
+                name="vc-server-supervisor-housekeeping",
+                daemon=True,
+            )
+            self.thread.start()
+            return True
+        return self._tick_sync()
 
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=45)
+            if self.thread.is_alive():
+                raise HousekeepingScheduleError(
+                    "housekeeping did not drain its bounded observation"
+                )
 
-def _deactivate(paths: HousekeepingSchedulePaths) -> None:
-    """Best-effort `launchctl bootout`; failures are swallowed (e.g. not
-    currently loaded)."""
+    def _tick_sync(self) -> bool:
+        try:
+            config = load_housekeeping_config(
+                self.supervisor_config.config_file,
+                operator_home=self.supervisor_config.paths.operator_home,
+            )
+        except ServerConfigError as exc:
+            self.error = f"housekeeping config deferred: {type(exc).__name__}: {exc}"
+            return False
+        now = self.clock()
+        if config != self.last_config:
+            self.last_config = config
+            self.next_run = now + config.interval_hours * 3600
+        if not config.enabled or self.next_run is None:
+            return False
+        home = self.supervisor_config.paths.home
+        descriptor = home / "server" / "housekeeping.owner.json"
+        try:
+            raw = _read_owned_text(descriptor)
+            if raw is None:
+                raise HousekeepingScheduleError(
+                    "no verified housekeeping script registration"
+                )
+            owner = json.loads(raw)
+            if (
+                owner.get("schema") != "vibecrafted.supervisor-housekeeping.v1"
+                or owner.get("owner") != "vc-server-supervisor"
+            ):
+                raise HousekeepingScheduleError(
+                    "invalid housekeeping script registration"
+                )
+            script = _validate_owned_regular_file(Path(owner["script"]))
+            if _sha256_file(script) != owner.get("sha256"):
+                raise HousekeepingScheduleError(
+                    "housekeeping script changed; re-register before execution"
+                )
+            self.error = None
+            if config.auto_execute:
+                self._retire_accepted_caches()
+            if now < self.next_run:
+                return False
+            self.next_run = now + config.interval_hours * 3600
+            spec = importlib.util.spec_from_file_location(
+                "_vc_supervisor_housekeeping", script
+            )
+            if spec is None or spec.loader is None:
+                raise HousekeepingScheduleError("cannot load housekeeping script")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            plan = module.build_plan(
+                home, {"transient", "build-cache"}, config.retention_days
+            )
+            module.write_receipt(home, "plans", plan)
+            if config.auto_execute:
+                module.write_receipt(
+                    home, "executions", module.execute_plan(home, plan)
+                )
+            self.error = None
+        except (Exception, SystemExit) as exc:
+            import logging
 
-    try:
-        _launchctl(["bootout", _launch_target()])
-    except SupervisorError:
-        pass
+            logging.getLogger(__name__).exception(
+                "vc-server-supervisor: housekeeping execution deferred"
+            )
+            self.error = f"housekeeping deferred: {type(exc).__name__}: {exc}"
+        _atomic_private_write(
+            home / "server" / "housekeeping.status.json",
+            json.dumps(
+                {
+                    "owner": "vc-server-supervisor",
+                    "enabled": config.enabled,
+                    "auto_execute": config.auto_execute,
+                    "error": self.error,
+                },
+                sort_keys=True,
+            ).encode()
+            + b"\n",
+        )
+        return self.error is None
+
+    def _retire_accepted_caches(self) -> None:
+        """Policy B: a bounded pass after acceptance, no warm-cache warehouse."""
+        from .cache_lifecycle import CacheDeferred, accepted_owner, clean_cache
+
+        home = self.supervisor_config.paths.home
+        owners = home / "store" / "housekeeping" / "owners"
+        if not owners.is_dir() or owners.is_symlink():
+            return
+        outcomes = []
+        entries = sorted(owners.glob("*.json"))
+        if not entries:
+            return
+        offset = self._owner_offset % len(entries)
+        batch = (entries[offset:] + entries[:offset])[:256]
+        self._owner_offset = (offset + len(batch)) % len(entries)
+        for receipt in batch:
+            if self.stop_event.is_set():
+                break
+            try:
+                raw = _read_owned_text(receipt)
+                if raw is None:
+                    continue
+                owner = json.loads(raw)
+                path = Path(owner["path"])
+                if not path.exists() and not path.is_symlink():
+                    continue
+                accepted_owner(home, path)
+                from .cache_lifecycle import observe_unused
+
+                def observe(candidate: Path) -> None:
+                    if self.stop_event.is_set():
+                        raise CacheDeferred("supervisor-stopping")
+                    observe_unused(candidate)
+
+                result = clean_cache(home, path, observe=observe)
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                KeyError,
+                subprocess.TimeoutExpired,
+                CacheDeferred,
+            ) as exc:
+                result = f"deferred:{type(exc).__name__}:{exc}"
+            outcomes.append({"receipt": str(receipt), "result": result})
+        if outcomes:
+            _atomic_private_write(
+                home / "server" / "cache-retirement.status.json",
+                json.dumps(
+                    {"owner": "vc-server-supervisor", "outcomes": outcomes}
+                ).encode()
+                + b"\n",
+            )
 
 
 def schedule_cli_main(argv: Sequence[str] | None = None) -> int:
@@ -299,7 +403,9 @@ def schedule_cli_main(argv: Sequence[str] | None = None) -> int:
                     "interval_hours": config.interval_hours,
                     "config_path": str(config_path()),
                     "installed": housekeeping_schedule_installed(paths),
-                    "launch_agent_file": str(paths.launch_agent_file),
+                    "owner": "vc-server-supervisor",
+                    "registration": str(_owner_file(paths)),
+                    "legacy_launch_agent_file": str(paths.launch_agent_file),
                 },
                 indent=2,
             )
@@ -317,7 +423,9 @@ def schedule_cli_main(argv: Sequence[str] | None = None) -> int:
                 {
                     "installed": True,
                     "changed": changed,
-                    "launch_agent_file": str(paths.launch_agent_file),
+                    "owner": "vc-server-supervisor",
+                    "registration": str(_owner_file(paths)),
+                    "legacy_launch_agent_file": str(paths.launch_agent_file),
                     "auto_execute": config.auto_execute,
                     "interval_hours": config.interval_hours,
                 },
@@ -330,7 +438,7 @@ def schedule_cli_main(argv: Sequence[str] | None = None) -> int:
     removed = uninstall_housekeeping_schedule(paths)
     print(
         json.dumps(
-            {"removed": removed, "launch_agent_file": str(paths.launch_agent_file)},
+            {"removed": removed, "registration": str(_owner_file(paths))},
             indent=2,
         )
     )

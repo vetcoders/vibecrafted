@@ -13,12 +13,21 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import _write_test_source_provenance, seed_runtime_pack
+from _runtime_pack_fixture import (
+    _write_test_source_provenance,
+    fixed_terminal_fixture,
+    seed_runtime_pack,
+)
 
 from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
+
+
+@pytest.fixture(autouse=True)
+def _paired_host_fixture(monkeypatch, tmp_path):
+    fixed_terminal_fixture(monkeypatch, tmp_path)
 
 
 def _legacy_shim_public_name(name: str) -> str:
@@ -86,15 +95,15 @@ def _write_terminal_bundle_host(path: Path) -> None:
     with (path.parents[1] / "Info.plist").open("wb") as handle:
         plistlib.dump(
             {
-                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                "CFBundleExecutable": "alacritty",
-                "CFBundleIconFile": "alacritty.icns",
-                "CFBundleDisplayName": "VC Terminal",
-                "CFBundleName": "VC Terminal",
+                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                "CFBundleExecutable": "Vibecrafted",
+                "CFBundleIconFile": "Vibecrafted.icns",
+                "CFBundleDisplayName": "Vibecrafted",
+                "CFBundleName": "Vibecrafted",
             },
             handle,
         )
-    icon = path.parents[1] / "Resources/alacritty.icns"
+    icon = path.parents[1] / "Resources/Vibecrafted.icns"
     icon.parent.mkdir(parents=True, exist_ok=True)
     icon.write_bytes(b"fixture-icon")
 
@@ -139,6 +148,26 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     wrapper = generation / "bin/vc-terminal"
     shutil.copy2(REPO_ROOT / "scripts/vc-terminal-product-entry.sh", wrapper)
     wrapper.chmod(0o755)
+    if sys.platform == "darwin":
+        fixture_app = tmp_path / "Applications/Vibecrafted.app"
+        fixture_host = fixture_app / "Contents/MacOS/vc-terminal"
+        fixture_host.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(host, fixture_host)
+        (fixture_app / "Contents/Info.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                    "CFBundleExecutable": "Vibecrafted",
+                }
+            )
+        )
+        # Remap only the fixed installation root in a private script fixture;
+        # never execute a host application during this command-contract test.
+        wrapper.write_text(
+            wrapper.read_text().replace(
+                "/Applications/Vibecrafted.app", str(fixture_app)
+            )
+        )
     config_home = tmp_path / "home/.config"
     entry = config_home / "vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
@@ -358,7 +387,11 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
     assert Path(installed["frame"]) == generation / "libexec/vc-frame"
-    assert Path(installed["terminal_host"]) == generation / "libexec/vc-terminal"
+    assert Path(installed["terminal_host"]) == (
+        installer._FIXED_TERMINAL_HOST
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-terminal"
+    )
     assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
@@ -504,12 +537,12 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
     )
     installed = json.loads(capsys.readouterr().out)
     generation = runtime_home / "releases/9.9.9+g12345678"
-    assert Path(installed["terminal_host"]) == helper
+    assert Path(installed["terminal_host"]) == installer._FIXED_TERMINAL_HOST
     assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert (generation / "libexec/vc-terminal").is_file()
     path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
     assert "VIBECRAFTED_TERMINAL_HOST=" in path_wrapper
-    assert str(helper) in path_wrapper
+    assert str(installer._FIXED_TERMINAL_HOST) in path_wrapper
     assert str(generation / "libexec/vc-terminal") not in path_wrapper
     assert str(generation / "bin/vc-terminal") in path_wrapper
 
@@ -548,19 +581,20 @@ def test_runtime_install_uses_generation_bundle_without_app_root(
     generation = runtime_home / "releases/9.9.9+g12345678"
     generation_host = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     assert installed["app_root"] == ""
-    assert Path(installed["terminal_host"]) == generation_host
-    assert installer._is_product_bundle_terminal_host(generation_host)
+    assert Path(installed["terminal_host"]) == installer._FIXED_TERMINAL_HOST
+    assert not installer._is_product_bundle_terminal_host(generation_host)
     assert (generation_host.parents[1] / "Info.plist").is_file()
-    assert (generation_host.parents[1] / "Resources/alacritty.icns").is_file()
+    assert (generation_host.parents[1] / "Resources/Vibecrafted.icns").is_file()
     launcher = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
-    assert f"VIBECRAFTED_TERMINAL_HOST={generation_host}" in launcher
+    assert f"VIBECRAFTED_TERMINAL_HOST={installer._FIXED_TERMINAL_HOST}" in launcher
 
-    (generation_host.parents[1] / "Resources/alacritty.icns").unlink()
+    (generation_host.parents[1] / "Resources/Vibecrafted.icns").unlink()
     assert not installer._is_product_bundle_terminal_host(generation_host)
 
 
 def test_bundle_terminal_host_admission_refuses_every_broken_metadata_shape(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Admission reads untrusted bytes: a bad bundle is `False`, never a crash.
 
@@ -573,10 +607,11 @@ def test_bundle_terminal_host_admission_refuses_every_broken_metadata_shape(
     `ExpatError`, either of which aborts the install rather than falling back
     to the flat native host.
     """
-    bundle_root = tmp_path / "generation/libexec/vc-terminal.app"
-    host = bundle_root / "Contents/MacOS/alacritty"
+    bundle_root = tmp_path / "Applications/Vibecrafted.app"
+    host = bundle_root / "Contents/MacOS/vc-terminal"
+    monkeypatch.setattr(installer, "_FIXED_TERMINAL_HOST", host)
     plist = bundle_root / "Contents/Info.plist"
-    icon = bundle_root / "Contents/Resources/alacritty.icns"
+    icon = bundle_root / "Contents/Resources/Vibecrafted.icns"
 
     _write_terminal_bundle_host(host)
     assert installer._is_product_bundle_terminal_host(host)

@@ -60,7 +60,8 @@ def test_plan_preserves_store_unknown_and_recent_state(tmp_path: Path) -> None:
     plan = housekeeping.build_plan(home, {"transient"}, retention_days=7)
 
     items = {Path(item["path"]).name: item for item in plan["items"]}
-    assert items["old"]["eligible"] is True
+    assert items["old"]["eligible"] is False
+    assert "receipt" in items["old"]["reason"]
     assert items["recent.log"]["eligible"] is False
     assert plan["top_level"]["founder-data"] == ["store"]
     assert plan["top_level"]["unknown"] == ["mystery"]
@@ -75,7 +76,7 @@ def test_execute_requires_exact_confirmation(tmp_path: Path) -> None:
         raise AssertionError("unsafe execution was accepted")
 
 
-def test_execute_deletes_only_eligible_and_writes_receipts(tmp_path: Path) -> None:
+def test_execute_retains_unowned_state_and_writes_receipts(tmp_path: Path) -> None:
     home = tmp_path / ".vibecrafted"
     old = home / "tmp" / "old"
     keep = home / "store" / "keep.txt"
@@ -101,7 +102,7 @@ def test_execute_deletes_only_eligible_and_writes_receipts(tmp_path: Path) -> No
         == 0
     )
 
-    assert not old.exists()
+    assert old.exists()
     assert keep.read_text(encoding="utf-8") == "durable"
     plans = list((home / "store" / "housekeeping" / "plans").glob("*.json"))
     executions = list((home / "store" / "housekeeping" / "executions").glob("*.json"))

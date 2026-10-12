@@ -6,7 +6,9 @@ entrypoints are copied from the repository and run through the test interpreter.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import plistlib
 import shutil
 import sys
 from collections.abc import Callable
@@ -15,6 +17,40 @@ from pathlib import Path
 from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def fixed_terminal_fixture(monkeypatch, tmp_path: Path) -> None:
+    """Pair installer fixtures with a private main app, never /Applications.
+
+    The signer's CodeDirectory/Team probe is a test boundary double; native
+    signature/process acceptance is separately tested and remains parent-owned.
+    """
+    host = tmp_path / "Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+    host.parent.mkdir(parents=True)
+    shutil.copyfile("/usr/bin/true", host)
+    host.chmod(0o755)
+    contents = host.parent.parent
+    (contents / "Resources").mkdir()
+    (contents / "Resources/Vibecrafted.icns").write_bytes(b"fixture-icon")
+    (contents / "Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                "CFBundleExecutable": "Vibecrafted",
+                "CFBundleName": "Vibecrafted",
+                "CFBundleDisplayName": "Vibecrafted",
+                "CFBundleIconFile": "Vibecrafted.icns",
+            }
+        )
+    )
+    monkeypatch.setattr(installer, "_FIXED_TERMINAL_HOST", host)
+
+    def code_identity(path):
+        if path.is_dir():
+            return hashlib.sha256(host.read_bytes()).hexdigest(), "FIXTURE_TEAM"
+        return hashlib.sha256(path.read_bytes()).hexdigest(), "FIXTURE_TEAM"
+
+    monkeypatch.setattr(installer, "_signed_terminal_identity", code_identity)
 
 
 def _write_test_source_provenance(

@@ -2112,6 +2112,12 @@ def test_service_install_executes_exact_staged_supervisor_from_repo_cwd(
         REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "server_config.py",
         staged_package / "server_config.py",
     )
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+        staged_package,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__init__.py", "__pycache__", "*.pyc"),
+    )
     _write_executable(
         launcher,
         (

@@ -44,6 +44,7 @@ import os
 import queue
 import secrets
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -3189,6 +3190,18 @@ class GuardianWorker:
         self.cursor_parser = cursor_parser
         self.control_parser = control_parser
         self._ready_announced = False
+        self._active_response: Any = None
+
+    def interrupt_io(self) -> None:
+        """Interrupt this owner's SSE socket at shutdown, including partial lines."""
+        response = self._active_response
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        stream_socket = getattr(raw, "_sock", None)
+        if stream_socket is not None:
+            try:
+                stream_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # Already disconnected; the worker still owns final close.
 
     def _publish_board_safely(self) -> None:
         """Optional projection hook; must never own or block settlement.
@@ -3236,7 +3249,9 @@ class GuardianWorker:
                 f"SSE endpoint returned unexpected content type {content_type!r}"
             )
 
-    def consume_connection(self) -> ConnectionStats:
+    def consume_connection(
+        self, *, stop_requested: Callable[[], bool] = lambda: False
+    ) -> ConnectionStats:
         """Consume one SSE connection until the server disconnects."""
 
         stats = ConnectionStats()
@@ -3244,16 +3259,26 @@ class GuardianWorker:
         connection_caught_up = False
         try:
             response = self.opener(self._request(), timeout=self.connect_timeout)
+            self._active_response = response
             with contextlib.closing(response):
                 self._validate_response(response)
                 if not self._ready_announced and self.ready_callback is not None:
                     self.ready_callback()
                     self._ready_announced = True
+
+                def stop_aware_lines() -> Iterator[bytes | str]:
+                    for line in response:
+                        if stop_requested():
+                            return
+                        yield line
+
                 for item in iter_sse(
-                    response,
+                    stop_aware_lines(),
                     cursor_parser=self.cursor_parser,
                     control_parser=self.control_parser,
                 ):
+                    if stop_requested():
+                        return stats
                     if isinstance(item, SSEStreamBoundary):
                         latest_cursor = item.cursor
                         if self.state.baseline_complete:
@@ -3416,6 +3441,7 @@ class GuardianWorker:
                         stats.action_failures += 1
             return stats
         finally:
+            self._active_response = None
             # Settlement claims and controls persist their own cursor. This
             # final checkpoint covers non-settlement traffic once per socket.
             if (
@@ -3583,6 +3609,7 @@ class GuardianWorker:
         sleep: Callable[[float], None] = time.sleep,
         stop_requested: Callable[[], bool] = lambda: False,
         max_connections: int | None = None,
+        disconnected_callback: Callable[[], None] | None = None,
     ) -> None:
         """Reconnect with bounded backoff; never enter a zero-delay spin."""
 
@@ -3591,7 +3618,13 @@ class GuardianWorker:
         while not stop_requested():
             stats: ConnectionStats | None = None
             try:
-                stats = self.consume_connection()
+                if disconnected_callback is not None:
+                    self._ready_announced = False
+                stats = (
+                    self.consume_connection(stop_requested=stop_requested)
+                    if disconnected_callback is not None
+                    else self.consume_connection()
+                )
             except (
                 GuardianProtocolError,
                 OSError,
@@ -3599,6 +3632,9 @@ class GuardianWorker:
                 urllib.error.URLError,
             ) as exc:
                 LOGGER.warning("guardian SSE disconnected: %s", exc)
+            finally:
+                if disconnected_callback is not None:
+                    disconnected_callback()
             attempts += 1
             if stats is not None and stats.proved_stable:
                 retry.reset()
@@ -3877,7 +3913,14 @@ def _recover_untriaged_runs_background() -> None:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+    ready_callback: ReadyCallback | None = None,
+    disconnected_callback: Callable[[], None] | None = None,
+    worker_callback: Callable[[GuardianWorker], None] | None = None,
+) -> int:
     """CLI entrypoint: load state, wire the recovery adapter, and run forever."""
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -3893,7 +3936,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         """CLI Notifier: forward to `notify_operator` honoring `--no-desktop`."""
         notify_operator(notification, desktop=not args.no_desktop)
 
-    ready_callback: ReadyCallback | None = None
     if args.ready_file is not None and args.ready_nonce is not None:
 
         def announce_ready() -> None:
@@ -3922,6 +3964,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ready_callback=ready_callback,
         )
         backoff = BoundedBackoff(args.backoff_initial, args.backoff_max)
+        if worker_callback is not None:
+            worker_callback(worker)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -3934,7 +3978,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "guarded native recovery adapter active",
                     worker.server_url,
                 )
-                worker.run_forever(backoff=backoff)
+                if stop_event is None:
+                    worker.run_forever(backoff=backoff)
+                else:
+                    worker.run_forever(
+                        backoff=backoff,
+                        sleep=stop_event.wait,
+                        stop_requested=stop_event.is_set,
+                        disconnected_callback=disconnected_callback,
+                    )
             finally:
                 if args.ready_file is not None and args.ready_nonce is not None:
                     remove_ready_receipt_if_owned(

@@ -690,7 +690,10 @@ def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     runtime-manifest.json and therefore correctly fails before the behavior
     each test intends to prove.
     """
+    from _runtime_pack_fixture import fixed_terminal_fixture
     from vibecrafted_core import frontier_assets
+
+    fixed_terminal_fixture(monkeypatch, tmp_path)
 
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 

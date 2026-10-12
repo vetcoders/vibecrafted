@@ -3053,6 +3053,23 @@ elif operation == "status-read":
         print(f"{host}\t{port}")
 elif operation == "pair-health":
     runtime_dir = Path(args[0])
+    if (runtime_dir / "guardian.execution.json").exists():
+        from vibecrafted_core.server_supervisor import (
+            SupervisorPaths, _managed_pair_in_process_healthy, _managed_pair_snapshot,
+        )
+        paths = SupervisorPaths.create(
+            home=runtime_dir.parent,
+            runtime_home=Path(os.environ.get("VIBECRAFTED_RUNTIME_HOME", str(Path.home() / ".local/share/vibecrafted"))),
+            operator_home=Path.home(),
+        )
+        status = read_json(runtime_dir / "status.json")
+        host, port = validate_endpoint(status.get("host", "127.0.0.1"), status.get("port", 3024))
+        if not _managed_pair_in_process_healthy(paths, host=host, port=port):
+            fail("server or embedded Guardian is not ready", 4)
+        snapshot = _managed_pair_snapshot(paths)
+        print(f"Server: RUNNING (PID {snapshot['server_pid']}, listening on {origin(host, port)})")
+        print(f"Guardian: RUNNING (supervisor thread, owner PID {snapshot['guardian_owner_pid']})")
+        raise SystemExit(0)
     audit_process_probe("pair-health", os.getpid())
 
     def first_line(path: Path) -> str:
@@ -3943,6 +3960,11 @@ _guardian_binary() {
 }
 
 _stop_guardian() {
+  # Embedded recovery is stopped by its supervisor owner, never by signalling
+  # the shared PID as though it were an independent Guardian child.
+  if [[ "${VIBECRAFTED_GUARDIAN_EXECUTION:-}" == "supervisor-thread" ]]; then
+    return 0
+  fi
   _stop_managed_process guardian Guardian
 }
 
@@ -3966,6 +3988,10 @@ _guardian_ready_receipt_state() {
 }
 
 _ensure_guardian() {
+  if [[ "${VIBECRAFTED_GUARDIAN_EXECUTION:-}" == "supervisor-thread" ]]; then
+    # The supervisor proves readiness itself after this bounded server start.
+    return 0
+  fi
   local host="${1:-127.0.0.1}"
   local port="${2:-3024}"
   local runtime_dir guardian_pid_file guardian_url_file guardian_ready_path_file
@@ -4177,6 +4203,11 @@ cmd_server() {
   esac
   if [[ "$lifecycle_mutation" -eq 1 ]] && ! _server_lifecycle_lock_is_owned; then
     _with_server_lifecycle_lock "$verb" "$@"
+    return $?
+  fi
+  if [[ "$verb" == "start" && \
+    "${VIBECRAFTED_SERVER_SUPERVISOR_CHILD:-0}" != "1" ]]; then
+    _server_supervisor_cli service start "$@"
     return $?
   fi
   if [[ "$verb" == "stop" && \
@@ -4485,6 +4516,11 @@ cmd_server() {
     status)
       local runtime_dir
       runtime_dir="$(_server_runtime_dir)"
+      if [[ -f "$runtime_dir/guardian.execution.json" ]]; then
+        _server_supervisor_cli runtime-status || return $?
+        _server_python pair-health "$runtime_dir"
+        return $?
+      fi
       local pid_file="$runtime_dir/server.pid"
       local guardian_pid_file="$runtime_dir/guardian.pid"
       local status_file="$runtime_dir/status.json"
@@ -4639,14 +4675,7 @@ cmd_server() {
       else
         printf "  [%b!%b] Compatibility binary missing at %s\n" "$_yellow" "$_reset" "$compat_server_bin"
       fi
-      local guardian_bin
-      guardian_bin="$(_guardian_binary 2>/dev/null || true)"
-      if [[ -n "$guardian_bin" && -x "$guardian_bin" ]]; then
-        printf "  [%b✓%b] Guardian entrypoint present and executable at %s\n" "$_green" "$_reset" "$guardian_bin"
-      else
-        printf "  [%b✗%b] Guardian entrypoint vc-guardian is missing or not executable\n" "$_red" "$_reset"
-        has_errors=1
-      fi
+      printf "  Guardian recovery owner: vc-server-supervisor (embedded thread)\n"
 
       # 2. Site root & Fonts check
       if [[ -d "$site_root" ]]; then
@@ -4742,6 +4771,13 @@ cmd_server() {
         has_errors=1
       fi
 
+      if [[ -f "$runtime_dir/guardian.execution.json" ]]; then
+        if _server_python pair-health "$runtime_dir"; then
+          printf "  [%b✓%b] Embedded Guardian readiness verified\n" "$_green" "$_reset"
+        else
+          has_errors=1
+        fi
+      else
       case "$guardian_state" in
         missing)
           if [[ $server_healthy -eq 1 ]]; then
@@ -4780,6 +4816,7 @@ cmd_server() {
           ;;
       esac
 
+      fi
       if [[ "$server_state" == "missing" && "$guardian_state" == "missing" ]]; then
         printf "  [%b✓%b] Server/guardian lifecycle is cleanly stopped\n" "$_green" "$_reset"
       fi

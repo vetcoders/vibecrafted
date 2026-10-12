@@ -9,10 +9,8 @@
 # Alacritty does not expand ${HOME} in [terminal].shell.program; the private
 # config is not a product surface.
 #
-# Finder treats a naked unix executable as Terminal.app's job. When a
-# generation or App helper ships vc-terminal.app, exec that bundle's
-# Contents/MacOS/alacritty so Dock/LaunchServices identity and logo attach.
-# libexec/vc-terminal remains the required native host and the fallback.
+# macOS terminal bytes execute inside the fixed /Applications/Vibecrafted.app
+# main bundle. Generations remain internal; Linux uses the flat native host.
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
@@ -97,53 +95,24 @@ _vc_terminal_sanitize_inherited_path() {
 }
 
 _vc_terminal_is_bundle_host() {
-  local candidate="${1:-}" macos contents bundle
-  [[ "$candidate" == /* ]] || return 1
-  [[ "$candidate" == */vc-terminal.app/Contents/MacOS/alacritty ]] || return 1
-  macos="${candidate%/*}"
-  contents="${macos%/*}"
-  bundle="${contents%/*}"
-  [[ "${bundle##*/}" == "vc-terminal.app" ]] || return 1
+  local candidate="${1:-}" bundle=/Applications/Vibecrafted.app
+  [[ "$candidate" == "$bundle/Contents/MacOS/vc-terminal" ]] || return 1
   [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
-  [[ ! -L "$macos" && ! -L "$contents" && ! -L "$bundle" ]] || return 1
+  [[ ! -L "$bundle" && ! -L "$bundle/Contents" && ! -L "$bundle/Contents/MacOS" ]] || return 1
   [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
-  # A bundle without its declared icon is not a branded host.  Do not let an
-  # ambient VIBECRAFTED_TERMINAL_HOST turn that incomplete shell into the
-  # visible product identity.
-  [[ -s "$bundle/Contents/Resources/alacritty.icns" \
-    && ! -L "$bundle/Contents/Resources/alacritty.icns" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty.icns" ]] || return 1
-  # Both payloads' bundles are stamped VC Terminal by the one builder helper.
-  # A bundle still carrying the donor's name is somebody else's app sitting at
-  # a path shaped like ours; it does not get to be the product's Dock identity.
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist" 2>/dev/null)" == "io.vetcoders.vibecrafted" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist" 2>/dev/null)" == "Vibecrafted" ]] || return 1
 }
 
 _vc_terminal_select_host() {
-  local fallback="$1" candidate
-  # .app is a macOS identity mechanism. Other supported platforms always
-  # retain the generation's flat native host, even when a polluted environment
-  # supplies a bundle-shaped path.
-  [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || {
-    printf '%s\n' "$fallback"
+  local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal
+  [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || { printf '%s\n' "$fallback"; return 0; }
+  if _vc_terminal_is_bundle_host "$candidate"; then
+    printf '%s\n' "$candidate"
     return 0
-  }
-  for candidate in \
-    "$root/libexec/vc-terminal.app/Contents/MacOS/alacritty" \
-    "${VIBECRAFTED_TERMINAL_HOST:-}"
-  do
-    if _vc_terminal_is_bundle_host "$candidate"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf '%s\n' "$fallback"
+  fi
+  printf 'vc-terminal: fixed signed host missing at /Applications/Vibecrafted.app; install the reviewed notarized app before opening a terminal.\n' >&2
+  return 78
 }
 
 _vc_terminal_sanitize_inherited_path

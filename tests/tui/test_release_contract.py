@@ -1502,8 +1502,6 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert '--version "$VERSION"' in builder
     assert icon.is_file()
     assert icon.stat().st_size > 100_000
-    assert "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" in builder
-    assert "$TERMINAL_REPO/assets/icon/terminal.png" in builder
     assert '"$ICON_SOURCE" "$resources/Vibecrafted.icns" "$ICON_REFERENCE"' in builder
     assert "! -name 'Vibecrafted.icns'" in builder
     assert '[[ -s "$resources/TrayIcon.png" ]]' in builder
@@ -1573,7 +1571,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "SourceCodePro[wght].ttf" in builder
     assert "SourceCodePro-Italic[wght].ttf" in builder
     assert "OFL.txt" in builder
-    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert 'embed_terminal_font_resources "$APP"' in builder
     assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert "missing Source Code Pro input" in builder
     assert "(OpenType|TrueType) [Ff]ont" in builder
@@ -2056,7 +2054,7 @@ def test_embedded_python_drops_native_code_no_declared_executable_reaches(
 ) -> None:
     """Release #7 (c71487bf, CPython 3.14.7) died at VCPC027: the bundled
     verifier found libpython, the Tcl/Tk stack and its thread/itcl packages
-    reachable from no declared executable. Run the real prune function on a
+    now reached by the native embedded Python hosts; the unrelated Tcl/Tk stack remains pruned. Run the real prune function on a
     python-build-standalone shaped tree whose interpreter links no libpython.
     """
     python = _embedded_python_fixture(tmp_path / "static")
@@ -2068,6 +2066,7 @@ def test_embedded_python_drops_native_code_no_declared_executable_reaches(
     assert remaining == [
         "bin/pip3",
         "bin/python3.14",
+        "lib/libpython3.14.dylib",
         "lib/pkgconfig/python3-embed.pc",
         "lib/python3.14/json/__init__.py",
         "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
@@ -2402,51 +2401,16 @@ def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> Non
     assert "_CodeSignature/CodeResources" in helper
 
 
-def test_vc_terminal_bundle_identity_has_a_single_materializer() -> None:
-    """Both payloads' bundles are stamped by one function, or they drift.
-
-    Measured on 5ff2c4c5: the App helper was stamped VC Terminal and the new
-    Runtime Pack bundle kept the donor's CFBundleName, so the same binary
-    reached the Dock under two names depending on which payload was installed.
-    """
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
-        encoding="utf-8"
-    )
-    installer_source = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
-        encoding="utf-8"
-    )
-
+def test_vc_terminal_uses_one_fixed_main_app_identity() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
     assert (
-        builder.count('/usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app"') == 1
+        'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
+        in builder
     )
-    assert builder.count("Set :CFBundleDisplayName VC Terminal") == 1
-    assert builder.count("Set :CFBundleName VC Terminal") == 1
-    assert (
-        builder.count(
-            'materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app"'
-        )
-        == 1
-    )
-    assert builder.count('materialize_vc_terminal_app_bundle "$terminal_app"') == 1
-    # The pack bundle is a Darwin-only product contract; Linux keeps the flat
-    # native host, so the call has to stay inside the platform guard.
-    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
-        "\nbuild_product() {", 1
-    )[0]
-    guard = materializer.index('if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then')
-    call = materializer.index("materialize_vc_terminal_app_bundle")
-    assert guard < call < materializer.index("\n  fi\n", guard)
-
-    # The two admission predicates read the same stamp.
-    assert '"$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal"' in entry
-    assert '_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"' in installer_source
-    assert (
-        'document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME'
-        in installer_source
-    )
+    assert "materialize_vc_terminal_app_bundle" not in builder
+    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in entry
+    assert "io.vetcoders.vibecrafted" in entry
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:

@@ -1,63 +1,133 @@
 # Vibecrafted Housekeeping
 
-This reset surface uses categories, plan first, explicit execute,
-background operation, and durable receipts. It is not a recursive wipe of
-`~/.vibecrafted`.
+`vc-server-supervisor` owns recovery and housekeeping scheduling in-process.
+`vc-server` owns the API and local metrics. Frame hosts sessions. There is no
+permanent Guardian, housekeeping or metrics child in this service contract.
 
-## Plan in the background
-
-```bash
-scripts/vibecrafted-housekeeping --background
-```
-
-The launcher prints a PID and log path. The detached process writes its plan
-below `~/.vibecrafted/store/housekeeping/plans/`. `store/` is durable Founder
-data and is never scanned as a cleanup candidate.
-
-Default retention is seven days. The plan covers:
-
-- old children of `tmp`, `logs`, `install-transactions`, and `recovery`;
-- old build caches inside fleet worktrees (`target`, `node_modules`, `.venv`,
-  Python test/cache directories).
-
-Recent candidates, symlinks, and paths overlapping a live process working
-directory are retained with a reason. Founder data and unknown top-level paths
-are inventoried but never deleted.
-
-## Read the plan
+## Inspect before changing a plan
 
 ```bash
 scripts/vibecrafted-housekeeping --json
+vibecrafted housekeeping schedule status
+vibecrafted server status
 ```
 
-The summary reports candidate count, eligible count, and reclaimable bytes.
-The JSON item list records every protected path and why it was protected.
+The planner reports each actual filesystem (`device`, free bytes, roots and
+missing roots). Capacities are not added across APFS volumes. Missing process,
+open-file, lock, identity or capacity observations defer cleanup. Estimated
+candidate bytes do not guarantee physically reclaimed disk space.
 
-## Execute the same policy
+Use those facts to consciously reduce concurrency, correct the plan, wait, or
+choose an explicitly authorized override. There is no automatic capacity waiter
+or batch relaunch mechanism. Quota and provider choice belong to the common
+server/dispatch contract; this guide does not invent a quota CLI.
 
-Execution rescans immediately, so a stale plan cannot authorize deletion.
-The confirmation token is deliberately awkward:
+## Hold a build chain lease
+
+Source-checkout command (installed availability requires the new Runtime Pack):
 
 ```bash
-scripts/vibecrafted-housekeeping \
-  --execute \
+scripts/vc-build-lease --root "$CARGO_TARGET_DIR" -- \
+  /bin/bash -c 'cargo check && cargo test'
+```
+
+The regular `.vc-build-lease` stays shared-locked across both commands and the
+idle gap between them. The child inherits its descriptor, so a surviving child
+still protects the cache if the wrapper exits. `--lease-root /another/target`
+can protect additional actual output roots in the same chain. The release
+builder wraps its entire build tree and donor targets with this mechanism.
+It never removes or expires another owner's lease by PID or age.
+
+For a new task-owned reconstructible output under the tracked task's root:
+
+```bash
+scripts/vc-build-lease --root "$PWD/target" \
+  --home "$VIBECRAFTED_HOME" --run-id '<exact-tracked-run-id>' -- \
+  /bin/bash -c 'cargo check && cargo test'
+```
+
+Registration requires a newly created output directory and records its exact
+inode, filesystem and owning run. A pre-existing unregistered target stays
+unclaimed. Shared caches can be protected with a lease without granting this
+task ownership. Source manifests, source trees, sessions, branches, reports,
+unintegrated results and durable receipts are never this cache.
+
+## Completion and acceptance
+
+A green verifier or an exited worker is insufficient. Dispatch's successful
+`settle_verified` boundary only marks an existing exact ownership registration.
+Deletion separately requires the control plane's current trust-finalized
+settlement, matching hashed trust receipt and revision, non-waived acceptance,
+a dead owning worker, and the current cache inode. Policy B retires accepted
+owned cache; it does not retain a default warm-cache warehouse.
+
+Both Founder settings remain effective:
+
+```toml
+[housekeeping]
+enabled = true
+auto_execute = false
+interval_hours = 24
+retention_days = 7
+```
+
+`enabled = false` disables scheduling. `auto_execute = false` produces plans
+only. When both are true, the supervisor also performs a bounded retirement
+pass for newly accepted registered caches. Age and names discover candidates;
+they never confer deletion authority.
+
+`vibecrafted housekeeping schedule install` registers the script's exact digest
+for the supervisor. It creates no additional LaunchAgent. A changed script
+requires re-registration. The separate housekeeping plist renderer is retired;
+`--background` is retired because the supervisor owns execution. Explicit
+manual cleanup remains:
+
+```bash
+scripts/vibecrafted-housekeeping --execute \
   --confirm DELETE-REGENERABLE-VIBECRAFTED-STATE
 ```
 
-To detach the destructive pass, add `--background`. Every result is written
-below `store/housekeeping/executions/` before the command returns.
+Plans and execution receipts stay under `store/housekeeping/`. Cleanup retains
+exclusive nonblocking leases on the cache and containing targets through
+staging, rechecks after rename, and restores a vetoed tree when its original
+path is still vacant. A recreated path is retained alongside the staging tree.
+Failed staging paths are appended to `leftovers.txt`. No automatic recursive
+retry of retained payload is allowed. One metadata-only retry is bounded to
+128 directories and only regular `.DS_Store` files plus empty directories.
 
-## Settled fleet worktrees
+## Migration and native acceptance
 
-The housekeeping script removes caches inside old worktrees, not worktrees
-themselves. Worktree deletion remains receipt-owned:
+The release builders materialize real named native hosts for VC-owned Python
+manifest entrypoints, including `vc-server-supervisor`, and a `vc-python` door
+for internal Python helpers. They embed the pinned CPython library. The
+ordinary development uv console scripts remain development interpreter doors. A plist label, shebang or altered
+argv is not a process-identity receipt. The macOS terminal executable lives in
+one fixed app at `/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal`.
+Generations are internal payloads; the launcher refuses to open an alternate
+generation app. A standalone macOS pack requires the reviewed notarized fixed
+app before activation: missing/malformed/symlinked hosts and a mismatch between
+the fixed host and candidate CodeDirectory/Team identity refuse publication
+with a pending paired-app handoff. Prior active/config state stays preserved. Linux uses its flat native host.
 
-```bash
-vibecrafted dispatch "$PLAN" --cleanup-settled <dispatch-run-id>
-```
+Parent/integrator migration must preserve config.toml, active Frame sessions,
+running agents, Guardian cursor/outbox/deadletters and durable receipts. Stop
+an old Guardian only by its verified managed identity. A still-held Guardian
+lock prevents embedding and stays visibly degraded; it is never forcibly
+reclaimed. Retire a legacy housekeeping plist only with the exact trusted
+installer digest through `retire_legacy_schedule`; an ownership mismatch or
+unconfirmed bootout retains it. Per-provider telemetry plist retirement belongs
+to the collector migration and likewise requires ownership receipts. Names
+alone never authorize deleting foreign files.
 
-That command validates settled state, retains branches/evidence, and records
-the cleanup outcome. Do not replace it with `rm -rf`.
+After source admission, the parent must perform the authorized idle-safe,
+notarized install and inspect actual executable paths, signatures, app bundle
+identity, two infrastructure roles, embedded SSE recovery, config switches,
+terminal launch command handoff and agent-start confirmation. Isolated process
+fixtures do not prove that installed Dock or agent-delivery behavior.
+
+Whole worktree removal remains the separate receipt-owned
+`vibecrafted dispatch "$PLAN" --cleanup-settled <dispatch-run-id>` contract.
+Cache retirement does not remove worktrees or branches.
 
 ## Runtime rescue footprint
 

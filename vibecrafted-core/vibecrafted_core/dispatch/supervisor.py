@@ -895,6 +895,23 @@ class DispatchSupervisor:
                 return self._unverified_claim(
                     cut, "claim changed before settlement; verification must run again"
                 )
+            # Final dispatch admission can mark a previously registered cache.
+            # It is not trust acceptance and never deletes source or payload.
+            from ..cache_lifecycle import mark_cache_eligible
+            from ..runtime_paths import vibecrafted_home
+
+            cache_receipt = self._receipt_store.cut(cut.id)
+            if cache_receipt.get("target_path") and cache_receipt.get(
+                "provider_run_id"
+            ):
+                retirement = mark_cache_eligible(
+                    vibecrafted_home(),
+                    Path(cache_receipt["target_path"]),
+                    run_id=str(cache_receipt["provider_run_id"]),
+                    dispatch_run_id=self._receipt_store.run_id,
+                    cut_id=cut.id,
+                )
+                self._receipt_store.update(cut.id, cache_retirement=retirement)
             for dependency in cut.closes_embargo:
                 self._set_state(
                     dependency,

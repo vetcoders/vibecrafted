@@ -9304,78 +9304,103 @@ def _is_native_executable(path: Path) -> bool:
     return magic in _NATIVE_EXECUTABLE_MAGIC
 
 
-# The one name the release builder stamps into every vc-terminal.app it
-# materializes — Vibecrafted.app's helper and the Runtime Pack generation's
-# bundle alike. A bundle carrying the donor's name is not this product's
-# Finder/Dock identity, so it is not admitted as the public terminal host.
-_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
+_TERMINAL_BUNDLE_DISPLAY_NAME = "Vibecrafted"
+_FIXED_TERMINAL_HOST = Path("/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal")
 
 
 def _is_product_bundle_terminal_host(path: Path) -> bool:
-    """True when `path` is the inner binary of a physical vc-terminal.app."""
+    """Only the fixed main app owns macOS terminal identity; generations do not."""
+    if path != _FIXED_TERMINAL_HOST:
+        return False
     try:
-        if path.name != "alacritty" or not path.is_absolute():
-            return False
-        macos = path.parent
-        contents = macos.parent
+        contents = path.parent.parent
         bundle = contents.parent
-        if (
-            macos.name != "MacOS"
-            or contents.name != "Contents"
-            or bundle.name != "vc-terminal.app"
-        ):
-            return False
-        plist = contents / "Info.plist"
-        icon = contents / "Resources" / "alacritty.icns"
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
-            return False
-        for node in (path, macos, contents, bundle, plist, icon):
+        for node in (path, path.parent, contents, bundle, contents / "Info.plist"):
             if node.is_symlink():
                 return False
-        if not plist.is_file() or not icon.is_file() or icon.stat().st_size == 0:
-            return False
-        with plist.open("rb") as stream:
+        with (contents / "Info.plist").open("rb") as stream:
             document = plistlib.load(stream)
-        # A plist whose root is an array or a string parses cleanly and then
-        # has no `.get`. Admission is a predicate on untrusted bytes under a
-        # path an installed generation hands us, so every shape that is not a
-        # dictionary is simply "not a branded host" — never an AttributeError
-        # escaping into cmd_runtime_install.
-        if not isinstance(document, dict):
+        icon = contents / "Resources/Vibecrafted.icns"
+        if not icon.is_file() or icon.is_symlink() or icon.stat().st_size == 0:
             return False
-        return _is_native_executable(path) and (
-            document.get("CFBundleExecutable") == "alacritty"
-            and document.get("CFBundleIconFile") == "alacritty.icns"
-            and document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME
-            and document.get("CFBundleDisplayName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+        return (
+            isinstance(document, dict)
+            and _is_native_executable(path)
+            and (
+                document.get("CFBundleIdentifier") == "io.vetcoders.vibecrafted"
+                and document.get("CFBundleExecutable") == "Vibecrafted"
+                and document.get("CFBundleIconFile") == "Vibecrafted.icns"
+                and document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+                and document.get("CFBundleDisplayName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+            )
         )
-    except OSError:
+    except (OSError, plistlib.InvalidFileException, ExpatError, ValueError, TypeError):
         return False
-    # Truncated or malformed XML reaches expat, which raises ExpatError — not a
-    # ValueError, so InvalidFileException alone never covered it.
-    except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError):
-        return False
+
+
+def _signed_terminal_identity(path: Path) -> tuple[str, str]:
+    """Read verified CodeDirectory/Team identity, not timestamp-dependent file SHA."""
+    verified = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    fields = dict(
+        line.split("=", 1) for line in details.stderr.splitlines() if "=" in line
+    )
+    code, team = fields.get("CDHash", ""), fields.get("TeamIdentifier", "")
+    if (
+        verified.returncode != 0
+        or details.returncode != 0
+        or re.fullmatch(r"[0-9a-f]{40,64}", code) is None
+        or not team
+        or team == "not set"
+    ):
+        raise RuntimeInstallRefusal(
+            "pending paired notarized app handoff: terminal code signature unproven"
+        )
+    return code, team
 
 
 def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
-    """Prefer a branded vc-terminal.app host; keep generation libexec as fallback.
-
-    Finder opens a naked libexec Mach-O through Terminal.app. The product GUI
-    identity lives in vc-terminal.app. The App helper is accepted only at that
-    exact inner path; a historical `--terminal-host` pointing at a non-bundle
-    helper is ignored.
-    """
-    libexec = generation / "libexec" / "vc-terminal"
-    candidates = [generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"]
-    if app_root is not None:
-        candidates.append(
-            Path(app_root) / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-        )
-    for candidate in candidates:
-        if _is_product_bundle_terminal_host(candidate):
-            return candidate
-    return libexec
+    """Admit a matching fixed signed host before publishing a usable GUI entry."""
+    if sys.platform == "darwin":
+        host = _FIXED_TERMINAL_HOST
+        if not _is_product_bundle_terminal_host(host):
+            raise RuntimeInstallRefusal(
+                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app host missing or malformed; prior runtime preserved"
+            )
+        candidate = generation / "libexec/vc-terminal"
+        if not candidate.exists():
+            # Older admitted carriers put the native host at bin/vc-terminal;
+            # publication moves these exact bytes to libexec before launchers.
+            candidate = generation / "bin/vc-terminal"
+        if not _is_native_executable(candidate) or candidate.is_symlink():
+            raise RuntimeInstallRefusal(
+                "pending paired notarized app handoff: candidate terminal native bytes missing"
+            )
+        if _signed_terminal_identity(host) != _signed_terminal_identity(candidate):
+            raise RuntimeInstallRefusal(
+                "pending paired notarized app handoff: fixed host differs from candidate signed terminal code; prior runtime preserved"
+            )
+        if (
+            _signed_terminal_identity(host.parents[2])[1]
+            != _signed_terminal_identity(host)[1]
+        ):
+            raise RuntimeInstallRefusal(
+                "pending paired notarized app handoff: main app and terminal signing owners differ"
+            )
+        return host
+    return generation / "libexec" / "vc-terminal"
 
 
 def _runtime_terminal_launcher_environment(
@@ -9384,7 +9409,10 @@ def _runtime_terminal_launcher_environment(
     host = _product_terminal_host(generation=generation, app_root=app_root)
     if host == generation / "libexec" / "vc-terminal":
         return None
-    return {"VIBECRAFTED_TERMINAL_HOST": str(host)}
+    return {
+        "VIBECRAFTED_TERMINAL_HOST": str(host),
+        "VIBECRAFTED_TERMINAL_CODE_ID": _signed_terminal_identity(host)[0],
+    }
 
 
 def _materialize_runtime_generation_vc_terminal_entry(
@@ -27203,6 +27231,10 @@ def _install_runtime_pack(
     if not version or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version):
         raise RuntimeInstallRefusal(f"invalid Runtime Pack VERSION: {version!r}")
     _assert_runtime_tree_has_no_symlinks(payload_root)
+
+    # Admission precedes rescue/config staging, selector publication and service
+    # activation. A pack-only upgrade may require a Founder-gated matching app.
+    _product_terminal_host(generation=payload_root, app_root=app_root)
 
     paths = _runtime_install_paths(getattr(args, "runtime_home", None))
     runtime_home = paths["runtime_home"]

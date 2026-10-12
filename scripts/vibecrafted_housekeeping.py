@@ -11,13 +11,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+_CORE = Path(__file__).resolve().parents[1] / "vibecrafted-core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+from vibecrafted_core.cache_lifecycle import (
+    CacheDeferred,
+    accepted_owner,
+    capacity,
+    clean_cache,
+)
 
 CONFIRM_TOKEN = "DELETE-REGENERABLE-VIBECRAFTED-STATE"
 TRANSIENT_ROOTS = ("tmp", "logs", "install-transactions", "recovery")
@@ -100,8 +109,10 @@ def live_cwds() -> tuple[Path, ...]:
             text=True,
             timeout=20,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return ()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CacheDeferred("cwd-observation-uncertain") from exc
+    if result.returncode != 0 or result.stderr or not result.stdout.strip():
+        raise CacheDeferred("cwd-observation-uncertain")
     paths: list[Path] = []
     for line in result.stdout.splitlines():
         if line.startswith("n/"):
@@ -217,7 +228,12 @@ def build_plan(
 ) -> dict[str, object]:
     now = utc_now()
     timestamp = now.timestamp()
-    cwds = live_cwds()
+    observation_errors: list[str] = []
+    try:
+        cwds = live_cwds()
+    except CacheDeferred as exc:
+        cwds = ()
+        observation_errors.append(str(exc))
     candidates: list[Candidate] = []
     if "transient" in categories:
         candidates.extend(
@@ -231,6 +247,33 @@ def build_plan(
                 root, now=timestamp, retention_days=retention_days, cwds=cwds
             )
         )
+    # Age and directory names are discovery hints only. A separate task owner
+    # and authoritative accepted settlement are required for every deletion.
+    guarded: list[Candidate] = []
+    for item in candidates:
+        eligible, reason = item.eligible, item.reason
+        try:
+            accepted_owner(root, Path(item.path))
+            if observation_errors:
+                raise CacheDeferred(observation_errors[0])
+            if not Path(item.path).is_symlink() and not overlaps_live_path(
+                Path(item.path), cwds
+            ):
+                eligible, reason = True, "settled-accepted-owned-cache"
+        except (OSError, ValueError, CacheDeferred) as exc:
+            eligible, reason = False, str(exc)
+        guarded.append(
+            Candidate(
+                item.category,
+                item.path,
+                item.bytes,
+                item.newest_mtime,
+                item.age_days,
+                eligible,
+                reason,
+            )
+        )
+    candidates = guarded
     candidates.sort(key=lambda item: (-item.bytes, item.path))
     eligible = [item for item in candidates if item.eligible]
     return {
@@ -241,6 +284,10 @@ def build_plan(
         "retention_days": retention_days,
         "categories": sorted(categories),
         "live_cwds_observed": len(cwds),
+        "observation_errors": observation_errors,
+        **capacity(
+            [root, root / "worktrees", *(Path(item.path) for item in candidates)]
+        ),
         "top_level": classify_top_level(root),
         "summary": {
             "candidates": len(candidates),
@@ -275,11 +322,10 @@ def delete_candidate(root: Path, raw: str) -> tuple[bool, str]:
         return False, "symlink-refused"
     if not path.exists():
         return True, "already-absent"
-    if path.is_dir():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
-    return True, "deleted"
+    try:
+        return True, clean_cache(root, path)
+    except (OSError, ValueError, subprocess.TimeoutExpired, CacheDeferred) as exc:
+        return False, f"deferred:{exc}"
 
 
 def execute_plan(root: Path, plan: dict[str, object]) -> dict[str, object]:
@@ -297,27 +343,17 @@ def execute_plan(root: Path, plan: dict[str, object]) -> dict[str, object]:
         "home": str(root),
         "plan_created_at": plan["created_at"],
         "outcomes": outcomes,
-        "deleted_bytes": sum(int(item["bytes"]) for item in outcomes if item["ok"]),
+        "deleted_bytes": sum(
+            int(item["bytes"]) for item in outcomes if item["result"] == "deleted"
+        ),
         "failures": sum(1 for item in outcomes if not item["ok"]),
     }
 
 
 def launch_background(argv: Sequence[str], root: Path) -> int:
-    forwarded = [arg for arg in argv if arg != "--background"]
-    log_dir = root / "store" / "housekeeping" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
-    log_path = log_dir / f"{stamp}.log"
-    with log_path.open("ab", buffering=0) as log:
-        process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), *forwarded],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    print(json.dumps({"pid": process.pid, "log": str(log_path), "home": str(root)}))
-    return 0
+    raise SystemExit(
+        "--background retired; housekeeping runs inside vc-server-supervisor"
+    )
 
 
 def parser() -> argparse.ArgumentParser:

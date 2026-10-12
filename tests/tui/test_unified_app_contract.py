@@ -4070,15 +4070,16 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert 'make -C "$TERMINAL_REPO"' in builder
     assert "release-bins" in builder
     assert 'chmod 0755 "$terminal_source"' in builder
-    assert 'local terminal_app="$APP/Contents/Helpers/vc-terminal.app"' in builder
-    assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
-    assert '"$terminal_app/Contents/Resources/alacritty.icns"' in builder
-    assert "Set :CFBundleDisplayName VC Terminal" in builder
-    assert "Set :CFBundleName VC Terminal" in builder
+    assert (
+        'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
+        in builder
+    )
+    assert 'embed_terminal_font_resources "$APP"' in builder
+    assert "materialize_vc_terminal_app_bundle" not in builder
     terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
         encoding="utf-8"
     )
-    assert "vc-terminal.app/Contents/MacOS/alacritty" in terminal_entry
+    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in terminal_entry
     assert "_vc_terminal_is_bundle_host" in terminal_entry
     assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
     assert "sign_nested_app_bundles" in builder
