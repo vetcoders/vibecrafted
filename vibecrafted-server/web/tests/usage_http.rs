@@ -235,7 +235,8 @@ async fn native_formats_are_local_and_absent_malformed_and_stale_are_distinct() 
         json!({"ts":ts,"kind":"ok","limit5h":{"usedRatio":1.0}}),
     );
     let (_, _, agy) = get(&home.0, "/api/usage/quota?agent=agy&model=selected-model").await;
-    assert_eq!(agy["agents"][0]["status"], "blocked");
+    assert_eq!(agy["agents"][0]["status"], "unknown");
+    assert_eq!(agy["agents"][0]["authoritative"], false);
     let (_, _, kimi) = get(&home.0, "/api/usage/quota?agent=kimi").await;
     assert_eq!(kimi["agents"][0]["status"], "blocked");
     write_quota(
@@ -346,4 +347,24 @@ async fn missing_or_other_account_scope_cannot_block_default_batch() {
     assert_eq!(other["agents"][0]["status"], "unknown");
     let (_, _, explicit) = get(&home.0, "/api/usage/quota?agent=codex&account=other").await;
     assert_eq!(explicit["agents"][0]["status"], "blocked");
+}
+
+#[tokio::test]
+async fn republished_old_agy_error_is_never_fresh_confirmed_exhaustion() {
+    let home = TestHome::new();
+    let ts = chrono::Utc::now().timestamp();
+    write_quota(
+        &home.0,
+        "agy",
+        json!({"ts":ts,"model_id":"selected-model","quota":{"status":"RESOURCE_EXHAUSTED","last_429_ts":(ts-3600)*1000}}),
+    );
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=agy&model=selected-model").await;
+    assert_eq!(board["agents"][0]["status"], "unknown");
+    assert_eq!(board["agents"][0]["authoritative"], false);
+    assert!(
+        board["agents"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("error-derived")
+    );
 }

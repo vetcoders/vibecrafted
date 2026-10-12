@@ -100,9 +100,10 @@ Provider, Agent and Model pickers use the same identifiers as API dimensions.
 They preserve unknown and currently unobserved selections. Quota checks run
 on explicit page entry/refresh and task preflight, without idle network polling.
 The shared quota endpoint accepts `agent`, `model`, `provider`, `account` and
-`pool`. It reads all eight source adapters equally. Native Kimi ratios and
-Agy quota signals remain supported as source formats, without requiring their
-monitors for local usage collection.
+`pool`. It reads all eight source adapters equally. Native Kimi ratios remain supported. Legacy Agy log-derived status is
+unconfirmed: its monitor republishes snapshot time even for an old error,
+so only an explicit authoritative observation can refuse admission. Neither
+monitor is required for local usage collection.
 
 A provider snapshot may publish a scoped observation (or `observations` array):
 

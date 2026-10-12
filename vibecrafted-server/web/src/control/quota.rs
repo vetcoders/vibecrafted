@@ -256,6 +256,7 @@ fn project_source(
             let age_s = observed_ts.map(age_secs);
             let invalid_time = observed_ts.is_none_or(|t| t > Utc::now().timestamp() as u64 + 30);
             let authoritative = !invalid_time
+                && (id != "agy" || value["authoritative"] == true)
                 && (value
                     .get("authoritative")
                     .and_then(Value::as_bool)
@@ -264,6 +265,16 @@ fn project_source(
                             || fields.status == "ok"
                             || !fields.bars.is_empty(),
                     ));
+            // Agy's legacy monitor derives RESOURCE_EXHAUSTED from log
+            // text and republishes ts on every tick. That is not a fresh
+            // authoritative provider quota response.
+            if id == "agy" && value.get("authoritative").is_none() {
+                fields.status = "unknown";
+                fields.headline = "unconfirmed".into();
+                fields.detail.push_str(
+                    " · error-derived status; authoritative quota observation unavailable",
+                );
+            }
             let applies = value
                 .get("applies")
                 .and_then(Value::as_bool)
