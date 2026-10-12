@@ -17457,6 +17457,7 @@ def _runtime_retirement_references(
     receipt: Mapping[str, Any],
     *,
     maintenance_target: Path | None = None,
+    diagnostics: list[dict[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Read live executable/dependency/cwd and durable owner references, without signals.
 
@@ -17721,7 +17722,76 @@ def _runtime_retirement_references(
         for plist in directory.glob("*.plist"):
             if plist.stat().st_uid != os.geteuid():
                 continue
-            collect(f"launchagent:{plist.name}", plistlib.loads(plist.read_bytes()))
+            raw = plist.read_bytes()
+            try:
+                payload = plistlib.loads(raw)
+            except _PLIST_DECODE_ERRORS as exc:
+                if str(plist) in receipt.get("owned_files", {}) or str(
+                    plist
+                ) in receipt.get("owned_symlinks", {}):
+                    raise RuntimeError(
+                        f"owned LaunchAgent is malformed: {plist.name}"
+                    ) from exc
+                # A foreign definition is never repaired by our garbage collector.
+                # Still discover every possible reference before allowing deletion.
+                try:
+                    text = raw.decode("utf-8-sig")
+                except UnicodeError:
+                    raise RuntimeError(
+                        f"unreadable foreign LaunchAgent reference format: {plist.name}"
+                    ) from None
+                standard_dtd = re.compile(
+                    r'<!DOCTYPE\s+plist\s+PUBLIC\s+"-//Apple//DTD PLIST 1\.0//EN"'
+                    r'\s+"https?://www\.apple\.com/DTDs/PropertyList-1\.0\.dtd"\s*>'
+                )
+                without_dtd = standard_dtd.sub("", text)
+                if (
+                    not text.lstrip().startswith(("<?xml", "<plist", "<!DOCTYPE"))
+                    or "<plist" not in text
+                    or re.search(r"<!\s*(?:DOCTYPE|ENTITY)", without_dtd, re.IGNORECASE)
+                    or any(ord(char) < 32 and char not in "\t\n\r" for char in text)
+                ):
+                    raise RuntimeError(
+                        f"unsupported foreign LaunchAgent reference format: {plist.name}"
+                    )
+                entities = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+                def decode_entity(
+                    match: re.Match[str],
+                    entity_map: Mapping[str, str] = entities,
+                    plist_name: str = plist.name,
+                ) -> str:
+                    name = match.group(1)
+                    if name in entity_map:
+                        return entity_map[name]
+                    try:
+                        digits = name[2:] if name.startswith("#x") else name[1:]
+                        value = chr(int(digits, 16 if name.startswith("#x") else 10))
+                        if ord(value) < 32 or 0xD800 <= ord(value) <= 0xDFFF:
+                            raise ValueError
+                        return value
+                    except (ValueError, OverflowError):
+                        raise RuntimeError(
+                            f"unsupported foreign LaunchAgent entity: {plist_name}"
+                        ) from None
+
+                # Decode XML entities once. Unknown named entities fail closed;
+                # a bare ampersand is the common malformed foreign XML case.
+                decoded = re.sub(
+                    r"&([A-Za-z][A-Za-z0-9]*|#[^;\s]+);", decode_entity, text
+                )
+                collect(f"launchagent:{plist.name}:conservative-text", [text, decoded])
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "path": str(plist),
+                            "sha256": hashlib.sha256(raw).hexdigest(),
+                            "parse_error": type(exc).__name__,
+                            "action": "conservative-xml-reference-scan; foreign bytes preserved",
+                        }
+                    )
+            else:
+                collect(f"launchagent:{plist.name}", payload)
     for app in {
         Path("/Applications/Vibecrafted.app"),
         Path.home() / "Applications/Vibecrafted.app",
@@ -17910,7 +17980,10 @@ def _runtime_retirement_plan(
             status="pending",
             reason="publication/recovery is pending; usable recovery retained",
         )
-    references = _runtime_retirement_references(paths, receipt)
+    diagnostics: list[dict[str, str]] = []
+    references = _runtime_retirement_references(paths, receipt, diagnostics=diagnostics)
+    if diagnostics:
+        plan["reference_diagnostics"] = diagnostics
     rollback = receipt.get("retirement_rollback") or {}
     if rollback.get("generation"):
         references.append(("single-healthy-rollback", rollback["generation"]))
@@ -18288,6 +18361,8 @@ def _finish_runtime_retirement_locked(
         "deleted": [],
         "residuals": list(plan["residuals"]),
     }
+    if plan.get("reference_diagnostics"):
+        result["reference_diagnostics"] = plan["reference_diagnostics"]
     if plan["status"] == "pending":
         result["reason"] = plan["reason"]
         return result
@@ -18321,6 +18396,16 @@ def _finish_runtime_retirement_locked(
     records = runtime_home / ".installer-backups/retirement"
     descriptor = _runtime_payload_open_absolute_directory(records, create=True)
     os.close(descriptor)
+    if plan.get("reference_diagnostics"):
+        diagnostic = {
+            "schema": plan["schema"],
+            "reference_diagnostics": plan["reference_diagnostics"],
+        }
+        _atomic_json_file(
+            records
+            / ("reference-diagnostics-" + _canonical_digest(diagnostic) + ".json"),
+            diagnostic,
+        )
     pending = receipt.setdefault("retirement_pending", {})
     # Durable in-progress intents are independently resumable after partial rmdir.
     entries = {
@@ -26083,6 +26168,21 @@ def _runtime_retirement_legacy_guard(
     )
     if not verified:
         raise RuntimeError("current publication is not verified: " + reason)
+    return _runtime_retirement_current_binding(
+        paths, receipt, selector_identity=selector_identity
+    )
+
+
+def _runtime_retirement_current_binding(
+    paths: Mapping[str, Path],
+    receipt: Mapping[str, Any],
+    *,
+    selector_identity: tuple[Any, ...] | None = None,
+) -> dict[str, Any]:
+    """Bind the existing verified-current owner to immutable publication evidence."""
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    if selector_identity is None:
+        selector_identity = _capture_stat_identity(current.lstat())
     generation = current.resolve(strict=True)
     binding = {
         "roots": receipt["roots"],
@@ -26095,7 +26195,7 @@ def _runtime_retirement_legacy_guard(
         # Unlink/recreate may reuse an inode. Bind change time and the existing
         # stable metadata contract as well, excluding read-induced atime changes.
         "selector_identity": list(selector_identity),
-        "active_sha256": _sha256_path(runtime / "active.json"),
+        "active_sha256": _sha256_path(paths["runtime_home"] / "active.json"),
         "configuration_digest": _runtime_config_digest(paths["product_config"]),
         "selector": str(current.readlink()),
     }
@@ -26809,6 +26909,55 @@ def _runtime_retirement_legacy(
     return dict(compact, status="settled")
 
 
+def _runtime_retirement_keep_current_only(
+    paths: Mapping[str, Path],
+    receipt: dict[str, Any],
+    *,
+    plan_only: bool,
+) -> dict[str, Any]:
+    """Release only the policy rollback pin after verifying and archiving its proof."""
+    binding = _runtime_retirement_current_binding(paths, receipt)
+    verified, reason = _runtime_rescue_verify_destination(paths)
+    if not verified or binding != _runtime_retirement_current_binding(paths, receipt):
+        raise RuntimeError("current publication is not verified: " + reason)
+    previous = json.loads(json.dumps(receipt))
+    rollback = previous.pop("retirement_rollback", {})
+    plan = _runtime_retirement_plan(paths, previous)
+    if plan["status"] != "ready":
+        raise RuntimeError("keep-current-only refused: pending publication/recovery")
+    event = {
+        "schema": "vibecrafted.runtime-retirement-current-only.v1",
+        "binding": binding,
+        "released_rollback": rollback,
+    }
+    if plan.get("reference_diagnostics"):
+        event["reference_diagnostics"] = plan["reference_diagnostics"]
+    records = paths["runtime_home"] / ".installer-backups/retirement"
+    archive = records / ("accepted-current-" + _canonical_digest(event) + ".json")
+    summary = {"binding": binding, "rollback_archive": str(archive)}
+    if plan_only:
+        plan["keep_current_only"] = summary
+        return plan
+    descriptor = _runtime_payload_open_absolute_directory(records, create=True)
+    os.close(descriptor)
+    _atomic_json_file(archive, event, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES)
+    live = _load_runtime_install_receipt(_runtime_receipt_path(paths["runtime_home"]))
+    verified, reason = _runtime_rescue_verify_destination(paths)
+    if (
+        not verified
+        or _canonical_digest(live) != _canonical_digest(receipt)
+        or binding != _runtime_retirement_current_binding(paths, live)
+    ):
+        raise RuntimeError(
+            "current publication changed before rollback pin release: " + reason
+        )
+    receipt.pop("retirement_rollback", None)
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    result = _finish_runtime_retirement(paths, receipt)
+    result["keep_current_only"] = summary
+    return result
+
+
 def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
     """Retry the publication owner's finish, also usable after App adoption."""
     paths = _runtime_install_paths(getattr(args, "runtime_home", None))
@@ -26819,6 +26968,11 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
         evidence = getattr(args, "legacy_evidence", None)
         inventory = getattr(args, "legacy_inventory", None)
         admitted = getattr(args, "admit_plan", None)
+        keep_current = bool(getattr(args, "keep_current_only", False))
+        if keep_current and (inventory or evidence or admitted):
+            raise RuntimeError(
+                "--keep-current-only cannot be combined with legacy admission"
+            )
         if (inventory and (not plan_only or evidence or admitted)) or (
             admitted and (not evidence or plan_only)
         ):
@@ -26848,6 +27002,10 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
                 result = _runtime_retirement_legacy(
                     paths, receipt, Path(evidence), plan_only=True, admitted=None
                 )
+            elif keep_current:
+                result = _runtime_retirement_keep_current_only(
+                    paths, receipt, plan_only=True
+                )
             else:
                 result = _runtime_retirement_plan(paths, receipt)
             for entry in [*result.get("generations", []), *result.get("copies", [])]:
@@ -26875,6 +27033,10 @@ def _cmd_runtime_retirement_finish(args: argparse.Namespace) -> int:
                         admitted=admitted,
                     )
                     if evidence
+                    else _runtime_retirement_keep_current_only(
+                        paths, receipt, plan_only=False
+                    )
+                    if keep_current
                     else _finish_runtime_retirement(paths, receipt)
                 )
     except (
@@ -28421,6 +28583,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Finish verified publication retirement (with --plan: read-only classification)",
     )
     p_runtime_repair.add_argument(
+        "--keep-current-only",
+        action="store_true",
+        help="With --retire: verify current publication, archive and release the rollback pin; live references stay protected",
+    )
+    p_runtime_repair.add_argument(
         "--legacy-inventory",
         metavar="ABSOLUTE_PATH",
         help="With --retire --plan: inventory one receipt-bound publication copy, rescue capture or historical generation",
@@ -28490,6 +28657,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "runtime-resolve":
         return cmd_runtime_resolve(args)
     elif args.command == "runtime-repair":
+        if getattr(args, "keep_current_only", False) and not args.retire:
+            parser.error("--keep-current-only requires --retire")
         return cmd_runtime_repair(args)
     elif args.command == "terminal-shell-check":
         return cmd_terminal_shell_check(args)
