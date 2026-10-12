@@ -2756,3 +2756,43 @@ def test_interactive_unselected_same_build_remains_ambiguous(
             quota_policy=resolve_quota_policy("unmetered", runtime="local-native"),
             usage_capability=ProviderUsageCapability("codex", False),
         )
+
+
+@pytest.mark.parametrize("selection", ["ambiguous", "inconsistent"])
+def test_interactive_command_publicly_reports_catalog_refusal(
+    restored_interactive_seats, monkeypatch, capsys, selection
+):
+    repo, seats = restored_interactive_seats
+    if selection == "ambiguous":
+        for key in seats[-1].to_env():
+            monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv("VIBECRAFTED_SESSION_ID", seats[0].vibecrafted_session_id)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("private refusal fixture"))
+    assert (
+        main(
+            [
+                "interactive-command",
+                "codex",
+                "--root",
+                str(repo),
+                "--runtime",
+                "local-native",
+                "--permissions",
+                "bypass",
+                "--token-budget",
+                "unmetered",
+                "--continuity",
+                "fresh",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert (
+        "multiple live instances"
+        if selection == "ambiguous"
+        else "ownership is inconsistent"
+    ) in output.err
+    assert "Traceback" not in output.err

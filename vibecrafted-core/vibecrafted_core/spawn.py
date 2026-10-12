@@ -6700,6 +6700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "interactive-command":
         from .workflow import read_prompt_stream
+        from .workspace_catalog import WorkspaceCatalogError
 
         prompt = read_prompt_stream(sys.stdin)
         try:
@@ -6727,7 +6728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 resume_last=args.resume_last,
                 session_selection=args.session_selection,
             )
-        except ValueError as exc:
+        except (ValueError, WorkspaceCatalogError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
         print(shlex.join(command))
