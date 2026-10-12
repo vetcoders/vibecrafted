@@ -22,7 +22,7 @@ def _isolated_quota_board(request: pytest.FixtureRequest, monkeypatch) -> None:
     if getattr(request.module, "REAL_QUOTA_BOARD", False):
         return
 
-    def ok_board(server_url, *, refresh, fetch=None):
+    def ok_board(server_url, *, refresh, agents=(), fetch=None):
         agents = [
             "agy",
             "claude",

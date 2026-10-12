@@ -24,7 +24,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -162,14 +162,23 @@ def _http_get_json(url: str, timeout: float) -> Any:
 
 
 def fetch_board(
-    server_url: str, *, refresh: bool, fetch: Fetch | None = None
+    server_url: str,
+    *,
+    refresh: bool,
+    agents: Sequence[str] = (),
+    fetch: Fetch | None = None,
 ) -> tuple[dict[str, dict[str, Any]], str]:
     """Query the shared board; returns ``(items_by_agent, error)``.
 
-    ``refresh`` asks the server to refresh authoritative quota for this
-    preflight (the only moment the network is allowed to be touched).
+    ``refresh`` asks the server to refresh authoritative quota for exactly
+    ``agents`` (the plan's needed providers) -- the only moment the network is
+    allowed to be touched.
     """
-    query = "?refresh=preflight" if refresh else ""
+    query = ""
+    if refresh:
+        query = "?" + urllib.parse.urlencode(
+            {"refresh": "preflight", "agents": ",".join(sorted(set(agents)))}
+        )
     url = f"{server_url.rstrip('/')}{QUOTA_PATH}{query}"
     try:
         payload = (fetch or _http_get_json)(url, _PROBE_TIMEOUT_S)
@@ -373,7 +382,12 @@ def diagnose(
         items: dict[str, dict[str, Any]] = {}
         failure = "no vc-server URL configured"
     else:
-        items, failure = fetch_board(url, refresh=refresh, fetch=fetch)
+        items, failure = fetch_board(
+            url,
+            refresh=refresh,
+            agents=[requirement.agent for requirement in needed],
+            fetch=fetch,
+        )
     if failure:
         diagnosis.warnings.append(
             (

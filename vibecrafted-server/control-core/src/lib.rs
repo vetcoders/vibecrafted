@@ -49,10 +49,12 @@ pub mod usage;
 pub mod usage_agy;
 pub mod usage_claude;
 pub mod usage_codex;
+pub mod usage_collect;
 pub mod usage_cursor;
 pub mod usage_grok;
 pub mod usage_junie;
 pub mod usage_kimi;
+pub mod usage_local;
 pub mod workspace;
 
 pub use events::{

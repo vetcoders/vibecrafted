@@ -140,177 +140,53 @@ async fn usage_api_projects_filters_totals_and_validation() {
 }
 
 #[tokio::test]
-async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
+async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
     let home = TestHome::new();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
-    let agy = json!({
-        "ts": ts,
-        "model_id": "gemini-3.1-pro-high",
-        "metrics": {"estimated_tokens": 12400, "cost_usd": 0.042},
-        "quota": {"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}
-    });
-    // 0.97 (or 0.95) is warn, NOT blocked!
-    let kimi_warn = json!({
-        "ts": ts,
-        "kind": "ok",
-        "plan": "Coding",
-        "limit5h": {"usedRatio": 0.97},
-        "monthTotal": {"usedRatio": 0.41},
-        "monthCode": {"usedRatio": 0.12}
-    });
-    let kimi_exhausted = json!({
-        "ts": ts,
-        "kind": "ok",
-        "plan": "Coding",
-        "limit5h": {"usedRatio": 1.0},
-        "monthTotal": {"usedRatio": 0.41},
-        "monthCode": {"usedRatio": 0.12}
-    });
-    let codex_snapshot = json!({
-        "agent": "codex",
-        "status": "ok",
-        "last_session": {"id": "sess-codex-1", "model": "gpt-5.6-terra", "processed_total": 4500},
-        "metrics": {"processed_total": 4500, "fleet_processed_total": 9000, "session_count": 2},
-        "quota": {"status": "ok"}
-    });
-    let cursor_snapshot = json!({
-        "agent": "cursor",
-        "status": "unavailable",
-        "reason": "usage lives in Cursor cloud"
-    });
+    // Host activity the collector left behind (the real fleet_engine entry shape).
+    let dir = home.0.join("telemetry/claude");
+    fs::create_dir_all(&dir).expect("telemetry dir");
+    let mtime = chrono::Utc::now().timestamp() as f64 - 60.0;
+    fs::write(
+        dir.join("scan-cache.json"),
+        serde_json::to_vec(
+            &json!({"files": {"/s/claude/aaaa1111-2222-3333-4444-555566667777.jsonl": {
+                "parser": 3,
+                "days": [{"day": "2026-10-12", "model": "claude-opus-5-5",
+                          "input_tokens": 10, "output_tokens": 5,
+                          "cache_read_tokens": 0, "cache_creation_tokens": 0}],
+                "record": {"id": "aaaa1111-2222-3333-4444-555566667777", "mtime": mtime}
+            }}}),
+        )
+        .expect("json"),
+    )
+    .expect("scan cache");
 
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", agy.to_string());
-        std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi_warn.to_string());
-        std::env::set_var("VIBECRAFTED_CODEX_QUOTA_JSON", codex_snapshot.to_string());
-        std::env::set_var("VIBECRAFTED_CURSOR_QUOTA_JSON", cursor_snapshot.to_string());
-    }
-
-    let (status, cache, board) = get(&home.0, "/api/usage/quota").await;
+    let (status, _, all) = get(&home.0, "/api/usage?window=all").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cache, "no-store");
-    assert_eq!(board["schema"], "vibecrafted.quota-dashboard.v1");
-    let agents = board["agents"].as_array().expect("agents");
-    // All 8 providers are returned equally:
-    assert_eq!(agents.len(), 8);
+    let origins: Vec<_> = all["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .map(|run| run["origin"].as_str().expect("origin").to_string())
+        .collect();
+    assert!(origins.contains(&"vc".to_string()) && origins.contains(&"local".to_string()));
+    assert_eq!(all["local_sources"].as_array().expect("sources").len(), 8);
 
-    // agy: RESOURCE_EXHAUSTED -> blocked
-    let agy_agent = agents.iter().find(|a| a["id"] == "agy").expect("agy");
-    assert_eq!(agy_agent["status"], "blocked");
-    assert_eq!(agy_agent["headline"], "EXHAUSTED");
-    assert!(
-        agy_agent["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("api-equiv")
-    );
-    assert_eq!(agy_agent["tokens"], 12400);
-
-    // kimi at 97% -> warn, NOT blocked!
-    let kimi_agent = agents.iter().find(|a| a["id"] == "kimi").expect("kimi");
-    assert_eq!(kimi_agent["status"], "warn");
-    assert_eq!(kimi_agent["bars"][0]["label"], "5h");
-    assert_eq!(kimi_agent["bars"][0]["level"], "warn");
-    assert_eq!(kimi_agent["bars"][1]["text"], "41%");
-
-    // codex unmeasured quota reports unknown, transparent source/time/scope
-    let codex_agent = agents.iter().find(|a| a["id"] == "codex").expect("codex");
-    assert_eq!(codex_agent["status"], "unknown");
-    assert_eq!(codex_agent["headline"], "unmeasured");
-    assert!(
-        codex_agent["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("unmeasured quota")
-    );
-
-    // cursor unavailable reports unknown with cloud reason
-    let cursor_agent = agents.iter().find(|a| a["id"] == "cursor").expect("cursor");
-    assert_eq!(cursor_agent["status"], "unknown");
-    assert_eq!(cursor_agent["headline"], "cloud-only");
-    assert!(
-        cursor_agent["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("Cursor cloud")
-    );
-
-    // Test on-demand query filtering:
-    let (status, _, filtered_agy) = get(&home.0, "/api/usage/quota?agent=agy").await;
-    assert_eq!(status, StatusCode::OK);
-    let filtered_agents = filtered_agy["agents"].as_array().expect("agents");
-    assert_eq!(filtered_agents.len(), 1);
-    assert_eq!(filtered_agents[0]["id"], "agy");
-
-    let (status, _, filtered_pool) = get(&home.0, "/api/usage/quota?pool=moonshot").await;
-    assert_eq!(status, StatusCode::OK);
-    let moonshot_agents = filtered_pool["agents"].as_array().expect("agents");
-    assert_eq!(moonshot_agents.len(), 1);
-    assert_eq!(moonshot_agents[0]["id"], "kimi");
-
-    // Test confirmed 100% exhaustion on Kimi:
-    unsafe {
-        std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi_exhausted.to_string());
-    }
-    let (status, _, exhausted_board) = get(&home.0, "/api/usage/quota?agent=kimi").await;
-    assert_eq!(status, StatusCode::OK);
-    let kimi_exhausted_agent = &exhausted_board["agents"][0];
-    assert_eq!(kimi_exhausted_agent["status"], "blocked");
-    assert_eq!(kimi_exhausted_agent["bars"][0]["level"], "blocked");
-
-    // Test stale degradation: stale blocked snapshot becomes warn · stale!
-    let stale_agy = json!({
-        "ts": ts.saturating_sub(600), // 10 minutes ago (> 300s)
-        "model_id": "gemini-3.1-pro-high",
-        "metrics": {"estimated_tokens": 12400},
-        "quota": {"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}
-    });
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", stale_agy.to_string());
-    }
-    let (status, _, stale_board) = get(&home.0, "/api/usage/quota?agent=agy").await;
-    assert_eq!(status, StatusCode::OK);
-    let stale_agent = &stale_board["agents"][0];
-    assert_eq!(stale_agent["status"], "warn"); // degraded from blocked!
-    assert_eq!(stale_agent["stale"], true);
-    assert!(
-        stale_agent["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("stale")
-    );
-
-    // Test absent monitor:
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", "/nonexistent/agy-quota.json");
-        std::env::set_var(
-            "VIBECRAFTED_KIMI_QUOTA_JSON",
-            "/nonexistent/kimi-quota.json",
-        );
-        std::env::set_var(
-            "VIBECRAFTED_CODEX_QUOTA_JSON",
-            "/nonexistent/codex-quota.json",
-        );
-        std::env::set_var(
-            "VIBECRAFTED_CURSOR_QUOTA_JSON",
-            "/nonexistent/cursor-quota.json",
-        );
-    }
-    let (status, _, quiet) = get(&home.0, "/api/usage/quota").await;
-    assert_eq!(status, StatusCode::OK);
-    let quiet_agents = quiet["agents"].as_array().expect("agents");
-    assert_eq!(quiet_agents.len(), 8);
-    let quiet_agy = quiet_agents.iter().find(|a| a["id"] == "agy").expect("agy");
-    assert_eq!(quiet_agy["present"], false);
-    assert_eq!(quiet_agy["status"], "absent");
-
-    unsafe {
-        std::env::remove_var("VIBECRAFTED_AGY_QUOTA_JSON");
-        std::env::remove_var("VIBECRAFTED_KIMI_QUOTA_JSON");
-        std::env::remove_var("VIBECRAFTED_CODEX_QUOTA_JSON");
-        std::env::remove_var("VIBECRAFTED_CURSOR_QUOTA_JSON");
+    // The picker lists exactly the dimension names the API reports; choosing any
+    // of them must return exactly that dimension's runs.
+    for (picker, param) in [
+        ("providers", "provider"),
+        ("agents", "agent"),
+        ("models", "model"),
+    ] {
+        let names = all["dimensions"][picker].as_array().expect("dimension");
+        assert!(!names.is_empty(), "{picker}");
+        for dimension in names {
+            let name = dimension["name"].as_str().expect("name");
+            let uri = format!("/api/usage?window=all&{param}={name}");
+            let (status, _, filtered) = get(&home.0, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(filtered["totals"]["runs"], dimension["runs"], "{uri}");
+        }
     }
 }

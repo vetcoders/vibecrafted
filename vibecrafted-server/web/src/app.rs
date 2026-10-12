@@ -975,12 +975,14 @@ pub fn UsagePage() -> impl IntoView {
                 <section class="quota-board" aria-label="Live agent quota" data-quota-board>
                     <div class="control-panel-head">
                         <h2>"Live quota"</h2>
-                        <span id="quota-status">"local monitors"</span>
+                        <span id="quota-status">"shared server observation"</span>
+                        <button type="button" id="quota-refresh" class="server-console-link" title="Ask provider-owned quota sources now (explicit request)">"Refresh quota"</button>
                     </div>
                     <div id="quota-agents" class="quota-agents"></div>
-                    <p class="control-plane-meta">"Provider-neutral local quota for all 8 native providers. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
+                    <p class="control-plane-meta">"One shared observation for all 8 providers: state, source, age and pool/account/model scope. Unknown, stale and exhausted stay distinct; token totals never imply exhaustion. Prices are api-equiv, not a bill."</p>
                     <script inner_html=quota_dashboard_script()></script>
                 </section>
+                <p class="control-plane-meta" id="usage-local-sources" aria-label="Local collection by provider"></p>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
                     <div class="usage-attention"><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
                     <div class="usage-attention"><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
@@ -1080,7 +1082,8 @@ fn quota_dashboard_script() -> &'static str {
     const pill = document.createElement('span');
     pill.className = 'quota-pill';
     pill.dataset.status = agent.status || 'unknown';
-    pill.textContent = agent.status || 'unknown';
+    pill.dataset.state = agent.state || 'unknown';
+    pill.textContent = agent.state || agent.status || 'unknown';
     head.append(name, pill);
     const headline = document.createElement('p');
     headline.className = 'quota-headline';
@@ -1112,7 +1115,9 @@ fn quota_dashboard_script() -> &'static str {
     if ((agent.bars || []).length) article.append(bars);
     const meta = document.createElement('p');
     meta.className = 'quota-meta';
-    const bits = [agent.model, agent.tokens !== null && agent.tokens !== undefined ? String(agent.tokens) + ' tok' : '', money(agent.cost_usd), ageText(agent.age_s), agent.source].filter(Boolean);
+    const scope = agent.scope || {};
+    const scoped = [scope.pool && 'pool ' + scope.pool, scope.account && 'account ' + scope.account, scope.model && 'model ' + scope.model].filter(Boolean).join(' ');
+    const bits = [scoped, agent.model, agent.tokens !== null && agent.tokens !== undefined ? String(agent.tokens) + ' tok' : '', money(agent.cost_usd), ageText(agent.age_s), agent.source].filter(Boolean);
     meta.textContent = bits.join(' · ');
     article.append(meta);
     return article;
@@ -1132,7 +1137,21 @@ fn quota_dashboard_script() -> &'static str {
       status.textContent = 'Live quota unavailable: ' + error.message;
     }
   };
+  const refresh = document.getElementById('quota-refresh');
+  if (refresh) refresh.addEventListener('click', async () => {
+    // Explicit operator request: the only UI path that may reach a provider.
+    status.textContent = 'Asking provider quota sources…';
+    try {
+      const response = await fetch('/api/usage/quota?refresh=network', { credentials: 'same-origin', cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
+      render(payload);
+    } catch (error) {
+      status.textContent = 'Quota refresh failed: ' + error.message;
+    }
+  });
   load();
+  // Local file read only; the network is never touched by this timer.
   setInterval(load, 15000);
 })();"#
 }
@@ -1171,6 +1190,15 @@ fn usage_dashboard_script() -> &'static str {
     return number.format(totals.tokens_total_known);
   };
   const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
+  const renderLocalSources = (sources) => {
+    const bits = (sources || []).map((item) => {
+      const detail = item.source === 'scan_cache' || item.source === 'archive'
+        ? item.counted + ' local' + (item.matched_vc ? ' · ' + item.matched_vc + ' already in VC runs' : '') + (item.withheld_days ? ' · ' + item.withheld_days + ' day(s) withheld' : '')
+        : item.source + (item.note ? ' (' + item.note + ')' : '');
+      return item.agent + ': ' + detail;
+    });
+    set('usage-local-sources', bits.length ? 'Local collection — ' + bits.join(' · ') : '');
+  };
   const renderDimensions = (id, values) => {
     const target = byId(id);
     target.replaceChildren();
@@ -1208,32 +1236,27 @@ fn usage_dashboard_script() -> &'static str {
   root.querySelectorAll('[data-usage-dim]').forEach((button) => {
     button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
   });
-  const populateModelPicker = (models) => {
-    const select = byId('usage-model');
+  // A picker lists the names the API itself reports (unknown included) plus
+  // the seeded options; the current selection survives even when the window
+  // has no row for it, so a filter always round-trips.
+  const populatePicker = (id, items) => {
+    const select = byId(id);
     if (!select) return;
-    const current = params.get('model') || select.value || '';
-    const seen = new Set();
+    const key = id.replace('usage-', '');
+    const current = params.get(key) || select.value || '';
+    const names = new Set(Array.from(select.options).map((option) => option.value).filter(Boolean));
+    for (const item of items || []) if (item && item.name) names.add(item.name);
+    if (current) names.add(current);
     select.replaceChildren();
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'all';
-    select.appendChild(defaultOpt);
-    for (const item of models || []) {
-      const name = item.name;
-      if (name && name !== 'unknown' && !seen.has(name)) {
-        seen.add(name);
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        if (current === name) opt.selected = true;
-        select.appendChild(opt);
-      }
-    }
-    if (current && !seen.has(current)) {
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'all';
+    select.appendChild(all);
+    for (const name of Array.from(names).sort()) {
       const opt = document.createElement('option');
-      opt.value = current;
-      opt.textContent = current;
-      opt.selected = true;
+      opt.value = name;
+      opt.textContent = name;
+      if (current === name) opt.selected = true;
       select.appendChild(opt);
     }
   };
@@ -1248,7 +1271,10 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
-    populateModelPicker(report.dimensions && report.dimensions.models);
+    populatePicker('usage-provider', report.dimensions && report.dimensions.providers);
+    populatePicker('usage-agent', report.dimensions && report.dimensions.agents);
+    populatePicker('usage-model', report.dimensions && report.dimensions.models);
+    renderLocalSources(report.local_sources);
     body.replaceChildren();
     const runs = report.runs || [];
     for (const run of runs) {
@@ -1260,13 +1286,13 @@ fn usage_dashboard_script() -> &'static str {
       const runCell = document.createElement('td');
       const link = document.createElement('a'); link.href = '/run/' + encodeURIComponent(run.run_id); link.textContent = run.run_id; link.className = 'control-run-open';
       const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
-      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent);
+      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : '');
       const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
       const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
       const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
       const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
       if (run.failure) state.title = run.failure;
-      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok')) tr.className = 'is-attention';
+      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok' && run.status !== 'observed')) tr.className = 'is-attention';
       if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
       tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
     }

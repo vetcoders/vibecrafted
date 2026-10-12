@@ -235,6 +235,12 @@ Examples:
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 
+    // vc-server owns local usage collection: one scheduled one-shot, no
+    // resident per-provider monitor children.
+    vibecrafted_server_web::control::collector::spawn_local_usage_collector(
+        control_core::ControlPlane::from_env(),
+    );
+
     log!("listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
