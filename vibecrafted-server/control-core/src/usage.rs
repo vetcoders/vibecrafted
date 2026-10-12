@@ -159,6 +159,27 @@ impl ControlPlane {
         });
         recover_lazy_transcripts(&runtime_runs, &mut runs);
 
+        let mut vc_session_ids = std::collections::HashSet::new();
+        for run in &runs {
+            if let Some(session_id) = run.provider_session_id.as_str() {
+                if !session_id.is_empty() && session_id != "unknown" {
+                    vc_session_ids.insert(session_id.to_string());
+                }
+            }
+        }
+
+        let telemetry_dir = self.home().join("telemetry");
+        let local_runs =
+            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, cutoff, &filter);
+        runs.extend(local_runs);
+
+        runs.sort_by(|left, right| {
+            right
+                .recorded_at
+                .cmp(&left.recorded_at)
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        });
+
         let totals = totals(&runs);
         let dimensions = UsageDimensions {
             providers: dimensions(&runs, |run| display_value(&run.provider)),
@@ -344,17 +365,317 @@ fn cost_from(block: Option<&Map<String, Value>>) -> UsageCost {
 }
 
 fn matches_filter(run: &UsageRun, filter: &UsageFilter) -> bool {
-    field_matches(&run.provider, filter.provider.as_deref())
+    provider_matches(&run.provider, &run.agent, filter.provider.as_deref())
         && field_matches(&run.agent, filter.agent.as_deref())
         && field_matches(&run.model, filter.model.as_deref())
 }
 
+fn provider_matches(provider: &Value, agent: &Value, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| {
+        let trimmed = expected.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+            return true;
+        }
+        provider
+            .as_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
+            || agent
+                .as_str()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
+    })
+}
+
 fn field_matches(value: &Value, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| {
+        let trimmed = expected.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+            return true;
+        }
         value
             .as_str()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
     })
+}
+
+fn canonical_provider_for(agent: &str) -> &'static str {
+    match agent {
+        "agy" => "google",
+        "claude" => "anthropic",
+        "codex" => "openai",
+        "copilot" => "github",
+        "cursor" => "cursor",
+        "grok" => "xai",
+        "junie" => "jetbrains",
+        "kimi" => "moonshot",
+        _ => "unknown",
+    }
+}
+
+fn read_local_telemetry_runs(
+    telemetry_dir: &Path,
+    vc_session_ids: &std::collections::HashSet<String>,
+    cutoff: Option<DateTime<Utc>>,
+    filter: &UsageFilter,
+) -> Vec<UsageRun> {
+    let mut local_runs = Vec::new();
+    let mut seen_session_ids = std::collections::HashSet::new();
+
+    for agent in USAGE_PROVIDER_ADAPTERS {
+        let scan_cache_path = telemetry_dir.join(agent).join("scan-cache.json");
+        let mut had_scan_cache = false;
+        if regular_file(&scan_cache_path) {
+            if let Ok(content) = fs::read(&scan_cache_path) {
+                if let Ok(value) = serde_json::from_slice::<Value>(&content) {
+                    if let Some(files) = value.get("files").and_then(Value::as_object) {
+                        had_scan_cache = true;
+                        for (_file_key, entry) in files {
+                            let Some(record) = entry.get("record").and_then(Value::as_object)
+                            else {
+                                continue;
+                            };
+                            let session_id = record
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+
+                            // Deduplication: skip if session was run via VC or already seen in another local file
+                            if !session_id.is_empty() {
+                                if vc_session_ids.contains(&session_id)
+                                    || seen_session_ids.contains(&session_id)
+                                {
+                                    continue;
+                                }
+                                seen_session_ids.insert(session_id.clone());
+                            }
+
+                            let mtime = record.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
+                            let recorded_dt = DateTime::from_timestamp(
+                                mtime as i64,
+                                ((mtime.fract() * 1_000_000_000.0) as u32).min(999_999_999),
+                            )
+                            .unwrap_or_else(Utc::now);
+
+                            if cutoff.is_some_and(|c| recorded_dt < c) {
+                                continue;
+                            }
+
+                            let rec_agent = record
+                                .get("agent")
+                                .and_then(Value::as_str)
+                                .unwrap_or(*agent);
+                            let model_str = record.get("model").and_then(Value::as_str);
+                            let model_val = match model_str {
+                                Some(m) if !m.is_empty() => json!(m),
+                                _ => unknown("model not reported by local scan"),
+                            };
+
+                            let provider_val = json!(canonical_provider_for(rec_agent));
+                            let agent_val = json!(rec_agent);
+
+                            let processed_total = record
+                                .get("processed_total")
+                                .and_then(Value::as_u64)
+                                .or_else(|| {
+                                    record.get("native").and_then(Value::as_object).and_then(
+                                        |nat| {
+                                            nat.get("total_tokens")
+                                                .or_else(|| nat.get("totalTokens"))
+                                                .and_then(Value::as_u64)
+                                        },
+                                    )
+                                });
+
+                            let native = record.get("native").and_then(Value::as_object);
+                            let tokens_input = native
+                                .and_then(|n| {
+                                    n.get("input_tokens").or_else(|| n.get("inputTokens"))
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    unknown("local session emitted no input token breakdown")
+                                });
+                            let tokens_output = native
+                                .and_then(|n| {
+                                    n.get("output_tokens").or_else(|| n.get("outputTokens"))
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    unknown("local session emitted no output token breakdown")
+                                });
+                            let tokens_cached_input = native
+                                .and_then(|n| {
+                                    n.get("cached_input_tokens")
+                                        .or_else(|| n.get("cachedReadTokens"))
+                                        .or_else(|| n.get("cacheReadTokens"))
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    unknown("local session carried no cache read count")
+                                });
+                            let tokens_cache_write = native
+                                .and_then(|n| {
+                                    n.get("cache_write_input_tokens")
+                                        .or_else(|| n.get("cacheCreationTokens"))
+                                        .or_else(|| n.get("cacheWriteTokens"))
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    unknown("local session carried no cache write count")
+                                });
+
+                            let tokens_total = processed_total
+                                .map(Value::from)
+                                .unwrap_or_else(|| unknown("local session carried no token total"));
+
+                            let tokens = UsageTokens {
+                                schema: "vibecrafted.usage.v1".to_string(),
+                                unit: "tokens".to_string(),
+                                source: "local_scan".to_string(),
+                                events: 1,
+                                tokens_input,
+                                tokens_cached_input,
+                                tokens_cache_write,
+                                tokens_output,
+                                tokens_total,
+                                semantics: BTreeMap::new(),
+                            };
+
+                            let cost = UsageCost {
+                                amount: unknown("cost not recorded for local session"),
+                                currency: None,
+                                unit: Some("USD".to_string()),
+                                source: "local_scan".to_string(),
+                            };
+
+                            let run_id = if session_id.is_empty() {
+                                format!("local-{rec_agent}-{}", (mtime as u64))
+                            } else {
+                                let safe_suffix: String = session_id
+                                    .chars()
+                                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                                    .take(24)
+                                    .collect();
+                                format!("local-{rec_agent}-{safe_suffix}")
+                            };
+
+                            let run = UsageRun {
+                                run_id,
+                                provider: provider_val,
+                                agent: agent_val,
+                                model: model_val,
+                                status: "completed".to_string(),
+                                exit_code: Some(0),
+                                recorded_at: recorded_dt.to_rfc3339(),
+                                tokens,
+                                cost,
+                                failure_kind: None,
+                                failure: None,
+                                provider_session_id: if session_id.is_empty() {
+                                    unknown("local session has no session id")
+                                } else {
+                                    json!(session_id)
+                                },
+                                telemetry_source: "local_session".to_string(),
+                                unpriced_models: Vec::new(),
+                            };
+
+                            if matches_filter(&run, filter) {
+                                local_runs.push(run);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check archive JSONL if scan-cache wasn't found
+        if !had_scan_cache {
+            let archive_path = telemetry_dir.join("archive").join(format!("{agent}.jsonl"));
+            if regular_file(&archive_path) {
+                if let Ok(file_content) = fs::read_to_string(&archive_path) {
+                    for line in file_content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(row) = serde_json::from_str::<Value>(trimmed) else {
+                            continue;
+                        };
+                        let Some(day) = row.get("day").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let model_str = row
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let recorded_at = format!("{day}T12:00:00Z");
+                        let recorded_dt = parse_timestamp(&recorded_at).unwrap_or_else(Utc::now);
+                        if cutoff.is_some_and(|c| recorded_dt < c) {
+                            continue;
+                        }
+
+                        let input_tokens =
+                            row.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                        let output_tokens = row
+                            .get("output_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let cache_create = row
+                            .get("cache_creation_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let cache_read = row
+                            .get("cache_read_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let total_tokens = input_tokens + output_tokens + cache_create + cache_read;
+
+                        let tokens = UsageTokens {
+                            schema: "vibecrafted.usage.v1".to_string(),
+                            unit: "tokens".to_string(),
+                            source: "local_archive".to_string(),
+                            events: 1,
+                            tokens_input: json!(input_tokens),
+                            tokens_cached_input: json!(cache_read),
+                            tokens_cache_write: json!(cache_create),
+                            tokens_output: json!(output_tokens),
+                            tokens_total: json!(total_tokens),
+                            semantics: BTreeMap::new(),
+                        };
+                        let cost = UsageCost {
+                            amount: unknown("cost not recorded for local archive"),
+                            currency: None,
+                            unit: Some("USD".to_string()),
+                            source: "local_archive".to_string(),
+                        };
+                        let run = UsageRun {
+                            run_id: format!("archive-{agent}-{day}-{model_str}"),
+                            provider: json!(canonical_provider_for(agent)),
+                            agent: json!(agent),
+                            model: json!(model_str),
+                            status: "completed".to_string(),
+                            exit_code: Some(0),
+                            recorded_at,
+                            tokens,
+                            cost,
+                            failure_kind: None,
+                            failure: None,
+                            provider_session_id: unknown(
+                                "archive day aggregation has no session id",
+                            ),
+                            telemetry_source: "local_archive".to_string(),
+                            unpriced_models: Vec::new(),
+                        };
+                        if matches_filter(&run, filter) {
+                            local_runs.push(run);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    local_runs
 }
 
 fn totals(runs: &[UsageRun]) -> UsageTotals {
