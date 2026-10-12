@@ -25,6 +25,7 @@ from pathlib import Path
 from shutil import which
 from typing import Any
 
+from . import operational_policy
 from .agent_dispatch import extract_session_id, sandbox_supported
 from .aicx_session_chain import SessionChain
 from .clock import utc_now_iso
@@ -361,13 +362,15 @@ def compose_interactive_task_prompt(
     resume_block: str | None = None,
     admission: Mapping[str, Any] | None = None,
     parent_session_id: str = "",
+    policy_delivery: operational_policy.PolicyDelivery | None = None,
 ) -> str:
     """Build the private ``prompt.md`` body for interactive init/operator/partner/resume/fork.
 
     Explicit role, canonical skill files when they exist, preserved extra,
     the shared VC identity contract, and the existing ``init_resume_block``
     projection. Empty extra is not a license to invent work. Does not wrap
-    headless ``_runtime_prompt``.
+    headless ``_runtime_prompt``. ``policy_delivery`` places the operational
+    policy block after orientation and before the operator-supplied extra.
     """
     launcher = str(skill or "init").strip() or "init"
     extra = source if isinstance(source, str) else str(source or "")
@@ -462,6 +465,8 @@ def compose_interactive_task_prompt(
         )
     if resume_block:
         lines.extend([resume_block.rstrip(), ""])
+    if policy_delivery is not None:
+        lines.extend([policy_delivery.turn_block(), ""])
     if extra.strip() and not duplicate_slash:
         lines.extend(
             [
@@ -1730,8 +1735,37 @@ def interactive_policy_command(
     *,
     provider_session_id: str | None = None,
     continuity_policy: ContinuityPolicy | None = None,
+    policy_delivery: operational_policy.PolicyDelivery | None = None,
 ) -> list[str]:
-    """Build one interactive argv from the canonical policy decision."""
+    """Build one interactive argv from the canonical policy decision.
+
+    ``policy_delivery`` adds the operational policy's additive system option
+    directly after the executable when that delivery is native; every
+    trailing positional and later ``--resume`` insertion keeps its place.
+    """
+    return operational_policy.with_native_args(
+        _interactive_provider_argv(
+            provider,
+            prompt,
+            runtime,
+            permissions,
+            provider_session_id=provider_session_id,
+            continuity_policy=continuity_policy,
+        ),
+        policy_delivery,
+    )
+
+
+def _interactive_provider_argv(
+    provider: str,
+    prompt: str,
+    runtime: str,
+    permissions: str,
+    *,
+    provider_session_id: str | None = None,
+    continuity_policy: ContinuityPolicy | None = None,
+) -> list[str]:
+    """Provider argv for one interactive launch (no operational policy)."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
@@ -2682,6 +2716,38 @@ class _ClaudeTranscriptUsage:
         }
 
 
+def interactive_policy_delivery(
+    provider: str,
+    continuity: str = "fresh",
+    admission: Mapping[str, Any] | None = None,
+    parent_session_id: str = "",
+) -> operational_policy.PolicyDelivery:
+    """Operational-policy transport for one interactive launch.
+
+    A public bare fork (``skill == "fork"``) opens the native child idle, so
+    it has no turn to carry the policy. A proven native child identity is a
+    resume. Full-lineage starts a new provider conversation (fresh).
+    """
+    record = admission or {}
+    if continuity == "bare-fork":
+        continuation = (
+            operational_policy.IDLE_FORK
+            if record.get("skill") == "fork"
+            else operational_policy.FORK
+        )
+    else:
+        _, native = disjoint_session_identities(
+            parent_session_id=str(
+                parent_session_id or record.get("parent_session_id") or ""
+            ),
+            native_child_session_id=str(record.get("agent_session_id") or ""),
+        )
+        continuation = operational_policy.RESUME if native else operational_policy.FRESH
+    return operational_policy.plan_delivery(
+        provider, lane=operational_policy.INTERACTIVE, continuation=continuation
+    )
+
+
 def launch_interactive_workspace(
     provider: str,
     prompt: str,
@@ -2695,14 +2761,25 @@ def launch_interactive_workspace(
     parent_lineage_id: str = "",
     *,
     admission: dict[str, Any] | None = None,
+    policy_delivery: operational_policy.PolicyDelivery | None = None,
 ) -> int:
-    """Own one provider child while preserving the inherited interactive TTY."""
+    """Own one provider child while preserving the inherited interactive TTY.
+
+    ``policy_delivery`` is the transport already composed into *prompt* by
+    :func:`compose_interactive_task_prompt`. Without it the launch resolves
+    its own delivery and places the policy block ahead of the raw prompt.
+    """
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
     if not operator_policy.supported:
         raise ValueError(operator_policy.reason)
     from .workflow import reserve_run_id
 
     admission = dict(admission or {})
+    if policy_delivery is None:
+        policy_delivery = interactive_policy_delivery(
+            provider, continuity, admission, parent_session_id
+        )
+        prompt = operational_policy.with_turn_block(prompt, policy_delivery)
     run_id = str(admission.get("run_id") or reserve_run_id("init"))
     try:
         continuity_policy = resolve_continuity_policy(
@@ -2764,6 +2841,7 @@ def launch_interactive_workspace(
             run_id=run_id,
             continuity_material=continuity_material,
             admission=admission,
+            policy_delivery=policy_delivery,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
@@ -2786,6 +2864,7 @@ def launch_interactive_workspace(
         permissions,
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
+        policy_delivery=policy_delivery,
     )
     if (
         continuity_policy.mode == "bare-fork"
@@ -2864,6 +2943,7 @@ def launch_interactive_workspace(
         workspace_identity=admission,
     )
     launch.receipt.update(admission)
+    launch.receipt["operational_policy"] = policy_delivery.receipt()
     # A requested ID is not a provider acknowledgement. Codex fork does not
     # even accept our generated ID; process admission must not invent one.
     native_fork = continuity_policy.mode == "bare-fork"
@@ -2998,6 +3078,7 @@ def launch_interactive_workspace(
     capture = InteractiveTranscriptCapture(transcript, source_secret)
     launch.receipt["transcript"] = str(transcript)
     launch.receipt["latest_transcript"] = str(transcript)
+    operational_policy.emit_notice(policy_delivery)
     spawned_epoch = time.time()
     try:
         child = subprocess.Popen(
@@ -3556,6 +3637,7 @@ def _launch_supervised_interactive_workspace(
     run_id: str,
     continuity_material: ContinuityMaterial,
     admission: dict[str, Any] | None = None,
+    policy_delivery: operational_policy.PolicyDelivery | None = None,
 ) -> int:
     """Own one child and one distinct supervisor on the existing lifecycle throne."""
     assert operator_policy.provider is not None
@@ -3571,6 +3653,11 @@ def _launch_supervised_interactive_workspace(
         permissions,
         provider_session_id=child_session_id,
         continuity_policy=continuity_policy,
+        policy_delivery=policy_delivery,
+    )
+    # The supervising Operator Agent is its own fresh conversation.
+    operator_delivery = operational_policy.plan_delivery(
+        operator_policy.provider, lane=operational_policy.INTERACTIVE
     )
     child_command = _with_model_override(
         provider, child_command, str(admission.get("model_effective") or "")
@@ -3624,11 +3711,14 @@ def _launch_supervised_interactive_workspace(
         operator_meta_path = operator_run_dir / "meta.json"
         operator_prompt_path = operator_run_dir / "prompt.md"
         protocol_path = operator_run_dir / "operator-protocol.jsonl"
-        operator_prompt = _operator_supervision_prompt(
-            child_run_id=launch.run_id,
-            child_meta_path=launch.meta_path,
-            relation_id=relation_id,
-            protocol_path=protocol_path,
+        operator_prompt = operational_policy.with_turn_block(
+            _operator_supervision_prompt(
+                child_run_id=launch.run_id,
+                child_meta_path=launch.meta_path,
+                relation_id=relation_id,
+                protocol_path=protocol_path,
+            ),
+            operator_delivery,
         )
         from .workflow import _write_prompt_file
 
@@ -3669,6 +3759,8 @@ def _launch_supervised_interactive_workspace(
         "native_identity_status": "proven" if proven_native else "unknown",
         "provider_session_requested": child_session_id,
     }
+    if policy_delivery is not None:
+        child_receipt["operational_policy"] = policy_delivery.receipt()
     operator_receipt = {
         **launch.receipt,
         "created_at": now_iso,
@@ -3687,6 +3779,7 @@ def _launch_supervised_interactive_workspace(
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
         "measured_usage": _empty_measured_usage(),
+        "operational_policy": operator_delivery.receipt(),
     }
     operator_command = interactive_policy_command(
         operator_policy.provider,
@@ -3697,7 +3790,9 @@ def _launch_supervised_interactive_workspace(
         continuity_policy=ContinuityPolicy(
             mode="fresh", lineage_id=continuity_policy.lineage_id
         ),
+        policy_delivery=operator_delivery,
     )
+    operational_policy.emit_notice(policy_delivery)
     operator_resolved = _resolve_agent_command(
         operator_policy.provider, operator_command, base_env
     )
@@ -6272,9 +6367,24 @@ class Supervisor:
         and emits spawn-* lifecycle events as the child completes.
         """
         root_path = Path(normalize_run_root(os.fspath(root)))
-        command_list = (
-            list(command) if command is not None else _default_command(agent, prompt)
-        )
+        if command is not None:
+            command_list = list(command)
+        else:
+            # Inline-prompt lane (microsandbox): the policy rides the same
+            # argv prompt, ahead of the task, or the additive system option.
+            delivery = (
+                operational_policy.plan_delivery(
+                    agent, lane=operational_policy.HEADLESS
+                )
+                if agent in operational_policy.POLICY_PROVIDERS
+                else None
+            )
+            command_list = operational_policy.with_native_args(
+                _default_command(
+                    agent, operational_policy.with_turn_block(prompt, delivery)
+                ),
+                delivery,
+            )
         effective_run_id = (
             run_id or os.environ.get("VIBECRAFTED_RUN_ID") or f"{skill}-manual"
         )
@@ -6737,6 +6847,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         admission = {}
         claimed = False
         native_lease = None
+        policy_delivery = None
         try:
             if args.admission_file:
                 path = Path(args.admission_file)
@@ -6765,16 +6876,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     or args.root != admission["root"]
                 ):
                     raise ValueError("interactive admission target mismatch")
+                parent_session = str(
+                    getattr(args, "parent_session", "")
+                    or admission.get("parent_session_id")
+                    or ""
+                )
+                policy_delivery = interactive_policy_delivery(
+                    args.provider, args.continuity, admission, parent_session
+                )
                 args.prompt = compose_interactive_task_prompt(
                     skill=str(admission["skill"]),
                     source=source.decode("utf-8"),
                     root=admission["root"],
                     admission=admission,
-                    parent_session_id=str(
-                        getattr(args, "parent_session", "")
-                        or admission.get("parent_session_id")
-                        or ""
-                    ),
+                    parent_session_id=parent_session,
+                    policy_delivery=policy_delivery,
                 )
                 # Exclusive execution claim: reopening a view cannot run the provider twice.
                 claim_fd = os.open(
@@ -6812,6 +6928,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.parent_session,
                 args.continuity_parent,
                 admission=admission,
+                policy_delivery=policy_delivery,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             if claimed:

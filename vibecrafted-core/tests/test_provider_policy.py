@@ -2426,7 +2426,14 @@ def test_unmetered_launch_reaches_a_provider_without_a_usage_sidechannel(
 
     assert "/vc-init" not in capture.read_text(encoding="utf-8")
     snapshot = next((home / "control_plane/runtime_runs").glob("*/prompt.md"))
-    assert snapshot.read_text() == "/vc-init"
+    # A raw prompt keeps its bytes; the operational policy (codex: current
+    # turn) precedes it in the same private file, never on argv.
+    from vibecrafted_core import operational_policy
+
+    body = snapshot.read_text()
+    assert body.endswith("\n\n/vc-init")
+    assert body.count(operational_policy.policy_text()) == 1
+    assert operational_policy.policy_text() not in capture.read_text(encoding="utf-8")
     receipts = list((home / "control_plane" / "runtime_runs").glob("*/meta.json"))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text(encoding="utf-8"))

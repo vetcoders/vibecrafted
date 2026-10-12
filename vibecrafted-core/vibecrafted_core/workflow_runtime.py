@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import operational_policy
 from .effort_overrides import _with_effort_override
 from .model_overrides import _with_model_override
 from .package_resources import package_root
@@ -26,7 +27,7 @@ from .research_config import (
 )
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .server_config import load_agent_launch_config
-from .spawn import _resolve_agent_command, _stdin_command
+from .spawn import _resolve_agent_command, _stdin_command, agent_cli_name
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 from .telemetry import tokens_total as _tokens_total
 
@@ -436,10 +437,12 @@ WORKER_SIGNAL_DISCIPLINE = (
 )
 
 
-def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
+def _child_prompt(
+    kind: str, label: str, root: str, prompt: str, policy_block: str = ""
+) -> str:
     """Compose the full prompt handed to a supervised child worker: contract
     boilerplate, worker-signal discipline, marbles blindness note if applicable,
-    then the operator prompt.
+    the operational policy block, then the operator prompt.
     """
     marbles_blindness = ""
     if kind == "marbles":
@@ -448,6 +451,7 @@ def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
             "- Do not read sibling child reports/transcripts unless the operator "
             "prompt explicitly names them.\n"
         )
+    policy_section = f"\n{policy_block.rstrip()}\n" if policy_block.strip() else ""
     return f"""You are running as a supervised Vibecrafted {kind} worker.
 
 Contract:
@@ -457,7 +461,7 @@ Contract:
 - Do not launch external agent fleets.
 - Write your durable report to VIBECRAFTED_REPORT_PATH.
 - Let stdout/stderr form VIBECRAFTED_TRANSCRIPT_PATH.
-{WORKER_SIGNAL_DISCIPLINE}{marbles_blindness}
+{WORKER_SIGNAL_DISCIPLINE}{marbles_blindness}{policy_section}
 Operator prompt:
 {prompt}
 """
@@ -482,12 +486,17 @@ def _loop_prompt(kind: str, prompt: str, index: int, count: int, depth: int) -> 
 
 
 def _research_synthesis_prompt(
-    root: str, prompt: str, results: Sequence[ChildResult]
+    root: str,
+    prompt: str,
+    results: Sequence[ChildResult],
+    policy_block: str = "",
 ) -> str:
-    """Compose the synthesis worker's prompt, citing each surviving lane's report path."""
+    """Compose the synthesis worker's prompt, citing each surviving lane's report
+    path; the operational policy block precedes the original operator prompt."""
     reports = "\n".join(
         f"- {result.agent}: {result.report}" for result in results if result.report
     )
+    policy_section = f"\n{policy_block.rstrip()}\n" if policy_block.strip() else ""
     return f"""You are producing the objective vc-research synthesis from completed lanes.
 
 Contract:
@@ -497,7 +506,7 @@ Contract:
 - Write the synthesis report to VIBECRAFTED_REPORT_PATH.
 - Use concise file:path citations to source reports; do not inline full reports.
 - Surface convergent findings, single-agent signals, disagreements, and the operator-ready recommendation.
-
+{policy_section}
 Original operator prompt:
 {prompt}
 
@@ -579,6 +588,17 @@ def _resume_stdin_command(agent: str, agent_session_id: str) -> list[str]:
     return native_resume_argv(agent, agent_session_id)
 
 
+def _child_policy(
+    agent: str, continuation: str = operational_policy.FRESH
+) -> operational_policy.PolicyDelivery | None:
+    """Operational-policy transport for one supervised child (None off-fleet)."""
+    if agent not in operational_policy.POLICY_PROVIDERS:
+        return None
+    return operational_policy.plan_delivery(
+        agent, lane=operational_policy.SUPERVISED_CHILD, continuation=continuation
+    )
+
+
 async def _run_child(
     *,
     kind: str,
@@ -589,10 +609,18 @@ async def _run_child(
     model_requested: str = "",
     command: Sequence[str] | None = None,
     prompt_body: str | None = None,
+    continuation: str = operational_policy.FRESH,
+    policy_delivery: operational_policy.PolicyDelivery | None = None,
 ) -> ChildResult:
     """Spawn and await one supervised child agent process, writing its prompt
     file, resolving its command, applying a requested model pin once, and
     returning the collected `ChildResult`.
+
+    The operational policy reaches the child through ``policy_delivery`` (or
+    the delivery resolved for ``continuation``): native argv on a fresh
+    provider conversation, otherwise the block ahead of the operator task. A
+    caller that passes ``prompt_body`` composes the block from the same
+    ``policy_delivery``.
     """
     from .workflow import (
         WorkflowLaunchSpec,
@@ -639,10 +667,25 @@ async def _run_child(
         agent=agent,
         prompt=prompt,
     )
-    prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt_file.write_text(
-        prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
+    delivery = (
+        policy_delivery
+        if policy_delivery is not None
+        else _child_policy(agent, continuation)
     )
+    if prompt_body is None:
+        body = _child_prompt(
+            kind,
+            label,
+            root,
+            prompt,
+            policy_block=delivery.turn_block() if delivery is not None else "",
+        )
+    elif policy_delivery is None:
+        body = operational_policy.with_turn_block(prompt_body, delivery)
+    else:
+        body = prompt_body
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text(body, encoding="utf-8")
     child_command = _with_effort_override(
         agent,
         _with_model_override(
@@ -652,9 +695,18 @@ async def _run_child(
         ),
         effort,
     )
+    if (
+        delivery is not None
+        and child_command
+        and Path(child_command[0]).name in {agent, agent_cli_name(agent)}
+    ):
+        child_command = operational_policy.with_native_args(child_command, delivery)
     child_env = _child_env(agent, report, transcript, meta, model)
     child_command = _resolve_agent_command(agent, child_command, child_env)
-    _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
+    receipt: dict[str, object] = {"run_id": run_id, "agent": agent, **selection}
+    if delivery is not None:
+        receipt["operational_policy"] = delivery.receipt()
+    _write_json(meta, receipt)
     if _tee_enabled():
         print(f"\n===== {kind}:{label}:{agent} =====", flush=True)
     handle: AsyncRunHandle = await AsyncSupervisor().run(
@@ -1120,6 +1172,7 @@ async def _run_research_synthesis(
     if not survivors or len(survivors) < _research_quorum(len(results)):
         return None
     if selection is not None and selection.synthesizer:
+        delivery = _child_policy(selection.synthesizer)
         return await _run_child(
             kind="research",
             label="research-synthesis",
@@ -1127,11 +1180,18 @@ async def _run_research_synthesis(
             root=root,
             prompt=prompt,
             model_requested=selection.synthesis_model(model_requested),
-            prompt_body=_research_synthesis_prompt(root, prompt, survivors),
+            prompt_body=_research_synthesis_prompt(
+                root,
+                prompt,
+                survivors,
+                policy_block=delivery.turn_block() if delivery is not None else "",
+            ),
+            policy_delivery=delivery,
         )
     last = max(survivors, key=lambda item: item.completed_at or "")
     if not last.agent_session_id:
         return _failed_synthesis_result(last, "missing_agent_session_id_for_resume")
+    continuation = operational_policy.RESUME
     try:
         synthesis_command = native_resume_argv(last.agent, last.agent_session_id)
     except ValueError:
@@ -1140,6 +1200,8 @@ async def _run_research_synthesis(
         # turn from the durable survivor reports instead of pretending a native
         # resume occurred.
         synthesis_command = _stdin_command(last.agent)
+        continuation = operational_policy.FRESH
+    delivery = _child_policy(last.agent, continuation)
     return await _run_child(
         kind="research",
         label="research-synthesis",
@@ -1148,7 +1210,13 @@ async def _run_research_synthesis(
         prompt=prompt,
         command=synthesis_command,
         model_requested=model_requested,
-        prompt_body=_research_synthesis_prompt(root, prompt, survivors),
+        prompt_body=_research_synthesis_prompt(
+            root,
+            prompt,
+            survivors,
+            policy_block=delivery.turn_block() if delivery is not None else "",
+        ),
+        policy_delivery=delivery,
     )
 
 

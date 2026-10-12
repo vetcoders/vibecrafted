@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import guard as guard_mod
+from . import operational_policy
 from .artifacts import validate_artifacts
 from .continuity.capabilities import (
     PROBE_CONFIRMED,
@@ -85,7 +86,12 @@ from .server_config import (
     load_agent_launch_config,
     validate_agent_pin,
 )
-from .spawn import _default_command, _resolve_agent_command, _stdin_command
+from .spawn import (
+    _default_command,
+    _resolve_agent_command,
+    _stdin_command,
+    agent_cli_name,
+)
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
 
@@ -2001,8 +2007,14 @@ def _runtime_prompt(
     *,
     source_prompt: str | None = None,
     run_id: str = "",
+    policy_block: str = "",
 ) -> str:
-    """Wrap the source prompt in the runtime contract instructions given to the worker."""
+    """Wrap the source prompt in the runtime contract instructions given to the worker.
+
+    ``policy_block`` (operational policy reference or full text) sits after the
+    contract and before the operator prompt; the final ``Operator prompt:``
+    delimiter stays the last one (``_legacy_preassembly_spec`` relies on it).
+    """
     from .monitor_lane import startup_lane_paragraph
 
     report_hint = "${VIBECRAFTED_REPORT_PATH}"
@@ -2014,6 +2026,7 @@ def _runtime_prompt(
     # no unfinished work; `init_resume_block` never raises.
     resume_block = init_resume_block(spec.root)
     resume_section = f"\n{resume_block}\n" if resume_block else ""
+    policy_section = f"\n{policy_block.rstrip()}\n" if policy_block.strip() else ""
     lane_paragraph = startup_lane_paragraph(run_id or spec.run_id)
     return f"""You are running under Vibecrafted core runtime.
 
@@ -2056,10 +2069,34 @@ due-diligence right here in this thread, because it is what makes every later mo
 Your skill (vc-{spec.skill}) carries its own orientation gate — this is it. Not a rule barked at
 you: it is simply the move that separates a real cut from a confident guess, and it pays for
 itself in the very next step.
-{resume_section}
+{policy_section}{resume_section}
 Operator prompt:
 {source_prompt}
 """
+
+
+def _headless_policy_delivery(
+    agent: str, launch_meta: dict[str, Any] | None
+) -> operational_policy.PolicyDelivery | None:
+    """Operational-policy transport for one headless provider worker.
+
+    The resume/fork owners mark their continuation in ``launch_meta``
+    (``native_resume`` / ``native_fork``); everything else opens a fresh
+    provider conversation. Agents outside the provider set (deprecated
+    ``gemini``) keep their own refusal path and get no delivery.
+    """
+    if agent not in operational_policy.POLICY_PROVIDERS:
+        return None
+    meta = launch_meta or {}
+    if meta.get("native_fork"):
+        continuation = operational_policy.FORK
+    elif meta.get("native_resume"):
+        continuation = operational_policy.RESUME
+    else:
+        continuation = operational_policy.FRESH
+    return operational_policy.plan_delivery(
+        agent, lane=operational_policy.HEADLESS, continuation=continuation
+    )
 
 
 def _write_prompt_file(path: Path, body: str) -> Path:
@@ -3291,10 +3328,21 @@ def launch_workflow(
         )
     source_prompt = _source_prompt(spec)
     runtime_source = spec.prompt if spec.plan_source is not None else source_prompt
+    supervised_kind = runtime_kind in {"supervised_research", "supervised_marbles"}
+    # Supervised research/marbles children resolve their own delivery in
+    # workflow_runtime._run_child; this worker is the provider itself.
+    policy_delivery = (
+        None if supervised_kind else _headless_policy_delivery(spec.agent, launch_meta)
+    )
     prompt_body = (
         runtime_source
-        if runtime_kind in {"supervised_research", "supervised_marbles"}
-        else _runtime_prompt(spec, source_prompt=runtime_source, run_id=run_id)
+        if supervised_kind
+        else _runtime_prompt(
+            spec,
+            source_prompt=runtime_source,
+            run_id=run_id,
+            policy_block=policy_delivery.turn_block() if policy_delivery else "",
+        )
     )
     canonical_report_dir = _canonical_report_dir(spec.root, spec.skill)
     artifact_ts = time.strftime("%Y-%m-%d")
@@ -3377,6 +3425,8 @@ def launch_workflow(
         initial_meta["model_effective"] = spec.model
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
+    if policy_delivery is not None:
+        initial_meta["operational_policy"] = policy_delivery.receipt()
     # Who launched this run, captured before the child env overlay replaces
     # VIBECRAFTED_AGENT with the worker. Message recipients read this block.
     initial_meta["dispatcher"] = dispatcher_identity()
@@ -3391,6 +3441,18 @@ def launch_workflow(
         if worker_command_override is not None
         else build_launch_command(spec, source_dir, prompt_file=prompt_path)
     )
+    if (
+        policy_delivery is not None
+        and worker_command
+        and Path(worker_command[0]).name
+        in {
+            spec.agent,
+            agent_cli_name(spec.agent),
+        }
+    ):
+        worker_command = operational_policy.with_native_args(
+            worker_command, policy_delivery
+        )
     try:
         merged_env = selected_runtime_environment()
         if env:
