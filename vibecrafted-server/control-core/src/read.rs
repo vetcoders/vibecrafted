@@ -169,6 +169,12 @@ impl ControlPlane {
         Self::new(vibecrafted_home())
     }
 
+    /// `<home>` — the root containing `control_plane` and `telemetry`.
+    #[must_use]
+    pub fn home(&self) -> PathBuf {
+        self.home.clone()
+    }
+
     /// `<home>/control_plane`.
     #[must_use]
     pub fn control_plane_home(&self) -> PathBuf {
