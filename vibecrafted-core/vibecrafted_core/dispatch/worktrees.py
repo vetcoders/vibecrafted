@@ -7,7 +7,7 @@ import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ class WorktreeGeometry:
     target_path: str
     artifact_path: str
     integrator_exclusive: bool = False
+    cache_creation_receipt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -181,8 +182,15 @@ class WorktreeManager:
                     f"refusing existing worktree {root}; resume with its owning "
                     "run id or clean it explicitly"
                 )
-            self._validate_target(root)
             self._validate_reuse(geometry)
+            from ..cache_lifecycle import retain_cache_for_launch
+
+            try:
+                retain_cache_for_launch(vibecrafted_home(), root / "target")
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise WorktreeContractError(
+                    f"cache reuse proof uncertain: {exc}"
+                ) from exc
         else:
             branch_exists = bool(
                 _git(
@@ -206,7 +214,9 @@ class WorktreeManager:
                 raise WorktreeContractError(
                     "new worker baseline differs from pinned commit"
                 )
+            proof = self._validate_target(root, creation_geometry=geometry)
             self._validate_reuse(geometry)
+            geometry = replace(geometry, cache_creation_receipt=proof)
         self._validate_target(root)
         return geometry
 
@@ -411,13 +421,39 @@ class WorktreeManager:
                 f"refusing dirty reused worktree {root}: {dirty}"
             )
 
-    def _validate_target(self, root: Path) -> None:
+    def _validate_target(
+        self, root: Path, *, creation_geometry: WorktreeGeometry | None = None
+    ) -> str:
+        from ..cache_lifecycle import (
+            build_lease,
+            dispatch_target_creation,
+            identity,
+            record_dispatch_cache_creation,
+        )
+
         target = root / "target"
         if target.is_symlink():
             raise WorktreeContractError(
                 f"worker target must be a real local directory, not a symlink: {target}"
             )
-        target.mkdir(parents=True, exist_ok=True)
+        if creation_geometry is not None:
+            try:
+                with dispatch_target_creation(
+                    vibecrafted_home(), root
+                ) as created_identity:
+                    if created_identity is not None:
+                        with build_lease(target):
+                            proof = record_dispatch_cache_creation(
+                                vibecrafted_home(),
+                                creation_geometry,
+                                created_identity=created_identity,
+                            )
+                        return proof
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                pass  # Ambiguous publication/observation never grants ownership.
+        # Validation/recovery can create missing output, without ownership.
+        target.mkdir(exist_ok=True)
+        identity(target)
         resolved = target.resolve()
         try:
             resolved.relative_to(root.resolve())
@@ -444,6 +480,7 @@ class WorktreeManager:
                     if existing and not existing.endswith("\n"):
                         handle.write("\n")
                     handle.write("/target/\n")
+        return ""
 
 
 def _safe_component(value: str, fallback: str) -> str:

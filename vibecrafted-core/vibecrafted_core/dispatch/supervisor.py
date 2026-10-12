@@ -1789,6 +1789,19 @@ class DispatchSupervisor:
             acceptance="pending",
         )
         try:
+            from ..cache_lifecycle import (
+                reserve_dispatch_cache_attempt,
+                retain_cache_for_launch,
+            )
+            from ..runtime_paths import vibecrafted_home
+
+            geometry = self._geometries.get(cut.id)
+            cache_attempt = ""
+            if geometry is not None and not geometry.integrator_exclusive:
+                retain_cache_for_launch(vibecrafted_home(), Path(geometry.target_path))
+                cache_attempt = reserve_dispatch_cache_attempt(
+                    vibecrafted_home(), geometry, kind
+                )
             cell = self.launcher(cut, prompt, kind)
         # The launcher is an injected provider callback; any exception must be journaled and
         # returned as a failed Verdict before the cell can be admitted.
@@ -1835,6 +1848,19 @@ class DispatchSupervisor:
             attempt=kind,
             idempotency_key=self._dispatch_idempotency_key(cut, kind),
         )
+        # Publish canonical accepted-run identity before extra cache proof I/O.
+        # Native children can already be running; observers need the receipt.
+        if geometry is not None and not geometry.integrator_exclusive:
+            from ..cache_lifecycle import bind_dispatch_cache
+
+            cache_binding = bind_dispatch_cache(
+                vibecrafted_home(),
+                geometry,
+                cell.run_id,
+                attempt_token=cache_attempt,
+                dispatch_run_id=self._receipt_store.run_id,
+            )
+            self._receipt_store.update(cut.id, cache_binding=cache_binding)
         self._set_state(
             cut.id,
             STATE_PENDING,

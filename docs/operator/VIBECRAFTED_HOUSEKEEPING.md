@@ -52,13 +52,30 @@ unclaimed. Shared caches can be protected with a lease without granting this
 task ownership. Source manifests, source trees, sessions, branches, reports,
 unintegrated results and durable receipts are never this cache.
 
+Default dispatch records an immutable creation receipt only when its worktree
+owner publishes a new target in a newly managed worker checkout. Creation uses
+private random staging, a held directory descriptor and atomic exclusive
+publication; it never claims whichever object first appears after a public
+`mkdir`. macOS uses `renameatx_np(RENAME_EXCL)` and Linux uses
+`renameat2(RENAME_NOREPLACE)`. Unsupported exclusive publication retains an
+unclaimed target. Cleanup staging and restoration also refuse replacement.
+The first launch attempt consumes that proof; an accepted exact provider run
+binds ownership. Missing or lagging run observations, refused launches, lost
+proof, raced-in targets, reused checkouts and integrators retain their caches.
+A repair or later launch permanently fences the previous cache acceptance;
+it does not inherit or transfer ownership. Those retained paths need a separate
+explicit lifecycle decision. The original creation/attempt/registration
+receipts remain durable under `store/housekeeping/`.
+
 ## Completion and acceptance
 
 A green verifier or an exited worker is insufficient. Dispatch's successful
 `settle_verified` boundary only marks an existing exact ownership registration.
 Deletion separately requires the control plane's current trust-finalized
 settlement, matching hashed trust receipt and revision, non-waived acceptance,
-a dead owning worker, and the current cache inode. Policy B retires accepted
+a dead owning worker, and the current cache inode. Dispatch-owned cache also
+requires the current exact dispatch cut to remain admitted and settled for
+that provider run. Launch acceptance alone cannot authorize cleanup. Policy B retires accepted
 owned cache; it does not retain a default warm-cache warehouse.
 
 Both Founder settings remain effective:

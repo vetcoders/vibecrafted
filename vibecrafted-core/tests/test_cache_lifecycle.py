@@ -121,6 +121,27 @@ def test_competing_cleaner_is_excluded(tmp_path):
     assert cache.clean_cache(home, path, observe=observe) == "deleted"
 
 
+def test_restore_refuses_a_path_created_in_the_publication_gap(tmp_path, monkeypatch):
+    home, path = owned(tmp_path)
+    publish = cache._publish_directory_noreplace
+
+    def collision(parent_fd, source, destination):
+        if destination == path.name:
+            path.mkdir()
+            (path / "foreign").write_text("keep")
+        publish(parent_fd, source, destination)
+
+    def veto(candidate):
+        if candidate != path:
+            raise cache.CacheDeferred("veto-stage")
+
+    monkeypatch.setattr(cache, "_publish_directory_noreplace", collision)
+    with pytest.raises(cache.CacheDeferred, match="veto-stage"):
+        cache.clean_cache(home, path, observe=veto)
+    assert (path / "foreign").read_text() == "keep"
+    assert (next(path.parent.glob(".vc-clean-*")) / "artifact").exists()
+
+
 @pytest.mark.parametrize("replacement", ["symlink", "directory"])
 def test_replacement_cannot_inherit_cache_identity(tmp_path, replacement):
     home, path = owned(tmp_path)
