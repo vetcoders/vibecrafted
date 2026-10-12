@@ -43,6 +43,7 @@ struct QuotaDashboard {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaAgent {
     pub id: &'static str,
+    pub agent: &'static str,
     pub name: &'static str,
     pub present: bool,
     pub status: &'static str,
@@ -54,6 +55,8 @@ pub struct QuotaAgent {
     pub tokens: Option<u64>,
     pub cost_usd: Option<f64>,
     pub bars: Vec<QuotaBar>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fraction: Option<f64>,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -217,6 +220,7 @@ fn project(
         Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
         Source::Unreadable { label, error } => QuotaAgent {
             id,
+            agent: id,
             name,
             present: true,
             status: "unknown",
@@ -228,6 +232,7 @@ fn project(
             tokens: None,
             cost_usd: None,
             bars: Vec::new(),
+            fraction: None,
             source: label,
             account: None,
             pool: default_pool_for(id),
@@ -254,8 +259,16 @@ fn project(
                     fields.detail.push_str(" · stale");
                 }
             }
+            let fraction = fields.fraction.or_else(|| {
+                fields
+                    .bars
+                    .iter()
+                    .filter_map(|b| b.ratio)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            });
             QuotaAgent {
                 id,
+                agent: id,
                 name,
                 present: true,
                 status: fields.status,
@@ -267,6 +280,7 @@ fn project(
                 tokens: fields.tokens,
                 cost_usd: fields.cost_usd,
                 bars: fields.bars,
+                fraction,
                 source: label,
                 account: fields.account,
                 pool: fields.pool.or_else(|| default_pool_for(id)),
@@ -284,6 +298,7 @@ struct QuotaFields {
     tokens: Option<u64>,
     cost_usd: Option<f64>,
     bars: Vec<QuotaBar>,
+    fraction: Option<f64>,
     account: Option<String>,
     pool: Option<String>,
     provenance: Option<String>,
@@ -356,6 +371,7 @@ fn absent(
 ) -> QuotaAgent {
     QuotaAgent {
         id,
+        agent: id,
         name,
         present: false,
         status: "absent",
@@ -367,6 +383,7 @@ fn absent(
         tokens: None,
         cost_usd: None,
         bars: Vec::new(),
+        fraction: None,
         source,
         account: None,
         pool,
@@ -377,6 +394,7 @@ fn absent(
 fn parse_agy(value: &Value) -> QuotaFields {
     let quota_status = value
         .pointer("/quota/status")
+        .or_else(|| value.get("status"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_uppercase();
@@ -390,10 +408,32 @@ fn parse_agy(value: &Value) -> QuotaFields {
         .pointer("/metrics/cost_usd")
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && *n >= 0.0);
+    let frac = value
+        .pointer("/quota/fraction")
+        .or_else(|| value.get("fraction"))
+        .or_else(|| value.get("utilization"))
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n >= 0.0);
     let (status, headline) = match quota_status.as_str() {
-        "RESOURCE_EXHAUSTED" => ("blocked", "EXHAUSTED".to_string()),
-        "OK" => ("ok", "OK".to_string()),
-        "" => ("unknown", "no status".to_string()),
+        "RESOURCE_EXHAUSTED" | "BLOCKED" | "EXHAUSTED" => ("blocked", "EXHAUSTED".to_string()),
+        "OK" => {
+            if frac.is_some_and(|f| f >= 1.0) {
+                ("blocked", "EXHAUSTED".to_string())
+            } else if frac.is_some_and(|f| f >= 0.8) {
+                ("warn", "HIGH".to_string())
+            } else {
+                ("ok", "OK".to_string())
+            }
+        }
+        "" => {
+            if frac.is_some_and(|f| f >= 1.0) {
+                ("blocked", "EXHAUSTED".to_string())
+            } else if frac.is_some_and(|f| f >= 0.8) {
+                ("warn", "HIGH".to_string())
+            } else {
+                ("unknown", "no status".to_string())
+            }
+        }
         other => ("unknown", other.to_string()),
     };
     let mut parts = Vec::new();
@@ -428,6 +468,7 @@ fn parse_agy(value: &Value) -> QuotaFields {
         tokens,
         cost_usd,
         bars: Vec::new(),
+        fraction: frac,
         account: text_field(value, "account"),
         pool: Some("google".to_string()),
         provenance: Some("agy-monitor".to_string()),
@@ -440,15 +481,55 @@ fn parse_kimi(value: &Value) -> QuotaFields {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_lowercase();
-    let bars = ["limit5h", "monthTotal", "monthCode"]
+    let mut bars = ["limit5h", "monthTotal", "monthCode"]
         .into_iter()
         .filter_map(|key| ratio_bar(value, key))
         .collect::<Vec<_>>();
+    let mut extracted_frac = None;
+    if bars.is_empty() {
+        if let Some(limits) = value.get("limits").and_then(Value::as_object) {
+            if let Some(f5) = limits
+                .get("five_hour")
+                .and_then(|v| v.get("fraction"))
+                .and_then(Value::as_f64)
+            {
+                bars.push(QuotaBar {
+                    id: "limit5h",
+                    label: "5h",
+                    ratio: Some(f5),
+                    level: ratio_level(f5),
+                    text: format!("{:.0}%", f5.clamp(0.0, 1.0) * 100.0),
+                });
+            }
+            if let Some(fm) = limits
+                .get("monthly")
+                .and_then(|v| v.get("fraction"))
+                .and_then(Value::as_f64)
+            {
+                bars.push(QuotaBar {
+                    id: "monthTotal",
+                    label: "month",
+                    ratio: Some(fm),
+                    level: ratio_level(fm),
+                    text: format!("{:.0}%", fm.clamp(0.0, 1.0) * 100.0),
+                });
+            }
+        } else if let Some(frac) = value.get("fraction").and_then(Value::as_f64) {
+            bars.push(QuotaBar {
+                id: "limit",
+                label: "limit",
+                ratio: Some(frac),
+                level: ratio_level(frac),
+                text: format!("{:.0}%", frac.clamp(0.0, 1.0) * 100.0),
+            });
+            extracted_frac = Some(frac);
+        }
+    }
     let hottest = bars
         .iter()
         .filter_map(|bar| bar.ratio)
         .fold(0.0_f64, f64::max);
-    if kind != "ok" {
+    if kind != "ok" && !kind.is_empty() {
         let message = value
             .pointer("/error/message")
             .and_then(Value::as_str)
@@ -463,16 +544,32 @@ fn parse_kimi(value: &Value) -> QuotaFields {
             tokens: None,
             cost_usd: None,
             bars,
+            fraction: extracted_frac.or(Some(hottest).filter(|&h| h > 0.0)),
             account: text_field(value, "account"),
             pool: Some("moonshot".to_string()),
             provenance: Some("kimi-monitor".to_string()),
         };
     }
-    let status = ratio_level(hottest);
-    let headline = bars
-        .first()
-        .map(|bar| bar.text.clone())
-        .unwrap_or_else(|| "—".to_string());
+    let status_str = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let status = if status_str == "blocked"
+        || status_str == "exhausted"
+        || hottest >= BLOCKED_LIMIT
+    {
+        "blocked"
+    } else {
+        ratio_level(hottest)
+    };
+    let headline = if status == "blocked" && hottest >= 1.0 {
+        "100%".to_string()
+    } else {
+        bars.first()
+            .map(|bar| bar.text.clone())
+            .unwrap_or_else(|| "—".to_string())
+    };
     let detail = if bars.is_empty() {
         "snapshot has no usage windows".to_string()
     } else {
@@ -498,6 +595,7 @@ fn parse_kimi(value: &Value) -> QuotaFields {
         tokens: None,
         cost_usd: None,
         bars,
+        fraction: extracted_frac.or(Some(hottest).filter(|&h| h > 0.0)),
         account: text_field(value, "account"),
         pool: Some("moonshot".to_string()),
         provenance: Some("kimi-monitor".to_string()),
@@ -553,6 +651,7 @@ fn parse_fleet(value: &Value) -> QuotaFields {
             tokens: None,
             cost_usd: None,
             bars: Vec::new(),
+            fraction: None,
             account: None,
             pool,
             provenance: Some("cloud_unavailable".to_string()),
@@ -576,6 +675,7 @@ fn parse_fleet(value: &Value) -> QuotaFields {
             tokens,
             cost_usd,
             bars: Vec::new(),
+            fraction: Some(1.0),
             account: text_field(value, "account"),
             pool,
             provenance: Some("fleet_engine".to_string()),
@@ -607,6 +707,7 @@ fn parse_fleet(value: &Value) -> QuotaFields {
             tokens,
             cost_usd,
             bars,
+            fraction: Some(hottest),
             account: text_field(value, "account"),
             pool,
             provenance: Some("fleet_engine".to_string()),
@@ -630,6 +731,7 @@ fn parse_fleet(value: &Value) -> QuotaFields {
         tokens,
         cost_usd,
         bars: Vec::new(),
+        fraction: None,
         account: text_field(value, "account"),
         pool,
         provenance: Some("local_sessions".to_string()),
@@ -642,7 +744,7 @@ fn default_pool_for(id: &str) -> Option<String> {
         "claude" => "anthropic".to_string(),
         "codex" => "openai".to_string(),
         "copilot" => "github".to_string(),
-        "cursor" => "cursor".to_string(),
+        "cursor" => "anysphere".to_string(),
         "grok" => "xai".to_string(),
         "junie" => "jetbrains".to_string(),
         "kimi" => "moonshot".to_string(),

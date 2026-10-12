@@ -425,6 +425,8 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
     assert_eq!(local_codex.telemetry_source, "local_session");
     assert_eq!(local_codex.agent, "codex");
     assert_eq!(local_codex.provider, "openai");
+    assert_eq!(local_codex.status, "untracked");
+    assert_eq!(local_codex.exit_code, None);
     assert_eq!(local_codex.tokens.tokens_total, 200);
 
     let local_claude = report
@@ -435,7 +437,87 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
     assert_eq!(local_claude.telemetry_source, "local_session");
     assert_eq!(local_claude.agent, "claude");
     assert_eq!(local_claude.provider, "anthropic");
+    assert_eq!(local_claude.status, "untracked");
+    assert_eq!(local_claude.exit_code, None);
     assert_eq!(local_claude.tokens.tokens_total, 300);
+
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn test_archive_fallback_deduplicates_vc_and_uses_last_wins() {
+    let home = fixture_home("archive-fallback");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+
+    // 1. Create a VC run for kimi on day 2026-10-12
+    write_meta(
+        &home,
+        "vc-kimi-1",
+        json!({
+            "run_id": "vc-kimi-1",
+            "agent": "kimi",
+            "provider": "moonshot",
+            "agent_model": "k2.5",
+            "status": "completed",
+            "completed_at": "2026-10-12T10:00:00Z",
+            "usage": {
+                "schema": "vibecrafted.usage.v1",
+                "unit": "tokens",
+                "source": "provider_stream",
+                "events": 1,
+                "tokens_input": 500,
+                "tokens_output": 100,
+                "tokens_total": 600
+            },
+            "cost": {"amount": 0.05, "currency": "USD", "source": "estimated:test"}
+        }),
+    );
+
+    // 2. Write archive for kimi (same day 2026-10-12) - should be skipped due to VC deduplication!
+    let archive_dir = home.join("telemetry/archive");
+    fs::create_dir_all(&archive_dir).unwrap();
+    let kimi_archive = "{\"day\": \"2026-10-12\", \"model\": \"k2.5\", \"input_tokens\": 1000, \"output_tokens\": 200}\n";
+    fs::write(archive_dir.join("kimi.jsonl"), kimi_archive).unwrap();
+
+    // 3. Write archive for grok with duplicate lines for same (day, model) - last wins!
+    let grok_archive = "{\"day\": \"2026-10-11\", \"model\": \"grok-beta\", \"input_tokens\": 100, \"output_tokens\": 50}\n{\"day\": \"2026-10-11\", \"model\": \"grok-beta\", \"input_tokens\": 800, \"output_tokens\": 200}\n";
+    fs::write(archive_dir.join("grok.jsonl"), grok_archive).unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+
+    // Total runs: 1 VC run (kimi) + 1 grok archive run = 2 (NOT 3, kimi archive was deduped against VC day!)
+    assert_eq!(report.totals.runs, 2);
+
+    let grok_run = report
+        .runs
+        .iter()
+        .find(|r| r.agent == "grok")
+        .expect("grok run");
+    assert_eq!(grok_run.status, "untracked");
+    assert_eq!(grok_run.exit_code, None);
+    assert_eq!(grok_run.telemetry_source, "local_archive");
+    assert_eq!(grok_run.provider, "xai");
+    // Last-wins: 800 + 200 = 1000 total tokens
+    assert_eq!(grok_run.tokens.tokens_total, 1000);
+
+    // Verify filter by canonical provider name ("xai") and agent name ("grok") both work
+    let filtered_xai = ControlPlane::new(&home).usage_report(
+        now,
+        UsageFilter {
+            provider: Some("xai".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(filtered_xai.totals.runs, 1);
+
+    let filtered_grok = ControlPlane::new(&home).usage_report(
+        now,
+        UsageFilter {
+            provider: Some("grok".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(filtered_grok.totals.runs, 1);
 
     fs::remove_dir_all(home).ok();
 }

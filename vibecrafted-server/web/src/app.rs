@@ -946,14 +946,14 @@ pub fn UsagePage() -> impl IntoView {
                         </select></label>
                         <label><span>"Provider"</span><select id="usage-provider" name="provider">
                             <option value="">"all"</option>
-                            <option value="agy">"agy"</option>
-                            <option value="claude">"claude"</option>
-                            <option value="codex">"codex"</option>
-                            <option value="copilot">"copilot"</option>
-                            <option value="cursor">"cursor"</option>
-                            <option value="grok">"grok"</option>
-                            <option value="junie">"junie"</option>
-                            <option value="kimi">"kimi"</option>
+                            <option value="anthropic">"anthropic"</option>
+                            <option value="anysphere">"anysphere"</option>
+                            <option value="github">"github"</option>
+                            <option value="google">"google"</option>
+                            <option value="jetbrains">"jetbrains"</option>
+                            <option value="moonshot">"moonshot"</option>
+                            <option value="openai">"openai"</option>
+                            <option value="xai">"xai"</option>
                         </select></label>
                         <label><span>"Agent"</span><select id="usage-agent" name="agent">
                             <option value="">"all"</option>
@@ -1208,33 +1208,32 @@ fn usage_dashboard_script() -> &'static str {
   root.querySelectorAll('[data-usage-dim]').forEach((button) => {
     button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
   });
-  const populateModelPicker = (models) => {
-    const select = byId('usage-model');
+  const populateDimensionPicker = (selectId, paramName, items) => {
+    const select = byId(selectId);
     if (!select) return;
-    const current = params.get('model') || select.value || '';
+    const current = params.get(paramName) || select.value || '';
     const seen = new Set();
-    select.replaceChildren();
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'all';
-    select.appendChild(defaultOpt);
-    for (const item of models || []) {
+    for (const opt of Array.from(select.options)) {
+      if (opt.value) seen.add(opt.value.toLowerCase());
+    }
+    for (const item of items || []) {
       const name = item.name;
-      if (name && name !== 'unknown' && !seen.has(name)) {
-        seen.add(name);
+      if (name && name !== 'unknown' && !seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
         const opt = document.createElement('option');
         opt.value = name;
         opt.textContent = name;
-        if (current === name) opt.selected = true;
         select.appendChild(opt);
       }
     }
-    if (current && !seen.has(current)) {
+    if (current && !seen.has(current.toLowerCase())) {
       const opt = document.createElement('option');
       opt.value = current;
       opt.textContent = current;
-      opt.selected = true;
       select.appendChild(opt);
+    }
+    if (current) {
+      select.value = current;
     }
   };
   const render = (report) => {
@@ -1248,7 +1247,9 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
-    populateModelPicker(report.dimensions && report.dimensions.models);
+    populateDimensionPicker('usage-provider', 'provider', report.dimensions && report.dimensions.providers);
+    populateDimensionPicker('usage-agent', 'agent', report.dimensions && report.dimensions.agents);
+    populateDimensionPicker('usage-model', 'model', report.dimensions && report.dimensions.models);
     body.replaceChildren();
     const runs = report.runs || [];
     for (const run of runs) {

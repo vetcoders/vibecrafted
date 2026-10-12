@@ -160,17 +160,25 @@ impl ControlPlane {
         recover_lazy_transcripts(&runtime_runs, &mut runs);
 
         let mut vc_session_ids = std::collections::HashSet::new();
+        let mut vc_days = std::collections::HashSet::new();
         for run in &runs {
             if let Some(session_id) = run.provider_session_id.as_str() {
                 if !session_id.is_empty() && session_id != "unknown" {
                     vc_session_ids.insert(session_id.to_string());
                 }
             }
+            vc_session_ids.insert(run.run_id.clone());
+            if let Some(agent_str) = run.agent.as_str() {
+                let day = run.recorded_at.split('T').next().unwrap_or("");
+                if !day.is_empty() {
+                    vc_days.insert((day.to_string(), agent_str.to_string()));
+                }
+            }
         }
 
         let telemetry_dir = self.home().join("telemetry");
         let local_runs =
-            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, cutoff, &filter);
+            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, &vc_days, cutoff, &filter);
         runs.extend(local_runs);
 
         runs.sort_by(|left, right| {
@@ -376,12 +384,13 @@ fn provider_matches(provider: &Value, agent: &Value, expected: Option<&str>) -> 
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return true;
         }
-        provider
-            .as_str()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
-            || agent
-                .as_str()
-                .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
+        let canonical = canonical_provider_for(trimmed);
+        provider.as_str().is_some_and(|actual| {
+            actual.eq_ignore_ascii_case(trimmed) || actual.eq_ignore_ascii_case(canonical)
+        }) || agent.as_str().is_some_and(|actual| {
+            actual.eq_ignore_ascii_case(trimmed)
+                || canonical_provider_for(actual).eq_ignore_ascii_case(trimmed)
+        })
     })
 }
 
@@ -403,7 +412,7 @@ fn canonical_provider_for(agent: &str) -> &'static str {
         "claude" => "anthropic",
         "codex" => "openai",
         "copilot" => "github",
-        "cursor" => "cursor",
+        "cursor" => "anysphere",
         "grok" => "xai",
         "junie" => "jetbrains",
         "kimi" => "moonshot",
@@ -414,6 +423,7 @@ fn canonical_provider_for(agent: &str) -> &'static str {
 fn read_local_telemetry_runs(
     telemetry_dir: &Path,
     vc_session_ids: &std::collections::HashSet<String>,
+    vc_days: &std::collections::HashSet<(String, String)>,
     cutoff: Option<DateTime<Utc>>,
     filter: &UsageFilter,
 ) -> Vec<UsageRun> {
@@ -564,8 +574,8 @@ fn read_local_telemetry_runs(
                                 provider: provider_val,
                                 agent: agent_val,
                                 model: model_val,
-                                status: "completed".to_string(),
-                                exit_code: Some(0),
+                                status: "untracked".to_string(),
+                                exit_code: None,
                                 recorded_at: recorded_dt.to_rfc3339(),
                                 tokens,
                                 cost,
@@ -594,6 +604,7 @@ fn read_local_telemetry_runs(
             let archive_path = telemetry_dir.join("archive").join(format!("{agent}.jsonl"));
             if regular_file(&archive_path) {
                 if let Ok(file_content) = fs::read_to_string(&archive_path) {
+                    let mut day_model_map = BTreeMap::new();
                     for line in file_content.lines() {
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
@@ -609,6 +620,13 @@ fn read_local_telemetry_runs(
                             .get("model")
                             .and_then(Value::as_str)
                             .unwrap_or("unknown");
+                        day_model_map.insert((day.to_string(), model_str.to_string()), row);
+                    }
+
+                    for ((day, model_str), row) in day_model_map {
+                        if vc_days.contains(&(day.clone(), agent.to_string())) {
+                            continue;
+                        }
                         let recorded_at = format!("{day}T12:00:00Z");
                         let recorded_dt = parse_timestamp(&recorded_at).unwrap_or_else(Utc::now);
                         if cutoff.is_some_and(|c| recorded_dt < c) {
@@ -654,8 +672,8 @@ fn read_local_telemetry_runs(
                             provider: json!(canonical_provider_for(agent)),
                             agent: json!(agent),
                             model: json!(model_str),
-                            status: "completed".to_string(),
-                            exit_code: Some(0),
+                            status: "untracked".to_string(),
+                            exit_code: None,
                             recorded_at,
                             tokens,
                             cost,

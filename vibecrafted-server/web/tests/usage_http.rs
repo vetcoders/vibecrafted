@@ -199,6 +199,7 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
 
     // agy: RESOURCE_EXHAUSTED -> blocked
     let agy_agent = agents.iter().find(|a| a["id"] == "agy").expect("agy");
+    assert_eq!(agy_agent["agent"], "agy");
     assert_eq!(agy_agent["status"], "blocked");
     assert_eq!(agy_agent["headline"], "EXHAUSTED");
     assert!(
@@ -211,13 +212,16 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
 
     // kimi at 97% -> warn, NOT blocked!
     let kimi_agent = agents.iter().find(|a| a["id"] == "kimi").expect("kimi");
+    assert_eq!(kimi_agent["agent"], "kimi");
     assert_eq!(kimi_agent["status"], "warn");
     assert_eq!(kimi_agent["bars"][0]["label"], "5h");
     assert_eq!(kimi_agent["bars"][0]["level"], "warn");
     assert_eq!(kimi_agent["bars"][1]["text"], "41%");
+    assert_eq!(kimi_agent["fraction"], 0.97);
 
     // codex unmeasured quota reports unknown, transparent source/time/scope
     let codex_agent = agents.iter().find(|a| a["id"] == "codex").expect("codex");
+    assert_eq!(codex_agent["agent"], "codex");
     assert_eq!(codex_agent["status"], "unknown");
     assert_eq!(codex_agent["headline"], "unmeasured");
     assert!(
@@ -229,6 +233,7 @@ async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
 
     // cursor unavailable reports unknown with cloud reason
     let cursor_agent = agents.iter().find(|a| a["id"] == "cursor").expect("cursor");
+    assert_eq!(cursor_agent["agent"], "cursor");
     assert_eq!(cursor_agent["status"], "unknown");
     assert_eq!(cursor_agent["headline"], "cloud-only");
     assert!(
