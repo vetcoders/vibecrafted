@@ -1578,15 +1578,27 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
         return WorkspaceSessionRecord.from_payload(payload)
 
 
-def runtime_session_owner_root(runtime_session_id: str, socket_dir: str) -> str | None:
-    """Return a physical Frame session's recorded repo root, if one exists."""
+def runtime_session_owner_root(
+    runtime_session_id: str, socket_dir: str, *, runtime_state: str = ""
+) -> str | None:
+    """Read current live ownership, or conservative history for an exited seat.
+
+    The caller supplies the engine's observed state. Historical missing/dead
+    attachments and stale instances cannot own a newly live incarnation.
+    An EXITED cache or unspecified observation has no current incarnation
+    proof, so keep its historical foreign-root fence until explicit recovery.
+    """
+    if runtime_state and runtime_state not in RUNTIME_SESSION_STATES:
+        raise WorkspaceCatalogError("invalid observed Frame state")
+    if runtime_state == "live":
+        seat = _runtime_workspace_identity(
+            root=None, runtime_session_id=runtime_session_id, socket_dir=socket_dir
+        )
+        return show_workspace(seat[0].workspace_id).canonical_root if seat else None
 
     owners: set[str] = set()
     for path in sessions_dir().glob("*.json"):
-        try:
-            session = read_workspace_session(path.stem)
-        except WorkspaceCatalogError:
-            continue
+        session = read_workspace_session(path.stem)
         if any(
             attachment.runtime == "vc-frame"
             and attachment.runtime_session_id == runtime_session_id
@@ -1812,7 +1824,7 @@ class RunWorkspaceIdentity:
 
 
 def _runtime_workspace_identity(
-    *, root: Path, runtime_session_id: str, socket_dir: str
+    *, root: Path | None, runtime_session_id: str, socket_dir: str
 ) -> tuple[WorkspaceSessionRecord, WorkspaceInstance, RuntimeSessionAttachment] | None:
     """Read one exact physical seat; historical receipts are never relabelled."""
     candidates = []
@@ -1821,7 +1833,11 @@ def _runtime_workspace_identity(
         for path in sessions_dir().glob("*.json"):
             payload = _read_json(path)
             if payload is None:
-                continue
+                # The census observed a session record. A tolerant loader's
+                # missing/corrupt result cannot exclude a hidden live owner.
+                raise WorkspaceCatalogError(
+                    "physical Frame session ownership is unreadable"
+                )
             session = WorkspaceSessionRecord.from_payload(payload)
             attachments = [
                 item
@@ -1851,8 +1867,12 @@ def _runtime_workspace_identity(
             if (
                 instance.workspace_id != session.workspace_id
                 or instance.vibecrafted_session_id != session.session_id
-                or _canonical_root_key(record.canonical_root) != str(root)
-                or _canonical_root_key(instance.build_id.root) != str(root)
+                or _canonical_root_key(instance.build_id.root)
+                != _canonical_root_key(record.canonical_root)
+                or (
+                    root is not None
+                    and _canonical_root_key(record.canonical_root) != str(root)
+                )
             ):
                 raise WorkspaceCatalogError(
                     "physical Frame session ownership does not match requested root"
@@ -2647,6 +2667,9 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     )
     owner_p.add_argument("--runtime-session-id", required=True)
     owner_p.add_argument("--socket-dir", required=True)
+    owner_p.add_argument(
+        "--runtime-state", choices=sorted(RUNTIME_SESSION_STATES), default=""
+    )
 
     counts_p = sub.add_parser(
         "settlement-counts", help="F/X/N projection scoped to workspace_id"
@@ -2791,7 +2814,11 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             )
             return _emit(session.to_payload(), as_json=args.json)
         if args.action == "session-owner":
-            owner = runtime_session_owner_root(args.runtime_session_id, args.socket_dir)
+            owner = runtime_session_owner_root(
+                args.runtime_session_id,
+                args.socket_dir,
+                runtime_state=args.runtime_state,
+            )
             if owner:
                 print(owner)
             return 0

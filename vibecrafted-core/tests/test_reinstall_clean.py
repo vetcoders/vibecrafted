@@ -819,6 +819,13 @@ def test_installer_still_owns_every_reused_primitive() -> None:
         "_assert_runtime_loaded_service_owner",
         "_runtime_service_snapshot",
         "_run_runtime_service_command",
+        "_runtime_install_paths",
+        "_runtime_receipt_path",
+        "_load_runtime_install_receipt",
+        "_runtime_launch_agent_contract",
+        "_assert_runtime_launchd_job_owned",
+        "_bootout_owned_runtime_launchd_job",
+        "_wait_for_runtime_service_settlement",
     ):
         assert hasattr(installer, name), name
 
@@ -2194,3 +2201,405 @@ finally:
     finally:
         # These names/sockets/cache and their children were created by this test.
         frame("delete-session", name, "--force")
+
+
+def test_resurrect_publishes_distinct_agentless_project_seats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    root = tmp_path / "non-git-project"
+    root.mkdir()
+    old = wc.resolve_run_workspace_identity(root=root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=old.workspace_id,
+        vibecrafted_session_id=old.vibecrafted_session_id,
+        workspace_instance_id=old.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="old-seat",
+        socket_dir=str(SOCKETS),
+        state="missing",
+    )
+    before = wc.workspace_session_path(old.vibecrafted_session_id).read_bytes()
+    manifest = {
+        "runtime": {"running_roots": []},
+        "frame": {
+            "sessions": [
+                {
+                    "name": name,
+                    "cwd": str(root),
+                    "layout": f'layout {{ cwd "{root}"; tab {{ pane }} }}',
+                    "panes": [],
+                    "unplaced_agents": [],
+                }
+                for name in ["alpha", "beta"]
+            ]
+        },
+        "headless_runs": [],
+    }
+    ctx = ctx_for(tmp_path, Runner(), monkeypatch=monkeypatch)
+    report = reinstall_clean.resurrect(manifest, ctx)
+    assert [s["result"] for s in report["sessions"]] == ["live", "live"]
+    seats = [
+        wc._runtime_workspace_identity(
+            root=root, runtime_session_id=name, socket_dir=str(SOCKETS)
+        )
+        for name in ["alpha", "beta"]
+    ]
+    assert all(seats)
+    assert seats[0][0].session_id != seats[1][0].session_id
+    assert seats[0][1].workspace_instance_id != seats[1][1].workspace_instance_id
+    assert wc.workspace_session_path(old.vibecrafted_session_id).read_bytes() == before
+    assert all(s["workspace"]["result"] == "live" for s in report["sessions"])
+
+
+@pytest.mark.parametrize("cross_root", [False, True])
+def test_resurrect_workspace_binds_native_admission_without_changing_uuid_or_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cross_root: bool
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    manifest = take(tmp_path / "world")
+    project = tmp_path / "project"
+    project.mkdir()
+    other = tmp_path / "agent-project"
+    other.mkdir()
+    session = manifest["frame"]["sessions"][0]
+    session["cwd"] = str(project)
+    agent_root = other if cross_root else project
+    for pane in session["panes"]:
+        if pane.get("agent"):
+            pane["agent"].update(cwd=str(agent_root), linked_run_id="")
+    runner = Runner()
+    ctx = ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    restored = reinstall_clean.resurrect(manifest, ctx)["sessions"][0]
+    assert restored["result"] == "live"
+    assert restored["workspace"]["result"] == "live"
+    admissions = [(a, kw) for a, kw in runner.calls if "interactive-command" in a]
+    assert len(admissions) == 3
+    for command, kw in admissions:
+        assert command[command.index("--root") + 1] == str(agent_root)
+        assert (
+            kw["env"][wc.ENV_VIBECRAFTED_SESSION_ID]
+            == restored["workspace"]["vibecrafted_session_id"]
+        )
+    native_ids = {
+        a[a.index("--session") + 1] for a, _ in admissions if "--session" in a
+    }
+    assert native_ids == {CLAUDE_ID, CODEX_ID}
+    created = next(kw for a, kw in runner.calls if "--create-background" in a)
+    assert (
+        created["env"][wc.ENV_WORKSPACE_INSTANCE_ID]
+        == restored["workspace"]["workspace_instance_id"]
+    )
+    seat = wc._runtime_workspace_identity(
+        root=project, runtime_session_id="vibecrafted", socket_dir=str(SOCKETS)
+    )
+    assert (
+        seat and seat[0].session_id == restored["workspace"]["vibecrafted_session_id"]
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["provider", "publication", "same-root-publication", "already-live"]
+)
+def test_resurrect_workspace_never_promotes_unproven_or_foreign_seat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    manifest = take(tmp_path / "world")
+    root = tmp_path / "project"
+    root.mkdir()
+    manifest["frame"]["sessions"][0]["cwd"] = str(root)
+    runner = Runner()
+    ctx = ctx_for(
+        tmp_path,
+        runner,
+        monkeypatch=monkeypatch,
+        live=["vibecrafted"] if failure == "already-live" else None,
+    )
+    if failure == "provider":
+        runner.live_agents = False
+    if failure in ("publication", "same-root-publication"):
+        original = reinstall_clean._publish_restored_workspace
+        foreign_root = (
+            root if failure == "same-root-publication" else tmp_path / "foreign"
+        )
+        foreign_root.mkdir(exist_ok=True)
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+
+        def publish(context, name, workspace):
+            owner = foreign
+            if failure == "same-root-publication":
+                owner = wc.materialize_instance(
+                    workspace_id=workspace["workspace_id"],
+                    root=root,
+                    vibecrafted_session_id=wc.new_uuid7(),
+                )
+            wc.record_runtime_session_attachment(
+                workspace_id=owner.workspace_id,
+                vibecrafted_session_id=owner.vibecrafted_session_id,
+                workspace_instance_id=owner.workspace_instance_id,
+                runtime="vc-frame",
+                runtime_session_id=name,
+                state="live",
+                socket_dir=str(SOCKETS),
+            )
+            return original(context, name, workspace)
+
+        monkeypatch.setattr(reinstall_clean, "_publish_restored_workspace", publish)
+    restored = reinstall_clean.resurrect(manifest, ctx)["sessions"][0]
+    if failure == "already-live":
+        assert restored["result"] == "already-live"
+        assert not wc.list_instances()
+        return
+    assert restored["result"] == "failed"
+    reserved = wc.read_workspace_session(
+        restored["workspace"]["vibecrafted_session_id"]
+    )
+    assert reserved.attachments[0].state == "missing"
+    if failure in ("publication", "same-root-publication"):
+        assert wc.runtime_session_owner_root(
+            "vibecrafted", str(SOCKETS), runtime_state="live"
+        ) == str(foreign_root)
+
+
+def test_resurrect_workspace_lobby_and_unknown_cwd_do_not_guess_agent_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    lobby = Path(os.environ["VIBECRAFTED_HOME"]) / "projects"
+    lobby.mkdir()
+    ctx = ctx_for(tmp_path, Runner(), monkeypatch=monkeypatch)
+    ctx.env["VIBECRAFTED_HOME"] = os.environ["VIBECRAFTED_HOME"]
+    for raw, expected in [
+        (str(lobby), "not-applicable"),
+        ("", "unavailable"),
+        (str(tmp_path / "absent"), "unavailable"),
+    ]:
+        _, result = reinstall_clean._prepare_restored_workspace(
+            ctx, {"name": "host", "cwd": raw}
+        )
+        assert result["result"] == expected
+    assert not wc.list_instances()
+
+
+@pytest.fixture
+def recovery_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from contextlib import contextmanager
+
+    from vibecrafted_core.doctor import _installer_module
+
+    installer = _installer_module()
+    events = []
+    paths = {
+        name: tmp_path / name
+        for name in (
+            "runtime_home",
+            "config_home",
+            "product_config",
+            "crafted_home",
+            "launcher_home",
+        )
+    }
+    paths["runtime_home"].mkdir()
+    receipt = installer._runtime_receipt_path(paths["runtime_home"])
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": installer.RUNTIME_INSTALL_SCHEMA,
+                "roots": {key: str(value) for key, value in paths.items()},
+                "config_transaction": {
+                    "schema": "vibecrafted.config-publication.v1",
+                    "entries": [],
+                },
+            }
+        )
+    )
+    state = {
+        "stopped": False,
+        "foreign": False,
+        "owned_job": True,
+        "uncertain": False,
+        "foreign_runtime": False,
+        "settle": True,
+        "pending": True,
+        "reclaimable": False,
+    }
+    live = installer._RuntimeServiceStatus(
+        True, True, True, True, True, True, True, 6729
+    )
+    reclaimable = installer._RuntimeServiceStatus(
+        True, True, True, True, True, False, False, 6729
+    )
+    stopped = installer._RuntimeServiceStatus(
+        True, False, False, False, False, False, False, None
+    )
+
+    @contextmanager
+    def lease(*args, **kwargs):
+        events.append("lease")
+        with (tmp_path / "lease").open("w") as handle:
+            yield handle.fileno()
+
+    @contextmanager
+    def inherited(fd):
+        events.append("inherited")
+        yield
+
+    def owner(home):
+        events.append("owner")
+        if state["foreign"]:
+            raise OSError("foreign service home")
+        return home
+
+    def snapshot(home):
+        events.append("snapshot")
+        if state["uncertain"]:
+            raise OSError("uncertain identity")
+        return (
+            Path("/owned/vibecrafted"),
+            stopped
+            if state["stopped"]
+            else reclaimable
+            if state["reclaimable"]
+            else live,
+            "stopped" if state["stopped"] else "running",
+        )
+
+    def job_owned(home):
+        events.append("job-owned")
+        return state["owned_job"]
+
+    def bootout(home):
+        events.append("bootout")
+        state["stopped"] = state["settle"]
+        return True
+
+    def command(*args):
+        events.append("ordinary-stop")
+        if state["pending"]:
+            return subprocess.CompletedProcess(
+                args, 78, "", "runtime publication has no coherent install identity"
+            )
+        state["stopped"] = True
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(
+        reinstall_clean, "vibecrafted_home", lambda: paths["crafted_home"]
+    )
+    monkeypatch.setattr(installer, "_runtime_service_has_evidence", lambda home: True)
+    monkeypatch.setattr(
+        installer, "_current_tools_link", lambda home: tmp_path / "tools/current"
+    )
+    monkeypatch.setattr(installer, "_tools_install_lease", lease)
+    monkeypatch.setattr(installer, "_inherited_tools_install_lease", inherited)
+    monkeypatch.setattr(installer, "_assert_runtime_loaded_service_owner", owner)
+    monkeypatch.setattr(installer, "_runtime_service_snapshot", snapshot)
+    monkeypatch.setattr(installer, "_runtime_install_paths", lambda: paths)
+    monkeypatch.setattr(installer, "_assert_runtime_launchd_job_owned", job_owned)
+    monkeypatch.setattr(
+        installer,
+        "_runtime_launch_agent_contract",
+        lambda home: {
+            "runtime_home": tmp_path / "foreign-runtime"
+            if state["foreign_runtime"]
+            else paths["runtime_home"]
+        },
+    )
+    monkeypatch.setattr(installer, "_bootout_owned_runtime_launchd_job", bootout)
+    monkeypatch.setattr(installer, "_run_runtime_service_command", command)
+    return reinstall_clean.InstallerOwnership(installer), receipt, state, events
+
+
+@pytest.mark.parametrize("marker", ["config_transaction", "install_pending"])
+@pytest.mark.parametrize("reclaimable", [False, True])
+def test_pending_publication_service_stop_uses_verified_owned_recovery(
+    recovery_service,
+    marker: str,
+    reclaimable: bool,
+) -> None:
+    ownership, receipt, state, events = recovery_service
+    state["reclaimable"] = reclaimable
+    if marker == "install_pending":
+        value = json.loads(receipt.read_text())
+        value.pop("config_transaction")
+        value["install_pending"] = True
+        receipt.write_text(json.dumps(value))
+    before = receipt.read_bytes()
+    result = ownership.stop_service()
+    assert result["action"] == "stopped" and result["was_live"] is True
+    assert result["method"] == "pending-publication-owned-bootout"
+    assert (
+        events.index("lease")
+        < events.index("owner")
+        < events.index("job-owned")
+        < events.index("bootout")
+    )
+    assert "ordinary-stop" not in events
+    assert state["stopped"] is True
+    assert receipt.read_bytes() == before
+
+
+def test_quiescent_service_stop_does_not_mutate_installed_definition(
+    recovery_service,
+) -> None:
+    ownership, receipt, state, events = recovery_service
+    state["stopped"] = True
+    before = receipt.read_bytes()
+    result = ownership.stop_service()
+    assert receipt.read_bytes() == before
+    assert result == {"action": "none", "was_live": False, "pair": "stopped"}
+    assert "ordinary-stop" not in events and "bootout" not in events
+
+
+def test_coherent_service_stop_keeps_normal_owner_path(recovery_service) -> None:
+    ownership, receipt, state, events = recovery_service
+    value = json.loads(receipt.read_text())
+    value.pop("config_transaction")
+    receipt.write_text(json.dumps(value))
+    state["pending"] = False
+    result = ownership.stop_service()
+    assert result["action"] == "stopped" and result["was_live"] is True
+    assert "ordinary-stop" in events and "bootout" not in events
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        "foreign",
+        "uncertain",
+        "foreign_runtime",
+        "no-job",
+        "bad-receipt",
+        "bad-transaction",
+        "roots",
+        "settle",
+    ],
+)
+def test_pending_publication_service_stop_preserves_strict_fences(
+    recovery_service, refusal
+) -> None:
+    ownership, receipt, state, events = recovery_service
+    if refusal in ("foreign", "uncertain", "foreign_runtime"):
+        state[refusal] = True
+    elif refusal == "no-job":
+        state["owned_job"] = False
+    elif refusal == "settle":
+        state["settle"] = False
+    else:
+        value = json.loads(receipt.read_text())
+        if refusal == "bad-receipt":
+            value["schema"] = "foreign"
+        elif refusal == "bad-transaction":
+            value["config_transaction"]["schema"] = "unknown"
+        else:
+            value["roots"]["runtime_home"] = "/foreign"
+        receipt.write_text(json.dumps(value))
+    with pytest.raises((OSError, reinstall_clean.ReinstallError)):
+        ownership.stop_service()
+    assert "ordinary-stop" not in events
+    if refusal != "settle":
+        assert "bootout" not in events

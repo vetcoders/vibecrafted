@@ -742,7 +742,16 @@ class Scene:
 
 @pytest.mark.parametrize(
     "state",
-    ["live", "dead", "missing", "history", "ambiguous", "mismatch", "contradictory"],
+    [
+        "live",
+        "dead",
+        "missing",
+        "history",
+        "foreign-history",
+        "ambiguous",
+        "mismatch",
+        "contradictory",
+    ],
 )
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 @pytest.mark.parametrize("origin", ["owned", "foreign"])
@@ -847,6 +856,19 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
         old_session = wc.read_workspace_session(
             expected.vibecrafted_session_id
         ).to_payload()
+    if state == "foreign-history":
+        foreign_root = tmp_path / "historical-foreign"
+        foreign_root.mkdir()
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=foreign.workspace_id,
+            vibecrafted_session_id=foreign.vibecrafted_session_id,
+            workspace_instance_id=foreign.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="selected",
+            state="missing",
+            socket_dir=env["VC_FRAME_SOCKET_DIR"],
+        )
     env.update(first.to_env())
     if state in ("ambiguous", "mismatch"):
         second = wc.materialize_instance(
@@ -904,8 +926,13 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
         timeout=45,
     )
     if state in ("ambiguous", "mismatch", "contradictory"):
-        assert "RC=[2]" in run.stdout, run.stdout + run.stderr
-        assert "ownership" in run.stdout or "ambiguous live seats" in run.stdout
+        expected_rc = 2 if state == "mismatch" else 4
+        assert f"RC=[{expected_rc}]" in run.stdout, run.stdout + run.stderr
+        assert (
+            "ownership" in run.stdout
+            or "ambiguous live seats" in run.stdout
+            or "could not verify the owner" in run.stdout
+        )
         assert not native_receipts.exists()
         assert not _creates(scene.calls())
         assert not any(
@@ -933,7 +960,7 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
     iid = identity[wc.ENV_WORKSPACE_INSTANCE_ID]
     bound = wc.read_workspace_session(sid)
     assert bound.workspace_instance_id == iid
-    if state in ("live", "history"):
+    if state in ("live", "history", "foreign-history"):
         assert sid == expected.vibecrafted_session_id
         assert iid == expected.workspace_instance_id
         assert identity[wc.ENV_BUILD_ID] == expected.build_id.rendered
@@ -2524,6 +2551,8 @@ def test_the_terminal_child_enters_the_session_its_parent_created(
     # rewriting the attachment already owned by the parent.
     binds = [c for c in scene.owner_calls() if c.startswith("workspace session-attach")]
     assert not binds, binds
+    owners = [c for c in scene.owner_calls() if c.startswith("workspace session-owner")]
+    assert owners and all("--runtime-state live" in call for call in owners)
     resolves = [c for c in scene.owner_calls() if c.startswith("workspace resolve")]
     assert resolves, scene.owner_calls()
     for resolve in resolves:

@@ -56,7 +56,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -1070,11 +1070,80 @@ class InstallerOwnership:
                         "service evidence exists but no verified launcher"
                     )
                 launcher, status, pair = snapshot
-                was_live = bool(
-                    status.installed or status.loaded or status.supervisor_live
-                )
-                if not was_live and pair == "stopped":
+                if status.quiescent and pair == "stopped":
                     return {"action": "none", "was_live": False, "pair": pair}
+                was_live = bool(status.loaded or status.supervisor_live)
+                # A known incomplete publication cannot admit ordinary service
+                # mutation. Reinstall alone may drain the still-owned loaded
+                # job, using the installer's exact path fence and settlement
+                # proof. This is explicit recovery, never an error fallback.
+                try:
+                    paths = installer._runtime_install_paths()
+                    receipt = installer._load_runtime_install_receipt(
+                        installer._runtime_receipt_path(paths["runtime_home"])
+                    )
+                    if receipt and receipt.get("roots") != {
+                        name: str(path) for name, path in paths.items()
+                    }:
+                        raise ReinstallError(
+                            "pending service receipt has foreign install roots"
+                        )
+                    transaction = receipt.get("config_transaction")
+                    if "config_transaction" in receipt and (
+                        not isinstance(transaction, dict)
+                        or transaction.get("schema")
+                        != "vibecrafted.config-publication.v1"
+                        or not isinstance(transaction.get("entries"), list)
+                    ):
+                        raise ReinstallError(
+                            "pending service config transaction is unsupported"
+                        )
+                    pending = (
+                        bool(transaction) or receipt.get("install_pending") is True
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    raise ReinstallError(
+                        f"cannot verify pending service publication: {exc}"
+                    ) from exc
+                if pending:
+                    if (
+                        not status.needs_drain
+                        or not was_live
+                        or not status.supervisor_pid
+                    ):
+                        raise ReinstallError(
+                            "pending service has no verified live drain identity"
+                        )
+                    contract = installer._runtime_launch_agent_contract(shared_home)
+                    if contract["runtime_home"] != paths["runtime_home"].resolve(
+                        strict=False
+                    ):
+                        raise ReinstallError(
+                            "pending service LaunchAgent has foreign runtime home"
+                        )
+                    if not installer._assert_runtime_launchd_job_owned(shared_home):
+                        raise ReinstallError(
+                            "pending service has no verified owned loaded job"
+                        )
+                    if not installer._bootout_owned_runtime_launchd_job(shared_home):
+                        raise ReinstallError(
+                            "pending service disappeared before recovery stop"
+                        )
+                    _, final_status, final_pair = (
+                        installer._wait_for_runtime_service_settlement(
+                            shared_home, allow_healthy=False
+                        )
+                    )
+                    if not final_status.quiescent or final_pair != "stopped":
+                        raise ReinstallError(
+                            "pending service is not quiescent after owned recovery stop"
+                        )
+                    return {
+                        "action": "stopped",
+                        "was_live": True,
+                        "pair": pair,
+                        "method": "pending-publication-owned-bootout",
+                    }
                 result = installer._run_runtime_service_command(
                     launcher, shared_home, "service", "stop"
                 )
@@ -2314,6 +2383,99 @@ def create_session(
     return outcome
 
 
+def _prepare_restored_workspace(
+    ctx: ResurrectContext, session: Mapping[str, Any]
+) -> tuple[ResurrectContext, dict[str, Any]]:
+    """Reserve a distinct WES seat through the same lifecycle as public start.
+
+    Only an explicit existing project cwd can own the rebuilt Frame session.
+    Lobby and unavailable cwd remain physical-only; no guessed agent cwd can
+    lend ownership to the whole session.
+    """
+    from . import workspace_catalog as wc
+    from .repo_selection import is_workspace_lobby
+
+    raw = str(session.get("cwd") or "")
+    root = Path(raw).expanduser() if raw else None
+    if root is None or not root.is_absolute() or not root.is_dir():
+        return ctx, {
+            "result": "unavailable",
+            "reason": "no existing absolute project cwd",
+        }
+    if is_workspace_lobby(root, env=ctx.env):
+        return ctx, {"result": "not-applicable", "reason": "workspace lobby"}
+    name = session["name"]
+    # Resurrection has independently proved this name absent. Resolve records
+    # that observation through the catalog owner; never relabel old identity.
+    identity = wc.resolve_run_workspace_identity(
+        root=root,
+        env={},
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+        runtime_state="missing",
+    )
+    wc.record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+        state="missing",
+    )
+    return replace(ctx, env={**ctx.env, **identity.to_env()}), {
+        "result": "reserved",
+        "root": str(root.resolve()),
+        **identity.to_meta_fields(),
+    }
+
+
+def _publish_restored_workspace(
+    ctx: ResurrectContext, name: str, workspace: dict[str, Any]
+) -> None:
+    """Promote only a physically restored, provider-verified WES reservation."""
+    from . import workspace_catalog as wc
+
+    if workspace.get("result") != "reserved":
+        return
+    live = ctx.live_sessions or (
+        lambda: CliFrameProbe(ctx.frame_bin, ctx.socket_dir).list_sessions()
+    )
+    if name not in live():
+        raise ReinstallError("Frame seat disappeared before WES publication")
+    # A same-root seat is still a different owner. Refuse before promoting
+    # the reservation, rather than leaving two ambiguous LIVE attachments.
+    current = wc._runtime_workspace_identity(
+        root=Path(workspace["root"]),
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+    )
+    if current is not None and (
+        current[0].session_id != workspace["vibecrafted_session_id"]
+        or current[1].workspace_instance_id != workspace["workspace_instance_id"]
+    ):
+        raise ReinstallError("restored Frame seat has a different live WES owner")
+    wc.record_runtime_session_attachment(
+        workspace_id=workspace["workspace_id"],
+        vibecrafted_session_id=workspace["vibecrafted_session_id"],
+        workspace_instance_id=workspace["workspace_instance_id"],
+        runtime="vc-frame",
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+        state="live",
+    )
+    # Reuse strict live reader: inconsistent/ambiguous evidence is never a
+    # successful publication, even if the physical Frame remains available.
+    seat = wc._runtime_workspace_identity(
+        root=Path(workspace["root"]),
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+    )
+    if seat is None or seat[0].session_id != workspace["vibecrafted_session_id"]:
+        raise ReinstallError("restored Frame seat has no coherent WES publication")
+    workspace["result"] = "live"
+
+
 def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, Any]:
     """Phase 4: rebuild sessions, agents and apps from the fresh generation."""
     report: dict[str, Any] = {
@@ -2327,12 +2489,30 @@ def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, A
     sessions = sorted(
         manifest["frame"]["sessions"], key=lambda s: (s["name"] != "vc-host", s["name"])
     )
+    from .workspace_catalog import WorkspaceCatalogError
+
     for session in sessions:
         name = session["name"]
         entry: dict[str, Any] = {"session": name, "panes": []}
         report["sessions"].append(entry)
         if name in already:
             entry["result"] = "already-live"
+            continue
+        try:
+            # Recheck absence before catalog mutation; create_session repeats
+            # it before touching Frame's resurrection cache.
+            current_live = ctx.live_sessions or (
+                lambda: CliFrameProbe(ctx.frame_bin, ctx.socket_dir).list_sessions()
+            )
+            if name in current_live():
+                entry.update(result="already-live", workspace={"result": "not-adopted"})
+                continue
+            session_ctx, workspace = _prepare_restored_workspace(ctx, session)
+            entry["workspace"] = workspace
+        except (OSError, ValueError, ReinstallError, WorkspaceCatalogError) as exc:
+            entry.update(
+                result="failed", workspace={"result": "failed", "reason": str(exc)}
+            )
             continue
         launches: list[PaneLaunch] = []
         candidates = [(p, p.get("agent")) for p in session["panes"] if p.get("agent")]
@@ -2342,7 +2522,7 @@ def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, A
         ]
         for index, (pane, agent) in enumerate(candidates):
             key = f"{name}-{pane.get('id') if pane.get('id') is not None else f'u{index}'}"
-            argv, outcome = _interactive_launch(ctx, agent, key)
+            argv, outcome = _interactive_launch(session_ctx, agent, key)
             outcome.update(old_pane=pane.get("id"), tab=pane.get("tab_name"))
             entry["panes"].append(outcome)
             if argv:
@@ -2375,16 +2555,22 @@ def resurrect(manifest: Mapping[str, Any], ctx: ResurrectContext) -> dict[str, A
         layout_file.write_text(rewritten, encoding="utf-8")
         entry["layout_file"] = str(layout_file)
         entry["layout_matches"] = matches
-        entry.update(create_session(ctx, name, layout_file))
+        entry.update(create_session(session_ctx, name, layout_file))
         entry["frame_result"] = entry["result"]
         if entry["result"] == "live":
-            _verify_agent_panes(ctx, name, entry["panes"])
+            _verify_agent_panes(session_ctx, name, entry["panes"])
         else:
             for pane in entry["panes"]:
                 if pane.get("result") == "admitted":
                     pane.update(result="failed", reason="Frame session did not start")
         if any(p.get("result") in {"failed", "refused"} for p in entry["panes"]):
             entry["result"] = "failed"
+        if entry["result"] == "live":
+            try:
+                _publish_restored_workspace(session_ctx, name, workspace)
+            except (OSError, ValueError, ReinstallError, WorkspaceCatalogError) as exc:
+                workspace.update(result="failed", reason=str(exc))
+                entry["result"] = "failed"
     for run in manifest.get("headless_runs", []):
         if run.get("spared"):
             report["headless"].append(

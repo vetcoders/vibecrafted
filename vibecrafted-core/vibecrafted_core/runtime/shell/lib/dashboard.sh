@@ -1280,7 +1280,7 @@ _vetcoders_start_check_existing_owner() {
   local name="${1:-}" state="${2:-}" root="${3:-}" socket_dir="" owner=""
   socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 4
   owner="$(_vetcoders_product_core_cli workspace session-owner \
-    --runtime-session-id "$name" --socket-dir "$socket_dir" 2>/dev/null)" || {
+    --runtime-session-id "$name" --socket-dir "$socket_dir" --runtime-state "$state" 2>/dev/null)" || {
     printf 'vc-start: could not verify the owner of workspace %s.\n' "$(_vetcoders_shell_quote "$name")" >&2
     return 4
   }
