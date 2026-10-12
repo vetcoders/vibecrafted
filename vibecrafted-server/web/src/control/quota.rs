@@ -9,19 +9,29 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
+use axum::extract::Query;
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const SCHEMA: &str = "vibecrafted.quota-dashboard.v1";
 const STALE_SECS: u64 = 300;
 const NEAR_LIMIT: f64 = 0.85;
-const BLOCKED_LIMIT: f64 = 0.95;
+const BLOCKED_LIMIT: f64 = 1.0;
 const MAX_BYTES: u64 = 256 * 1024;
 const AGY_ENV: &str = "VIBECRAFTED_AGY_QUOTA_JSON";
 const KIMI_ENV: &str = "VIBECRAFTED_KIMI_QUOTA_JSON";
+
+#[derive(Debug, Deserialize, Default)]
+pub struct QuotaQuery {
+    pub agent: Option<String>,
+    pub provider: Option<String>,
+    pub pool: Option<String>,
+    pub model: Option<String>,
+    pub account: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 struct QuotaDashboard {
@@ -30,37 +40,110 @@ struct QuotaDashboard {
     agents: Vec<QuotaAgent>,
 }
 
-#[derive(Debug, Serialize)]
-struct QuotaAgent {
-    id: &'static str,
-    name: &'static str,
-    present: bool,
-    status: &'static str,
-    headline: String,
-    detail: String,
-    stale: bool,
-    age_s: Option<u64>,
-    model: Option<String>,
-    tokens: Option<u64>,
-    cost_usd: Option<f64>,
-    bars: Vec<QuotaBar>,
-    source: String,
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaAgent {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub present: bool,
+    pub status: &'static str,
+    pub headline: String,
+    pub detail: String,
+    pub stale: bool,
+    pub age_s: Option<u64>,
+    pub model: Option<String>,
+    pub tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub bars: Vec<QuotaBar>,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct QuotaBar {
-    id: &'static str,
-    label: &'static str,
-    ratio: Option<f64>,
-    text: String,
-    level: &'static str,
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaBar {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub ratio: Option<f64>,
+    pub text: String,
+    pub level: &'static str,
 }
 
-pub async fn quota() -> Response {
+pub async fn quota(Query(query): Query<QuotaQuery>) -> Response {
+    let mut agents = vec![
+        read_agy(),
+        read_fleet_agent("claude", "Claude"),
+        read_fleet_agent("codex", "Codex"),
+        read_fleet_agent("copilot", "Copilot"),
+        read_fleet_agent("cursor", "Cursor"),
+        read_fleet_agent("grok", "Grok"),
+        read_fleet_agent("junie", "Junie"),
+        read_kimi(),
+    ];
+
+    if let Some(expected_agent) = query
+        .agent
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        agents.retain(|a| a.id.eq_ignore_ascii_case(expected_agent));
+    }
+    if let Some(expected_provider) = query
+        .provider
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        agents.retain(|a| {
+            a.pool
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(expected_provider))
+                || a.id.eq_ignore_ascii_case(expected_provider)
+                || a.name.eq_ignore_ascii_case(expected_provider)
+        });
+    }
+    if let Some(expected_pool) = query
+        .pool
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        agents.retain(|a| {
+            a.pool
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(expected_pool))
+                || a.id.eq_ignore_ascii_case(expected_pool)
+        });
+    }
+    if let Some(expected_model) = query
+        .model
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        agents.retain(|a| {
+            a.model.as_deref().is_some_and(|m| {
+                m.to_ascii_lowercase()
+                    .contains(&expected_model.to_ascii_lowercase())
+            })
+        });
+    }
+    if let Some(expected_account) = query
+        .account
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
+        agents.retain(|a| {
+            a.account
+                .as_deref()
+                .is_some_and(|acc| acc.eq_ignore_ascii_case(expected_account))
+        });
+    }
+
     let body = QuotaDashboard {
         schema: SCHEMA,
         generated_at: Utc::now().to_rfc3339(),
-        agents: vec![read_agy(), read_kimi()],
+        agents,
     };
     no_store(Json(body).into_response())
 }
@@ -73,24 +156,52 @@ fn no_store(mut response: Response) -> Response {
 }
 
 fn read_agy() -> QuotaAgent {
+    let mut default_path = default_quota_path(".gemini/agy-monitor/runtime/quota.json");
+    if !default_path.exists() {
+        let alt = vibecrafted_telemetry_quota_path("agy");
+        if alt.exists() {
+            default_path = alt;
+        }
+    }
     project(
         "agy",
         "Antigravity",
         AGY_ENV,
-        default_quota_path(".gemini/agy-monitor/runtime/quota.json"),
+        default_path,
         "~/.gemini/agy-monitor/runtime/quota.json",
         parse_agy,
     )
 }
 
 fn read_kimi() -> QuotaAgent {
+    let mut default_path = default_quota_path(".kimi-code/runtime/quota.json");
+    if !default_path.exists() {
+        let alt = vibecrafted_telemetry_quota_path("kimi");
+        if alt.exists() {
+            default_path = alt;
+        }
+    }
     project(
         "kimi",
         "Kimi",
         KIMI_ENV,
-        default_quota_path(".kimi-code/runtime/quota.json"),
+        default_path,
         "~/.kimi-code/runtime/quota.json",
         parse_kimi,
+    )
+}
+
+fn read_fleet_agent(id: &'static str, name: &'static str) -> QuotaAgent {
+    let env_name = format!("VIBECRAFTED_{}_QUOTA_JSON", id.to_ascii_uppercase());
+    let default_path = vibecrafted_telemetry_quota_path(id);
+    let default_label = format!("~/.vibecrafted/telemetry/{id}/quota.json");
+    project(
+        id,
+        name,
+        &env_name,
+        default_path,
+        &default_label,
+        parse_fleet,
     )
 }
 
@@ -103,7 +214,7 @@ fn project(
     parse: fn(&Value) -> QuotaFields,
 ) -> QuotaAgent {
     match load_source(env_name, &default_path, default_label) {
-        Source::Missing { label } => absent(id, name, label),
+        Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
         Source::Unreadable { label, error } => QuotaAgent {
             id,
             name,
@@ -118,14 +229,28 @@ fn project(
             cost_usd: None,
             bars: Vec::new(),
             source: label,
+            account: None,
+            pool: default_pool_for(id),
+            provenance: Some("unreadable".to_string()),
         },
         Source::Json { label, value } => {
             let mut fields = parse(&value);
-            let age_s = json_ts(&value).map(age_secs);
+            let age_s = json_ts(&value)
+                .or_else(|| {
+                    value
+                        .get("generated_at")
+                        .and_then(Value::as_str)
+                        .and_then(iso_to_ts)
+                })
+                .map(age_secs);
             let stale = age_s.is_some_and(|age| age > STALE_SECS);
-            if stale && fields.status != "blocked" {
-                fields.status = worst(fields.status, "warn");
-                if !fields.detail.is_empty() {
+            if stale {
+                if fields.status == "blocked" {
+                    fields.status = "warn";
+                } else {
+                    fields.status = worst(fields.status, "warn");
+                }
+                if !fields.detail.is_empty() && !fields.detail.ends_with(" · stale") {
                     fields.detail.push_str(" · stale");
                 }
             }
@@ -143,6 +268,9 @@ fn project(
                 cost_usd: fields.cost_usd,
                 bars: fields.bars,
                 source: label,
+                account: fields.account,
+                pool: fields.pool.or_else(|| default_pool_for(id)),
+                provenance: fields.provenance,
             }
         }
     }
@@ -156,6 +284,9 @@ struct QuotaFields {
     tokens: Option<u64>,
     cost_usd: Option<f64>,
     bars: Vec<QuotaBar>,
+    account: Option<String>,
+    pool: Option<String>,
+    provenance: Option<String>,
 }
 
 enum Source {
@@ -217,7 +348,12 @@ fn read_file(path: &Path, label: &str) -> Source {
     }
 }
 
-fn absent(id: &'static str, name: &'static str, source: String) -> QuotaAgent {
+fn absent(
+    id: &'static str,
+    name: &'static str,
+    source: String,
+    pool: Option<String>,
+) -> QuotaAgent {
     QuotaAgent {
         id,
         name,
@@ -232,6 +368,9 @@ fn absent(id: &'static str, name: &'static str, source: String) -> QuotaAgent {
         cost_usd: None,
         bars: Vec::new(),
         source,
+        account: None,
+        pool,
+        provenance: Some("absent".to_string()),
     }
 }
 
@@ -289,6 +428,9 @@ fn parse_agy(value: &Value) -> QuotaFields {
         tokens,
         cost_usd,
         bars: Vec::new(),
+        account: text_field(value, "account"),
+        pool: Some("google".to_string()),
+        provenance: Some("agy-monitor".to_string()),
     }
 }
 
@@ -321,6 +463,9 @@ fn parse_kimi(value: &Value) -> QuotaFields {
             tokens: None,
             cost_usd: None,
             bars,
+            account: text_field(value, "account"),
+            pool: Some("moonshot".to_string()),
+            provenance: Some("kimi-monitor".to_string()),
         };
     }
     let status = ratio_level(hottest);
@@ -353,6 +498,172 @@ fn parse_kimi(value: &Value) -> QuotaFields {
         tokens: None,
         cost_usd: None,
         bars,
+        account: text_field(value, "account"),
+        pool: Some("moonshot".to_string()),
+        provenance: Some("kimi-monitor".to_string()),
+    }
+}
+
+fn parse_fleet(value: &Value) -> QuotaFields {
+    let agent = value.get("agent").and_then(Value::as_str).unwrap_or("");
+    let status_val = value.get("status").and_then(Value::as_str).unwrap_or("");
+    let reason = value.get("reason").and_then(Value::as_str);
+    let quota_obj = value.get("quota").and_then(Value::as_object);
+    let quota_status = quota_obj
+        .and_then(|q| q.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase();
+
+    let last_session = value.get("last_session").and_then(Value::as_object);
+    let model = last_session
+        .and_then(|s| s.get("model"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| text_field(value, "model"));
+
+    let tokens = value
+        .pointer("/metrics/processed_total")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value
+                .pointer("/metrics/fleet_processed_total")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            last_session
+                .and_then(|s| s.get("processed_total"))
+                .and_then(Value::as_u64)
+        });
+
+    let cost_usd = value
+        .pointer("/metrics/cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n >= 0.0);
+
+    let pool = default_pool_for(agent);
+
+    if status_val == "unavailable" {
+        let msg = reason.unwrap_or("usage lives in Cursor cloud");
+        return QuotaFields {
+            status: "unknown",
+            headline: "cloud-only".to_string(),
+            detail: format!("{msg} · unmeasured quota"),
+            model,
+            tokens: None,
+            cost_usd: None,
+            bars: Vec::new(),
+            account: None,
+            pool,
+            provenance: Some("cloud_unavailable".to_string()),
+        };
+    }
+
+    if quota_status == "RESOURCE_EXHAUSTED" || quota_status == "BLOCKED" {
+        let mut detail_parts = Vec::new();
+        if let Some(t) = tokens {
+            detail_parts.push(format!("{} tok", format_tokens(t)));
+        }
+        if let Some(m) = &model {
+            detail_parts.push(m.clone());
+        }
+        detail_parts.push("quota exhausted".to_string());
+        return QuotaFields {
+            status: "blocked",
+            headline: "EXHAUSTED".to_string(),
+            detail: detail_parts.join(" · "),
+            model,
+            tokens,
+            cost_usd,
+            bars: Vec::new(),
+            account: text_field(value, "account"),
+            pool,
+            provenance: Some("fleet_engine".to_string()),
+        };
+    }
+
+    let bars = ["limit", "daily", "monthly"]
+        .into_iter()
+        .filter_map(|key| ratio_bar(value, key))
+        .collect::<Vec<_>>();
+
+    if !bars.is_empty() {
+        let hottest = bars.iter().filter_map(|b| b.ratio).fold(0.0_f64, f64::max);
+        let status = ratio_level(hottest);
+        let headline = bars
+            .first()
+            .map(|b| b.text.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let detail = bars
+            .iter()
+            .map(|b| format!("{} {}", b.label, b.text))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        return QuotaFields {
+            status,
+            headline,
+            detail,
+            model,
+            tokens,
+            cost_usd,
+            bars,
+            account: text_field(value, "account"),
+            pool,
+            provenance: Some("fleet_engine".to_string()),
+        };
+    }
+
+    let mut parts = Vec::new();
+    if let Some(t) = tokens {
+        parts.push(format!("{} tok", format_tokens(t)));
+    }
+    if let Some(m) = &model {
+        parts.push(m.clone());
+    }
+    parts.push("unmeasured quota".to_string());
+
+    QuotaFields {
+        status: "unknown",
+        headline: "unmeasured".to_string(),
+        detail: parts.join(" · "),
+        model,
+        tokens,
+        cost_usd,
+        bars: Vec::new(),
+        account: text_field(value, "account"),
+        pool,
+        provenance: Some("local_sessions".to_string()),
+    }
+}
+
+fn default_pool_for(id: &str) -> Option<String> {
+    Some(match id {
+        "agy" => "google".to_string(),
+        "claude" => "anthropic".to_string(),
+        "codex" => "openai".to_string(),
+        "copilot" => "github".to_string(),
+        "cursor" => "cursor".to_string(),
+        "grok" => "xai".to_string(),
+        "junie" => "jetbrains".to_string(),
+        "kimi" => "moonshot".to_string(),
+        _ => id.to_string(),
+    })
+}
+
+fn iso_to_ts(iso: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|dt| dt.timestamp().max(0) as u64)
+}
+
+fn vibecrafted_telemetry_quota_path(agent: &str) -> PathBuf {
+    if let Some(base) = std::env::var_os("VIBECRAFTED_HOME").filter(|v| !v.is_empty()) {
+        PathBuf::from(base)
+            .join("telemetry")
+            .join(agent)
+            .join("quota.json")
+    } else {
+        default_quota_path(&format!(".vibecrafted/telemetry/{agent}/quota.json"))
     }
 }
 

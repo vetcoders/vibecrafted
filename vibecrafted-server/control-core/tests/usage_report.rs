@@ -302,3 +302,140 @@ fn harness_settlement_reaches_existing_dashboard_with_semantics() {
     );
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
+    let home = fixture_home("local-dedup");
+    let now = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+
+    // 1. A VC run with provider_session_id "sess-shared-123"
+    write_meta(
+        &home,
+        "vc-codex-1",
+        json!({
+            "run_id": "vc-codex-1",
+            "agent": "codex",
+            "provider": "openai",
+            "agent_model": "gpt-5.6-terra",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-10-12T11:30:00Z",
+            "usage": {
+                "schema": "vibecrafted.usage.v1",
+                "unit": "tokens",
+                "source": "provider_stream",
+                "events": 1,
+                "tokens_input": 100,
+                "tokens_cached_input": 20,
+                "tokens_cache_write": 0,
+                "tokens_output": 50,
+                "tokens_total": 150
+            },
+            "cost": {"amount": 0.25, "currency": "USD", "source": "estimated:test"},
+            "provider_session_id": "sess-shared-123"
+        }),
+    );
+
+    // 2. Local telemetry scan-cache for codex containing both the shared session and a local-only session
+    let codex_cache_dir = home.join("telemetry/codex");
+    fs::create_dir_all(&codex_cache_dir).unwrap();
+    let mtime = now.timestamp() as f64 - 1800.0;
+    let codex_cache = json!({
+        "files": {
+            "/tmp/store/session_shared.jsonl": {
+                "record": {
+                    "agent": "codex",
+                    "id": "sess-shared-123",
+                    "model": "gpt-5.6-terra",
+                    "mtime": mtime,
+                    "processed_total": 150,
+                    "native": {"input_tokens": 100, "output_tokens": 50}
+                }
+            },
+            "/tmp/store/session_local_only.jsonl": {
+                "record": {
+                    "agent": "codex",
+                    "id": "sess-local-only-456",
+                    "model": "gpt-5.6-terra",
+                    "mtime": mtime,
+                    "processed_total": 200,
+                    "native": {"input_tokens": 120, "output_tokens": 80}
+                }
+            }
+        }
+    });
+    fs::write(
+        codex_cache_dir.join("scan-cache.json"),
+        serde_json::to_vec(&codex_cache).unwrap(),
+    )
+    .unwrap();
+
+    // 3. Local telemetry scan-cache for claude
+    let claude_cache_dir = home.join("telemetry/claude");
+    fs::create_dir_all(&claude_cache_dir).unwrap();
+    let claude_cache = json!({
+        "files": {
+            "/tmp/store/claude_sess.jsonl": {
+                "record": {
+                    "agent": "claude",
+                    "id": "sess-claude-789",
+                    "model": "claude-sonnet-4-terra",
+                    "mtime": mtime,
+                    "processed_total": 300,
+                    "native": {"input_tokens": 200, "output_tokens": 100}
+                }
+            }
+        }
+    });
+    fs::write(
+        claude_cache_dir.join("scan-cache.json"),
+        serde_json::to_vec(&claude_cache).unwrap(),
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now, UsageFilter::default());
+
+    // Total runs: 1 VC run + 2 non-duplicated local runs = 3
+    assert_eq!(report.totals.runs, 3);
+    assert_eq!(report.totals.tokens_total_known, 150 + 200 + 300);
+
+    // Verify VC run retains its VC provenance
+    let vc_run = report
+        .runs
+        .iter()
+        .find(|r| r.run_id == "vc-codex-1")
+        .expect("vc run");
+    assert_eq!(vc_run.telemetry_source, "meta");
+    assert_eq!(vc_run.provider_session_id, "sess-shared-123");
+
+    // Verify deduplication: sess-shared-123 is NOT duplicated as a local run
+    let dup = report
+        .runs
+        .iter()
+        .filter(|r| r.provider_session_id == "sess-shared-123")
+        .count();
+    assert_eq!(dup, 1);
+
+    // Verify local-only sessions carry "local_session" provenance
+    let local_codex = report
+        .runs
+        .iter()
+        .find(|r| r.provider_session_id == "sess-local-only-456")
+        .expect("local codex");
+    assert_eq!(local_codex.telemetry_source, "local_session");
+    assert_eq!(local_codex.agent, "codex");
+    assert_eq!(local_codex.provider, "openai");
+    assert_eq!(local_codex.tokens.tokens_total, 200);
+
+    let local_claude = report
+        .runs
+        .iter()
+        .find(|r| r.provider_session_id == "sess-claude-789")
+        .expect("local claude");
+    assert_eq!(local_claude.telemetry_source, "local_session");
+    assert_eq!(local_claude.agent, "claude");
+    assert_eq!(local_claude.provider, "anthropic");
+    assert_eq!(local_claude.tokens.tokens_total, 300);
+
+    fs::remove_dir_all(home).ok();
+}

@@ -944,9 +944,31 @@ pub fn UsagePage() -> impl IntoView {
                             <option value="30d">"30 days"</option>
                             <option value="all">"All recorded"</option>
                         </select></label>
-                        <label><span>"Provider"</span><input id="usage-provider" name="provider" maxlength="128" placeholder="all" /></label>
-                        <label><span>"Agent"</span><input id="usage-agent" name="agent" maxlength="128" placeholder="all" /></label>
-                        <label><span>"Model"</span><input id="usage-model" name="model" maxlength="128" placeholder="all" /></label>
+                        <label><span>"Provider"</span><select id="usage-provider" name="provider">
+                            <option value="">"all"</option>
+                            <option value="agy">"agy"</option>
+                            <option value="claude">"claude"</option>
+                            <option value="codex">"codex"</option>
+                            <option value="copilot">"copilot"</option>
+                            <option value="cursor">"cursor"</option>
+                            <option value="grok">"grok"</option>
+                            <option value="junie">"junie"</option>
+                            <option value="kimi">"kimi"</option>
+                        </select></label>
+                        <label><span>"Agent"</span><select id="usage-agent" name="agent">
+                            <option value="">"all"</option>
+                            <option value="agy">"agy"</option>
+                            <option value="claude">"claude"</option>
+                            <option value="codex">"codex"</option>
+                            <option value="copilot">"copilot"</option>
+                            <option value="cursor">"cursor"</option>
+                            <option value="grok">"grok"</option>
+                            <option value="junie">"junie"</option>
+                            <option value="kimi">"kimi"</option>
+                        </select></label>
+                        <label><span>"Model"</span><select id="usage-model" name="model">
+                            <option value="">"all"</option>
+                        </select></label>
                         <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
                     </form>
                 </header>
@@ -956,7 +978,7 @@ pub fn UsagePage() -> impl IntoView {
                         <span id="quota-status">"local monitors"</span>
                     </div>
                     <div id="quota-agents" class="quota-agents"></div>
-                    <p class="control-plane-meta">"agy-monitor and kimi-monitor. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
+                    <p class="control-plane-meta">"Provider-neutral local quota for all 8 native providers. Prices are api-equiv, not a bill. A missing file stays quiet."</p>
                     <script inner_html=quota_dashboard_script()></script>
                 </section>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
@@ -1186,6 +1208,35 @@ fn usage_dashboard_script() -> &'static str {
   root.querySelectorAll('[data-usage-dim]').forEach((button) => {
     button.addEventListener('click', () => showDimension(button.getAttribute('data-usage-dim')));
   });
+  const populateModelPicker = (models) => {
+    const select = byId('usage-model');
+    if (!select) return;
+    const current = params.get('model') || select.value || '';
+    const seen = new Set();
+    select.replaceChildren();
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'all';
+    select.appendChild(defaultOpt);
+    for (const item of models || []) {
+      const name = item.name;
+      if (name && name !== 'unknown' && !seen.has(name)) {
+        seen.add(name);
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        if (current === name) opt.selected = true;
+        select.appendChild(opt);
+      }
+    }
+    if (current && !seen.has(current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = current;
+      opt.selected = true;
+      select.appendChild(opt);
+    }
+  };
   const render = (report) => {
     const totals = report.totals || {};
     set('usage-total-runs', number.format(totals.runs || 0));
@@ -1197,6 +1248,7 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
+    populateModelPicker(report.dimensions && report.dimensions.models);
     body.replaceChildren();
     const runs = report.runs || [];
     for (const run of runs) {
