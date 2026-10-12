@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -81,6 +83,28 @@ class DoctorReport:
         return result
 
 
+def _safe_float(val: Any) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return (
+            float(val)
+            if not isinstance(val, float)
+            or (not math.isnan(val) and not math.isinf(val))
+            else None
+        )
+    if isinstance(val, str):
+        val = val.strip()
+        if not val:
+            return None
+        try:
+            res = float(val)
+            return res if not math.isnan(res) and not math.isinf(res) else None
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def _parse_timestamp(val: Any) -> float | None:
     if val is None:
         return None
@@ -125,15 +149,31 @@ def diagnose_quotas(
     server_url: str | None = None,
     home: Path | None = None,
 ) -> tuple[tuple[DoctorError, ...], tuple[DoctorWarning, ...], dict[str, Any] | None]:
-    needed_agents: dict[str, str] = {}
+    needed_targets: dict[str, dict[str, Any]] = {}
     for cut in dispatch.cuts:
         agent = cut.agent.strip().lower() if cut.agent else ""
-        if agent and agent not in needed_agents:
-            pool = PROVIDER_POOLS.get(agent, agent)
-            needed_agents[agent] = pool
+        if not agent:
+            continue
+        model = cut.model.strip() if cut.model else ""
+        pool = PROVIDER_POOLS.get(agent, agent)
+        if agent not in needed_targets:
+            needed_targets[agent] = {
+                "agent": agent,
+                "pool": pool,
+                "models": set(),
+                "cut_ids": [],
+            }
+        if model:
+            needed_targets[agent]["models"].add(model)
+        needed_targets[agent]["cut_ids"].append(cut.id)
 
-    if not needed_agents:
+    if not needed_targets:
         return (), (), None
+
+    if not server_url:
+        server_url = os.environ.get("VIBECRAFTED_SERVER_URL") or os.environ.get(
+            "VC_SERVER_URL"
+        )
 
     server_agents: dict[str, dict[str, Any]] = {}
     if server_url:
@@ -150,8 +190,14 @@ def diagnose_quotas(
                     if resp.status == 200:
                         payload = json.loads(resp.read().decode("utf-8"))
                         for item in payload.get("agents", []):
-                            if isinstance(item, dict) and "agent" in item:
-                                server_agents[str(item["agent"]).lower()] = item
+                            if isinstance(item, dict):
+                                agent_id = (
+                                    str(item.get("agent") or item.get("id") or "")
+                                    .lower()
+                                    .strip()
+                                )
+                                if agent_id:
+                                    server_agents[agent_id] = item
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
                 server_agents.clear()
 
@@ -161,34 +207,43 @@ def diagnose_quotas(
 
     now = time.time()
 
-    for agent, pool in needed_agents.items():
+    for agent, target_info in needed_targets.items():
+        pool = target_info["pool"]
+        cut_models = target_info["models"]
         if agent in server_agents:
             info = server_agents[agent]
             status = str(info.get("status") or "ok").lower()
-            fraction = float(info.get("fraction") or 0.0)
+            fraction = _safe_float(info.get("fraction"))
             stale = bool(info.get("stale", False))
-            age_s = float(info.get("age_s") or 0.0)
+            age_s = _safe_float(info.get("age_s")) or 0.0
+            effective_pool = str(info.get("pool") or pool)
+            account = info.get("account")
+            effective_model = (
+                next(iter(cut_models)) if cut_models else info.get("model")
+            )
 
             if status == "blocked":
                 if stale:
                     warnings.append(
                         DoctorWarning(
-                            f"quota.{pool}",
+                            f"quota.{effective_pool}",
                             f"quota snapshot for agent '{agent}' is stale ({int(age_s)}s old) and reported exhaustion; treating as unconfirmed warning",
                         )
                     )
                 elif ignore_warnings:
                     warnings.append(
                         DoctorWarning(
-                            f"quota.{pool}",
-                            f"quota confirmed exhausted for agent '{agent}' (pool '{pool}') [overridden via --ignore-usage-quota-warnings]",
+                            f"quota.{effective_pool}",
+                            f"quota confirmed exhausted for agent '{agent}' (pool '{effective_pool}') [overridden via --ignore-usage-quota-warnings]",
                         )
                     )
                     overrides.append(
                         {
                             "agent": agent,
-                            "pool": pool,
-                            "fraction": fraction,
+                            "pool": effective_pool,
+                            "model": effective_model,
+                            "account": account,
+                            "fraction": fraction or 1.0,
                             "age_s": age_s,
                             "reason": "confirmed_exhausted",
                         }
@@ -196,22 +251,22 @@ def diagnose_quotas(
                 else:
                     errors.append(
                         DoctorError(
-                            f"quota.{pool}",
-                            f"quota confirmed exhausted for agent '{agent}' (pool '{pool}')",
+                            f"quota.{effective_pool}",
+                            f"quota confirmed exhausted for agent '{agent}' (pool '{effective_pool}')",
                         )
                     )
             elif status == "warn":
                 warnings.append(
                     DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota warning for agent '{agent}': {info.get('detail') or 'high utilization'}",
+                        f"quota.{effective_pool}",
+                        f"quota warning for agent '{agent}': {info.get('detail') or info.get('headline') or 'high utilization'}",
                     )
                 )
-            elif status == "unknown":
+            elif status in ("unknown", "absent"):
                 warnings.append(
                     DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota for agent '{agent}' is unmeasured",
+                        f"quota.{effective_pool}",
+                        f"quota for agent '{agent}' is {status} ({info.get('detail') or info.get('headline') or 'unmeasured'})",
                     )
                 )
             continue
@@ -239,6 +294,12 @@ def diagnose_quotas(
                     break
 
         if not found_file:
+            warnings.append(
+                DoctorWarning(
+                    f"quota.{pool}",
+                    f"quota for agent '{agent}' is unmeasured (no quota observation available)",
+                )
+            )
             continue
 
         if parsed_data is None:
@@ -290,10 +351,10 @@ def diagnose_quotas(
                 if isinstance(limits.get("monthly"), dict)
                 else None
             )
-            fracs = [float(f) for f in (f5, fm) if f is not None]
+            fracs = [f for f in (_safe_float(f5), _safe_float(fm)) if f is not None]
             fraction = max(fracs) if fracs else None
             if fraction is None and payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
+                fraction = _safe_float(payload["fraction"])
             status_str = str(payload.get("status") or "")
             is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
                 "blocked",
@@ -305,26 +366,30 @@ def diagnose_quotas(
                 payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
             )
             if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
+                fraction = _safe_float(quota_obj["fraction"])
             elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
+                fraction = _safe_float(payload["fraction"])
             elif payload.get("utilization") is not None:
-                fraction = float(payload["utilization"])
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
+                fraction = _safe_float(payload["utilization"])
+            status_str = str(
+                quota_obj.get("status") or payload.get("status") or ""
+            ).upper()
             is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
-                "blocked",
-                "exhausted",
+                "BLOCKED",
+                "EXHAUSTED",
                 "RESOURCE_EXHAUSTED",
             }
         else:
             quota_obj = (
                 payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
             )
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
+            status_str = str(
+                quota_obj.get("status") or payload.get("status") or ""
+            ).lower()
             if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
+                fraction = _safe_float(quota_obj["fraction"])
             elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
+                fraction = _safe_float(payload["fraction"])
 
             if status_str in {"unavailable", "empty"} or fraction is None:
                 is_unmeasured = True
@@ -343,6 +408,9 @@ def diagnose_quotas(
                 )
             )
             continue
+
+        effective_model = next(iter(cut_models)) if cut_models else payload.get("model")
+        account = payload.get("account")
 
         if is_exhausted:
             if stale:
@@ -363,6 +431,8 @@ def diagnose_quotas(
                     {
                         "agent": agent,
                         "pool": pool,
+                        "model": effective_model,
+                        "account": account,
                         "fraction": fraction or 1.0,
                         "age_s": age_s,
                         "reason": "confirmed_exhausted",
@@ -385,6 +455,7 @@ def diagnose_quotas(
 
     receipt = (
         {
+            "schema": "vibecrafted.quota-override-receipt.v1",
             "overridden_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "flag": "--ignore-usage-quota-warnings",
             "overrides": overrides,
@@ -419,6 +490,10 @@ def diagnose_file(
     home: Path | None = None,
 ) -> DoctorReport:
     """Validate a dispatch TOML file on disk; an unreadable file is reported as an error."""
+    if server_url is None:
+        server_url = os.environ.get("VIBECRAFTED_SERVER_URL") or os.environ.get(
+            "VC_SERVER_URL"
+        )
     source = Path(path).expanduser()
     try:
         text = source.read_text(encoding="utf-8")
@@ -663,6 +738,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=False,
         help="bypass quota exhaustion errors and record override receipt",
     )
+    parser.add_argument(
+        "--server-url",
+        default=os.environ.get("VIBECRAFTED_SERVER_URL")
+        or os.environ.get("VC_SERVER_URL"),
+        help="central vc-server URL for quota observations",
+    )
     args = parser.parse_args(argv)
 
     report = diagnose_file(
@@ -670,6 +751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=args.run_id,
         check_quotas=args.check_quotas or args.ignore_usage_quota_warnings,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=args.server_url,
     )
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))

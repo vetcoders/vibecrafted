@@ -468,3 +468,58 @@ def test_cli_still_accepts_a_plan_file_named_like_a_verb(tmp_path: Path) -> None
     # An existing file wins over the verb heuristic: the doctor path reports
     # its schema errors (exit 1), never the unknown-subcommand refusal (2).
     assert dispatch_cli_main([str(plan), "--doctor"]) == 1
+
+
+def test_cli_refuses_when_quota_override_receipt_fails_to_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        f"""schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "{repo}"
+[[cuts]]
+id = "c1"
+agent = "kimi"
+workflow = "implement"
+prompt = "run kimi cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ exit_code = 0 }}
+""",
+        encoding="utf-8",
+    )
+
+    import vibecrafted_core.dispatch.cli as cli_mod
+    from vibecrafted_core.dispatch.doctor import DoctorReport
+    from vibecrafted_core.dispatch.schema import parse_dispatch
+
+    parsed = parse_dispatch(plan.read_text(encoding="utf-8"))
+    mock_report = DoctorReport(
+        ok=True,
+        errors=(),
+        warnings=(),
+        dispatch=parsed,
+        quota_override_receipt={
+            "flag": "--ignore-usage-quota-warnings",
+            "overrides": [],
+        },
+    )
+    monkeypatch.setattr(cli_mod, "diagnose_file", lambda *args, **kwargs: mock_report)
+    monkeypatch.setattr(cli_mod, "_verify_baseline", lambda report, **kwargs: report)
+
+    orig_write_text = Path.write_text
+
+    def failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "quota-override-receipt.json":
+            raise OSError("disk full simulated")
+        return orig_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    code = cli_mod.main([str(plan), "--ignore-usage-quota-warnings"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "cannot persist quota override receipt" in err

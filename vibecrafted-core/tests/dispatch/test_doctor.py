@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import Self
 
 import pytest
 from vibecrafted_core.dispatch.doctor import diagnose_file, diagnose_runtime, main
@@ -487,3 +488,177 @@ prompt = "run kimi cut"
     )
     assert report.ok is False
     assert any("meta.repo" in err.path for err in report.errors)
+
+
+def test_diagnose_quotas_needed_codex_with_no_observation_returns_unmeasured_warning(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "codex"
+workflow = "implement"
+prompt = "run codex cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    report = diagnose_file(plan, check_quotas=True, home=home)
+    assert report.ok is True
+    assert not report.errors
+    assert any(
+        "codex" in w.message and "unmeasured" in w.message for w in report.warnings
+    ), report.warnings
+
+
+def test_diagnose_quotas_fraction_invalid_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    kimi_telemetry = home / "telemetry" / "kimi"
+    kimi_telemetry.mkdir(parents=True)
+    (kimi_telemetry / "quota.json").write_text(
+        json.dumps(
+            {
+                "agent": "kimi",
+                "status": "ok",
+                "limits": {"five_hour": {"fraction": "invalid"}},
+                "updated_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "kimi"
+workflow = "implement"
+prompt = "run kimi cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    # Must NOT raise ValueError on fraction='invalid'
+    report = diagnose_file(plan, check_quotas=True, home=home)
+    assert report.ok is True
+    assert not report.errors
+
+
+def test_diagnose_quotas_server_probe_with_id_serialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_payload = {
+        "schema": "vibecrafted.quota-dashboard.v1",
+        "agents": [
+            {
+                "id": "codex",
+                "status": "blocked",
+                "headline": "EXHAUSTED",
+                "detail": "exhausted · 100%",
+                "fraction": 1.0,
+                "stale": False,
+                "age_s": 10.0,
+                "pool": "openai",
+            }
+        ],
+    }
+
+    class MockResponse:
+        def __init__(self, data: dict):
+            self.data = json.dumps(data).encode("utf-8")
+            self.status = 200
+
+        def read(self) -> bytes:
+            return self.data
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, timeout=1.0: MockResponse(server_payload),
+    )
+
+    plan = tmp_path / "plan.dispatch.toml"
+    plan.write_text(
+        """schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "/tmp/repo"
+[[cuts]]
+id = "c1"
+agent = "codex"
+workflow = "implement"
+prompt = "run codex cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { exit_code = 0 }
+""",
+        encoding="utf-8",
+    )
+
+    # With server returning blocked codex (keyed by "id"), doctor must block
+    report = diagnose_file(
+        plan,
+        check_quotas=True,
+        server_url="http://127.0.0.1:4040",
+    )
+    assert report.ok is False
+    assert any("quota.openai" in err.path for err in report.errors)
+
+    # With ignore_usage_quota_warnings, doctor overrides and records receipt
+    report_override = diagnose_file(
+        plan,
+        check_quotas=True,
+        ignore_usage_quota_warnings=True,
+        server_url="http://127.0.0.1:4040",
+    )
+    assert report_override.ok is True
+    assert report_override.quota_override_receipt is not None
+    assert report_override.quota_override_receipt["overrides"][0]["agent"] == "codex"
+    assert report_override.quota_override_receipt["overrides"][0]["pool"] == "openai"
+
+
+def test_doctor_main_accepts_server_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_server_url: list[str | None] = []
+
+    def mock_diagnose_file(path: str | Path, **kwargs: object) -> object:
+        captured_server_url.append(kwargs.get("server_url"))  # type: ignore[arg-type]
+        from vibecrafted_core.dispatch.doctor import DoctorReport
+
+        return DoctorReport(ok=True, errors=())
+
+    import vibecrafted_core.dispatch.doctor as doctor_mod
+
+    monkeypatch.setattr(doctor_mod, "diagnose_file", mock_diagnose_file)
+
+    code = doctor_mod.main(
+        [str(tmp_path / "plan.dispatch.toml"), "--server-url", "http://127.0.0.1:4040"]
+    )
+    assert code == 0
+    assert captured_server_url == ["http://127.0.0.1:4040"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -132,6 +133,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="bypass confirmed quota exhaustion admission gate; record deliberate override receipt",
     )
+    parser.add_argument(
+        "--server-url",
+        default=os.environ.get("VIBECRAFTED_SERVER_URL")
+        or os.environ.get("VC_SERVER_URL"),
+        help="central vc-server URL for quota observations",
+    )
     return parser
 
 
@@ -170,6 +177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source,
         check_quotas=True,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=args.server_url,
     )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
@@ -219,8 +227,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            print(
+                f"dispatch admission failed: cannot persist quota override receipt: {exc}",
+                file=sys.stderr,
+            )
+            return 1
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung
