@@ -946,14 +946,14 @@ pub fn UsagePage() -> impl IntoView {
                         </select></label>
                         <label><span>"Provider"</span><select id="usage-provider" name="provider">
                             <option value="">"all"</option>
-                            <option value="agy">"agy"</option>
-                            <option value="claude">"claude"</option>
-                            <option value="codex">"codex"</option>
-                            <option value="copilot">"copilot"</option>
-                            <option value="cursor">"cursor"</option>
-                            <option value="grok">"grok"</option>
-                            <option value="junie">"junie"</option>
-                            <option value="kimi">"kimi"</option>
+                            <option value="google">"google"</option>
+                            <option value="anthropic">"anthropic"</option>
+                            <option value="openai">"openai"</option>
+                            <option value="github">"github"</option>
+                            <option value="anysphere">"anysphere"</option>
+                            <option value="xai">"xai"</option>
+                            <option value="jetbrains">"jetbrains"</option>
+                            <option value="moonshot">"moonshot"</option>
                         </select></label>
                         <label><span>"Agent"</span><select id="usage-agent" name="agent">
                             <option value="">"all"</option>
@@ -1169,7 +1169,13 @@ fn usage_dashboard_script() -> &'static str {
   const params = new URLSearchParams(location.search);
   for (const key of ['window', 'provider', 'agent', 'model']) {
     const field = byId('usage-' + key);
-    if (field && params.has(key)) field.value = params.get(key);
+    if (field && params.has(key)) {
+      const value = params.get(key);
+      if (![...field.options].some((o) => o.value === value)) {
+        const option = document.createElement('option'); option.value = value; option.textContent = value; field.appendChild(option);
+      }
+      field.value = value;
+    }
   }
   const unknown = (value) => value && typeof value === 'object' && value.value === 'unknown';
   const label = (value) => unknown(value) || value === null || value === '' || value === undefined ? 'unknown' : String(value);
@@ -1239,24 +1245,32 @@ fn usage_dashboard_script() -> &'static str {
   // A picker lists the names the API itself reports (unknown included) plus
   // the seeded options; the current selection survives even when the window
   // has no row for it, so a filter always round-trips.
-  const populatePicker = (id, items) => {
-    const select = byId(id);
+  const populatePicker = (key, models) => {
+    const select = byId('usage-' + key);
     if (!select) return;
-    const key = id.replace('usage-', '');
-    const current = params.get(key) || select.value || '';
-    const names = new Set(Array.from(select.options).map((option) => option.value).filter(Boolean));
-    for (const item of items || []) if (item && item.name) names.add(item.name);
-    if (current) names.add(current);
+    const current = select.value || params.get(key) || '';
+    const seen = new Set();
     select.replaceChildren();
-    const all = document.createElement('option');
-    all.value = '';
-    all.textContent = 'all';
-    select.appendChild(all);
-    for (const name of Array.from(names).sort()) {
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'all';
+    select.appendChild(defaultOpt);
+    for (const item of models || []) {
+      const name = item.name;
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        if (current === name) opt.selected = true;
+        select.appendChild(opt);
+      }
+    }
+    if (current && !seen.has(current)) {
       const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      if (current === name) opt.selected = true;
+      opt.value = current;
+      opt.textContent = current;
+      opt.selected = true;
       select.appendChild(opt);
     }
   };
@@ -1271,20 +1285,26 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-providers', report.dimensions && report.dimensions.providers);
     renderDimensions('usage-agents', report.dimensions && report.dimensions.agents);
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
-    populatePicker('usage-provider', report.dimensions && report.dimensions.providers);
-    populatePicker('usage-agent', report.dimensions && report.dimensions.agents);
-    populatePicker('usage-model', report.dimensions && report.dimensions.models);
+    const pickers = report.pickers || report.dimensions || {};
+    const providerNames = ['google','anthropic','openai','github','anysphere','xai','jetbrains','moonshot'];
+    const agentNames = ['agy','claude','codex','copilot','cursor','grok','junie','kimi'];
+    populatePicker('provider', [...providerNames.map((name) => ({name})), ...(pickers.providers || [])]);
+    populatePicker('agent', [...agentNames.map((name) => ({name})), ...(pickers.agents || [])]);
+    populatePicker('model', pickers.models);
     renderLocalSources(report.local_sources);
     body.replaceChildren();
     const runs = report.runs || [];
     for (const run of runs) {
       const tr = document.createElement('tr');
-      tr.setAttribute('data-run-id', run.run_id || '');
-      tr.setAttribute('data-href', '/run/' + encodeURIComponent(run.run_id || ''));
-      tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(run.run_id || '') + '/transcript');
+      const inspectId = (run.vc_run_ids || [])[0] || (run.origin === 'local' ? '' : run.run_id);
+      if (inspectId) {
+        tr.setAttribute('data-run-id', inspectId);
+        tr.setAttribute('data-href', '/run/' + encodeURIComponent(inspectId));
+        tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(inspectId) + '/transcript');
+      }
       tr.setAttribute('data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
       const runCell = document.createElement('td');
-      const link = document.createElement('a'); link.href = '/run/' + encodeURIComponent(run.run_id); link.textContent = run.run_id; link.className = 'control-run-open';
+      const link = document.createElement(inspectId ? 'a' : 'span'); if (inspectId) link.href = '/run/' + encodeURIComponent(inspectId); link.textContent = run.run_id; link.className = 'control-run-open';
       const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
       const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : '');
       const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
