@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -998,6 +1001,260 @@ def test_marbles_runtime_supervises_loops(monkeypatch, tmp_path: Path) -> None:
     assert "intentionally blind to prior marbles runs" in l2_transcript
     assert "Previous loop report" not in l2_transcript
     assert "marbles-L1.md" not in l2_transcript
+
+
+def _fake_kimi(bin_dir: Path, *, outcome: str = "completed") -> None:
+    """Consume only Kimi's argv prompt and keep a per-child execution receipt."""
+    path = bin_dir / "kimi"
+    path.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            f"""\
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            import yaml
+
+            argv = sys.argv[1:]
+            prompt = argv[argv.index('-p') + 1]
+            prompt_path = Path(os.environ['VIBECRAFTED_PROMPT_PATH'])
+            assert prompt == prompt_path.read_text(encoding='utf-8')
+            report = Path(os.environ['VIBECRAFTED_REPORT_PATH'])
+            run_id = os.environ['VIBECRAFTED_RUN_ID']
+            receipt = {{'argv': argv, 'prompt': prompt, 'cwd': os.getcwd(),
+                       'run_id': run_id, 'report': str(report)}}
+            report.with_suffix('.capture.json').write_text(json.dumps(receipt))
+            if {outcome!r} != 'missing-report':
+                _, frontmatter, body = report.read_text().split('---', 2)
+                header = yaml.safe_load(frontmatter)
+                header.update(status={outcome!r}, finalized=True,
+                              claim='fake Kimi round consumed its complete prompt')
+                report.write_text('---\\n' + yaml.safe_dump(header) + '---\\n' + body)
+            print('[12:00:00] model: fixture-kimi-model')
+            print('[12:00:00] session: ' + run_id + '-native')
+            print('fake Kimi round settled', flush=True)
+            sys.exit(7 if {outcome!r} == 'exit-failure' else 0)
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("model", ["", "fixture-kimi-model"])
+def test_kimi_marbles_consumes_materialized_prompt_in_two_settled_rounds(
+    monkeypatch, tmp_path: Path, model: str
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "marb-kimi")
+    _fake_kimi(tmp_path / "bin")
+    monkeypatch.setenv("VIBECRAFTED_EFFORT_REQUESTED", "high")
+    root = tmp_path / "assigned tree"
+    root.mkdir()
+    prompt = "Full plan: żółw\n'quoted' $HOME `literal`\n" + "tail-proof " * 5000
+
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "kimi",
+            "--root",
+            str(root),
+            "--prompt",
+            prompt,
+            "--count",
+            "2",
+            "--depth",
+            "4",
+            *(["--model", model] if model else []),
+        ]
+    )
+
+    assert rc == 0
+    parent = json.loads((home / "parent.meta.json").read_text())
+    assert parent["status"] == "completed"
+    assert len(parent["children"]) == 2
+    identities = set()
+    reports = set()
+    for index, child in enumerate(parent["children"], 1):
+        report = Path(child["report"])
+        captured = json.loads(report.with_suffix(".capture.json").read_text())
+        materialized = report.with_suffix(".prompt.md").read_text()
+        assert captured["prompt"] == materialized
+        assert prompt in materialized
+        assert f"Marbles loop: L{index}/2. Depth target: 4." in materialized
+        assert (
+            "You are running as a supervised Vibecrafted marbles worker."
+            in materialized
+        )
+        assert "intentionally blind to prior marbles runs" in materialized
+        assert Path(captured["cwd"]).resolve() == root.resolve()
+        argv = captured["argv"]
+        assert argv[argv.index("-p") + 1] == materialized
+        assert argv[argv.index("--output-format") + 1] == "stream-json"
+        assert not {"--auto", "--yolo", "--plan", "--effort"}.intersection(argv)
+        assert argv.count("--model") == bool(model)
+        if model:
+            assert argv[argv.index("--model") + 1] == model
+        meta = json.loads(report.with_suffix(".meta.json").read_text())
+        assert meta["effort_requested"] == "high"
+        assert meta["effort_override_skipped"] is True
+        assert meta["effort_override_skip_reason"] == "unsupported_agent_effort_flag"
+        assert child["model_requested"] == model
+        assert child["run_id"] == captured["run_id"] == f"marb-kimi-marbles-L{index}"
+        assert child["exit_code"] == 0
+        assert child["artifact_ok"] is True
+        assert child["completed_at"]
+        assert "fake Kimi round settled" in Path(child["transcript"]).read_text()
+        assert (
+            workflow_runtime.parse_report_path(report).fields["run_id"]
+            == child["run_id"]
+        )
+        identities.add(child["run_id"])
+        reports.add(report)
+    assert len(identities) == len(reports) == 2
+
+
+@pytest.mark.parametrize("outcome", ["missing-report", "exit-failure", "blocked"])
+def test_kimi_marbles_requires_report_and_terminal_success(
+    monkeypatch, tmp_path: Path, outcome: str
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "marb-kimi-failure")
+    _fake_kimi(tmp_path / "bin", outcome=outcome)
+    rc = workflow_runtime.main(
+        [
+            "marbles",
+            "--agent",
+            "kimi",
+            "--root",
+            str(tmp_path),
+            "--prompt",
+            "settle honestly",
+            "--count",
+            "2",
+        ]
+    )
+    assert rc == 1
+    parent = json.loads((home / "parent.meta.json").read_text())
+    assert len(parent["children"]) == 1
+    child = parent["children"][0]
+    assert child["completed_at"]
+    if outcome == "missing-report":
+        assert child["artifact_ok"] is False
+        assert child["artifact_errors"]
+    elif outcome == "exit-failure":
+        assert child["exit_code"] == 7
+    else:
+        assert (
+            workflow_runtime.parse_report_path(Path(child["report"])).fields["status"]
+            == "blocked"
+        )
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "kimi"])
+def test_supervised_child_preserves_explicit_command_override(
+    monkeypatch, tmp_path: Path, agent: str
+) -> None:
+    home = _runtime_env(monkeypatch, tmp_path, "override-test")
+    # This is a caller-owned command with stdin transport, even for Kimi.
+    _fake_agent(tmp_path / "bin", agent)
+    result = asyncio.run(
+        workflow_runtime._run_child(
+            kind="marbles",
+            label="override",
+            agent=agent,
+            root=str(tmp_path),
+            prompt="override prompt",
+            command=[agent, "--caller-owned"],
+        )
+    )
+    assert result.exit_code == 0
+    assert result.artifact_ok
+    assert Path(result.report).parent == home / "override-test-children"
+    assert Path(result.transcript).read_text().splitlines()[0] == "--caller-owned"
+
+
+def test_public_source_marbles_kimi_runs_both_rounds_in_selected_worktree(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from test_cli_execution_controls import _git_repo
+
+    _runtime_env(monkeypatch, tmp_path, "public-kimi")
+    _fake_kimi(tmp_path / "bin")
+    candidate = tmp_path / "candidate"
+    baseline = _git_repo(candidate)
+    plan = tmp_path / "common-plan.md"
+    plan.write_text("Preserve this complete common plan: żółw\n", encoding="utf-8")
+    source_root = Path(__file__).resolve().parents[2]
+    # The source console entrypoint uses this checkout, not the selected installed
+    # generation. Its dispatcher and supervised parent inherit the same source.
+    launcher = Path(sys.executable).parent / "vibecrafted"
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VIBECRAFTED_", "VC_FRAME", "ZELLIJ"))
+        and key not in {"PYTHONPATH", "PYTHONHOME"}
+    }
+    environment.update(
+        VIBECRAFTED_HOME=str(tmp_path / "public-home"),
+        VIBECRAFTED_ROOT=str(source_root),
+        VIBECRAFTED_CORE_DIR=str(source_root / "vibecrafted-core"),
+        VIBECRAFTED_PYTHON=sys.executable,
+        PYTHONPATH=str(source_root / "vibecrafted-core"),
+        HOME=str(tmp_path / "host-home"),
+        XDG_CONFIG_HOME=str(tmp_path / "xdg"),
+    )
+    Path(environment["HOME"]).mkdir()
+    result = subprocess.run(
+        [
+            str(launcher),
+            "marbles",
+            "kimi",
+            "--runtime",
+            "headless",
+            "--repo",
+            str(candidate),
+            "--base",
+            baseline,
+            "--worktree",
+            "true",
+            "--count",
+            "2",
+            "--file",
+            str(plan),
+            "--json",
+            "--await",
+        ],
+        cwd=source_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt, completion = [json.loads(line) for line in result.stdout.splitlines()]
+    assert receipt["accepted"] is True
+    assert completion["completed"] is True
+    assert receipt["worktree_baseline_sha"] == baseline
+    assert Path(receipt["parent_root"]).resolve() == candidate.resolve()
+    assigned = Path(receipt["root"])
+    assert assigned.resolve() != candidate.resolve()
+    assert Path(environment["VIBECRAFTED_HOME"]).resolve() in assigned.resolve().parents
+    command = receipt["worker_command"]
+    assert command[:3] == [sys.executable, "-m", "vibecrafted_core.workflow_runtime"]
+    parent = json.loads(Path(receipt["meta"]).read_text())
+    assert len(parent["children"]) == 2
+    assert parent["exit_code"] == 0
+    for child in parent["children"]:
+        capture = json.loads(
+            Path(child["report"]).with_suffix(".capture.json").read_text()
+        )
+        assert Path(capture["cwd"]).resolve() == assigned.resolve()
+        assert plan.read_text() in capture["prompt"]
+        assert child["artifact_ok"] is True
+        assert child["exit_code"] == 0
+        assert child["completed_at"]
 
 
 def test_polarize_runtime_reuses_loop_with_polarize_identity(

@@ -596,6 +596,7 @@ async def _run_child(
     """
     from .workflow import (
         WorkflowLaunchSpec,
+        build_launch_command,
         launch_selection_receipt,
         select_plan_effort,
         select_plan_model,
@@ -616,21 +617,21 @@ async def _run_child(
         model_source = os.environ.get("VIBECRAFTED_MODEL_SOURCE") or model_source
     if os.environ.get("VIBECRAFTED_EFFORT_REQUESTED"):
         effort_source = os.environ.get("VIBECRAFTED_EFFORT_SOURCE") or effort_source
-    selection = launch_selection_receipt(
-        WorkflowLaunchSpec(
-            agent=agent,
-            mode=kind,
-            skill="workflow",
-            prompt=prompt,
-            file="",
-            runtime="headless",
-            root=root,
-            model=model,
-            model_source=model_source,
-            effort=effort,
-            effort_source=effort_source,
-        )
+    child_spec = WorkflowLaunchSpec(
+        agent=agent,
+        mode=kind,
+        # A child is a provider worker, not another supervised parent loop.
+        skill="workflow",
+        prompt=prompt,
+        file="",
+        runtime="headless",
+        root=root,
+        model=model,
+        model_source=model_source,
+        effort=effort,
+        effort_source=effort_source,
     )
+    selection = launch_selection_receipt(child_spec)
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
     report, transcript, meta, prompt_file = _child_artifact_paths(
@@ -643,15 +644,20 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = _with_effort_override(
-        agent,
-        _with_model_override(
+    if command is None and agent == "kimi":
+        # Kimi's -p consumes argv text. Reuse the canonical owner with the
+        # complete child contract already materialized, including loop instructions.
+        child_command = build_launch_command(child_spec, root, prompt_file=prompt_file)
+    else:
+        child_command = _with_effort_override(
             agent,
-            command if command is not None else _stdin_command(agent),
-            model,
-        ),
-        effort,
-    )
+            _with_model_override(
+                agent,
+                command if command is not None else _stdin_command(agent),
+                model,
+            ),
+            effort,
+        )
     child_env = _child_env(agent, report, transcript, meta, model)
     child_command = _resolve_agent_command(agent, child_command, child_env)
     _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
