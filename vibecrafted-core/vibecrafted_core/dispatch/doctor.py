@@ -23,7 +23,11 @@ from vibecrafted_core.repository_claims import (
 )
 from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.runtime_receipt import ArtifactIdentityError
-from vibecrafted_core.server_config import ServerConfigError, load_server_config
+from vibecrafted_core.server_config import (
+    ServerConfigError,
+    load_copilot_provider_config,
+    load_server_config,
+)
 
 from .model import Dispatch
 from .schema import doctor_dispatch
@@ -209,8 +213,19 @@ def diagnose_quotas(
     observations: list[dict[str, Any]] = []
     overrides: list[dict[str, Any]] = []
     selections: dict[tuple[str, str], list[str]] = {}
+    external_pools: set[str] = set()
     for cut in dispatch.cuts:
-        selections.setdefault((cut.agent, cut.model), []).append(cut.id)
+        model = cut.model
+        if cut.agent == "copilot":
+            try:
+                profile = load_copilot_provider_config()
+            except ServerConfigError as exc:
+                errors.append(DoctorError("selection.copilot.provider", str(exc)))
+                continue
+            if os.environ.get("COPILOT_PROVIDER_BASE_URL") or profile.configured:
+                model = model or os.environ.get("COPILOT_MODEL", "") or profile.model
+                external_pools.add(cut.agent)
+        selections.setdefault((cut.agent, model), []).append(cut.id)
     try:
         origin = server_url if server_url is not None else quota_server_url()
     except ServerConfigError as exc:
@@ -234,6 +249,13 @@ def diagnose_quotas(
                 )
             )
             items = []
+        if agent in external_pools:
+            warnings.append(
+                DoctorWarning(
+                    path,
+                    "quota unknown for external Copilot provider profile: no canonical account/pool mapping",
+                )
+            )
         if not items:
             warnings.append(
                 DoctorWarning(
@@ -251,6 +273,8 @@ def diagnose_quotas(
             if observation_sink is not None:
                 observation_sink.append(evidence)
             problem = _valid_observation(info, model)
+            if agent in external_pools:
+                problem = "external provider profile quota pool is unknown; native GitHub quota cannot admit or refuse this selection"
             if problem:
                 warnings.append(
                     DoctorWarning(path, f"quota unknown for '{agent}': {problem}")

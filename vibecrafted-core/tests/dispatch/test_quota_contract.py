@@ -287,3 +287,33 @@ def test_override_cannot_launch_after_source_drift(tmp_path, monkeypatch, capsys
         monkeypatch.setenv("VIBECRAFTED_SERVER_URL", url)
         assert cli.main([str(plan), "--ignore-usage-quota-warnings"]) == 1
     assert "source changed" in capsys.readouterr().out
+
+
+def test_effective_external_copilot_profile_does_not_inherit_github_pool(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config/vibecrafted/config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[agents.copilot.provider]\nbase_url="http://127.0.0.1:7777"\nmodel="external-model"\n'
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from vibecrafted_core.dispatch.schema import parse_dispatch
+
+    selected = parse_dispatch(PLAN.replace('agent = "codex"', 'agent = "copilot"'))
+    requests = []
+
+    def readings(url, agent, model):
+        requests.append((agent, model))
+        return [observation(id="copilot", pool="github")]
+
+    monkeypatch.setattr(
+        "vibecrafted_core.dispatch.doctor._quota_observations", readings
+    )
+    errors, warnings, receipt = diagnose_quotas(
+        selected, server_url="http://unused", ignore_warnings=True
+    )
+    assert not errors and any("pool is unknown" in w.message for w in warnings)
+    assert requests == [("copilot", "external-model")]
+    assert receipt["selections"][0]["model"] == "external-model"
+    assert receipt["overrides"] == []

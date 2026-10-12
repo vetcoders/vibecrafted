@@ -134,3 +134,9 @@ selection, dispatch identity and source digest. Failure to publish that
 receipt refuses admission. Schema, baseline and other admission gates remain
 active. Existing work is not stopped or automatically resumed, and providers
 or models are not automatically switched.
+
+External Copilot provider profiles reuse the canonical config/environment
+model selection. A native GitHub quota reading does not describe a BYOK
+provider account. Without a canonical mapping to that external account/pool,
+preflight reports unknown and retains the shared reading as diagnosis; it
+never uses an unrelated GitHub limit to refuse the task.
