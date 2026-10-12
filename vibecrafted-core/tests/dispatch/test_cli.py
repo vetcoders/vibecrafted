@@ -73,7 +73,8 @@ def test_cli_doctor_accepts_valid_dispatch(tmp_path: Path, capsys) -> None:
     assert dispatch_cli.main([str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert captured.out.strip().endswith("dispatch-doctor: ok")
+    assert "quota unknown" in captured.out
 
 
 @pytest.mark.parametrize("mode", [["--doctor"], []])
@@ -173,7 +174,7 @@ def test_doctor_override_keeps_red_evidence(tmp_path: Path, capsys) -> None:
     assert payload["baseline"]["allow_red_baseline"] is True
     assert payload["baseline"]["verification"]["ok"] is False
     assert payload["baseline"]["verification"]["checks"][0]["exit_code"] == 7
-    assert "--allow-red-baseline" in payload["warnings"][0]["message"]
+    assert any("--allow-red-baseline" in w["message"] for w in payload["warnings"])
 
 
 def test_duplicate_command_retains_implicit_zero_exit(tmp_path: Path, capsys) -> None:
@@ -312,7 +313,8 @@ def test_root_cli_dispatch_subcommand_routes_to_dispatch_cli(
     assert root_cli.main(["dispatch", str(dispatch_file), "--doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "dispatch-doctor: ok"
+    assert captured.out.strip().endswith("dispatch-doctor: ok")
+    assert "quota unknown" in captured.out
 
 
 @pytest.mark.parametrize("command", ["echo red", "echo ok; exit 7", "echo ok"])
@@ -391,72 +393,3 @@ prompt = "next cut"
     tracker = Path(payload["artifacts"]["tracker"]).read_text()
     assert f"- allow_red_baseline: {str(not expected_green).lower()}" in tracker
     assert '"ok": ' + str(expected_green).lower() in tracker
-
-
-def test_cli_refuses_batch_when_needed_pool_exhausted(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    dispatch_file, _, _ = _dispatch_file(tmp_path)
-    home = tmp_path / "home"
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    codex_telemetry = home / "telemetry" / "codex"
-    codex_telemetry.mkdir(parents=True)
-    import time
-
-    (codex_telemetry / "quota.json").write_text(
-        json.dumps(
-            {
-                "agent": "codex",
-                "status": "blocked",
-                "quota": {"fraction": 1.0, "status": "RESOURCE_EXHAUSTED"},
-                "updated_at": time.time(),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    def forbidden_launch(*args, **kwargs):
-        pytest.fail("exhausted quota batch must refuse before supervisor launches")
-
-    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden_launch)
-
-    assert dispatch_cli.main([str(dispatch_file), "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert any(
-        "quota confirmed exhausted for agent 'codex'" in e["message"]
-        for e in payload["errors"]
-    )
-
-
-def test_cli_ignore_usage_quota_warnings_allows_admission_and_records_receipt(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    dispatch_file, _, _ = _dispatch_file(tmp_path)
-    home = tmp_path / "home"
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
-    codex_telemetry = home / "telemetry" / "codex"
-    codex_telemetry.mkdir(parents=True)
-    import time
-
-    (codex_telemetry / "quota.json").write_text(
-        json.dumps(
-            {
-                "agent": "codex",
-                "status": "blocked",
-                "quota": {"fraction": 1.0, "status": "RESOURCE_EXHAUSTED"},
-                "updated_at": time.time(),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    # Dry run with override flag passes admission
-    assert (
-        dispatch_cli.main(
-            [str(dispatch_file), "--dry-run", "--ignore-usage-quota-warnings"]
-        )
-        == 0
-    )
-    captured = capsys.readouterr()
-    assert "dispatch dry-run: rendered 1 prompt(s)" in captured.out

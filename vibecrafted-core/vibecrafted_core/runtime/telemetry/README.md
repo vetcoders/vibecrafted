@@ -23,13 +23,13 @@ bucket twice. A day once observed is appended to
 last-wins per `(day, model)`; the file is not compacted. A rotated source
 stays in the scan sidecar, so a shared day does not shrink to the files still
 on disk. A session that only moved paths is not counted twice. `live_total`
-is the live store. `archived_total` is the archive. Cursor has no local token ledger: the engine reports `status:
-unavailable` and the reason `usage lives in Cursor cloud`. It does not invent
-zeros and it does not grow an archive. Agy transcripts are estimated tokens,
+is the live store. `archived_total` is the archive. The standalone Cursor archive remains unavailable. The central collector can
+read exact usage in local Cursor agent transcripts, while cloud-only activity
+remains unknown. Agy transcripts are estimated tokens,
 so `telemetry agy archive` is the same honest unavailable. A missing engine
 script is `status: absent` inside `telemetry once`. Gemini has no engine here.
 
-Both engines are **local-only**. They do not send usage to a Vibecrafted backend.
+The local usage parsers are **local-only**. They do not send usage to a Vibecrafted backend.
 Shadow prices are labeled `api-equiv` so they cannot be mistaken for a
 subscription charge.
 
@@ -63,9 +63,10 @@ that agent. Daemons keep the files fresh.
 
 ## Web
 
-`vc-server` `/usage` leads with the same files: two cards (Antigravity, Kimi)
-above Cost & usage. `GET /api/usage/quota`. Shadow prices stay `api-equiv`.
-A missing file is a quiet card, not an alarm.
+`vc-server` `/usage` gives all eight providers equal quota cards and
+Provider/Agent/Model pickers backed by `GET /api/usage`. The server owns
+central local collection. `GET /api/usage/quota` reads scoped provider
+observations; missing authority stays unknown and stale remains visible.
 
 ## LaunchAgents (optional)
 
@@ -74,5 +75,62 @@ Templates:
 - `com.vetcoders.telemetry.agy.plist.template`
 - `com.vetcoders.telemetry.kimi.plist.template`
 
-ProgramArguments exec `telemetry <agent> daemon`. Do not ship Google's or
-Moonshot's reverse-DNS.
+These legacy optional templates execute `telemetry <agent> daemon`. The
+central server collector does not launch them or depend on them for usage.
+Existing host service ownership and migration remain with the runtime owner.
+
+## Central local collection and quota admission
+
+`vc-server` owns one local collection task. It runs a bounded, disposable
+parser sweep every 60 seconds, calls the existing fleet/harness parsers, and
+publishes `telemetry/local-usage.json`. It does not start provider tasks,
+make network quota requests in this loop, or keep Python/provider monitor
+children alive. A failed sweep retains the previous projection, which ages
+to `stale` after 300 seconds. `GET /api/usage` exposes collection time,
+coverage, unknown measurements and local/VC origin.
+
+Local session identity is scoped by agent. Repeated imports are counted once.
+A local session that includes VC activity carries the matching `vc_run_ids`;
+its full observed session spend replaces those run slices. A session file
+alone does not establish completion or exit code. Day archive rows lack
+session attribution and are excluded from session totals to avoid adding
+VC spend twice; this limitation is explicit in the report.
+
+Provider, Agent and Model pickers use the same identifiers as API dimensions.
+They preserve unknown and currently unobserved selections. Quota checks run
+on explicit page entry/refresh and task preflight, without idle network polling.
+The shared quota endpoint accepts `agent`, `model`, `provider`, `account` and
+`pool`. It reads all eight source adapters equally. Native Kimi ratios and
+Agy quota signals remain supported as source formats, without requiring their
+monitors for local usage collection.
+
+A provider snapshot may publish a scoped observation (or `observations` array):
+
+```json
+{
+  "authoritative": true,
+  "status": "exhausted",
+  "source": "provider quota response",
+  "observed_at": "2026-10-12T20:00:00Z",
+  "account": "default",
+  "pool": "provider-shared-pool",
+  "model": null
+}
+```
+
+`model: null` means a provider-wide pool observation. A named model only
+covers that exact effective selection; a different account is not assumed
+to be active. A reading with no authoritative evidence or observation time
+is unknown. An old exhaustion reading is stale; 95% use is a warning, not
+confirmed exhaustion. Usage token totals never prove quota exhaustion.
+
+`vibecrafted dispatch <plan.toml> --doctor` and actual batch dispatch consume
+these shared observations using models already resolved by the canonical
+frontmatter/plan/config selection owner. Fresh confirmed exhaustion refuses
+the whole new batch before its supervisor starts. To explicitly bypass only
+quota admission, use `--ignore-usage-quota-warnings`. Diagnosis remains
+visible, and `quota-override-receipt.json` contains the exact observation,
+selection, dispatch identity and source digest. Failure to publish that
+receipt refuses admission. Schema, baseline and other admission gates remain
+active. Existing work is not stopped or automatically resumed, and providers
+or models are not automatically switched.

@@ -1553,3 +1553,255 @@ __all__ = [
     "run",
     "scan_file",
 ]
+
+
+def collect_local_usage(home: Path, *, user_home: Path | None = None) -> dict:
+    """Serialize central sweeps using the existing portable file lock owner."""
+    from vibecrafted_core import portable_lock
+
+    root = home / "telemetry"
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / "local-collection.lock"
+    if lock_path.is_symlink():
+        raise OSError("local collection lock is a symlink")
+    with lock_path.open("a+") as lock:
+        portable_lock.flock(
+            lock.fileno(), portable_lock.LOCK_EX | portable_lock.LOCK_NB
+        )
+        try:
+            return _collect_local_usage(home, user_home=user_home)
+        finally:
+            portable_lock.flock(lock.fileno(), portable_lock.LOCK_UN)
+
+
+def _collect_local_usage(home: Path, *, user_home: Path | None = None) -> dict:
+    """One local-only sweep for vc-server; reuse session parsers and sidecars.
+
+    This is a disposable parser invocation, not a monitor or a lifecycle owner.
+    No archive day bucket is converted into a synthetic successful session.
+    """
+    import hashlib
+
+    from vibecrafted_core.harness_usage import _rows, resolve_harness_usage
+
+    user_home = user_home or _home()
+    projection = {
+        "schema": "vibecrafted.local-usage.v1",
+        "generated_at": _now_iso(),
+        "owner": "vc-server",
+        "providers": {},
+        "records": [],
+    }
+    roots = {
+        **{a: user_home / f".{a}" for a in FLEET_AGENTS},
+        "agy": user_home / ".gemini",
+        "kimi": user_home / ".kimi-code",
+    }
+    if user_home == _home() and os.environ.get("CODEX_HOME"):
+        roots["codex"] = Path(os.environ["CODEX_HOME"])
+    for agent in (
+        "agy",
+        "claude",
+        "codex",
+        "copilot",
+        "cursor",
+        "grok",
+        "junie",
+        "kimi",
+    ):
+        quota_root = home / "telemetry" / agent
+        cache = _load_json(_cache_path(agent, quota_root))
+        records = []
+        if agent in {"claude", "codex", "copilot", "grok", "junie"}:
+            _live, _last, cache = collect(
+                agent, roots[agent], mode="sessions", cache=cache
+            )
+            _write_cache(agent, quota_root, cache)
+            # Keep attributable retired files in the existing sidecar, never
+            # daily aggregates whose VC overlap can no longer be determined.
+            by_id = {}
+            for entry in _file_cache(cache).values():
+                rec = entry.get("record") if isinstance(entry, dict) else None
+                if not isinstance(rec, dict):
+                    continue
+                normalized = entry.get("local_record")
+                rec = dict(normalized or rec)
+                rec["measurement_observed"] = bool(entry.get("days"))
+                models = {
+                    r.get("model")
+                    for r in entry.get("days", [])
+                    if r.get("model") not in {None, "unknown"}
+                }
+                if len(models) == 1:
+                    rec["model"] = next(iter(models))
+                elif len(models) > 1:
+                    rec["model"] = None
+                    rec["model_reason"] = (
+                        "session contains multiple models; total is not a per-model allocation"
+                    )
+                if normalized is None and agent in {"claude", "junie"}:
+                    measured = resolve_harness_usage(
+                        agent=agent,
+                        session_id=rec["id"],
+                        started_at="1970-01-01T00:00:00Z",
+                        completed_at=_now_iso(),
+                        home=user_home,
+                    )
+                    if measured is not None:
+                        t = measured.totals()
+                        rec["native"] = {
+                            "input_tokens": t["fresh_input"],
+                            "cached_input_tokens": t["cache_read"],
+                            "cache_write_input_tokens": t["cache_creation"],
+                            "output_tokens": t["output"],
+                        }
+                        rec["processed_total"] = sum(
+                            t[k]
+                            for k in (
+                                "fresh_input",
+                                "cache_read",
+                                "cache_creation",
+                                "output",
+                            )
+                        )
+                        rec["measurement_observed"] = True
+                        if len(measured.models) == 1:
+                            rec["model"] = next(iter(measured.models))
+
+                if agent == "grok":
+                    try:
+                        rec["id"] = (
+                            Path(rec["path"])
+                            .relative_to(roots[agent] / "sessions")
+                            .parts[0]
+                        )
+                    except (ValueError, IndexError):
+                        pass
+                if agent == "codex":
+                    first = next(_rows(Path(rec["path"])), {})
+                    identity = first.get("payload", {}).get("id")
+                    if first.get("type") == "session_meta" and isinstance(
+                        identity, str
+                    ):
+                        rec["id"] = identity
+                        entry["record"]["id"] = identity
+                entry["local_record"] = dict(rec)
+                previous = by_id.get(rec["id"])
+                if previous is None or rec.get("mtime", 0) > previous.get("mtime", 0):
+                    by_id[rec["id"]] = rec
+            records = list(by_id.values())
+            _write_cache(agent, quota_root, cache)
+        else:
+            patterns = {
+                "agy": [
+                    "antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl",
+                    "antigravity-ide/brain/*/.system_generated/logs/transcript.jsonl",
+                ],
+                "kimi": ["sessions/*/session_*/wire.jsonl"],
+                "cursor": [
+                    "projects/*/agent-transcripts/*/*.jsonl",
+                    "projects/*/agent-transcripts/*.jsonl",
+                ],
+            }[agent]
+            found = {
+                p
+                for pattern in patterns
+                for p in roots[agent].glob(pattern)
+                if p.is_file() and not p.is_symlink()
+            }
+            files = _file_cache(cache)
+            for path in sorted(found):
+                session = (
+                    path.parents[2].name
+                    if agent == "agy"
+                    else path.parent.name.removeprefix("session_")
+                    if agent == "kimi"
+                    else path.stem
+                )
+                signature = _stat_signature(path)
+                old = files.get(str(path), {})
+                if (
+                    old.get("collector_parser") == 1
+                    and (old.get("size"), old.get("mtime_ns")) == signature[:2]
+                ):
+                    rec = old["record"]
+                else:
+                    usage = resolve_harness_usage(
+                        agent=agent,
+                        session_id=session,
+                        started_at="1970-01-01T00:00:00Z",
+                        completed_at=_now_iso(),
+                        home=user_home,
+                    )
+                    totals = usage.totals() if usage else None
+                    model = (
+                        next(iter(usage.models))
+                        if usage and len(usage.models) == 1
+                        else None
+                    )
+                    rec = {
+                        "id": session,
+                        "path": str(path),
+                        "mtime": signature[2],
+                        "model": model,
+                        "measurement_observed": usage is not None,
+                        "processed_total": sum(
+                            totals[k]
+                            for k in (
+                                "fresh_input",
+                                "cache_read",
+                                "cache_creation",
+                                "output",
+                            )
+                        )
+                        if totals
+                        else None,
+                        "native": {
+                            "input_tokens": totals["fresh_input"],
+                            "cached_input_tokens": totals["cache_read"],
+                            "cache_write_input_tokens": totals["cache_creation"],
+                            "output_tokens": totals["output"],
+                        }
+                        if totals
+                        else {},
+                        "cache_semantics": "separate_buckets",
+                    }
+                    files[str(path)] = {
+                        "collector_parser": 1,
+                        "size": signature[0],
+                        "mtime_ns": signature[1],
+                        "record": rec,
+                    }
+                records.append(rec)
+            _write_cache(agent, quota_root, cache)
+            # Retain attributable sessions that were rotated away.
+            records.extend(
+                e["record"]
+                for key, e in files.items()
+                if Path(key) not in found
+                and isinstance(e, dict)
+                and isinstance(e.get("record"), dict)
+            )
+        coverage = {
+            "status": "observed" if records else "unknown",
+            "sessions": len(records),
+            "reason": "local records only; missing usage stays unknown"
+            if records
+            else "no readable local session store",
+        }
+        projection["providers"][agent] = coverage
+        for record in records:
+            record = dict(record)
+            record["agent"] = agent
+            record["cache_semantics"] = record.get(
+                "cache_semantics"
+            ) or cache_semantics(agent)
+            record["source"] = "local_session"
+            if not record.get("measurement_observed"):
+                record["processed_total"] = None
+            record["key"] = hashlib.sha256(
+                (agent + ":" + str(record["id"])).encode()
+            ).hexdigest()
+            projection["records"].append(record)
+    atomic_write_json(home / "telemetry" / "local-usage.json", projection)
+    return projection

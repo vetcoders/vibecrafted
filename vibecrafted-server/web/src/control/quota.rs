@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Extension, Query};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use control_core::ControlPlane;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,8 +22,6 @@ const STALE_SECS: u64 = 300;
 const NEAR_LIMIT: f64 = 0.85;
 const BLOCKED_LIMIT: f64 = 1.0;
 const MAX_BYTES: u64 = 256 * 1024;
-const AGY_ENV: &str = "VIBECRAFTED_AGY_QUOTA_JSON";
-const KIMI_ENV: &str = "VIBECRAFTED_KIMI_QUOTA_JSON";
 
 #[derive(Debug, Deserialize, Default)]
 pub struct QuotaQuery {
@@ -43,6 +42,13 @@ struct QuotaDashboard {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaAgent {
     pub id: &'static str,
+    pub provider: String,
+    pub observed_at: Option<String>,
+    pub authoritative: bool,
+    pub applies: bool,
+    pub fraction: Option<f64>,
+    pub covered_agents: Vec<String>,
+    pub default_account: bool,
     pub name: &'static str,
     pub present: bool,
     pub status: &'static str,
@@ -55,7 +61,6 @@ pub struct QuotaAgent {
     pub cost_usd: Option<f64>,
     pub bars: Vec<QuotaBar>,
     pub source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
@@ -72,74 +77,110 @@ pub struct QuotaBar {
     pub level: &'static str,
 }
 
-pub async fn quota(Query(query): Query<QuotaQuery>) -> Response {
-    let mut agents = vec![
-        read_agy(),
-        read_fleet_agent("claude", "Claude"),
-        read_fleet_agent("codex", "Codex"),
-        read_fleet_agent("copilot", "Copilot"),
-        read_fleet_agent("cursor", "Cursor"),
-        read_fleet_agent("grok", "Grok"),
-        read_fleet_agent("junie", "Junie"),
-        read_kimi(),
+pub async fn quota(
+    Extension(plane): Extension<ControlPlane>,
+    Query(query): Query<QuotaQuery>,
+) -> Response {
+    let inventory = [
+        ("agy", "Antigravity"),
+        ("claude", "Claude"),
+        ("codex", "Codex"),
+        ("copilot", "Copilot"),
+        ("cursor", "Cursor"),
+        ("grok", "Grok"),
+        ("junie", "Junie"),
+        ("kimi", "Kimi"),
     ];
-
-    if let Some(expected_agent) = query
+    let mut agents = Vec::new();
+    for (id, name) in inventory {
+        let env_name = format!("VIBECRAFTED_{}_QUOTA_JSON", id.to_ascii_uppercase());
+        let path = plane.home().join("telemetry").join(id).join("quota.json");
+        let path = if !path.exists() && id == "agy" {
+            default_quota_path(".gemini/agy-monitor/runtime/quota.json")
+        } else if !path.exists() && id == "kimi" {
+            default_quota_path(".kimi-code/runtime/quota.json")
+        } else {
+            path
+        };
+        let source = load_source(&env_name, &path, &path.to_string_lossy());
+        let parse = match id {
+            "agy" => parse_agy,
+            "kimi" => parse_kimi,
+            _ => parse_fleet,
+        };
+        if let Source::Json { label, value } = &source {
+            if let Some(observations) = value.get("observations").and_then(Value::as_array) {
+                for observation in observations {
+                    agents.push(project_source(
+                        id,
+                        name,
+                        Source::Json {
+                            label: label.clone(),
+                            value: observation.clone(),
+                        },
+                        parse,
+                    ));
+                }
+                if observations.is_empty() {
+                    agents.push(absent(id, name, label.clone(), default_pool_for(id)));
+                }
+                continue;
+            }
+        }
+        agents.push(project_source(id, name, source, parse));
+    }
+    if let Some(agent) = query
         .agent
         .as_deref()
         .filter(|s| !s.is_empty() && *s != "all")
     {
-        agents.retain(|a| a.id.eq_ignore_ascii_case(expected_agent));
+        // A provider-wide observation can cover another agent using the same
+        // pool. A model-specific reading cannot become a provider-wide ban.
+        let needed_pool = default_pool_for(agent);
+        let needed_id = inventory
+            .iter()
+            .find(|(id, _)| *id == agent)
+            .map(|(id, _)| *id);
+        agents.retain(|a| {
+            a.id == agent
+                || a.covered_agents.iter().any(|member| member == agent)
+                || (a.pool == needed_pool && a.model.is_none() && a.authoritative)
+        });
+        if let Some(id) = needed_id {
+            for a in &mut agents {
+                a.id = id;
+            }
+        }
     }
-    if let Some(expected_provider) = query
+    for a in &mut agents {
+        a.applies = a.applies
+            && query
+                .model
+                .as_deref()
+                .is_none_or(|m| a.model.as_deref().is_none_or(|scope| scope == m));
+        a.applies = a.applies
+            && query
+                .account
+                .as_deref()
+                .map(|account| a.account.as_deref() == Some(account))
+                .unwrap_or(a.default_account);
+        a.applies = a.applies
+            && query
+                .pool
+                .as_deref()
+                .is_none_or(|pool| a.pool.as_deref() == Some(pool));
+        if !a.applies && !matches!(a.status, "unknown" | "absent") {
+            a.status = "unknown";
+            a.detail = "observation does not cover effective model/account/pool".into();
+        }
+    }
+    if let Some(provider) = query
         .provider
         .as_deref()
         .filter(|s| !s.is_empty() && *s != "all")
     {
-        agents.retain(|a| {
-            a.pool
-                .as_deref()
-                .is_some_and(|p| p.eq_ignore_ascii_case(expected_provider))
-                || a.id.eq_ignore_ascii_case(expected_provider)
-                || a.name.eq_ignore_ascii_case(expected_provider)
-        });
+        agents.retain(|a| a.provider == provider || a.id == provider);
     }
-    if let Some(expected_pool) = query
-        .pool
-        .as_deref()
-        .filter(|s| !s.is_empty() && *s != "all")
-    {
-        agents.retain(|a| {
-            a.pool
-                .as_deref()
-                .is_some_and(|p| p.eq_ignore_ascii_case(expected_pool))
-                || a.id.eq_ignore_ascii_case(expected_pool)
-        });
-    }
-    if let Some(expected_model) = query
-        .model
-        .as_deref()
-        .filter(|s| !s.is_empty() && *s != "all")
-    {
-        agents.retain(|a| {
-            a.model.as_deref().is_some_and(|m| {
-                m.to_ascii_lowercase()
-                    .contains(&expected_model.to_ascii_lowercase())
-            })
-        });
-    }
-    if let Some(expected_account) = query
-        .account
-        .as_deref()
-        .filter(|s| !s.is_empty() && *s != "all")
-    {
-        agents.retain(|a| {
-            a.account
-                .as_deref()
-                .is_some_and(|acc| acc.eq_ignore_ascii_case(expected_account))
-        });
-    }
-
     let body = QuotaDashboard {
         schema: SCHEMA,
         generated_at: Utc::now().to_rfc3339(),
@@ -155,68 +196,23 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn read_agy() -> QuotaAgent {
-    let mut default_path = default_quota_path(".gemini/agy-monitor/runtime/quota.json");
-    if !default_path.exists() {
-        let alt = vibecrafted_telemetry_quota_path("agy");
-        if alt.exists() {
-            default_path = alt;
-        }
-    }
-    project(
-        "agy",
-        "Antigravity",
-        AGY_ENV,
-        default_path,
-        "~/.gemini/agy-monitor/runtime/quota.json",
-        parse_agy,
-    )
-}
-
-fn read_kimi() -> QuotaAgent {
-    let mut default_path = default_quota_path(".kimi-code/runtime/quota.json");
-    if !default_path.exists() {
-        let alt = vibecrafted_telemetry_quota_path("kimi");
-        if alt.exists() {
-            default_path = alt;
-        }
-    }
-    project(
-        "kimi",
-        "Kimi",
-        KIMI_ENV,
-        default_path,
-        "~/.kimi-code/runtime/quota.json",
-        parse_kimi,
-    )
-}
-
-fn read_fleet_agent(id: &'static str, name: &'static str) -> QuotaAgent {
-    let env_name = format!("VIBECRAFTED_{}_QUOTA_JSON", id.to_ascii_uppercase());
-    let default_path = vibecrafted_telemetry_quota_path(id);
-    let default_label = format!("~/.vibecrafted/telemetry/{id}/quota.json");
-    project(
-        id,
-        name,
-        &env_name,
-        default_path,
-        &default_label,
-        parse_fleet,
-    )
-}
-
-fn project(
+fn project_source(
     id: &'static str,
     name: &'static str,
-    env_name: &str,
-    default_path: PathBuf,
-    default_label: &str,
+    source: Source,
     parse: fn(&Value) -> QuotaFields,
 ) -> QuotaAgent {
-    match load_source(env_name, &default_path, default_label) {
+    match source {
         Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
         Source::Unreadable { label, error } => QuotaAgent {
             id,
+            provider: default_pool_for(id).unwrap_or_default(),
+            observed_at: None,
+            authoritative: false,
+            applies: false,
+            fraction: None,
+            covered_agents: vec![id.to_string()],
+            default_account: false,
             name,
             present: true,
             status: "unknown",
@@ -234,15 +230,63 @@ fn project(
             provenance: Some("unreadable".to_string()),
         },
         Source::Json { label, value } => {
-            let mut fields = parse(&value);
-            let age_s = json_ts(&value)
-                .or_else(|| {
-                    value
-                        .get("generated_at")
-                        .and_then(Value::as_str)
-                        .and_then(iso_to_ts)
-                })
-                .map(age_secs);
+            let mut fields = if value.get("authoritative").is_some() {
+                parse_scoped(&value)
+            } else {
+                parse(&value)
+            };
+            let reported_fraction = value
+                .get("fraction")
+                .or_else(|| value.pointer("/quota/fraction"));
+            if reported_fraction.is_some_and(|v| {
+                !v.is_null() && v.as_f64().is_none_or(|f| !f.is_finite() || f < 0.0)
+            }) || fields.bars.iter().any(|bar| bar.ratio.is_none())
+            {
+                fields.status = "unknown";
+                fields.detail = "malformed quota reading".into();
+            }
+            let observed_ts = value
+                .get("observed_at")
+                .and_then(Value::as_str)
+                .and_then(iso_to_ts)
+                .or_else(|| json_ts(&value));
+            let observed_at = observed_ts
+                .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+                .map(|t| t.to_rfc3339());
+            let age_s = observed_ts.map(age_secs);
+            let invalid_time = observed_ts.is_none_or(|t| t > Utc::now().timestamp() as u64 + 30);
+            let authoritative = !invalid_time
+                && (value
+                    .get("authoritative")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(
+                        fields.status == "blocked"
+                            || fields.status == "ok"
+                            || !fields.bars.is_empty(),
+                    ));
+            let applies = value
+                .get("applies")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let default_account = if value.get("authoritative").is_some() {
+                value
+                    .get("account")
+                    .and_then(Value::as_str)
+                    .is_some_and(|account| {
+                        !account.is_empty()
+                            && (account == "default" || value["default_account"] == true)
+                    })
+            } else {
+                matches!(id, "agy" | "kimi") || value["default_account"] == true
+            };
+            if invalid_time {
+                fields.status = "unknown";
+                fields.detail.push_str(" · observation time unknown");
+            }
+            let fraction = value
+                .get("fraction")
+                .and_then(Value::as_f64)
+                .or_else(|| fields.bars.iter().filter_map(|b| b.ratio).reduce(f64::max));
             let stale = age_s.is_some_and(|age| age > STALE_SECS);
             if stale {
                 if fields.status == "blocked" {
@@ -256,6 +300,23 @@ fn project(
             }
             QuotaAgent {
                 id,
+                provider: default_pool_for(id).unwrap_or_default(),
+                observed_at,
+                authoritative,
+                applies,
+                fraction,
+                default_account,
+                covered_agents: value
+                    .get("agents")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec![id.to_string()]),
                 name,
                 present: true,
                 status: fields.status,
@@ -267,7 +328,7 @@ fn project(
                 tokens: fields.tokens,
                 cost_usd: fields.cost_usd,
                 bars: fields.bars,
-                source: label,
+                source: text_field(&value, "source").unwrap_or(label),
                 account: fields.account,
                 pool: fields.pool.or_else(|| default_pool_for(id)),
                 provenance: fields.provenance,
@@ -356,11 +417,18 @@ fn absent(
 ) -> QuotaAgent {
     QuotaAgent {
         id,
+        provider: default_pool_for(id).unwrap_or_default(),
+        observed_at: None,
+        authoritative: false,
+        applies: false,
+        fraction: None,
+        covered_agents: vec![id.to_string()],
+        default_account: false,
         name,
         present: false,
         status: "absent",
         headline: "quiet".to_string(),
-        detail: "no quota.json — monitor not running".to_string(),
+        detail: "quota unknown: no authoritative provider observation".to_string(),
         stale: false,
         age_s: None,
         model: None,
@@ -371,6 +439,45 @@ fn absent(
         account: None,
         pool,
         provenance: Some("absent".to_string()),
+    }
+}
+
+fn parse_scoped(value: &Value) -> QuotaFields {
+    let fraction = value
+        .get("fraction")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite() && *f >= 0.0);
+    let malformed = value
+        .get("fraction")
+        .is_some_and(|v| !v.is_null() && fraction.is_none());
+    let status = if malformed || value["authoritative"] != true {
+        "unknown"
+    } else {
+        match value["status"].as_str() {
+            Some("blocked" | "exhausted" | "RESOURCE_EXHAUSTED") => "blocked",
+            Some("warn" | "low") => "warn",
+            Some("ok") => fraction.map(ratio_level).unwrap_or("ok"),
+            _ => "unknown",
+        }
+    };
+    QuotaFields {
+        status,
+        headline: status.into(),
+        detail: if malformed {
+            "malformed quota fraction".into()
+        } else {
+            value["detail"]
+                .as_str()
+                .unwrap_or("scoped provider observation")
+                .into()
+        },
+        model: text_field(value, "model"),
+        tokens: None,
+        cost_usd: None,
+        bars: Vec::new(),
+        account: text_field(value, "account"),
+        pool: text_field(value, "pool"),
+        provenance: text_field(value, "source"),
     }
 }
 
@@ -429,7 +536,7 @@ fn parse_agy(value: &Value) -> QuotaFields {
         cost_usd,
         bars: Vec::new(),
         account: text_field(value, "account"),
-        pool: Some("google".to_string()),
+        pool: text_field(value, "pool").or_else(|| Some("google".to_string())),
         provenance: Some("agy-monitor".to_string()),
     }
 }
@@ -459,16 +566,20 @@ fn parse_kimi(value: &Value) -> QuotaFields {
             status: "warn",
             headline: "error".to_string(),
             detail: truncate(message),
-            model: text_field(value, "plan"),
+            model: text_field(value, "model"),
             tokens: None,
             cost_usd: None,
             bars,
             account: text_field(value, "account"),
-            pool: Some("moonshot".to_string()),
+            pool: text_field(value, "pool").or_else(|| Some("moonshot".to_string())),
             provenance: Some("kimi-monitor".to_string()),
         };
     }
-    let status = ratio_level(hottest);
+    let status = if bars.is_empty() {
+        "unknown"
+    } else {
+        ratio_level(hottest)
+    };
     let headline = bars
         .first()
         .map(|bar| bar.text.clone())
@@ -494,12 +605,12 @@ fn parse_kimi(value: &Value) -> QuotaFields {
         status,
         headline,
         detail,
-        model: text_field(value, "plan"),
+        model: text_field(value, "model"),
         tokens: None,
         cost_usd: None,
         bars,
         account: text_field(value, "account"),
-        pool: Some("moonshot".to_string()),
+        pool: text_field(value, "pool").or_else(|| Some("moonshot".to_string())),
         provenance: Some("kimi-monitor".to_string()),
     }
 }
@@ -656,17 +767,6 @@ fn iso_to_ts(iso: &str) -> Option<u64> {
         .map(|dt| dt.timestamp().max(0) as u64)
 }
 
-fn vibecrafted_telemetry_quota_path(agent: &str) -> PathBuf {
-    if let Some(base) = std::env::var_os("VIBECRAFTED_HOME").filter(|v| !v.is_empty()) {
-        PathBuf::from(base)
-            .join("telemetry")
-            .join(agent)
-            .join("quota.json")
-    } else {
-        default_quota_path(&format!(".vibecrafted/telemetry/{agent}/quota.json"))
-    }
-}
-
 fn ratio_bar(value: &Value, key: &'static str) -> Option<QuotaBar> {
     let entry = value.get(key)?;
     if !entry.is_object() {
@@ -733,7 +833,11 @@ fn text_field(value: &Value, key: &str) -> Option<String> {
 }
 
 fn json_ts(value: &Value) -> Option<u64> {
-    value.get("ts").and_then(Value::as_u64)
+    value.get("ts").and_then(Value::as_u64).or_else(|| {
+        ["timestamp", "updated_at", "generated_at", "ts_iso"]
+            .iter()
+            .find_map(|k| value[*k].as_str().and_then(iso_to_ts))
+    })
 }
 
 fn age_secs(ts: u64) -> u64 {

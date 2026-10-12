@@ -80,7 +80,7 @@ mod quota;
 #[cfg(feature = "ssr")]
 mod run_observation;
 #[cfg(feature = "ssr")]
-mod usage;
+pub mod usage;
 
 #[cfg(feature = "ssr")]
 pub mod api {

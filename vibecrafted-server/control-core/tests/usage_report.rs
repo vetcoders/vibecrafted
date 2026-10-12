@@ -115,7 +115,7 @@ fn usage_report_keeps_units_separate_and_unknowns_unknown() {
         .expect("legacy row");
     assert_eq!(legacy.tokens.tokens_total["value"], "unknown");
     assert_eq!(legacy.cost.amount["value"], "unknown");
-    assert_eq!(legacy.provider, "kimi");
+    assert_eq!(legacy.provider, "moonshot");
     assert_eq!(legacy.telemetry_source, "meta(legacy-uninstrumented)");
     fs::remove_dir_all(home).ok();
 }
@@ -176,7 +176,7 @@ fn usage_report_filters_window_and_dimensions_without_following_symlinks() {
     );
     assert_eq!(report.runs.len(), 1);
     assert_eq!(report.runs[0].run_id, "fresh-codex");
-    assert_eq!(report.dimensions.providers[0].name, "codex");
+    assert_eq!(report.dimensions.providers[0].name, "openai");
     assert_eq!(report.dimensions.agents[0].name, "codex");
     assert_eq!(report.dimensions.models[0].name, "gpt-5.6-terra");
     fs::remove_dir_all(home).ok();
@@ -343,6 +343,7 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
     let codex_cache = json!({
         "files": {
             "/tmp/store/session_shared.jsonl": {
+                "days": [{"day":"2026-10-12"}],
                 "record": {
                     "agent": "codex",
                     "id": "sess-shared-123",
@@ -353,6 +354,7 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
                 }
             },
             "/tmp/store/session_local_only.jsonl": {
+                "days": [{"day":"2026-10-12"}],
                 "record": {
                     "agent": "codex",
                     "id": "sess-local-only-456",
@@ -376,6 +378,7 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
     let claude_cache = json!({
         "files": {
             "/tmp/store/claude_sess.jsonl": {
+                "days": [{"day":"2026-10-12"}],
                 "record": {
                     "agent": "claude",
                     "id": "sess-claude-789",
@@ -403,9 +406,10 @@ fn local_provider_usage_ingested_and_deduplicated_against_vc_runs() {
     let vc_run = report
         .runs
         .iter()
-        .find(|r| r.run_id == "vc-codex-1")
+        .find(|r| r.provider_session_id == "sess-shared-123")
         .expect("vc run");
-    assert_eq!(vc_run.telemetry_source, "meta");
+    assert_eq!(vc_run.origin, "local+vibecrafted");
+    assert_eq!(vc_run.vc_run_ids, vec!["vc-codex-1"]);
     assert_eq!(vc_run.provider_session_id, "sess-shared-123");
 
     // Verify deduplication: sess-shared-123 is NOT duplicated as a local run

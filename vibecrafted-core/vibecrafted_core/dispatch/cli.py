@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from vibecrafted_core.delivery.store import atomic_write_json
 from vibecrafted_core.workflow import reserve_run_id
 
 from .doctor import DoctorError, DoctorReport, DoctorWarning, diagnose_file
@@ -168,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     report = diagnose_file(
         source,
-        check_quotas=True,
+        check_quotas=not args.cleanup_settled,
         ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
     )
     if not report.ok:
@@ -212,15 +214,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
+    if hashlib.sha256(source.read_bytes()).hexdigest() != report.source_sha256:
+        print(
+            "dispatch refused: source changed after quota/plan admission; recheck the plan"
+        )
+        return 1
     _copy_validated_source(source, artifacts_dir)
+    for warning in report.warnings:
+        print(f"warning: {warning.path}: {warning.message}", file=sys.stderr)
     if report.quota_override_receipt is not None:
+        receipt = {
+            **report.quota_override_receipt,
+            "run_id": run_id,
+            "dispatch_file": str(source.resolve()),
+            "source_sha256": report.source_sha256,
+        }
         try:
-            (artifacts_dir / "quota-override-receipt.json").write_text(
-                json.dumps(report.quota_override_receipt, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+            atomic_write_json(artifacts_dir / "quota-override-receipt.json", receipt)
+        except OSError as exc:
+            print(f"dispatch refused: quota override receipt publication failed: {exc}")
+            return 1
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung

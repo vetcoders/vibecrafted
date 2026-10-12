@@ -235,6 +235,9 @@ Examples:
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 
+    let _usage_collector = vibecrafted_server_web::control::usage::start_local_collector(
+        control_core::vibecrafted_home(),
+    );
     log!("listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

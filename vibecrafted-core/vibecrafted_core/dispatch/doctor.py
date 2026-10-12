@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import time
+import math
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,6 +23,7 @@ from vibecrafted_core.repository_claims import (
 )
 from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.runtime_receipt import ArtifactIdentityError
+from vibecrafted_core.server_config import ServerConfigError, load_server_config
 
 from .model import Dispatch
 from .schema import doctor_dispatch
@@ -68,6 +71,8 @@ class DoctorReport:
     warnings: tuple[DoctorWarning, ...] = ()
     dispatch: Dispatch | None = None
     quota_override_receipt: dict[str, Any] | None = None
+    quota_observations: tuple[dict[str, Any], ...] = ()
+    source_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Render this report as a JSON-safe mapping (omits the parsed ``dispatch``)."""
@@ -76,46 +81,113 @@ class DoctorReport:
             "errors": [error.to_dict() for error in self.errors],
             "warnings": [warning.to_dict() for warning in self.warnings],
         }
+        if self.quota_observations:
+            result["quota_observations"] = list(self.quota_observations)
         if self.quota_override_receipt is not None:
             result["quota_override_receipt"] = self.quota_override_receipt
         return result
 
 
-def _parse_timestamp(val: Any) -> float | None:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        val = val.strip()
-        if not val:
-            return None
-        try:
-            return float(val)
-        except ValueError:
-            pass
-        try:
-            iso = val.replace("Z", "+00:00")
-            return datetime.fromisoformat(iso).timestamp()
-        except (ValueError, TypeError):
-            return None
-    return None
+def quota_server_url() -> str:
+    """Use the existing server config owner; explicit process origin wins."""
+    return os.environ.get("VIBECRAFTED_SERVER_URL") or load_server_config().public_url
 
 
-def _resolve_candidate_files(agent: str, home: Path | None = None) -> list[Path]:
-    base_home = home if home is not None else vibecrafted_home()
-    out = [
-        base_home / "telemetry" / agent / "quota.json",
-        base_home / "telemetry" / agent / "scan-cache.json",
-    ]
-    user_home = Path.home()
-    if agent == "agy":
-        out.append(user_home / ".gemini" / "agy-monitor" / "runtime" / "quota.json")
-        out.append(user_home / ".gemini" / "agy-monitor" / "runtime" / "snapshot.json")
-    elif agent == "kimi":
-        out.append(user_home / ".kimi-code" / "runtime" / "quota.json")
-        out.append(user_home / ".kimi-code" / "runtime" / "snapshot.json")
-    return out
+def _quota_observations(
+    server_url: str, agent: str, model: str
+) -> list[dict[str, Any]]:
+    parsed = urllib.parse.urlsplit(server_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid quota server origin")
+    query = urllib.parse.urlencode({"agent": agent, "model": model})
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/api/usage/quota?{query}",
+        headers={"Accept": "application/json"},
+    )
+    # Fixed endpoint on the configured control server; never a provider model call.
+    # nosemgrep: dynamic-urllib-use-detected
+    with urllib.request.urlopen(req, timeout=2.0) as response:
+        raw = response.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("oversized quota response")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"malformed nonfinite quota number: {value}")
+
+    payload = json.loads(raw, parse_constant=reject_constant)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "vibecrafted.quota-dashboard.v1"
+    ):
+        raise ValueError("malformed quota response schema")
+    items = payload.get("agents")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ValueError("malformed quota observations")
+    return [item for item in items if item.get("id") == agent]
+
+
+def _valid_observation(info: dict[str, Any], model: str) -> str:
+    """Validate transport evidence, never reinterpret provider usage as quota."""
+    fraction = info.get("fraction")
+    if fraction is not None:
+        try:
+            valid_fraction = (
+                not isinstance(fraction, bool)
+                and isinstance(fraction, (int, float))
+                and math.isfinite(fraction)
+                and fraction >= 0
+            )
+        except OverflowError:
+            valid_fraction = False
+        if not valid_fraction:
+            return "malformed fraction"
+    if not isinstance(info.get("status"), str) or info.get("status") not in {
+        "ok",
+        "warn",
+        "blocked",
+        "unknown",
+        "absent",
+    }:
+        return "malformed status"
+    if info.get("status") in {"unknown", "absent"}:
+        return str(info.get("detail") or "absent or unknown observation")
+    if any(
+        not isinstance(info.get(k), str) or not info[k].strip()
+        for k in ("source", "pool")
+    ):
+        return "malformed observation scope/source"
+    if any(
+        info.get(k) is not None and not isinstance(info[k], str)
+        for k in ("model", "account")
+    ):
+        return "malformed model/account scope"
+    if (
+        not info.get("source")
+        or not info.get("pool")
+        or info.get("authoritative") is not True
+    ):
+        return "unmeasured / non-authoritative observation"
+    if info.get("applies") is not True or (
+        info.get("model") and info["model"] != model
+    ):
+        return "observation does not cover the effective model/account/pool"
+    try:
+        stamp = datetime.fromisoformat(str(info["observed_at"]))
+        if stamp.tzinfo is None:
+            return "malformed observation time"
+        age = (datetime.now(UTC) - stamp).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return "malformed observation time"
+    if info.get("stale") or age > 300 or age < -30:
+        return "stale or future observation"
+    return ""
 
 
 def diagnose_quotas(
@@ -124,275 +196,108 @@ def diagnose_quotas(
     ignore_warnings: bool = False,
     server_url: str | None = None,
     home: Path | None = None,
+    observation_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[tuple[DoctorError, ...], tuple[DoctorWarning, ...], dict[str, Any] | None]:
-    needed_agents: dict[str, str] = {}
-    for cut in dispatch.cuts:
-        agent = cut.agent.strip().lower() if cut.agent else ""
-        if agent and agent not in needed_agents:
-            pool = PROVIDER_POOLS.get(agent, agent)
-            needed_agents[agent] = pool
+    """Consume server-owned scoped quota observations for the entire admitted plan.
 
-    if not needed_agents:
-        return (), (), None
-
-    server_agents: dict[str, dict[str, Any]] = {}
-    if server_url:
-        parsed_url = urllib.parse.urlsplit(server_url)
-        if parsed_url.scheme in ("http", "https"):
-            try:
-                url = f"{server_url.rstrip('/')}/api/usage/quota"
-                req = urllib.request.Request(
-                    url, headers={"Accept": "application/json"}
-                )
-                # Server probe constructs an HTTP URL to the fixed internal quota endpoint.
-                # nosemgrep: dynamic-urllib-use-detected
-                with urllib.request.urlopen(req, timeout=1.0) as resp:
-                    if resp.status == 200:
-                        payload = json.loads(resp.read().decode("utf-8"))
-                        for item in payload.get("agents", []):
-                            if isinstance(item, dict) and "agent" in item:
-                                server_agents[str(item["agent"]).lower()] = item
-            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
-                server_agents.clear()
-
+    parse_dispatch already resolves model overrides, frontmatter and config with
+    select_plan_model, the same owner used by workflow_cell_launcher. There is
+    deliberately no local provider parser/fallback in the doctor.
+    """
     errors: list[DoctorError] = []
     warnings: list[DoctorWarning] = []
+    observations: list[dict[str, Any]] = []
     overrides: list[dict[str, Any]] = []
-
-    now = time.time()
-
-    for agent, pool in needed_agents.items():
-        if agent in server_agents:
-            info = server_agents[agent]
-            status = str(info.get("status") or "ok").lower()
-            fraction = float(info.get("fraction") or 0.0)
-            stale = bool(info.get("stale", False))
-            age_s = float(info.get("age_s") or 0.0)
-
-            if status == "blocked":
-                if stale:
+    selections: dict[tuple[str, str], list[str]] = {}
+    for cut in dispatch.cuts:
+        selections.setdefault((cut.agent, cut.model), []).append(cut.id)
+    try:
+        origin = server_url if server_url is not None else quota_server_url()
+    except ServerConfigError as exc:
+        origin = ""
+        warnings.append(DoctorWarning("quota", f"quota unknown: server config: {exc}"))
+    for (agent, model), cuts in selections.items():
+        path = f"quota.{PROVIDER_POOLS.get(agent, agent)}"
+        try:
+            items = _quota_observations(origin, agent, model)
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            warnings.append(
+                DoctorWarning(
+                    path,
+                    f"quota unknown for '{agent}' / '{model or 'provider default'}': server unavailable or malformed ({type(exc).__name__})",
+                )
+            )
+            items = []
+        if not items:
+            warnings.append(
+                DoctorWarning(
+                    path, f"quota unknown for '{agent}': no shared observation"
+                )
+            )
+        for info in items:
+            evidence = {
+                "agent": agent,
+                "effective_model": model,
+                "cuts": cuts,
+                "observation": info,
+            }
+            observations.append(evidence)
+            if observation_sink is not None:
+                observation_sink.append(evidence)
+            problem = _valid_observation(info, model)
+            if problem:
+                warnings.append(
+                    DoctorWarning(path, f"quota unknown for '{agent}': {problem}")
+                )
+                continue
+            pool = str(info["pool"])
+            path = f"quota.{pool}"
+            if info["status"] == "blocked":
+                message = f"quota confirmed exhausted for agent '{agent}' (pool '{pool}', model '{model or 'provider default'}')"
+                if ignore_warnings:
                     warnings.append(
                         DoctorWarning(
-                            f"quota.{pool}",
-                            f"quota snapshot for agent '{agent}' is stale ({int(age_s)}s old) and reported exhaustion; treating as unconfirmed warning",
-                        )
-                    )
-                elif ignore_warnings:
-                    warnings.append(
-                        DoctorWarning(
-                            f"quota.{pool}",
-                            f"quota confirmed exhausted for agent '{agent}' (pool '{pool}') [overridden via --ignore-usage-quota-warnings]",
+                            path,
+                            message + " [overridden via --ignore-usage-quota-warnings]",
                         )
                     )
                     overrides.append(
-                        {
-                            "agent": agent,
-                            "pool": pool,
-                            "fraction": fraction,
-                            "age_s": age_s,
-                            "reason": "confirmed_exhausted",
-                        }
+                        {**evidence, "pool": pool, "reason": "confirmed_exhausted"}
                     )
                 else:
-                    errors.append(
-                        DoctorError(
-                            f"quota.{pool}",
-                            f"quota confirmed exhausted for agent '{agent}' (pool '{pool}')",
-                        )
-                    )
-            elif status == "warn":
+                    errors.append(DoctorError(path, message))
+            elif info["status"] == "warn":
                 warnings.append(
                     DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota warning for agent '{agent}': {info.get('detail') or 'high utilization'}",
+                        path,
+                        f"quota utilization high for '{agent}': {info.get('detail') or 'low capacity'}",
                     )
                 )
-            elif status == "unknown":
-                warnings.append(
-                    DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota for agent '{agent}' is unmeasured",
-                    )
-                )
-            continue
-
-        candidates = _resolve_candidate_files(agent, home=home)
-        found_file = False
-        parsed_data = None
-        target_path = None
-
-        for path in candidates:
-            if path.is_file():
-                found_file = True
-                target_path = path
-                try:
-                    parsed_data = json.loads(path.read_text(encoding="utf-8"))
-                    break
-                except (OSError, json.JSONDecodeError) as exc:
-                    warnings.append(
-                        DoctorWarning(
-                            f"quota.{pool}",
-                            f"quota snapshot for agent '{agent}' at {path} is malformed: {exc}",
-                        )
-                    )
-                    parsed_data = None
-                    break
-
-        if not found_file:
-            continue
-
-        if parsed_data is None:
-            continue
-
-        payload = parsed_data
-        ts_val = (
-            payload.get("timestamp")
-            or payload.get("generated_at")
-            or payload.get("updated_at")
-        )
-        parsed_ts = _parse_timestamp(ts_val)
-        if parsed_ts is not None:
-            age_s = max(0.0, now - parsed_ts)
-        elif target_path is not None:
-            try:
-                age_s = max(0.0, now - target_path.stat().st_mtime)
-            except OSError:
-                age_s = 0.0
-        else:
-            age_s = 0.0
-
-        stale = age_s > 300.0
-
-        if agent == "cursor":
-            warnings.append(
-                DoctorWarning(
-                    f"quota.{pool}",
-                    f"quota for agent '{agent}' is unmeasured (cloud-only)",
-                )
-            )
-            continue
-
-        fraction = None
-        is_exhausted = False
-        is_unmeasured = False
-
-        if agent == "kimi":
-            limits = (
-                payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
-            )
-            f5 = (
-                limits.get("five_hour", {}).get("fraction")
-                if isinstance(limits.get("five_hour"), dict)
-                else None
-            )
-            fm = (
-                limits.get("monthly", {}).get("fraction")
-                if isinstance(limits.get("monthly"), dict)
-                else None
-            )
-            fracs = [float(f) for f in (f5, fm) if f is not None]
-            fraction = max(fracs) if fracs else None
-            if fraction is None and payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-            status_str = str(payload.get("status") or "")
-            is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
-                "blocked",
-                "exhausted",
-                "RESOURCE_EXHAUSTED",
-            }
-        elif agent == "agy":
-            quota_obj = (
-                payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
-            )
-            if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
-            elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-            elif payload.get("utilization") is not None:
-                fraction = float(payload["utilization"])
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
-            is_exhausted = (fraction is not None and fraction >= 1.0) or status_str in {
-                "blocked",
-                "exhausted",
-                "RESOURCE_EXHAUSTED",
-            }
-        else:
-            quota_obj = (
-                payload.get("quota") if isinstance(payload.get("quota"), dict) else {}
-            )
-            status_str = str(quota_obj.get("status") or payload.get("status") or "")
-            if quota_obj.get("fraction") is not None:
-                fraction = float(quota_obj["fraction"])
-            elif payload.get("fraction") is not None:
-                fraction = float(payload["fraction"])
-
-            if status_str in {"unavailable", "empty"} or fraction is None:
-                is_unmeasured = True
-            else:
-                is_exhausted = (fraction >= 1.0) or status_str in {
-                    "blocked",
-                    "exhausted",
-                    "RESOURCE_EXHAUSTED",
-                }
-
-        if is_unmeasured:
-            warnings.append(
-                DoctorWarning(
-                    f"quota.{pool}",
-                    f"quota for agent '{agent}' is unmeasured",
-                )
-            )
-            continue
-
-        if is_exhausted:
-            if stale:
-                warnings.append(
-                    DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota snapshot for agent '{agent}' is stale ({int(age_s)}s old) and reported exhaustion; treating as unconfirmed warning",
-                    )
-                )
-            elif ignore_warnings:
-                warnings.append(
-                    DoctorWarning(
-                        f"quota.{pool}",
-                        f"quota confirmed exhausted for agent '{agent}' (pool '{pool}') [overridden via --ignore-usage-quota-warnings]",
-                    )
-                )
-                overrides.append(
-                    {
-                        "agent": agent,
-                        "pool": pool,
-                        "fraction": fraction or 1.0,
-                        "age_s": age_s,
-                        "reason": "confirmed_exhausted",
-                    }
-                )
-            else:
-                errors.append(
-                    DoctorError(
-                        f"quota.{pool}",
-                        f"quota confirmed exhausted for agent '{agent}' (pool '{pool}')",
-                    )
-                )
-        elif fraction is not None and fraction >= 0.85:
-            warnings.append(
-                DoctorWarning(
-                    f"quota.{pool}",
-                    f"quota utilization high for agent '{agent}' ({int(fraction * 100)}%)",
-                )
-            )
-
+    # An explicit bypass always gets an exact decision receipt, even when all
+    # quota observations were unknown. Admission publishes it before launch.
     receipt = (
         {
-            "overridden_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "schema": "vibecrafted.quota-override.v1",
+            "overridden_at": datetime.now(UTC).isoformat(),
             "flag": "--ignore-usage-quota-warnings",
+            "server_url": origin,
+            "selections": [
+                {"agent": a, "model": m, "cuts": ids}
+                for (a, m), ids in selections.items()
+            ],
+            "observations": observations,
+            "diagnosis": [w.to_dict() for w in warnings],
             "overrides": overrides,
         }
-        if overrides
+        if ignore_warnings
         else None
     )
-
     return tuple(errors), tuple(warnings), receipt
 
 
@@ -421,8 +326,8 @@ def diagnose_file(
     """Validate a dispatch TOML file on disk; an unreadable file is reported as an error."""
     source = Path(path).expanduser()
     try:
-        text = source.read_text(encoding="utf-8")
-    except OSError as exc:
+        text = source.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         return DoctorReport(
             ok=False,
             errors=(DoctorError(path=str(source), message=f"unreadable file: {exc}"),),
@@ -437,12 +342,14 @@ def diagnose_file(
     quota_errors: tuple[DoctorError, ...] = ()
     quota_warnings: tuple[DoctorWarning, ...] = ()
     quota_receipt: dict[str, Any] | None = None
+    observations: list[dict[str, Any]] = []
     if check_quotas or ignore_usage_quota_warnings:
         quota_errors, quota_warnings, quota_receipt = diagnose_quotas(
             report.dispatch,
             ignore_warnings=ignore_usage_quota_warnings,
             server_url=server_url,
             home=home,
+            observation_sink=observations,
         )
 
     all_errors = (*report.errors, *runtime_errors, *quota_errors)
@@ -453,6 +360,8 @@ def diagnose_file(
         warnings=all_warnings,
         dispatch=report.dispatch,
         quota_override_receipt=quota_receipt,
+        quota_observations=tuple(observations),
+        source_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
     )
 
 

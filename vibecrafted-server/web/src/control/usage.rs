@@ -86,3 +86,29 @@ fn clean_filter(value: Option<String>) -> Result<Option<String>, ()> {
     }
     Ok(Some(trimmed.to_string()))
 }
+
+/// One vc-server-owned local collector; each parser child terminates after a
+/// sweep. No provider network calls, independent daemon, or lifecycle store.
+pub fn start_local_collector(home: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            let Some(command) = control_core::usage::local_usage_command(&home) else {
+                continue;
+            };
+            let mut command = tokio::process::Command::from(command);
+            command
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
+            match tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await {
+                Ok(Ok(output)) if output.status.success() => {}
+                _ => eprintln!(
+                    "vc-server: local usage collection failed; retained projection ages to stale"
+                ),
+            }
+        }
+    })
+}

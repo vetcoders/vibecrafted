@@ -45,6 +45,10 @@ pub struct UsageReport {
     pub dimensions: UsageDimensions,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
+    #[serde(default)]
+    pub local_collection: Value,
+    #[serde(default)]
+    pub pickers: UsageDimensions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +77,12 @@ pub struct UsageRun {
     pub failure: Option<String>,
     pub provider_session_id: Value,
     pub telemetry_source: String,
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub vc_run_ids: Vec<String>,
+    #[serde(default)]
+    pub usage_window_start: Option<String>,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
 }
@@ -144,42 +154,87 @@ impl ControlPlane {
             .flatten()
             .filter_map(Result::ok)
             .filter_map(|entry| read_usage_run(&entry.path()))
-            .filter(|run| {
-                cutoff.is_none_or(|cutoff| {
-                    parse_timestamp(&run.recorded_at).is_some_and(|stamp| stamp >= cutoff)
-                })
-            })
-            .filter(|run| matches_filter(run, &filter))
             .collect::<Vec<_>>();
-        runs.sort_by(|left, right| {
-            right
-                .recorded_at
-                .cmp(&left.recorded_at)
-                .then_with(|| left.run_id.cmp(&right.run_id))
-        });
         recover_lazy_transcripts(&runtime_runs, &mut runs);
-
-        let mut vc_session_ids = std::collections::HashSet::new();
-        for run in &runs {
-            if let Some(session_id) = run.provider_session_id.as_str() {
-                if !session_id.is_empty() && session_id != "unknown" {
-                    vc_session_ids.insert(session_id.to_string());
+        let telemetry_dir = self.home().join("telemetry");
+        let (local_runs, local_collection) = read_local_telemetry_runs(&telemetry_dir, now);
+        // Deduplicate before filters. A whole local session includes activity
+        // outside a VC cut; retain that measurement and mark its VC provenance.
+        for mut local in local_runs {
+            let matching = runs
+                .iter()
+                .filter(|r| {
+                    r.agent == local.agent && r.provider_session_id == local.provider_session_id
+                })
+                .collect::<Vec<_>>();
+            if !matching.is_empty() {
+                local.vc_run_ids = matching.iter().map(|r| r.run_id.clone()).collect();
+                local.origin = "local+vibecrafted".into();
+                // If local evidence is unavailable, retain runtime measurements.
+                if local.tokens.tokens_total.as_u64().is_none() {
+                    continue;
                 }
+                runs.retain(|r| {
+                    !(r.agent == local.agent && r.provider_session_id == local.provider_session_id)
+                });
+            }
+            runs.push(local);
+        }
+        // Imported receipts for the same session and time window represent
+        // one slice. Disjoint resumed run windows remain separate until the
+        // local full-session evidence can replace them with one observation.
+        let mut dedup: BTreeMap<String, UsageRun> = BTreeMap::new();
+        for run in runs {
+            let key = run
+                .provider_session_id
+                .as_str()
+                .filter(|id| *id != "unknown" && !id.is_empty())
+                .map(|id| {
+                    if run.origin == "vibecrafted" {
+                        format!(
+                            "{}:{id}:{}:{}",
+                            display_value(&run.agent),
+                            run.usage_window_start.as_deref().unwrap_or(""),
+                            run.recorded_at
+                        )
+                    } else {
+                        format!("{}:{id}", display_value(&run.agent))
+                    }
+                })
+                .unwrap_or_else(|| run.run_id.clone());
+            if let Some(previous) = dedup.get_mut(&key) {
+                let mut ids = previous.vc_run_ids.clone();
+                ids.extend(run.vc_run_ids.clone());
+                if run.tokens.tokens_total.as_u64().unwrap_or(0)
+                    > previous.tokens.tokens_total.as_u64().unwrap_or(0)
+                {
+                    *previous = run;
+                }
+                ids.sort();
+                ids.dedup();
+                previous.vc_run_ids = ids;
+            } else {
+                dedup.insert(key, run);
             }
         }
-
-        let telemetry_dir = self.home().join("telemetry");
-        let local_runs =
-            read_local_telemetry_runs(&telemetry_dir, &vc_session_ids, cutoff, &filter);
-        runs.extend(local_runs);
-
-        runs.sort_by(|left, right| {
-            right
-                .recorded_at
-                .cmp(&left.recorded_at)
-                .then_with(|| left.run_id.cmp(&right.run_id))
+        let unfiltered = dedup.into_values().collect::<Vec<_>>();
+        let pickers = UsageDimensions {
+            providers: dimensions(&unfiltered, |r| display_value(&r.provider)),
+            agents: dimensions(&unfiltered, |r| display_value(&r.agent)),
+            models: dimensions(&unfiltered, |r| display_value(&r.model)),
+        };
+        let mut runs = unfiltered
+            .into_iter()
+            .filter(|run| matches_filter(run, &filter))
+            .filter(|run| {
+                cutoff.is_none_or(|c| parse_timestamp(&run.recorded_at).is_some_and(|t| t >= c))
+            })
+            .collect::<Vec<_>>();
+        runs.sort_by(|a, b| {
+            b.recorded_at
+                .cmp(&a.recorded_at)
+                .then_with(|| a.run_id.cmp(&b.run_id))
         });
-
         let totals = totals(&runs);
         let dimensions = UsageDimensions {
             providers: dimensions(&runs, |run| display_value(&run.provider)),
@@ -187,6 +242,8 @@ impl ControlPlane {
             models: dimensions(&runs, |run| display_value(&run.model)),
         };
         UsageReport {
+            local_collection,
+            pickers,
             schema: USAGE_REPORT_SCHEMA.to_string(),
             generated_at: now.to_rfc3339(),
             filter: UsageReportFilter {
@@ -233,6 +290,8 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
     }
     let recorded_at = text(object, "completed_at")
         .or_else(|| text(object, "updated_at"))
+        .or_else(|| text(object, "started_at"))
+        .or_else(|| text(object, "created_at"))
         .and_then(|stamp| parse_timestamp(stamp).map(|parsed| parsed.to_rfc3339()))?;
 
     let usage = object.get("usage").and_then(Value::as_object);
@@ -245,7 +304,7 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
         .get("provider")
         .filter(|value| !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()))
         .cloned()
-        .unwrap_or_else(|| agent.clone());
+        .unwrap_or_else(|| json!(canonical_provider_for(agent.as_str().unwrap_or(""))));
     let model = value_or_unknown(
         object.get("agent_model").or_else(|| object.get("model")),
         "model not reported by provider stream",
@@ -263,6 +322,9 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
                     .collect()
             })
             .unwrap_or_default(),
+        origin: "vibecrafted".into(),
+        vc_run_ids: vec![run_id.clone()],
+        usage_window_start: text(object, "started_at").map(str::to_string),
         run_id,
         provider,
         agent,
@@ -376,6 +438,9 @@ fn provider_matches(provider: &Value, agent: &Value, expected: Option<&str>) -> 
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return true;
         }
+        if trimmed == "unknown" {
+            return provider.as_str().is_none_or(|v| v == "unknown");
+        }
         provider
             .as_str()
             .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
@@ -391,19 +456,22 @@ fn field_matches(value: &Value, expected: Option<&str>) -> bool {
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return true;
         }
+        if trimmed == "unknown" {
+            return value.as_str().is_none_or(|v| v == "unknown");
+        }
         value
             .as_str()
             .is_some_and(|actual| actual.eq_ignore_ascii_case(trimmed))
     })
 }
 
-fn canonical_provider_for(agent: &str) -> &'static str {
+pub fn canonical_provider_for(agent: &str) -> &'static str {
     match agent {
         "agy" => "google",
         "claude" => "anthropic",
         "codex" => "openai",
         "copilot" => "github",
-        "cursor" => "cursor",
+        "cursor" => "anysphere",
         "grok" => "xai",
         "junie" => "jetbrains",
         "kimi" => "moonshot",
@@ -411,271 +479,147 @@ fn canonical_provider_for(agent: &str) -> &'static str {
     }
 }
 
-fn read_local_telemetry_runs(
-    telemetry_dir: &Path,
-    vc_session_ids: &std::collections::HashSet<String>,
-    cutoff: Option<DateTime<Utc>>,
-    filter: &UsageFilter,
-) -> Vec<UsageRun> {
-    let mut local_runs = Vec::new();
-    let mut seen_session_ids = std::collections::HashSet::new();
-
-    for agent in USAGE_PROVIDER_ADAPTERS {
-        let scan_cache_path = telemetry_dir.join(agent).join("scan-cache.json");
-        let mut had_scan_cache = false;
-        if regular_file(&scan_cache_path) {
-            if let Ok(content) = fs::read(&scan_cache_path) {
-                if let Ok(value) = serde_json::from_slice::<Value>(&content) {
-                    if let Some(files) = value.get("files").and_then(Value::as_object) {
-                        had_scan_cache = true;
-                        for (_file_key, entry) in files {
-                            let Some(record) = entry.get("record").and_then(Value::as_object)
-                            else {
-                                continue;
-                            };
-                            let session_id = record
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string();
-
-                            // Deduplication: skip if session was run via VC or already seen in another local file
-                            if !session_id.is_empty() {
-                                if vc_session_ids.contains(&session_id)
-                                    || seen_session_ids.contains(&session_id)
-                                {
-                                    continue;
-                                }
-                                seen_session_ids.insert(session_id.clone());
-                            }
-
-                            let mtime = record.get("mtime").and_then(Value::as_f64).unwrap_or(0.0);
-                            let recorded_dt = DateTime::from_timestamp(
-                                mtime as i64,
-                                ((mtime.fract() * 1_000_000_000.0) as u32).min(999_999_999),
-                            )
-                            .unwrap_or_else(Utc::now);
-
-                            if cutoff.is_some_and(|c| recorded_dt < c) {
-                                continue;
-                            }
-
-                            let rec_agent = record
-                                .get("agent")
-                                .and_then(Value::as_str)
-                                .unwrap_or(*agent);
-                            let model_str = record.get("model").and_then(Value::as_str);
-                            let model_val = match model_str {
-                                Some(m) if !m.is_empty() => json!(m),
-                                _ => unknown("model not reported by local scan"),
-                            };
-
-                            let provider_val = json!(canonical_provider_for(rec_agent));
-                            let agent_val = json!(rec_agent);
-
-                            let processed_total = record
-                                .get("processed_total")
-                                .and_then(Value::as_u64)
-                                .or_else(|| {
-                                    record.get("native").and_then(Value::as_object).and_then(
-                                        |nat| {
-                                            nat.get("total_tokens")
-                                                .or_else(|| nat.get("totalTokens"))
-                                                .and_then(Value::as_u64)
-                                        },
-                                    )
-                                });
-
-                            let native = record.get("native").and_then(Value::as_object);
-                            let tokens_input = native
-                                .and_then(|n| {
-                                    n.get("input_tokens").or_else(|| n.get("inputTokens"))
-                                })
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    unknown("local session emitted no input token breakdown")
-                                });
-                            let tokens_output = native
-                                .and_then(|n| {
-                                    n.get("output_tokens").or_else(|| n.get("outputTokens"))
-                                })
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    unknown("local session emitted no output token breakdown")
-                                });
-                            let tokens_cached_input = native
-                                .and_then(|n| {
-                                    n.get("cached_input_tokens")
-                                        .or_else(|| n.get("cachedReadTokens"))
-                                        .or_else(|| n.get("cacheReadTokens"))
-                                })
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    unknown("local session carried no cache read count")
-                                });
-                            let tokens_cache_write = native
-                                .and_then(|n| {
-                                    n.get("cache_write_input_tokens")
-                                        .or_else(|| n.get("cacheCreationTokens"))
-                                        .or_else(|| n.get("cacheWriteTokens"))
-                                })
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    unknown("local session carried no cache write count")
-                                });
-
-                            let tokens_total = processed_total
-                                .map(Value::from)
-                                .unwrap_or_else(|| unknown("local session carried no token total"));
-
-                            let tokens = UsageTokens {
-                                schema: "vibecrafted.usage.v1".to_string(),
-                                unit: "tokens".to_string(),
-                                source: "local_scan".to_string(),
-                                events: 1,
-                                tokens_input,
-                                tokens_cached_input,
-                                tokens_cache_write,
-                                tokens_output,
-                                tokens_total,
-                                semantics: BTreeMap::new(),
-                            };
-
-                            let cost = UsageCost {
-                                amount: unknown("cost not recorded for local session"),
-                                currency: None,
-                                unit: Some("USD".to_string()),
-                                source: "local_scan".to_string(),
-                            };
-
-                            let run_id = if session_id.is_empty() {
-                                format!("local-{rec_agent}-{}", (mtime as u64))
-                            } else {
-                                let safe_suffix: String = session_id
-                                    .chars()
-                                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                                    .take(24)
-                                    .collect();
-                                format!("local-{rec_agent}-{safe_suffix}")
-                            };
-
-                            let run = UsageRun {
-                                run_id,
-                                provider: provider_val,
-                                agent: agent_val,
-                                model: model_val,
-                                status: "completed".to_string(),
-                                exit_code: Some(0),
-                                recorded_at: recorded_dt.to_rfc3339(),
-                                tokens,
-                                cost,
-                                failure_kind: None,
-                                failure: None,
-                                provider_session_id: if session_id.is_empty() {
-                                    unknown("local session has no session id")
-                                } else {
-                                    json!(session_id)
-                                },
-                                telemetry_source: "local_session".to_string(),
-                                unpriced_models: Vec::new(),
-                            };
-
-                            if matches_filter(&run, filter) {
-                                local_runs.push(run);
-                            }
-                        }
-                    }
-                }
+fn read_local_telemetry_runs(telemetry: &Path, now: DateTime<Utc>) -> (Vec<UsageRun>, Value) {
+    let projection = telemetry.join("local-usage.json");
+    let value = if regular_file(&projection) {
+        fs::read(&projection)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    } else {
+        None
+    };
+    let mut records = Vec::new();
+    let mut coverage = json!({"owner":"vc-server", "status":"unknown", "reason":"collector has not published", "archive":"daily aggregates excluded: session overlap cannot be proven"});
+    if let Some(value) = value.filter(|v| v["schema"] == "vibecrafted.local-usage.v1") {
+        let stamp = value["generated_at"].as_str().and_then(parse_timestamp);
+        let stale = stamp.is_none_or(|t| now.signed_duration_since(t).num_seconds() > 300);
+        coverage = json!({"owner":"vc-server", "status":if stale {"stale"} else {"observed"}, "generated_at": value["generated_at"], "providers":value["providers"], "archive":"daily aggregates excluded: session overlap cannot be proven"});
+        records = value["records"].as_array().cloned().unwrap_or_default();
+    } else {
+        // Compatibility intake from the existing parser sidecars; never import
+        // day aggregates as fake successful sessions or combine them with VC.
+        for agent in USAGE_PROVIDER_ADAPTERS {
+            let path = telemetry.join(agent).join("scan-cache.json");
+            if !regular_file(&path) {
+                continue;
             }
-        }
-
-        // Also check archive JSONL if scan-cache wasn't found
-        if !had_scan_cache {
-            let archive_path = telemetry_dir.join("archive").join(format!("{agent}.jsonl"));
-            if regular_file(&archive_path) {
-                if let Ok(file_content) = fs::read_to_string(&archive_path) {
-                    for line in file_content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let Ok(row) = serde_json::from_str::<Value>(trimmed) else {
-                            continue;
-                        };
-                        let Some(day) = row.get("day").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let model_str = row
-                            .get("model")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
-                        let recorded_at = format!("{day}T12:00:00Z");
-                        let recorded_dt = parse_timestamp(&recorded_at).unwrap_or_else(Utc::now);
-                        if cutoff.is_some_and(|c| recorded_dt < c) {
-                            continue;
-                        }
-
-                        let input_tokens =
-                            row.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                        let output_tokens = row
-                            .get("output_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let cache_create = row
-                            .get("cache_creation_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let cache_read = row
-                            .get("cache_read_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let total_tokens = input_tokens + output_tokens + cache_create + cache_read;
-
-                        let tokens = UsageTokens {
-                            schema: "vibecrafted.usage.v1".to_string(),
-                            unit: "tokens".to_string(),
-                            source: "local_archive".to_string(),
-                            events: 1,
-                            tokens_input: json!(input_tokens),
-                            tokens_cached_input: json!(cache_read),
-                            tokens_cache_write: json!(cache_create),
-                            tokens_output: json!(output_tokens),
-                            tokens_total: json!(total_tokens),
-                            semantics: BTreeMap::new(),
-                        };
-                        let cost = UsageCost {
-                            amount: unknown("cost not recorded for local archive"),
-                            currency: None,
-                            unit: Some("USD".to_string()),
-                            source: "local_archive".to_string(),
-                        };
-                        let run = UsageRun {
-                            run_id: format!("archive-{agent}-{day}-{model_str}"),
-                            provider: json!(canonical_provider_for(agent)),
-                            agent: json!(agent),
-                            model: json!(model_str),
-                            status: "completed".to_string(),
-                            exit_code: Some(0),
-                            recorded_at,
-                            tokens,
-                            cost,
-                            failure_kind: None,
-                            failure: None,
-                            provider_session_id: unknown(
-                                "archive day aggregation has no session id",
-                            ),
-                            telemetry_source: "local_archive".to_string(),
-                            unpriced_models: Vec::new(),
-                        };
-                        if matches_filter(&run, filter) {
-                            local_runs.push(run);
-                        }
+            if let Some(files) = fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v["files"].as_object().cloned())
+            {
+                for entry in files.into_values() {
+                    if let Some(mut record) = entry["record"].as_object().cloned() {
+                        record.insert("agent".into(), json!(agent));
+                        record.entry("measurement_observed").or_insert(json!(
+                            entry["days"].as_array().is_some_and(|d| !d.is_empty())
+                        ));
+                        records.push(Value::Object(record));
                     }
                 }
             }
         }
     }
-    local_runs
+    let mut runs = BTreeMap::new();
+    for record in records {
+        let Some(agent) = record["agent"]
+            .as_str()
+            .filter(|a| USAGE_PROVIDER_ADAPTERS.contains(a))
+        else {
+            continue;
+        };
+        let Some(id) = record["id"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let recorded_at = record["mtime"]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .and_then(|t| DateTime::from_timestamp(t as i64, 0))
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        let native = &record["native"];
+        let measured = record["measurement_observed"] == true;
+        let bucket = |keys: &[&str]| -> Value {
+            if measured {
+                for key in keys {
+                    if let Some(n) = native[*key].as_u64() {
+                        return json!(n);
+                    }
+                }
+            }
+            unknown("local session emitted no validated bucket")
+        };
+        let total = if measured {
+            record["processed_total"].as_u64().map(Value::from)
+        } else {
+            None
+        };
+        let run = UsageRun {
+            run_id: format!("local-{agent}-{id}"),
+            provider: json!(canonical_provider_for(agent)),
+            agent: json!(agent),
+            model: value_or_unknown(record.get("model"), "model not reported by local source"),
+            status: "unknown".into(),
+            exit_code: None,
+            recorded_at,
+            tokens: UsageTokens {
+                schema: "vibecrafted.usage.v1".into(),
+                unit: "tokens".into(),
+                source: "local_session".into(),
+                events: u64::from(measured),
+                tokens_input: bucket(&["input_tokens", "inputTokens"]),
+                tokens_cached_input: bucket(&[
+                    "cached_input_tokens",
+                    "cache_read_input_tokens",
+                    "cachedReadTokens",
+                    "cacheReadTokens",
+                    "cacheInputTokens",
+                ]),
+                tokens_cache_write: bucket(&[
+                    "cache_write_input_tokens",
+                    "cache_creation_input_tokens",
+                    "cacheWriteTokens",
+                    "cacheCreateTokens",
+                ]),
+                tokens_output: bucket(&["output_tokens", "outputTokens"]),
+                tokens_total: total.unwrap_or_else(|| unknown("local usage unmeasured")),
+                semantics: BTreeMap::from([(
+                    "cache_semantics".into(),
+                    record["cache_semantics"].clone(),
+                )]),
+            },
+            cost: UsageCost {
+                amount: unknown("local session cost unmeasured"),
+                currency: None,
+                unit: None,
+                source: "local_session".into(),
+            },
+            failure_kind: None,
+            failure: None,
+            provider_session_id: json!(id),
+            telemetry_source: "local_session".into(),
+            origin: "local".into(),
+            vc_run_ids: Vec::new(),
+            usage_window_start: None,
+            unpriced_models: Vec::new(),
+        };
+        let key = format!("{agent}:{id}");
+        if runs
+            .get(&key)
+            .is_none_or(|p: &UsageRun| p.recorded_at < run.recorded_at)
+        {
+            runs.insert(key, run);
+        }
+    }
+    (runs.into_values().collect(), coverage)
+}
+
+/// A bounded child invocation used only by the server's one local collector.
+/// Reuses the same interpreter/source resolver as lazy transcript recovery.
+pub fn local_usage_command(home: &Path) -> Option<Command> {
+    let mut command = telemetry_python()?;
+    command.arg("-c").arg("from pathlib import Path; import sys; from vibecrafted_core.runtime.telemetry.fleet_engine import collect_local_usage; collect_local_usage(Path(sys.argv[1]))").arg(home);
+    Some(command)
 }
 
 fn totals(runs: &[UsageRun]) -> UsageTotals {
