@@ -2603,3 +2603,102 @@ def test_pending_publication_service_stop_preserves_strict_fences(
     assert "ordinary-stop" not in events
     if refusal != "settle":
         assert "bootout" not in events
+
+
+@pytest.mark.parametrize("restore_rc", [0, 78])
+def test_partial_owned_service_stop_survives_executor_receipt_and_restore(
+    recovery_service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_rc: int
+) -> None:
+    ownership, _receipt, state, events = recovery_service
+    state["settle"] = False
+    manifest = take(tmp_path / "world")
+    manifest["frame"]["sessions"] = []
+    manifest["headless_runs"] = []
+    plan = {
+        "ready": True,
+        "preflight": [],
+        "install": {"command": ["must-not-install"]},
+        "resurrect": {"relaunch_apps": []},
+    }
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    missing_launcher = tmp_path / "missing-launchers"
+    runner = Runner()
+    ctx = ctx_for(run_dir, runner, monkeypatch=monkeypatch)
+
+    def run(argv, **kwargs):
+        if argv[1:] == ["server", "service", "start"]:
+            events.append("restore-attempt")
+            return subprocess.CompletedProcess(
+                argv, restore_rc, "", "guard refusal" if restore_rc else ""
+            )
+        return runner(argv, **kwargs)
+
+    ctx.runner = run
+    monkeypatch.setattr(
+        reinstall_clean,
+        "_live_dependencies",
+        lambda: (FakeProcs([], {}), ownership, None),
+    )
+    monkeypatch.setattr(
+        reinstall_clean, "take_live_snapshot", lambda **kwargs: manifest
+    )
+    monkeypatch.setattr(reinstall_clean, "resolve_source", lambda *args: tmp_path)
+    monkeypatch.setattr(reinstall_clean, "build_plan", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(
+        reinstall_clean, "vibecrafted_launcher_bin", lambda: missing_launcher
+    )
+    monkeypatch.setattr(reinstall_clean, "ResurrectContext", lambda **kwargs: ctx)
+    monkeypatch.setattr(reinstall_clean, "frame_binary", lambda: "/fake/vc-frame")
+    monkeypatch.setattr(reinstall_clean, "_active_runtime_root", lambda: NEW)
+    monkeypatch.setattr(
+        reinstall_clean,
+        "run_install",
+        lambda *args, **kwargs: pytest.fail("install ran after failed stop"),
+    )
+    rc = reinstall_clean.execute(
+        run_dir, source=str(tmp_path), pack=None, parent_pid=-1
+    )
+    phase2 = json.loads((run_dir / "receipts/phase-2-kill.json").read_text())
+    phase3 = json.loads((run_dir / "receipts/phase-3-install.json").read_text())
+    obligation = json.loads((run_dir / "kill-service.json").read_text())["service"]
+    assert phase2["status"] == "failed" and phase3["status"] == "skipped"
+    assert obligation["restore_required"] is True
+    assert obligation["quiescence_unverified"] is True
+    assert obligation["owned_job_booted_out"] is True
+    assert obligation["action"] == "stop-unverified"
+    assert phase2["service"] == obligation
+    assert events.index("bootout") < events.index("restore-attempt")
+    phase4 = json.loads((run_dir / "receipts/phase-4-resurrect.json").read_text())
+    assert phase4["service"]["rc"] == restore_rc
+    assert phase4["status"] == ("partial" if restore_rc else "ok")
+    assert rc == int(bool(restore_rc))
+
+
+@pytest.mark.parametrize("refusal", ["foreign", "no-job", "bootout-false"])
+def test_pre_bootout_service_refusal_has_no_restore_obligation(
+    recovery_service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    ownership, _receipt, state, _events = recovery_service
+    if refusal == "foreign":
+        state["foreign"] = True
+    elif refusal == "no-job":
+        state["owned_job"] = False
+    else:
+        monkeypatch.setattr(
+            ownership._installer,
+            "_bootout_owned_runtime_launchd_job",
+            lambda home: False,
+        )
+    detail = {}
+    with pytest.raises((OSError, reinstall_clean.ReinstallError)):
+        reinstall_clean.kill_clean(
+            {"ownership": {}}, ownership, table={}, config_dir=tmp_path, detail=detail
+        )
+    assert detail.get("service") is None
+    result = reinstall_clean.relaunch_after(
+        {"resurrect": {"relaunch_apps": []}},
+        ctx_for(tmp_path, Runner()),
+        detail.get("service"),
+    )
+    assert result["service"] is None

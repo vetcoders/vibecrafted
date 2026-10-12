@@ -160,7 +160,13 @@ HEADLESS_PROMPT = (
 
 
 class ReinstallError(RuntimeError):
-    """A refused step: nothing after it may run as if it had succeeded."""
+    """A refused step, optionally carrying a proved service restore obligation."""
+
+    def __init__(
+        self, message: str, *, partial_service: Mapping[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.partial_service = dict(partial_service) if partial_service else None
 
 
 def _iso(epoch: float | None = None) -> str:
@@ -1129,15 +1135,30 @@ class InstallerOwnership:
                         raise ReinstallError(
                             "pending service disappeared before recovery stop"
                         )
-                    _, final_status, final_pair = (
-                        installer._wait_for_runtime_service_settlement(
-                            shared_home, allow_healthy=False
+                    partial_service = {
+                        "action": "stop-unverified",
+                        "was_live": True,
+                        "restore_required": True,
+                        "quiescence_unverified": True,
+                        "owned_job_booted_out": True,
+                        "pair": pair,
+                        "method": "pending-publication-owned-bootout",
+                    }
+                    try:
+                        _, final_status, final_pair = (
+                            installer._wait_for_runtime_service_settlement(
+                                shared_home, allow_healthy=False
+                            )
                         )
-                    )
-                    if not final_status.quiescent or final_pair != "stopped":
+                        if not final_status.quiescent or final_pair != "stopped":
+                            raise ReinstallError(
+                                "pending service is not quiescent after owned recovery stop"
+                            )
+                    except (OSError, ReinstallError, subprocess.SubprocessError) as exc:
                         raise ReinstallError(
-                            "pending service is not quiescent after owned recovery stop"
-                        )
+                            f"owned service bootout completed but quiescence is unverified: {exc}",
+                            partial_service=partial_service,
+                        ) from exc
                     return {
                         "action": "stopped",
                         "was_live": True,
@@ -1890,7 +1911,12 @@ def kill_clean(
     still knows what was already stopped (a stopped service must come back).
     """
     detail = {} if detail is None else detail
-    detail["service"] = ownership.stop_service()
+    try:
+        detail["service"] = ownership.stop_service()
+    except ReinstallError as exc:
+        if exc.partial_service is not None:
+            detail["service"] = exc.partial_service
+        raise
     protected = set(ownership.caller_ancestors())
     spared = set(manifest["ownership"].get("headless_spared_pids", []))
 
@@ -2662,7 +2688,14 @@ def relaunch_after(
 ) -> dict[str, Any]:
     """Bring back the service and the App the kill phase stopped."""
     out: dict[str, Any] = {"service": None, "apps": []}
-    if service and service.get("action") == "stopped" and service.get("was_live"):
+    if (
+        service
+        and service.get("was_live")
+        and (
+            service.get("action") == "stopped"
+            or service.get("restore_required") is True
+        )
+    ):
         result = ctx.runner(
             [str(ctx.launcher), "server", "service", "start"],
             check=False,
