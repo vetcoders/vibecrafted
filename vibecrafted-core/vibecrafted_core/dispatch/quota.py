@@ -19,7 +19,9 @@ call.
 
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -40,8 +42,41 @@ KNOWN_STATES = frozenset(
     {"ok", "low", "exhausted", "stale", "unknown", "absent", "malformed"}
 )
 _PROBE_TIMEOUT_S = 30.0
+#: Worst-first: when one agent is reported twice the more alarming card wins,
+#: so a later benign duplicate can never hide a confirmed exhaustion.
+_SEVERITY = {
+    "exhausted": 6,
+    "malformed": 5,
+    "unknown": 4,
+    "absent": 3,
+    "stale": 2,
+    "low": 1,
+    "ok": 0,
+}
 
 Fetch = Callable[[str, float], Any]
+
+
+def _state_of(item: dict[str, Any]) -> str:
+    """Reported state, with a contradictory fresh claim downgraded to ``stale``.
+
+    ``exhausted`` only refuses a batch as a *fresh* confirmation; a card that
+    also says ``stale: true`` is not one.
+    """
+    state = item.get("state")
+    if not isinstance(state, str) or state not in KNOWN_STATES:
+        return "malformed"
+    if state == "exhausted" and item.get("stale") is True:
+        return "stale"
+    return state
+
+
+def _age_of(item: dict[str, Any]) -> float | None:
+    """Observation age in seconds; ``None`` unless a finite non-negative number."""
+    age = item.get("age_s")
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return None
+    return float(age) if math.isfinite(age) and age >= 0 else None
 
 
 @dataclass(frozen=True)
@@ -182,7 +217,13 @@ def fetch_board(
     url = f"{server_url.rstrip('/')}{QUOTA_PATH}{query}"
     try:
         payload = (fetch or _http_get_json)(url, _PROBE_TIMEOUT_S)
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        OSError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         return {}, f"{type(exc).__name__}: {exc}"
     agents = payload.get("agents") if isinstance(payload, dict) else None
     if not isinstance(agents, list):
@@ -192,8 +233,12 @@ def fetch_board(
         if not isinstance(item, dict):
             continue
         key = item.get("agent") or item.get("id")
-        if isinstance(key, str) and key:
-            items[key.lower()] = item
+        if not (isinstance(key, str) and key):
+            continue
+        name = key.lower()
+        known = items.get(name)
+        if known is None or _SEVERITY[_state_of(item)] > _SEVERITY[_state_of(known)]:
+            items[name] = item
     return items, ""
 
 
@@ -216,11 +261,10 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
     pool = str(scope.get("pool") or item.get("pool") or agent)
     account = str(scope.get("account") or item.get("account") or "")
     source = str(item.get("source") or "")
-    age = item.get("age_s")
-    age_s = float(age) if isinstance(age, (int, float)) and age >= 0 else None
-    state = item.get("state")
+    age_s = _age_of(item)
+    state = _state_of(item)
     detail = str(item.get("detail") or item.get("headline") or "")
-    if not isinstance(state, str) or state not in KNOWN_STATES:
+    if state == "malformed":
         return _finding(
             requirement,
             "malformed",
@@ -228,7 +272,7 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
             account=account,
             source=source,
             age_s=age_s,
-            detail=f"observation carries no recognised state ({state!r})",
+            detail=f"observation carries no recognised state ({item.get('state')!r})",
         )
     scope_model = str(scope.get("model") or "")
     if not _model_covered(scope_model, requirement.model):
@@ -292,7 +336,7 @@ def _exhausted_pools(
     found: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     for agent, item in items.items():
         pool, account = _pool_key(item)
-        if pool and item.get("state") == "exhausted":
+        if pool and _state_of(item) == "exhausted":
             found.setdefault((pool, account), (agent, item))
     return found
 
@@ -321,9 +365,7 @@ def _apply_shared_pool(
             pool=finding.pool,
             account=finding.account or account,
             source=str(item.get("source") or ""),
-            observed_age_s=item.get("age_s")
-            if isinstance(item.get("age_s"), (int, float))
-            else None,
+            observed_age_s=_age_of(item),
             detail=f"shared pool reported exhausted by agent '{reporter}'",
         )
     return finding
@@ -417,6 +459,17 @@ def diagnose(
         elif finding.state != "ok":
             diagnosis.warnings.append((path, _describe(finding)))
     return diagnosis
+
+
+def next_receipt_path(directory: Path, name: str = "quota-override-receipt") -> Path:
+    """First unused receipt path: a later (resume) override never replaces an earlier one."""
+    first = directory / f"{name}.json"
+    if not first.exists():
+        return first
+    index = 2
+    while (directory / f"{name}-{index}.json").exists():
+        index += 1
+    return directory / f"{name}-{index}.json"
 
 
 def publish_receipt(path: Path, receipt: dict[str, Any]) -> None:

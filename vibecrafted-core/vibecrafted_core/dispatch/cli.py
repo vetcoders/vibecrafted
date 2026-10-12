@@ -26,6 +26,7 @@ from .model import (
     Verify,
     classify_base,
 )
+from .quota import next_receipt_path as next_quota_receipt_path
 from .quota import publish_receipt as publish_quota_receipt
 from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
@@ -219,7 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The override is a durable decision: no receipt, no launch.
         try:
             publish_quota_receipt(
-                artifacts_dir / "quota-override-receipt.json",
+                next_quota_receipt_path(artifacts_dir),
                 report.quota_override_receipt,
             )
         except OSError as exc:

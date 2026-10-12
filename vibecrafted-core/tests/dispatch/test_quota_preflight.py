@@ -432,3 +432,83 @@ def test_contract_agy_is_scoped_to_its_model(tmp_path: Path, board: Board) -> No
 
     assert report.ok is True
     assert "scoped to model" in _quota_messages(report)[0]
+
+
+# --- marbles L1: fail-open and evidence-loss counterexamples ----------------
+
+
+def test_duplicate_cards_for_one_agent_never_hide_exhaustion(
+    tmp_path: Path, board: Board
+) -> None:
+    board.agents = [
+        item("codex", "exhausted", pool="openai"),
+        item("codex", "ok", pool="openai"),
+    ]
+    report = diagnose_file(_plan(tmp_path, ("codex", "")), check_quotas=True)
+
+    assert report.ok is False
+    assert report.errors[0].path == "quota.openai"
+
+
+def test_exhausted_card_flagged_stale_is_not_fresh_confirmation(
+    tmp_path: Path, board: Board
+) -> None:
+    board.agents = [item("codex", "exhausted", pool="openai", stale=True)]
+    report = diagnose_file(_plan(tmp_path, ("codex", "")), check_quotas=True)
+
+    assert report.ok is True
+    assert "not current evidence" in _quota_messages(report)[0]
+
+
+@pytest.mark.parametrize("age", [True, float("inf"), "5", -1])
+def test_non_numeric_age_is_not_reported_as_an_observation_age(
+    tmp_path: Path, board: Board, age: Any
+) -> None:
+    board.agents = [item("claude", "low", age_s=age)]
+    report = diagnose_file(_plan(tmp_path, ("claude", "")), check_quotas=True)
+
+    assert report.ok is True
+    assert "observed" not in _quota_messages(report)[0]
+
+
+def test_incomplete_read_from_the_server_is_a_warning_not_a_crash() -> None:
+    import http.client
+
+    def torn(_url: str, _timeout: float) -> Any:
+        raise http.client.IncompleteRead(b"{")
+
+    items, failure = quota_preflight.fetch_board(
+        "http://127.0.0.1:1", refresh=False, fetch=torn
+    )
+    assert items == {} and "IncompleteRead" in failure
+
+
+def test_resume_with_override_keeps_the_original_receipt(
+    tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board.agents = [item("codex", "exhausted", pool="openai")]
+    plan = _plan(tmp_path, ("codex", ""))
+    published: list[Path] = []
+    real = dispatch_cli.publish_quota_receipt
+
+    def spy(path: Path, receipt: dict[str, Any]) -> None:
+        real(path, receipt)
+        published.append(path)
+
+    def launch(*_a: object, **_k: object) -> None:
+        raise RuntimeError("stop after the receipt check")
+
+    monkeypatch.setattr(dispatch_cli, "publish_quota_receipt", spy)
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", launch)
+    monkeypatch.setattr(dispatch_cli, "reserve_run_id", lambda _p: "run-fixed")
+
+    dispatch_cli.main([str(plan), "--ignore-usage-quota-warnings"])
+    first = published[0]
+    original = json.loads(first.read_text(encoding="utf-8"))
+    assert original["bypassed"]
+
+    dispatch_cli.main(
+        [str(plan), "--ignore-usage-quota-warnings", "--resume", "run-fixed"]
+    )
+    assert json.loads(first.read_text(encoding="utf-8")) == original
+    assert len(set(published)) == 2
