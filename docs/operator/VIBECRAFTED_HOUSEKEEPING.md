@@ -114,7 +114,8 @@ running agents, Guardian cursor/outbox/deadletters and durable receipts. Stop
 an old Guardian only by its verified managed identity. A still-held Guardian
 lock prevents embedding and stays visibly degraded; it is never forcibly
 reclaimed. Retire a legacy housekeeping plist only with the exact trusted
-installer digest through `retire_legacy_schedule`; an ownership mismatch or
+installer digest recorded for that exact path in a canonical runtime-install
+ownership receipt through `retire_legacy_schedule`; an ownership mismatch or
 unconfirmed bootout retains it. Per-provider telemetry plist retirement belongs
 to the collector migration and likewise requires ownership receipts. Names
 alone never authorize deleting foreign files.

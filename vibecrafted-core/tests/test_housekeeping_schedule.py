@@ -117,11 +117,35 @@ def test_legacy_migration_requires_exact_ownership_digest(tmp_path: Path) -> Non
         }
     )
     paths.launch_agent_file.write_bytes(payload)
-    with pytest.raises(HousekeepingScheduleError, match="digest mismatch"):
-        schedule.retire_legacy_schedule(paths, expected_sha256="0" * 64)
+    ownership = tmp_path / "install-receipt.json"
+    digest = schedule._sha256_file(paths.launch_agent_file)
+    with pytest.raises(HousekeepingScheduleError, match="ownership receipt missing"):
+        schedule.retire_legacy_schedule(
+            paths, expected_sha256=digest, ownership_receipt=ownership
+        )
+    with pytest.raises(HousekeepingScheduleError, match="migration required"):
+        install_housekeeping_schedule(
+            HousekeepingConfig(enabled=True), paths, activate=False
+        )
+    ownership.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.runtime-install.v1",
+                "owned_files": {str(paths.launch_agent_file): digest},
+            }
+        )
+    )
+    with pytest.raises(
+        HousekeepingScheduleError, match="receipt.*mismatched|digest mismatch"
+    ):
+        schedule.retire_legacy_schedule(
+            paths, expected_sha256="0" * 64, ownership_receipt=ownership
+        )
     assert paths.launch_agent_file.read_bytes() == payload
     digest = schedule._sha256_file(paths.launch_agent_file)
-    assert schedule.retire_legacy_schedule(paths, expected_sha256=digest)
+    assert schedule.retire_legacy_schedule(
+        paths, expected_sha256=digest, ownership_receipt=ownership
+    )
 
 
 def test_schedule_respects_disabled_and_plan_only(tmp_path: Path, monkeypatch) -> None:

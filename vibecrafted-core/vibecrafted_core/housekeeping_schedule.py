@@ -123,6 +123,10 @@ def install_housekeeping_schedule(
     """Register the script for the supervisor; preserve both config switches."""
     if not config.enabled:
         raise HousekeepingScheduleError("[housekeeping].enabled is false")
+    if paths.launch_agent_file.exists() or paths.launch_agent_file.is_symlink():
+        raise HousekeepingScheduleError(
+            "legacy housekeeping plist retained; receipt-owned migration required before supervisor registration"
+        )
     script = _validate_owned_regular_file(paths.script_path)
     payload = (
         json.dumps(
@@ -163,13 +167,28 @@ def housekeeping_schedule_installed(paths: HousekeepingSchedulePaths) -> bool:
 
 
 def retire_legacy_schedule(
-    paths: HousekeepingSchedulePaths, *, expected_sha256: str, deactivate: bool = False
+    paths: HousekeepingSchedulePaths,
+    *,
+    expected_sha256: str,
+    ownership_receipt: Path,
+    deactivate: bool = False,
 ) -> bool:
     """Explicit migration with an exact prior installer digest; names are insufficient."""
     path = paths.launch_agent_file
     if not path.exists() and not path.is_symlink():
         return False
     _validate_owned_regular_file(path, allow_symlink=False)
+    raw_receipt = _read_owned_text(ownership_receipt)
+    receipt = json.loads(raw_receipt) if raw_receipt is not None else {}
+    owned_files = receipt.get("owned_files") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(owned_files, dict)
+        or receipt.get("schema") != "vibecrafted.runtime-install.v1"
+        or owned_files.get(str(path)) != expected_sha256
+    ):
+        raise HousekeepingScheduleError(
+            "legacy schedule ownership receipt missing or mismatched; retained"
+        )
     if not expected_sha256 or _sha256_file(path) != expected_sha256:
         raise HousekeepingScheduleError(
             "legacy schedule ownership digest mismatch; retained"
