@@ -18629,7 +18629,10 @@ def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
     the ledger from the live layer, yet the dead copies keep every later
     checkpoint above `_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES` for the life of the
     machine (observed 2026-10-10: a 70 MiB document refused each install).
-    The live-layer ledger is ownership truth and stays untouched.
+    Configuration transactions also carried a full previous receipt. Their
+    rollback uses the same live-layer ledger, so normalize that duplicate
+    through the canonical recovery snapshot. Ownership and retirement proof
+    fields survive; the live-layer ledger stays untouched.
     """
     for holder in (receipt, receipt.get("preparing_previous_receipt")):
         if not isinstance(holder, dict):
@@ -18643,6 +18646,11 @@ def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
         if saved.get("drift_backup_history"):
             saved["drift_backup_history"] = {}
         saved.pop("preparing_previous_receipt", None)
+    transaction = receipt.get("config_transaction")
+    if isinstance(transaction, dict):
+        previous = transaction.get("previous_receipt")
+        if isinstance(previous, dict) and previous:
+            transaction["previous_receipt"] = _recovery_receipt_snapshot(previous)
     return receipt
 
 
@@ -24529,7 +24537,7 @@ def _publish_runtime_config_transaction(
     receipt["config_transaction"] = {
         "schema": "vibecrafted.config-publication.v1",
         "entries": entries,
-        "previous_receipt": json.loads(json.dumps(previous)),
+        "previous_receipt": (_recovery_receipt_snapshot(previous) if previous else {}),
     }
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
     try:
