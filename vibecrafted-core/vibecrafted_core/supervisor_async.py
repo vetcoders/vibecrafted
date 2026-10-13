@@ -189,6 +189,13 @@ def _fallback_report_body(transcript_text: str) -> str:
     return "\n".join(plain_lines).strip() + ("\n" if plain_lines else "")
 
 
+def _is_workflow_parent(command: Sequence[str]) -> bool:
+    return len(command) >= 3 and tuple(command[1:3]) == (
+        "-m",
+        "vibecrafted_core.workflow_runtime",
+    )
+
+
 def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
     """Usage, cost, failure cause and provider session of a closing run.
 
@@ -248,10 +255,7 @@ def _workflow_parent_telemetry(handle: AsyncRunHandle, failure) -> RunTelemetry 
     each exact terminal child meta and cross-check identity/usage mirrors;
     arbitrary report prose or a precomputed parent sum is not evidence.
     """
-    if len(handle.command) < 3 or handle.command[1:3] != (
-        "-m",
-        "vibecrafted_core.workflow_runtime",
-    ):
+    if not _is_workflow_parent(handle.command):
         return None
     if handle.meta_path is None:
         return None
@@ -599,6 +603,7 @@ class AsyncRunHandle:
     artifact_validation: ArtifactValidation | None = None
     first_output_seen: bool = False
     session_id: str = ""
+    launch_session_id: str = ""
     agent: str = ""
     skill: str = ""
     agent_session_id: str = ""
@@ -686,6 +691,10 @@ class AsyncSupervisor:
         if env:
             merged_env.update(env)
         session_id = ensure_session_id(merged_env.get("VIBECRAFTED_SESSION_ID"))
+        # Retain the launcher's legacy correlation identity separately. The
+        # workspace/runtime identity below is canonical for parent report/meta;
+        # an orchestration parent has no provider stream to stamp its shell.
+        launch_session_id = session_id if _is_workflow_parent(command) else ""
         merged_env["VIBECRAFTED_SESSION_ID"] = session_id
         workspace_fields: dict[str, object] = {}
         try:
@@ -750,6 +759,17 @@ class AsyncSupervisor:
                 skill=skill,
                 claim_digest=claim_digest,
             )
+            if launch_session_id:
+                from .report_contract import stamp_launcher_report_identity
+
+                stamp_launcher_report_identity(
+                    report_path,
+                    run_id=run_id,
+                    session_id=session_id,
+                    agent=agent,
+                    skill=skill,
+                    status="pending",
+                )
 
         await self._emit(
             run_id,
@@ -811,6 +831,7 @@ class AsyncSupervisor:
             report_path=Path(report_path) if report_path is not None else None,
             transcript_path=transcript,
             session_id=session_id,
+            launch_session_id=launch_session_id,
             agent=agent,
             skill=skill,
             agent_session_id=initial_agent_session_id,
@@ -885,6 +906,8 @@ class AsyncSupervisor:
                             latest.setdefault(field, origin[field])
                     latest.setdefault("dispatcher", dict(dispatcher))
                     latest.setdefault("run_id", run_id)
+                    if launch_session_id:
+                        latest["launch_session_id"] = launch_session_id
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
                     latest.setdefault("skill", skill)
@@ -1409,7 +1432,9 @@ class AsyncSupervisor:
         stamp_launcher_report_identity(
             report,
             run_id=handle.run_id,
-            session_id=handle.agent_session_id,
+            session_id=handle.session_id
+            if handle.launch_session_id
+            else handle.agent_session_id,
             agent=handle.agent or "unknown",
             skill=handle.skill or "unknown",
             status=status,
@@ -1522,7 +1547,14 @@ class AsyncSupervisor:
         summary = {
             "run_id": handle.run_id,
             "agent": handle.agent,
-            "session_id": handle.agent_session_id,
+            "session_id": handle.session_id
+            if handle.launch_session_id
+            else handle.agent_session_id,
+            **(
+                {"launch_session_id": handle.launch_session_id}
+                if handle.launch_session_id
+                else {}
+            ),
             "agent_session_id": handle.agent_session_id,
             "agent_model": handle.agent_model,
             "runtime_session_id": handle.session_id,
