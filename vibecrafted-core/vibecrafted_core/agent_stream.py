@@ -35,6 +35,7 @@ MODEL_ENV_VARS = (
     "AGY_MODEL",
     "KIMI_MODEL",
     "COPILOT_MODEL",
+    "CURSOR_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 COST_PATTERNS = (
@@ -331,12 +332,19 @@ def resolve_default_model(
     command: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Resolve a default model id: launch command flag, then env vars, then codex config."""
+    """Resolve command, explicit generic override, selected provider env, then config.
+
+    Another provider's ambient model is never this agent's default. An explicit
+    empty environment must also stay empty rather than fall back to the host.
+    """
     model = _command_model(command)
     if model:
         return model
-    source_env = env or os.environ
-    for key in MODEL_ENV_VARS:
+    source_env = os.environ if env is None else env
+    agent = agent.strip().lower()
+    for key in ("VIBECRAFTED_PARENT_MODEL", f"{agent.upper()}_MODEL"):
+        if key not in MODEL_ENV_VARS:
+            continue
         model = _clean_model(source_env.get(key))
         if model:
             return model

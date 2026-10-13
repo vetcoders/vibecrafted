@@ -34,14 +34,16 @@ def _isolated_quota_board(request: pytest.FixtureRequest, monkeypatch) -> None:
             "kimi",
         ]
         return {
-            agent: {
-                "id": agent,
-                "agent": agent,
-                "state": "ok",
-                "pool": agent,
-                "stale": False,
-                "age_s": 5,
-            }
+            agent: [
+                {
+                    "id": agent,
+                    "agent": agent,
+                    "state": "ok",
+                    "pool": agent,
+                    "stale": False,
+                    "age_s": 5,
+                }
+            ]
             for agent in agents
         }, ""
 

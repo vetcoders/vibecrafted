@@ -7,6 +7,8 @@ Every test talks to a real HTTP listener serving the quota board shape
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -612,3 +614,368 @@ def test_truncated_http_body_is_a_visible_warning_not_an_exception() -> None:
     assert not diagnosis.errors
     assert any("quota board unavailable" in m for _p, m in diagnosis.warnings)
     assert diagnosis.findings[0].state == "absent"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("state", ["ok", "exhausted"])
+def test_same_agent_cards_preserve_required_model_in_both_orders(
+    tmp_path, board, monkeypatch, capsys, reverse, state
+) -> None:
+    board.agents = [
+        item("codex", state, scope_model="needed", pool="needed", account="team"),
+        item("codex", "exhausted", scope_model="other", pool="other", account="team"),
+    ][:: -1 if reverse else 1]
+    plan = _plan(tmp_path, ("claude", "claude-needed"), ("codex", "needed"))
+    board.agents.append(item("claude", "ok"))
+    code = doctor_main([str(plan), "--check-quotas", "--json"])
+    result = json.loads(capsys.readouterr().out)
+    assert code == (1 if state == "exhausted" else 0)
+    finding = next(f for f in result["quota"] if f["agent"] == "codex")
+    assert (finding["state"], finding["pool"], finding["account"]) == (
+        state,
+        "needed",
+        "team",
+    )
+    if state == "exhausted":
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("required exhaustion must refuse before reservation/launch")
+
+        monkeypatch.setattr(dispatch_cli, "reserve_run_id", forbidden)
+        monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+        assert dispatch_cli.main([str(plan), "--json"]) == 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_conflicting_and_malformed_required_cards_remain_visible(
+    tmp_path, board, reverse
+) -> None:
+    board.agents = [
+        item("codex", "exhausted", scope_model="needed", account="a"),
+        item("codex", "ok", scope_model="needed", account="a"),
+        item("codex", "exhausted", scope_model="needed", account="b", age_s=-1),
+        item("codex", "stale", scope_model="needed", account="c"),
+    ][:: -1 if reverse else 1]
+    report = diagnose_file(_plan(tmp_path, ("codex", "needed")), check_quotas=True)
+    assert not report.ok
+    assert {f["state"] for f in report.quota_findings} >= {
+        "exhausted",
+        "ok",
+        "malformed",
+        "stale",
+    }
+    assert any("conflict" in m for m in _quota_messages(report))
+
+
+def test_ambient_claude_model_cannot_hide_codex_config_exhaustion(
+    tmp_path, board, monkeypatch
+) -> None:
+    codex = tmp_path / "codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text('model = "gpt-required-model"\n')
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-unrelated-model")
+    monkeypatch.delenv("VIBECRAFTED_PARENT_MODEL", raising=False)
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    board.agents = [item("codex", "exhausted", scope_model="gpt-required-model")]
+    plan = _plan(tmp_path, ("codex", ""))
+    report = diagnose_file(plan, check_quotas=True)
+    assert not report.ok
+    assert report.quota_findings[0]["model"] == "gpt-required-model"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("ambient contamination must not admit the batch")
+
+    monkeypatch.setattr(dispatch_cli, "reserve_run_id", forbidden)
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+    assert dispatch_cli.main([str(plan), "--json"]) == 1
+
+
+def test_parallel_process_receipt_publication_never_overwrites(tmp_path) -> None:
+    path = tmp_path / "receipt.json"
+    code = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from vibecrafted_core.dispatch.quota import publish_receipt
+print("ready", flush=True)
+sys.stdin.readline()
+try:
+    publish_receipt(Path(sys.argv[2]), {"decision": sys.argv[3]})
+except OSError:
+    print("refused", flush=True)
+else:
+    print("published", flush=True)
+"""
+    core = str(Path(quota_preflight.__file__).resolve().parents[2])
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, core, str(path), decision],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for decision in ("first", "second")
+    ]
+    try:
+        for process in processes:
+            assert process.stdout.readline().strip() == "ready"
+        for process in processes:
+            process.stdin.write("go\n")
+            process.stdin.flush()
+        outcomes = [process.communicate(timeout=15) for process in processes]
+        assert all(process.returncode == 0 for process in processes), outcomes
+        assert sorted(out.strip() for out, err in outcomes) == ["published", "refused"]
+        assert json.loads(path.read_text())["decision"] in {"first", "second"}
+        assert list(tmp_path.iterdir()) == [path]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+@pytest.mark.parametrize(
+    "kind", ["legacy", "symlink", "temporary-symlink", "parent-symlink"]
+)
+def test_receipt_publication_preserves_preexisting_paths(tmp_path, kind) -> None:
+    target = tmp_path / "foreign"
+    target.write_text("preserve me")
+    path = tmp_path / "receipt.json"
+    if kind == "legacy":
+        path.write_text("legacy")
+    elif kind == "symlink":
+        path.symlink_to(target)
+    elif kind == "temporary-symlink":
+        path.with_name(path.name + ".tmp").symlink_to(target)
+    else:
+        directory = tmp_path / "foreign-directory"
+        directory.mkdir()
+        parent = tmp_path / "linked-parent"
+        parent.symlink_to(directory, target_is_directory=True)
+        path = parent / "receipt.json"
+    if kind == "temporary-symlink":
+        quota_preflight.publish_receipt(path, {"decision": "new"})
+        assert path.with_name(path.name + ".tmp").is_symlink()
+    else:
+        with pytest.raises(OSError):
+            quota_preflight.publish_receipt(path, {"decision": "new"})
+    assert target.read_text() == "preserve me"
+    if kind == "legacy":
+        assert path.read_text() == "legacy"
+    if kind == "parent-symlink":
+        assert not (directory / "receipt.json").exists()
+
+
+def test_foreign_model_card_cannot_assign_a_required_shared_pool(
+    tmp_path, board
+) -> None:
+    board.agents = [
+        item("cursor", "ok", pool="other", account="team", scope_model="foreign"),
+        item(
+            "copilot", "exhausted", pool="other", account="team", scope_model="needed"
+        ),
+    ]
+    report = diagnose_file(_plan(tmp_path, ("cursor", "needed")), check_quotas=True)
+    assert report.ok
+    assert report.quota_findings[0]["state"] == "unknown"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_shared_pool_retains_duplicate_reporter_scopes(
+    tmp_path, board, reverse
+) -> None:
+    board.agents = [
+        item(
+            "copilot", "exhausted", pool="shared", account="team", scope_model="needed"
+        ),
+        item("copilot", "ok", pool="foreign", account="other", scope_model="other"),
+    ][:: -1 if reverse else 1]
+    board.agents.append(item("cursor", "unknown", pool="shared", account="team"))
+    report = diagnose_file(_plan(tmp_path, ("cursor", "needed")), check_quotas=True)
+    assert not report.ok
+    assert report.quota_findings[0]["state"] == "exhausted"
+    assert report.quota_findings[0]["account"] == "team"
+
+
+def test_cli_retries_atomic_collision_and_preserves_the_legacy_decision(
+    tmp_path, board, monkeypatch
+) -> None:
+    board.agents = [item("codex", "exhausted")]
+    plan = _plan(tmp_path, ("codex", "needed"))
+    artifacts = tmp_path / "override"
+    artifacts.mkdir()
+    legacy = artifacts / "quota-override-receipt.json"
+    legacy.write_text('{"decision": "legacy"}')
+    monkeypatch.setattr(dispatch_cli, "_artifacts_dir", lambda *_a, **_kw: artifacts)
+
+    def launch(*args, **kwargs):
+        assert json.loads(legacy.read_text()) == {"decision": "legacy"}
+        receipt = json.loads((artifacts / "quota-override-receipt-1.json").read_text())
+        assert receipt["bypassed"][0]["model"] == "needed"
+        raise RuntimeError("stop after durable receipt check")
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", launch)
+    assert dispatch_cli.main([str(plan), "--ignore-usage-quota-warnings"]) == 1
+
+
+@pytest.mark.parametrize(
+    "stage", ["file-fsync", "directory-fsync", "link", "collision-limit"]
+)
+def test_durability_failures_and_collision_limit_refuse_launch(
+    tmp_path, board, monkeypatch, stage, capsys
+) -> None:
+    import os
+    import stat
+
+    board.agents = [item("codex", "exhausted")]
+    plan = _plan(tmp_path, ("codex", "needed"))
+    artifacts = tmp_path / "override"
+    artifacts.mkdir()
+    monkeypatch.setattr(dispatch_cli, "_artifacts_dir", lambda *_a, **_kw: artifacts)
+    fsync = os.fsync
+
+    def fail_sync(fd):
+        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        if directory == (stage == "directory-fsync"):
+            raise OSError("injected fsync failure")
+        fsync(fd)
+
+    def fail_link(*args, **kwargs):
+        raise OSError("injected link failure")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("failed durable publication must refuse launch")
+
+    if "fsync" in stage:
+        monkeypatch.setattr(os, "fsync", fail_sync)
+    elif stage == "link":
+        monkeypatch.setattr(os, "link", fail_link)
+    else:
+        for attempt in range(32):
+            name = (
+                "quota-override-receipt.json"
+                if attempt == 0
+                else f"quota-override-receipt-{attempt}.json"
+            )
+            (artifacts / name).write_text("legacy")
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+    assert dispatch_cli.main([str(plan), "--ignore-usage-quota-warnings"]) == 1
+    assert "could not be published" in capsys.readouterr().err
+    if stage == "collision-limit":
+        assert all(
+            path.read_text() == "legacy" for path in artifacts.glob("quota-override*")
+        )
+
+
+@pytest.mark.parametrize("selection", ["cut", "frontmatter", "config"])
+def test_quota_uses_canonical_selection_before_provider_environment(
+    tmp_path, board, monkeypatch, selection
+) -> None:
+    directory = tmp_path / "config" / "vibecrafted"
+    directory.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(directory.parent))
+    (directory / "config.toml").write_text('[agents.codex]\nmodel = "configured"\n')
+    monkeypatch.setenv("CODEX_MODEL", "ambient-codex")
+    monkeypatch.setenv("CLAUDE_MODEL", "ambient-claude")
+    model = {"cut": "pinned", "frontmatter": "brief", "config": "configured"}[selection]
+    plan = _plan(tmp_path, ("codex", "pinned" if selection == "cut" else ""))
+    if selection != "config":
+        plan.write_text(
+            plan.read_text().replace(
+                'prompt = "hello"', 'prompt = """---\nmodel: brief\n---\nhello"""'
+            )
+        )
+    board.agents = [item("codex", "exhausted", scope_model=model)]
+    report = diagnose_file(plan, check_quotas=True)
+    assert not report.ok
+    assert report.dispatch.cuts[0].model == model
+    assert report.quota_findings[0]["model"] == model
+
+
+@pytest.mark.parametrize(
+    "scope", ["invalid", {"pool": []}, {"account": True}, {"model": 42}]
+)
+def test_malformed_scope_cannot_prove_required_exhaustion(
+    tmp_path, board, scope
+) -> None:
+    board.agents = [item("codex", "exhausted", scope=scope)]
+    report = diagnose_file(_plan(tmp_path, ("codex", "needed")), check_quotas=True)
+    assert report.ok
+    assert report.quota_findings[0]["state"] == "malformed"
+
+
+@pytest.mark.parametrize("field", ["account", "pool"])
+def test_malformed_top_level_identity_cannot_confirm_shared_exhaustion(
+    tmp_path, board, field
+) -> None:
+    reporter = item("copilot", "exhausted", pool="shared", account="team")
+    reporter["scope"][field] = None
+    reporter[field] = True
+    target = item("cursor", "unknown", pool="shared", account="team")
+    target["scope"][field] = "True"
+    board.agents = [reporter, target]
+    report = diagnose_file(_plan(tmp_path, ("cursor", "needed")), check_quotas=True)
+    assert report.ok
+
+
+@pytest.mark.parametrize("swap_target", ["directory", "receipt"])
+def test_publication_directory_swap_refuses_cli_launch(
+    tmp_path, board, monkeypatch, capsys, swap_target
+) -> None:
+    import os
+
+    board.agents = [item("codex", "exhausted")]
+    plan = _plan(tmp_path, ("codex", "needed"))
+    directory = tmp_path / "override"
+    directory.mkdir()
+    moved = tmp_path / "moved"
+    link = os.link
+
+    def swap(*args, **kwargs):
+        link(*args, **kwargs)
+        if swap_target == "directory":
+            directory.rename(moved)
+            directory.mkdir()
+        else:
+            moved.mkdir()
+            receipt = directory / "quota-override-receipt.json"
+            receipt.rename(moved / receipt.name)
+            receipt.write_text((moved / receipt.name).read_text())
+        (directory / "foreign").write_text("preserve replacement")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("receipt absent at the launch-visible path must refuse launch")
+
+    monkeypatch.setattr(dispatch_cli, "_artifacts_dir", lambda *_a, **_kw: directory)
+    monkeypatch.setattr(os, "link", swap)
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+    assert dispatch_cli.main([str(plan), "--ignore-usage-quota-warnings"]) == 1
+    assert "could not be published" in capsys.readouterr().err
+    if swap_target == "directory":
+        assert not (directory / "quota-override-receipt.json").exists()
+    assert (
+        json.loads((moved / "quota-override-receipt.json").read_text())["bypassed"][0][
+            "model"
+        ]
+        == "needed"
+    )
+    assert (directory / "foreign").read_text() == "preserve replacement"
+
+
+def test_unsupported_publication_platform_refuses_launch(
+    tmp_path, board, monkeypatch, capsys
+) -> None:
+    import os
+
+    board.agents = [item("codex", "exhausted")]
+    plan = _plan(tmp_path, ("codex", "needed"))
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported durable publication must refuse launch")
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+    assert dispatch_cli.main([str(plan), "--ignore-usage-quota-warnings"]) == 1
+    assert "requires no-follow directory descriptors" in capsys.readouterr().err

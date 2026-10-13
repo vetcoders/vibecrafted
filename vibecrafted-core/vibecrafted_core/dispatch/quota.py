@@ -23,6 +23,7 @@ import http.client
 import json
 import math
 import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .model import Dispatch
 
@@ -169,8 +171,8 @@ def fetch_board(
     refresh: bool,
     agents: Sequence[str] = (),
     fetch: Fetch | None = None,
-) -> tuple[dict[str, dict[str, Any]], str]:
-    """Query the shared board; returns ``(items_by_agent, error)``.
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    """Query the shared board; retain every scoped card per agent.
 
     ``refresh`` asks the server to refresh authoritative quota for exactly
     ``agents`` (the plan's needed providers) -- the only moment the network is
@@ -195,13 +197,13 @@ def fetch_board(
     agents = payload.get("agents") if isinstance(payload, dict) else None
     if not isinstance(agents, list):
         return {}, "response has no 'agents' list"
-    items: dict[str, dict[str, Any]] = {}
+    items: dict[str, list[dict[str, Any]]] = {}
     for item in agents:
         if not isinstance(item, dict):
             continue
         key = item.get("agent") or item.get("id")
         if isinstance(key, str) and key:
-            items[key.lower()] = item
+            items.setdefault(key.lower(), []).append(item)
     return items, ""
 
 
@@ -219,7 +221,21 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
             "absent",
             detail="server has no quota card for this agent",
         )
+    if item.get("scope") is not None and not isinstance(item["scope"], dict):
+        return _finding(
+            requirement, "malformed", detail="observation scope is not a mapping"
+        )
     scope = item.get("scope") if isinstance(item.get("scope"), dict) else {}
+    for name in ("pool", "account", "model"):
+        values = (
+            (scope.get(name),) if name == "model" else (scope.get(name), item.get(name))
+        )
+        if any(value is not None and not isinstance(value, str) for value in values):
+            return _finding(
+                requirement,
+                "malformed",
+                detail=f"observation scope {name} is not a string",
+            )
     pool = str(scope.get("pool") or item.get("pool") or agent)
     account = str(scope.get("account") or item.get("account") or "")
     source = str(item.get("source") or "")
@@ -308,14 +324,25 @@ def _pool_key(item: dict[str, Any]) -> tuple[str, str]:
 
 
 def _exhausted_pools(
-    items: dict[str, dict[str, Any]],
+    items: dict[str, list[dict[str, Any]]],
 ) -> dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]:
     """Candidate observations; each still needs model and evidence validation."""
     found: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
-    for agent, item in items.items():
-        pool, account = _pool_key(item)
-        if pool and item.get("state") == "exhausted":
-            found.setdefault((pool, account), []).append((agent, item))
+    for agent, cards in items.items():
+        for item in cards:
+            pool, account = _pool_key(item)
+            if pool and item.get("state") == "exhausted":
+                found.setdefault((pool, account), []).append((agent, item))
+    for candidates in found.values():
+        candidates.sort(
+            key=lambda entry: (
+                entry[0],
+                str(entry[1].get("scope")),
+                str(entry[1].get("source")),
+                str(entry[1].get("age_s")),
+                str(entry[1].get("detail")),
+            )
+        )
     return found
 
 
@@ -403,7 +430,7 @@ def diagnose(
     url = server_url if server_url is not None else default_server_url()
     diagnosis.server_url = url or ""
     if not url:
-        items: dict[str, dict[str, Any]] = {}
+        items: dict[str, list[dict[str, Any]]] = {}
         failure = "no vc-server URL configured"
     else:
         items, failure = fetch_board(
@@ -422,47 +449,167 @@ def diagnose(
         )
     exhausted_pools = _exhausted_pools(items)
     for requirement in needed:
-        finding = _evaluate(requirement, items.get(requirement.agent))
-        finding = _apply_shared_pool(finding, exhausted_pools)
-        diagnosis.findings.append(finding)
-        path = f"quota.{finding.pool}"
-        if finding.state == "exhausted":
-            if not enforce:
-                diagnosis.warnings.append(
-                    (path, _describe(finding) + " [resume of an admitted batch]")
+        cards = items.get(requirement.agent, [])
+        observations = [_evaluate(requirement, card) for card in cards]
+        # Evaluate model coverage BEFORE reducing. Unrelated cards cannot erase
+        # a needed observation, establish its account/pool, or exhaust it.
+        covered = [
+            observation
+            for card, observation in zip(cards, observations, strict=True)
+            if _model_covered(
+                str((card.get("scope") or {}).get("model") or "")
+                if isinstance(card.get("scope"), dict)
+                else "",
+                requirement.model,
+            )
+        ]
+        findings = covered or observations or [_evaluate(requirement, None)]
+        # Stable evidence order also makes receipts reproducible. Do not discard
+        # contradictory, stale, or malformed cards by choosing one winner.
+        findings = sorted(
+            findings,
+            key=lambda f: (
+                f.state != "exhausted",
+                f.pool,
+                f.account,
+                f.state,
+                f.source,
+                f.detail,
+                str(f.observed_age_s),
+            ),
+        )
+        states: dict[tuple[str, str], set[str]] = {}
+        for finding in covered:
+            if finding.state in {"ok", "low", "exhausted"}:
+                states.setdefault((finding.pool, finding.account), set()).add(
+                    finding.state
                 )
-            elif ignore_warnings:
-                diagnosis.bypassed.append(finding)
+        for (pool, account), values in sorted(states.items()):
+            if "exhausted" in values and len(values) > 1:
                 diagnosis.warnings.append(
-                    (path, _describe(finding) + f" [bypassed via {RECEIPT_FLAG}]")
+                    (
+                        f"quota.{pool}",
+                        (
+                            f"conflicting quota observations for agent '{requirement.agent}' "
+                            f"model '{requirement.model}' pool '{pool}' account '{account}'; "
+                            "all evidence retained; confirmed exhaustion remains in diagnosis"
+                        ),
+                    )
                 )
-            else:
-                diagnosis.errors.append((path, _describe(finding)))
-        elif finding.state != "ok":
-            diagnosis.warnings.append((path, _describe(finding)))
+        for observation in findings:
+            finding = (
+                _apply_shared_pool(observation, exhausted_pools)
+                if covered
+                else observation
+            )
+            diagnosis.findings.append(finding)
+            if finding != observation:
+                # Keep the agent's original uncertainty alongside the shared
+                # capacity verdict; it is still part of the evidence envelope.
+                diagnosis.findings.append(observation)
+                if observation.state not in {"ok", "exhausted"}:
+                    diagnosis.warnings.append(
+                        (f"quota.{observation.pool}", _describe(observation))
+                    )
+            path = f"quota.{finding.pool}"
+            if finding.state == "exhausted":
+                if not enforce:
+                    diagnosis.warnings.append(
+                        (path, _describe(finding) + " [resume of an admitted batch]")
+                    )
+                elif ignore_warnings:
+                    diagnosis.bypassed.append(finding)
+                    diagnosis.warnings.append(
+                        (path, _describe(finding) + f" [bypassed via {RECEIPT_FLAG}]")
+                    )
+                else:
+                    diagnosis.errors.append((path, _describe(finding)))
+            elif finding.state != "ok":
+                diagnosis.warnings.append((path, _describe(finding)))
     return diagnosis
 
 
 def publish_receipt(path: Path, receipt: dict[str, Any]) -> None:
-    """Write the override receipt durably (tmp + fsync + rename + dir fsync).
+    """Publish a complete receipt durably, atomically, and without replacement.
 
-    Raises ``OSError`` on any failure: the caller must then refuse to launch.
+    An exclusive temporary inode is fsynced, then hard-linked into the final
+    name. The link is the no-clobber admission point; a collision raises
+    FileExistsError so the caller can retry another name. Never follow a
+    symlink or remove a legacy decision. Any failure must refuse launch.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW")) or not {
+        "open",
+        "mkdir",
+        "link",
+        "unlink",
+    }.issubset(function.__name__ for function in os.supports_dir_fd):
+        raise OSError(
+            "durable quota publication requires no-follow directory descriptors and atomic links"
+        )
+    path = Path(os.path.abspath(path))
+    # macOS exposes these OS-owned root aliases. Canonicalize only those;
+    # task/receipt-directory symlinks are refused by descriptor traversal.
+    if sys.platform == "darwin":
+        for alias in ("/var", "/tmp"):
+            if (
+                path.is_relative_to(alias)
+                and os.path.realpath(alias) == "/private" + alias
+            ):
+                path = Path("/private" + alias) / path.relative_to(alias)
     payload = json.dumps(receipt, ensure_ascii=False, indent=2).encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    dir_fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    tmp = "." + path.name + "." + uuid4().hex + ".tmp"
+    created = False
     try:
+        for component in path.parent.parts[1:]:
+            try:
+                os.mkdir(component, mode=0o755, dir_fd=dir_fd)
+            except FileExistsError:
+                pass
+            else:
+                os.fsync(dir_fd)
+            child_fd = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd
+            )
+            os.close(dir_fd)
+            dir_fd = child_fd
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o644,
+            dir_fd=dir_fd,
+        )
+        created = True
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(path.parent, os.O_RDONLY)
-    try:
+            published_inode = os.fstat(handle.fileno())
+        os.link(
+            tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False
+        )
+        os.unlink(tmp, dir_fd=dir_fd)
+        created = False
         os.fsync(dir_fd)
+        # A durable inode in a renamed directory is not launch-visible evidence.
+        # Verify the public directory and receipt still identify our held inodes
+        # after publication/fsync. On drift preserve both trees and refuse.
+        held_directory = os.fstat(dir_fd)
+        visible_directory = os.stat(path.parent, follow_symlinks=False)
+        visible_receipt = os.stat(path, follow_symlinks=False)
+        if (held_directory.st_dev, held_directory.st_ino) != (
+            visible_directory.st_dev,
+            visible_directory.st_ino,
+        ) or (published_inode.st_dev, published_inode.st_ino) != (
+            visible_receipt.st_dev,
+            visible_receipt.st_ino,
+        ):
+            raise OSError(
+                "quota receipt directory or public receipt identity changed during publication"
+            )
     finally:
-        os.close(dir_fd)
+        try:
+            if created:
+                os.unlink(tmp, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)

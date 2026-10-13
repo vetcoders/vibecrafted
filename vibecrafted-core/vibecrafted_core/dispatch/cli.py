@@ -218,10 +218,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if report.quota_override_receipt is not None:
         # The override is a durable decision: no receipt, no launch.
         try:
-            publish_quota_receipt(
-                artifacts_dir / "quota-override-receipt.json",
-                report.quota_override_receipt,
-            )
+            for attempt in range(32):
+                name = (
+                    "quota-override-receipt.json"
+                    if attempt == 0
+                    else f"quota-override-receipt-{attempt}.json"
+                )
+                try:
+                    publish_quota_receipt(
+                        artifacts_dir / name, report.quota_override_receipt
+                    )
+                except FileExistsError:
+                    if attempt == 31:
+                        raise
+                else:
+                    break
         except OSError as exc:
             print(
                 f"quota override receipt could not be published ({exc}); "
