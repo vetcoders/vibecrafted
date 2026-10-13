@@ -205,11 +205,17 @@ def test_shared_await_rearms_live_run_but_returns_terminal_or_missing(
 
 
 def test_session_launch_await_uses_continued_run_receipt(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(
-        cli,
-        "resolve_session_selection",
-        lambda *a: {"agent_session_id": "native-session"},
-    )
+    def select(agent, selector, root, *, infer_recorded_root):
+        assert agent == "codex"
+        assert selector == "native-session"
+        assert root == str(tmp_path)
+        assert infer_recorded_root is False
+        return {
+            "agent_session_id": "native-session",
+            "selection_root": str(tmp_path),
+        }
+
+    monkeypatch.setattr(cli, "resolve_session_selection", select)
     monkeypatch.setattr(
         cli,
         "manual_resume_session",

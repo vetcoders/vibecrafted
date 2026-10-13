@@ -79,14 +79,20 @@ def test_last_session_selection_uses_only_valid_aware_timestamps(
 ):
     monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
     monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
-    monkeypatch.setattr(
-        workflow,
-        "resolve_fork_source",
-        lambda agent, *, session, require_native_fork: {
+    winner = "candidate" if expected and expected.tzinfo is not None else "earlier"
+
+    def resolve(agent, *, session, require_native_fork, require_unique_root):
+        assert agent == "codex"
+        assert session == winner
+        assert require_native_fork is False
+        assert require_unique_root is True
+        return {
             "accepted": True,
             "agent_session_id": session,
-        },
-    )
+            "source_root": str(tmp_path),
+        }
+
+    monkeypatch.setattr(workflow, "resolve_fork_source", resolve)
     for name, stamp in [("earlier", "2026-10-09T09:00:00Z"), ("candidate", raw)]:
         path = tmp_path / "runtime_runs" / name / "meta.json"
         path.parent.mkdir(parents=True)
@@ -101,8 +107,9 @@ def test_last_session_selection_uses_only_valid_aware_timestamps(
             )
         )
     selected = workflow.resolve_session_selection("codex", "last", tmp_path)
-    winner = "candidate" if expected and expected.tzinfo is not None else "earlier"
     assert selected["agent_session_id"] == winner
+    assert selected["selection_root"] == str(tmp_path)
+    assert selected["source_root"] == str(tmp_path)
 
 
 def _monitor(name, monkeypatch):
