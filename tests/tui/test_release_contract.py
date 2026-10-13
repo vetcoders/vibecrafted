@@ -1281,7 +1281,7 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
     ("donor", "revision"),
     [
         ("terminal", "cfa2c367ed36ba9179a05fff32ab1221060cb04e"),
-        ("frame", "81093a490c3fd1f5dfcb6731299d57c6df5465a4"),
+        ("frame", "959bf18442e70db1f484cea20fa2794bd40155d0"),
     ],
 )
 def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
