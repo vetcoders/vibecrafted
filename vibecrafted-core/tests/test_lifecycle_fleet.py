@@ -407,7 +407,7 @@ def test_seed_repo_fences_inherited_git_environment(
 
     def snapshot() -> dict[str, bytes]:
         return {
-            str(path.relative_to(victim)): path.read_bytes()
+            path.relative_to(victim).as_posix(): path.read_bytes()
             for path in victim.rglob("*")
             if path.is_file()
         }
