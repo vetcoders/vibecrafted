@@ -988,6 +988,40 @@ def test_fork_from_stale_marker_with_a_terminal_declares_the_workspace(
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
 
+@pytest.mark.parametrize(
+    ("placement_args", "floating"),
+    [(["--placement", "right"], False), ([], True)],
+    ids=["explicit-right", "default-floating"],
+)
+def test_declared_workspace_fork_honors_the_requested_placement(
+    tmp_path: Path,
+    generation: Path,
+    placement_args: list[str],
+    floating: bool,
+) -> None:
+    """The declaration path (no projection host, workspace prepared) used to
+    drop `--placement`, so an explicit `right` still floated."""
+    scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = scene.fork(
+        "codex",
+        "--session",
+        NATIVE_SESSION,
+        *placement_args,
+        extra_env=STALE,
+        tty=True,
+    )
+    surfaces = _panes(scene.calls())
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(surfaces) == 1, scene.calls()
+    argv = surfaces[0]["argv"]
+    assert ("--floating" in argv) is floating, argv
+    assert ("--direction" in argv) is (not floating), argv
+    if not floating:
+        assert argv[argv.index("--direction") + 1] == "right", argv
+    assert not _provider_tabs(scene.calls()), scene.calls()
+
+
 def test_fork_inside_a_watched_pane_keeps_the_same_tab_pane(
     tmp_path: Path, generation: Path
 ) -> None:

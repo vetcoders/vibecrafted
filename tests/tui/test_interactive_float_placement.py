@@ -25,6 +25,7 @@ records exact argv/cwd (never a live session, never a paid provider):
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
@@ -214,3 +215,202 @@ def test_title_helper_outside_git_keeps_the_directory_name(tmp_path: Path) -> No
     assert "plain dir · claude · unknown" in result.stdout, (
         result.stdout + result.stderr
     )
+
+
+# --------------------------------------------------------------------------
+# ambiguous new-pane ACK: never reissue a pane creation that may have landed
+# --------------------------------------------------------------------------
+
+# A recording Frame. `new-pane` creates a pane (or not) according to MODE and
+# then answers with the ambiguous "timed out" ACK; `list-tabs` knows only
+# tabs, so a pane can never be found there. `list-panes` lists panes by their
+# command, the unique per-launch script path being the identity evidence.
+_AMBIGUOUS_FRAME = r"""#!/usr/bin/env python3
+import json, os, sys
+d = os.environ["STUB_DIR"]
+mode = os.environ.get("STUB_MODE", "")
+def jl(name, default):
+    try:
+        return json.load(open(os.path.join(d, name)))
+    except OSError:
+        return default
+def save(name, value):
+    json.dump(value, open(os.path.join(d, name), "w"))
+args = sys.argv[1:]
+open(os.path.join(d, "calls.log"), "a").write(json.dumps(args) + "\n")
+if args[:1] == ["--session"]:
+    args = args[2:]
+live = os.path.exists(os.path.join(d, "live"))
+if args[:1] == ["list-sessions"] or args[:1] == ["ls"]:
+    if live:
+        print("host-a (attached)")
+    sys.exit(0)
+if args[:2] == ["attach", "--create-background"]:
+    open(os.path.join(d, "live"), "w").write("1")
+    sys.exit(0)
+if args[:2] == ["action", "list-clients"]:
+    print("CLIENT_ID")
+    print("1")
+    sys.exit(0)
+if args[:2] == ["action", "list-tabs"]:
+    print(json.dumps(jl("tabs.json", [])))
+    sys.exit(0)
+if args[:2] == ["action", "list-panes"]:
+    if mode == "no-pane-listing":
+        sys.exit(1)
+    print(json.dumps(jl("panes.json", [])))
+    sys.exit(0)
+if args[:2] == ["action", "new-pane"] or args[:2] == ["action", "new-tab"]:
+    if mode == "missing-host" and not live:
+        sys.stderr.write("Session 'host-a' not found\n")
+        sys.exit(1)
+    if mode == "refuse":
+        sys.stderr.write("no current pane in this guest context\n")
+        sys.exit(1)
+    kind = args[1]
+    name = args[args.index("--name") + 1]
+    script = args[args.index("--") + 1]
+    lost = mode in (
+        "ack-lost",
+        "ack-lost-hidden",
+        "ack-lost-nothing",
+        "same-title",
+        "no-pane-listing",
+    )
+    created = mode not in ("ack-lost-nothing", "same-title")
+    if created:
+        n = jl("created.json", [])
+        n.append({"kind": kind, "name": name, "script": script})
+        save("created.json", n)
+        if kind == "new-pane" and mode != "ack-lost-hidden":
+            p = jl("panes.json", [])
+            p.append({"title": name, "pane_command": script})
+            save("panes.json", p)
+        if kind == "new-tab":
+            t = jl("tabs.json", [])
+            t.append({"name": name})
+            save("tabs.json", t)
+    if lost:
+        sys.stderr.write("vc-frame action timed out after 5s\n")
+        sys.exit(1)
+    sys.exit(0)
+sys.exit(0)
+"""
+
+
+class _Frame:
+    def __init__(self, tmp_path: Path, mode: str) -> None:
+        self.dir = tmp_path / "ambiguous-frame"
+        self.dir.mkdir()
+        self.bin = self.dir / "vc-frame"
+        self.bin.write_text(_AMBIGUOUS_FRAME, encoding="utf-8")
+        self.bin.chmod(0o755)
+        self.mode = mode
+        if mode != "missing-host":
+            (self.dir / "live").write_text("1", encoding="utf-8")
+
+    def json(self, name: str) -> list:
+        path = self.dir / name
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def calls(self) -> list[list[str]]:
+        path = self.dir / "calls.log"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def creations(self, kind: str) -> list[dict]:
+        return [c for c in self.json("created.json") if c["kind"] == kind]
+
+
+def _spawn(scene: Scene, frame: _Frame, kind: str = "new-pane", name: str = "T"):
+    script = scene.tmp_path / f"launch-{kind}.sh"
+    script.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    extra = ["--floating"] if kind == "new-pane" else []
+    return _run_face(
+        scene,
+        f'_vetcoders_vc_frame_session_action "{frame.bin}" host-a '
+        f'action {kind} {" ".join(extra)} --name "{name}" --cwd "{scene.root}" '
+        f'-- "{script}"',
+        extra_env={"STUB_DIR": str(frame.dir), "STUB_MODE": frame.mode},
+    )
+
+
+def test_lost_ack_for_a_pane_that_landed_is_confirmed_and_never_reissued(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "ack-lost")
+    result = _spawn(scene, frame)
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert len(frame.creations("new-pane")) == 1, frame.calls()
+
+
+def test_lost_ack_without_pane_evidence_is_unconfirmed_not_retried(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "ack-lost-hidden")
+    result = _spawn(scene, frame)
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert len(frame.creations("new-pane")) == 1, frame.calls()
+    assert "not reissued" in result.stderr, result.stderr
+
+
+def test_unlistable_panes_fail_honestly_without_a_second_creation(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "no-pane-listing")
+    result = _spawn(scene, frame)
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert len(frame.creations("new-pane")) == 1, frame.calls()
+    assert len([c for c in frame.calls() if "new-pane" in c]) == 1, frame.calls()
+
+
+def test_a_same_title_pane_is_not_evidence_of_this_launch(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "same-title")
+    (frame.dir / "panes.json").write_text(
+        json.dumps([{"title": "T", "pane_command": "/some/other/script.sh"}])
+    )
+    result = _spawn(scene, frame, name="T")
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert not frame.creations("new-pane"), frame.calls()
+    new_pane_calls = [c for c in frame.calls() if "new-pane" in c]
+    assert len(new_pane_calls) == 1, new_pane_calls
+
+
+def test_definite_refusal_is_returned_once(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "refuse")
+    result = _spawn(scene, frame)
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert len([c for c in frame.calls() if "new-pane" in c]) == 1, frame.calls()
+
+
+def test_missing_host_still_resurrects_once_and_creates_one_pane(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "missing-host")
+    result = _spawn(scene, frame)
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    creates = [c for c in frame.calls() if "--create-background" in c]
+    assert len(creates) == 1, frame.calls()
+    assert len(frame.creations("new-pane")) == 1, frame.calls()
+
+
+def test_ambiguous_tab_ack_keeps_the_tab_presence_semantics(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "ack-lost")
+    result = _spawn(scene, frame, kind="new-tab", name="codex")
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert len(frame.creations("new-tab")) == 1, frame.calls()
