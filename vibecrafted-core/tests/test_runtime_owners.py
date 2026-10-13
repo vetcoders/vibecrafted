@@ -128,9 +128,31 @@ def test_native_host_has_real_product_process_identity(tmp_path):
     (root / "bin").mkdir(parents=True)
     # A fixture borrows the local dev interpreter read-only. Production embeds
     # the pinned library/stdlib under the signed generation, with no symlinks.
-    (root / "python").symlink_to(Path(sys.base_prefix), target_is_directory=True)
     library = str(sysconfig.get_config_var("LDLIBRARY"))
     assert (Path(sys.base_prefix) / "lib" / library).exists()
+    if sys.platform == "darwin":
+        library_root = root / "python/lib"
+        library_root.mkdir(parents=True)
+        shutil.copyfile(Path(sys.base_prefix) / "lib" / library, library_root / library)
+        # Borrow only the stdlib; native code is copied into this generation.
+        (
+            library_root / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        ).symlink_to(sysconfig.get_path("stdlib"), target_is_directory=True)
+        subprocess.run(
+            [
+                "install_name_tool",
+                "-id",
+                f"@rpath/{library}",
+                str(library_root / library),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(library_root / library)],
+            check=True,
+        )
+    else:
+        (root / "python").symlink_to(Path(sys.base_prefix), target_is_directory=True)
     source = root / "vibecrafted-core"
     source.mkdir()
     (source / "vc_fixture.py").write_text("""import json,os,sys,time
@@ -181,6 +203,18 @@ def main():
         check=False,
     )
     assert recursion.returncode == 9
+    if sys.platform == "darwin":
+        # dyld search overrides must never select the host's ambient library,
+        # even when it exposes the same ABI and the payload copy is present.
+        overridden = subprocess.run(
+            [str(binary), "-c", "raise SystemExit(0)"],
+            env={**os.environ, "DYLD_LIBRARY_PATH": str(Path(sys.base_prefix) / "lib")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert overridden.returncode == 78
+        assert "CPython must load from this generation" in overridden.stderr
     ready = root / "ready.json"
     process = subprocess.Popen(
         [str(binary), str(ready)], stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -211,6 +245,16 @@ def main():
     finally:
         process.terminate()
         process.communicate(timeout=3)
+    relocated = tmp_path / "relocated"
+    root.rename(relocated)
+    relocated_binary = relocated / "bin/vc-server-supervisor"
+    relocated_probe = subprocess.run(
+        [str(relocated_binary), "-c", "import sys; print(sys.executable)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert relocated_probe.stdout.strip() == str(relocated_binary)
 
 
 def test_fixed_terminal_host_refuses_generation_app_identity(tmp_path):

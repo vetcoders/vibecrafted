@@ -2093,7 +2093,7 @@ def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -
     )
     call = builder.index('prune_embedded_python_unreachable "$runtime/python"')
     assert call < builder.index(
-        'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"'
+        'install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}"'
     )
     assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
 

@@ -12,6 +12,11 @@
 #include <wchar.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+/* Real symbol references keep libpython in LC_LOAD_DYLIB and in the closed
+ * product dependency graph. Linux retains its generation-local dlopen door. */
+extern int Py_BytesMain(int, char **);
+extern wchar_t *Py_DecodeLocale(const char *, size_t *);
+extern void Py_SetPythonHome(const wchar_t *);
 #endif
 
 #ifndef VC_PYTHON_LIB
@@ -65,6 +70,20 @@ int main(int argc, char **argv) {
     if (setenv("PYTHONHOME", home, 1) || setenv("PYTHONPATH", imports, 1) ||
         setenv("PYTHONNOUSERSITE", "1", 1) || setenv("PYTHONDONTWRITEBYTECODE", "1", 1) ||
         setenv("VIBECRAFTED_RUNTIME_ROOT", root, 1)) return 78;
+#ifdef __APPLE__
+    Dl_info image;
+    char expected_library[PATH_MAX], loaded_library[PATH_MAX];
+    if (!realpath(library, expected_library) ||
+        !dladdr((const void *)Py_BytesMain, &image) || !image.dli_fname ||
+        !realpath(image.dli_fname, loaded_library) ||
+        strcmp(expected_library, loaded_library)) {
+        fprintf(stderr, "vc native host: CPython must load from this generation\n");
+        return 78;
+    }
+    int (*python_main)(int, char **) = Py_BytesMain;
+    wchar_t *(*decode_locale)(const char *, size_t *) = Py_DecodeLocale;
+    void (*set_home)(const wchar_t *) = Py_SetPythonHome;
+#else
     void *handle = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
         fprintf(stderr, "vc native host: pinned CPython library unavailable: %s\n", dlerror());
@@ -79,6 +98,7 @@ int main(int argc, char **argv) {
     void (*set_home)(const wchar_t *) =
         (void (*)(const wchar_t *))dlsym(handle, "Py_SetPythonHome");
     if (!decode_locale || !set_home) return 78;
+#endif
     wchar_t *python_home = decode_locale(home, NULL);
     if (!python_home) return 71;
     set_home(python_home); /* Retained for the complete interpreter lifetime. */

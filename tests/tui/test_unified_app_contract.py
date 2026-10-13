@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -12,6 +13,7 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import tomllib
@@ -1967,6 +1969,188 @@ def test_valid_app_has_one_bundle_identity_and_three_bound_entrypoints(
         capture_output=True,
         text=True,
     )
+
+
+@pytest.fixture
+def native_python_contract_fixture(tmp_path: Path, macho_executable: Path):
+    """Run the actual Python producer block and compile its native host."""
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    runtime = app / "Contents/Resources/runtime"
+    library_name = str(sysconfig.get_config_var("LDLIBRARY"))
+    library = runtime / "python/lib" / library_name
+    library.parent.mkdir(parents=True)
+    shutil.copyfile(Path(sys.base_prefix) / "lib" / library_name, library)
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    start = builder.index(
+        '  if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then'
+    )
+    end = builder.index("\n  fi", start) + len("\n  fi")
+    subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail\nruntime=$1; PORTABLE_PYTHON_DYLIB=$2\n"
+            + builder[start:end],
+            "python-producer",
+            str(runtime),
+            library_name,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _codesign_macho(library)
+    spec = importlib.util.spec_from_file_location(
+        "native_renderer", REPO_ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    renderer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(renderer)
+    host = runtime / "bin/vc-python"
+    with pytest.MonkeyPatch.context() as environment:
+        environment.setenv("MACOSX_DEPLOYMENT_TARGET", "14.0")
+        renderer.render_native_host(
+            host, "vibecrafted_core.cli:main", library_name, python_only=True
+        )
+    manifest["files"].extend(
+        [
+            _entry(app, host.relative_to(app).as_posix(), kind="executable"),
+            _entry(app, library.relative_to(app).as_posix(), kind="dylib"),
+        ]
+    )
+    _write_app_manifest(app, manifest, sign=True)
+    return app, manifest, host, library, renderer
+
+
+def test_native_python_host_supplies_real_macho_dependency_closure(
+    native_python_contract_fixture,
+):
+    app, manifest, host, library, _ = native_python_contract_fixture
+    assert contract.verify_app(app) == manifest
+    observed = contract._observed_macho(
+        host, relative=host.relative_to(app).as_posix(), kind="executable"
+    )
+    assert observed is not None
+    assert f"@rpath/{library.name}" in observed.dependencies
+    assert observed.rpaths == ("@executable_path/../python/lib",)
+
+
+def test_manifest_producer_inventories_native_runtime_doors_and_real_edges(
+    native_python_contract_fixture, macho_executable
+):
+    app, _, host, library, _ = native_python_contract_fixture
+    names = (
+        "vc-python",
+        "vc-server-supervisor",
+        "vc-guardian",
+        "vc-workflow",
+        "vibecrafted-resume",
+        "vc-build-lease",
+        "verify-vibecrafted-walkaround",
+    )
+    for name in names:
+        if name != host.name:
+            shutil.copyfile(host, host.with_name(name))
+            host.with_name(name).chmod(0o755)
+    script = host.with_name("vc-script-fixture")
+    _write_executable(script)
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            terminal_source=macho_executable,
+            frame_source=macho_executable,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
+        )
+    )
+    produced = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text()
+    )
+    files = {entry["path"]: entry for entry in produced["files"]}
+    for name in names:
+        entry = files[f"Contents/Resources/runtime/bin/{name}"]
+        assert entry["kind"] == "executable"
+        assert f"@rpath/{library.name}" in entry["dylibs"]
+    assert files[script.relative_to(app).as_posix()]["kind"] == "resource"
+    _codesign_app(app)
+    assert contract.verify_app(app) == produced
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_library",
+        "missing_host",
+        "orphan_library",
+        "wrong_code",
+        "wrong_host_code",
+        "host_as_resource",
+    ],
+)
+def test_native_python_closed_inventory_rejects_damage(
+    native_python_contract_fixture, damage
+):
+    app, manifest, host, library, _ = native_python_contract_fixture
+    if damage == "missing_library":
+        library.unlink()
+        code = contract.E_MISSING
+    elif damage == "missing_host":
+        host.unlink()
+        code = contract.E_MISSING
+    elif damage == "wrong_code":
+        _mutate_macho_code_byte(library)
+        code = contract.E_HASH
+    elif damage == "wrong_host_code":
+        _mutate_macho_code_byte(host)
+        code = contract.E_HASH
+    elif damage == "host_as_resource":
+        entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == host.relative_to(app).as_posix()
+        )
+        entry.update(kind="resource", dylibs=[])
+        _write_app_manifest(app, manifest, sign=True)
+        code = contract.E_DEPENDENCY
+    else:
+        orphan = library.with_name("liborphan.dylib")
+        _compile_macho(
+            orphan,
+            source="int orphan(void) { return 0; }\n",
+            extra_args=("-dynamiclib", "-Wl,-install_name,@rpath/liborphan.dylib"),
+        )
+        _codesign_macho(orphan)
+        manifest["files"].append(
+            _entry(app, orphan.relative_to(app).as_posix(), kind="dylib")
+        )
+        _write_app_manifest(app, manifest, sign=True)
+        code = contract.E_DEPENDENCY
+    _assert_error(code, lambda: contract.verify_app(app))
+
+
+@pytest.mark.parametrize("damage", ["missing_library", "wrong_install_name"])
+def test_native_python_renderer_refuses_wrong_library_before_compiling(
+    native_python_contract_fixture, damage
+):
+    _, _, host, library, renderer = native_python_contract_fixture
+    if damage == "missing_library":
+        library.unlink()
+        error = subprocess.CalledProcessError
+    else:
+        subprocess.run(
+            ["install_name_tool", "-id", "@loader_path/ambient.dylib", str(library)],
+            check=True,
+        )
+        error = ValueError
+    replacement = host.with_name("vc-invalid-library")
+    with pytest.raises(error):
+        renderer.render_native_host(
+            replacement, "vibecrafted_core.cli:main", library.name
+        )
+    assert not replacement.exists()
 
 
 def test_app_rejects_legacy_icon_resource(

@@ -135,7 +135,15 @@ def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, A
             (relative.startswith("Contents/MacOS/") or "/Contents/MacOS/" in relative)
             and os.access(path, os.X_OK)
             or (
-                "/python/bin/" in relative
+                (
+                    "/python/bin/" in relative
+                    or relative.startswith(
+                        (
+                            "Contents/Resources/runtime/bin/",
+                            "Contents/Resources/runtime/libexec/",
+                        )
+                    )
+                )
                 and os.access(path, os.X_OK)
                 and "Mach-O"
                 in subprocess.run(

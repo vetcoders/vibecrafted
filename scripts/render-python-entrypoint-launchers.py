@@ -7,6 +7,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -128,6 +129,23 @@ def render_native_host(
     ):
         raise ValueError("invalid native host entrypoint or library")
     source = Path(__file__).with_name("native-python-entrypoint.c")
+    link_arguments = ["-ldl"]
+    if sys.platform == "darwin":
+        pinned_library = destination.parent.parent / "python/lib" / library
+        install_names = subprocess.run(
+            ["otool", "-D", str(pinned_library)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()[1:]
+        if install_names != [f"@rpath/{library}"]:
+            raise ValueError(
+                "native host requires the generation-local runpath library identity"
+            )
+        link_arguments = [
+            str(pinned_library),
+            "-Wl,-rpath,@executable_path/../python/lib",
+        ]
     subprocess.run(
         [
             "cc",
@@ -142,7 +160,7 @@ def render_native_host(
             str(source),
             "-o",
             str(destination),
-            *([] if __import__("sys").platform == "darwin" else ["-ldl"]),
+            *link_arguments,
         ],
         check=True,
     )

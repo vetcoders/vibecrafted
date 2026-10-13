@@ -1038,7 +1038,7 @@ materialize_runtime_payload() {
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
     'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'fastmcp>=2.0,<3'
   if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then
-    install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
+    install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}" \
       "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
   fi
   rm -rf "$runtime/python-site/bin"
