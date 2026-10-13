@@ -802,6 +802,7 @@ class AsyncSupervisor:
         require_transcript_output: bool = False,
         tee_output: bool = False,
         salvage_report_from_stream: bool = False,
+        on_output: Callable[[bytes], None] | None = None,
     ) -> AsyncRunHandle:
         """Spawn, watch to completion, validate artifacts, and settle a run end to end.
 
@@ -809,27 +810,39 @@ class AsyncSupervisor:
         manufacturing; otherwise writes a report fallback, meta summary, and
         the terminal lifecycle transition (COMPLETED/FAILED/STALLED).
         """
-        handle = await self.spawn(
-            run_id=run_id,
-            command=command,
-            root=root,
-            env=env,
-            meta_path=meta_path,
-            report_path=report_path,
-            transcript_path=transcript_path,
-            prompt_file_path=prompt_file_path,
-        )
+        try:
+            handle = await self.spawn(
+                run_id=run_id,
+                command=command,
+                root=root,
+                env=env,
+                meta_path=meta_path,
+                report_path=report_path,
+                transcript_path=transcript_path,
+                prompt_file_path=prompt_file_path,
+            )
+        except asyncio.CancelledError:
+            handle = self._runs.get(run_id)
+            if handle is not None:
+                await self._settle_cancelled(handle)
+            raise
         if tee_output:
             _write_terminal(_terminal_frontmatter(handle))
         try:
             if timeout is None:
                 await self._watch_process(
-                    handle, tee_output=tee_output, silence_timeout=silence_timeout
+                    handle,
+                    tee_output=tee_output,
+                    silence_timeout=silence_timeout,
+                    on_output=on_output,
                 )
             else:
                 await asyncio.wait_for(
                     self._watch_process(
-                        handle, tee_output=tee_output, silence_timeout=silence_timeout
+                        handle,
+                        tee_output=tee_output,
+                        silence_timeout=silence_timeout,
+                        on_output=on_output,
                     ),
                     timeout=timeout,
                 )
@@ -837,6 +850,14 @@ class AsyncSupervisor:
             await self._terminate(handle)
             handle.exit_code = handle.process.returncode
             handle.completed_at = _utc_now()
+            # Persist terminal truth before waking await. A stall used to return
+            # with only spawn metadata, so a dead parent looked perpetually live.
+            self._write_meta_summary(handle)
+            self._write_terminal_meta(
+                handle,
+                "timed_out",
+                "silence" if isinstance(stall, _SilenceTimeout) else "wall_clock",
+            )
             # Both stall kinds settle through this one path; the recorded reason
             # still names which instrument fired, so a triage never has to guess
             # whether the worker ran too long or went mute.
@@ -854,6 +875,11 @@ class AsyncSupervisor:
                 },
             )
             return handle
+        except asyncio.CancelledError:
+            # Nested workflows own separate process groups. Cancellation must
+            # reap their children before the outer dispatcher exits.
+            await self._settle_cancelled(handle)
+            raise
 
         handle.exit_code = handle.process.returncode
         if handle.meta_path is not None:
@@ -983,6 +1009,7 @@ class AsyncSupervisor:
         *,
         tee_output: bool = False,
         silence_timeout: float | None = None,
+        on_output: Callable[[bytes], None] | None = None,
     ) -> None:
         """Stream stdout lines to the transcript, parse usage, and emit heartbeats.
 
@@ -1003,7 +1030,10 @@ class AsyncSupervisor:
         try:
             while True:
                 completed, _pending = await asyncio.wait(
-                    {read_task}, timeout=_HEARTBEAT_INTERVAL_SECONDS
+                    {read_task},
+                    timeout=min(_HEARTBEAT_INTERVAL_SECONDS, silence_bound)
+                    if silence_bound > 0
+                    else _HEARTBEAT_INTERVAL_SECONDS,
                 )
                 if not completed:
                     # stdout silence is normal while an agent waits inside a
@@ -1033,6 +1063,8 @@ class AsyncSupervisor:
                 if not chunk:
                     break
                 last_output_monotonic = time.monotonic()
+                if on_output is not None:
+                    on_output(chunk)
                 read_task = asyncio.create_task(handle.process.stdout.readline())
                 if handle.transcript_path is not None:
                     with handle.transcript_path.open("ab") as transcript:
@@ -1368,6 +1400,14 @@ class AsyncSupervisor:
 
         def _merge_summary(payload: dict[str, object]) -> dict[str, object]:
             """Merge the computed summary onto the mutator's current meta payload."""
+            if isinstance(payload.get("reception"), dict) and payload.get("status") in {
+                "completed",
+                "blocked",
+                "failed",
+            }:
+                # The parent workflow owns its semantic result. Artifact
+                # validation and process exit are independent axes below.
+                summary["status"] = payload["status"]
             if not str(payload.get("origin_session") or "").strip() and origin.get(
                 "origin_session"
             ):
@@ -1403,9 +1443,50 @@ class AsyncSupervisor:
             create=True,
         )
 
+    async def _settle_cancelled(self, handle: AsyncRunHandle) -> None:
+        await self._terminate(handle)
+        handle.exit_code = handle.process.returncode
+        handle.completed_at = _utc_now()
+        self._write_meta_summary(handle)
+        self._write_terminal_meta(handle, "failed", "supervisor_cancelled")
+        await self._transition(
+            handle,
+            RunState.FAILED,
+            "supervisor cancelled",
+            payload={"exit_code": handle.exit_code, "liveness": "terminal"},
+        )
+
+    def _write_terminal_meta(
+        self, handle: AsyncRunHandle, status: str, reason: str
+    ) -> None:
+        if handle.meta_path is None:
+            return
+
+        def settle(payload: dict[str, object]) -> dict[str, object]:
+            payload.update(
+                status=status,
+                state=status,
+                liveness="terminal",
+                terminal_reason=reason,
+                exit_code=handle.exit_code,
+                completed_at=handle.completed_at.isoformat()
+                if handle.completed_at
+                else "",
+            )
+            return payload
+
+        mutate_run_meta(
+            control_plane_home(),
+            meta_path=handle.meta_path,
+            mutation_root=handle.meta_path.parent,
+            run_id=handle.run_id,
+            mutator=settle,
+            create=True,
+        )
+
     async def _terminate(self, handle: AsyncRunHandle) -> None:
-        """SIGTERM the run's process group (or process), escalating to SIGKILL after 3s."""
-        if handle.process.returncode is not None:
+        """SIGTERM the owned group, allowing up to 5s for nested cleanup, then reap it."""
+        if handle.process.returncode is not None and handle.pgid is None:
             return
         try:
             if handle.pgid is not None:
@@ -1415,7 +1496,7 @@ class AsyncSupervisor:
         except ProcessLookupError:
             return
         try:
-            await asyncio.wait_for(handle.process.wait(), timeout=3)
+            await asyncio.wait_for(handle.process.wait(), timeout=5)
         except TimeoutError:
             try:
                 if handle.pgid is not None:
@@ -1425,6 +1506,13 @@ class AsyncSupervisor:
             except ProcessLookupError:
                 pass
             await handle.process.wait()
+        # An exited group leader does not imply its pipe-holding descendants
+        # exited. Reap the owned remainder, including children ignoring TERM.
+        if handle.pgid is not None:
+            try:
+                os.killpg(handle.pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     async def _transition(
         self,

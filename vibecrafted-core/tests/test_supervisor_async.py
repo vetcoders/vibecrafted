@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import NoReturn
 
+import pytest
 from vibecrafted_core import control_plane, dispatcher
 from vibecrafted_core import supervisor_async as supervisor_async_module
 from vibecrafted_core.artifacts import validate_artifacts
@@ -1588,6 +1589,79 @@ def test_unparseable_silence_override_does_not_disable_the_bound() -> None:
             os.environ.pop("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", None)
         else:
             os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = previous
+
+
+@pytest.mark.parametrize("productive", [True, False])
+def test_nested_workflow_activity_and_timeout_have_terminal_truth(
+    tmp_path, monkeypatch, productive
+):
+    """Real nested source runtime: movement survives, mute children are reaped."""
+    import os
+    import textwrap
+
+    from vibecrafted_core.control_plane import await_run
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+    monkeypatch.setenv("VIBECRAFTED_RUN_ID", "nested-parent")
+    monkeypatch.setenv("VIBECRAFTED_REPORT_PATH", str(tmp_path / "parent.md"))
+    monkeypatch.setenv("VIBECRAFTED_META_PATH", str(tmp_path / "parent.meta.json"))
+    monkeypatch.setenv("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", "0.7")
+    script = tmp_path / "nested.py"
+    code = (
+        'import time; [(print(\'{"type":"item.started"}\',flush=True),time.sleep(.04)) for _ in range(40)]'
+        if productive
+        else "import time;time.sleep(120)"
+    )
+    script.write_text(
+        textwrap.dedent(f"""\
+        import asyncio,sys
+        from vibecrafted_core.workflow_runtime import _run_child, _with_shutdown
+        async def run():
+            result = await _run_child(kind="marbles", label="marbles-L1", agent="codex",
+                                      root={str(tmp_path)!r},prompt="fixture",
+                                      command=[sys.executable,"-c",{code!r}])
+            return 0 if result.exit_code == 0 else 1
+        sys.exit(asyncio.run(_with_shutdown(run())))
+    """)
+    )
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="nested-parent",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            meta_path=tmp_path / "parent.meta.json",
+            transcript_path=tmp_path / "parent.log",
+            require_report=False,
+        )
+    )
+    meta = json.loads((tmp_path / "parent.meta.json").read_text())
+    assert meta["exit_code"] == handle.exit_code
+    assert meta["completed_at"] and meta["status"] in {
+        "completed",
+        "failed",
+        "timed_out",
+    }
+    if productive:
+        assert handle.exit_code == 0 and handle.state is not RunState.STALLED
+        assert "workflow.child_activity" in (tmp_path / "parent.log").read_text()
+    else:
+        assert handle.exit_code != 0
+        assert meta["liveness"] == "terminal"
+    child_meta = tmp_path / "nested-parent-children" / "marbles-L1.meta.json"
+    child = json.loads(child_meta.read_text())
+    assert child["exit_code"] is not None and child["completed_at"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(child["worker_pid"], 0)
+    assert not (child_meta.parent / "marbles-L2.meta.json").exists()
+    # Await uses durable terminal metadata after its notification socket is gone.
+    from vibecrafted_core.control_plane import control_plane_home
+
+    runtime_dir = control_plane_home() / "runtime_runs" / "nested-parent"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "meta.json").write_text(json.dumps(meta))
+    outcome = await_run("nested-parent", timeout_seconds=2, interval_seconds=0.05)
+    assert outcome["completed"] and not outcome["timed_out"]
+    assert outcome["run"]["exit_code"] == handle.exit_code
 
 
 def test_kimi_provider_session_id_lands_in_meta_before_settlement(
