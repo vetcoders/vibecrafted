@@ -1751,7 +1751,10 @@ _vetcoders_vc_frame_action_name_arg() {
 # tab name and live `pane_command` are not identity, and a substring of the raw
 # text proves nothing. A non-list, malformed or schema-mismatched answer, a
 # failed query, no interpreter, zero or duplicate matches are all "unknown";
-# there is no host-python fallback.
+# there is no host-python fallback. The parser runs isolated (-I: no cwd on
+# sys.path, no PYTHONPATH/user site; -B: no bytecode writes) like the other
+# owned-interpreter probes, so a `json.py` in the caller's directory or on
+# PYTHONPATH cannot stand in for the stdlib and fabricate a match.
 _vetcoders_vc_frame_pane_present() {
   local vc_frame_bin="${1:-}"
   local session_name="${2:-}"
@@ -1766,7 +1769,7 @@ _vetcoders_vc_frame_pane_present() {
     raw="$("$vc_frame_bin" action list-panes --json --all 2>/dev/null)" || return 1
   fi
   [[ -n "$raw" ]] || return 1
-  printf '%s' "$raw" | "$py" -c '
+  printf '%s' "$raw" | "$py" -I -B -c '
 import json, sys
 want = sys.argv[1]
 try:

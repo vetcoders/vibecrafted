@@ -228,7 +228,12 @@ def test_title_helper_outside_git_keeps_the_directory_name(tmp_path: Path) -> No
 # tabs, so a pane can never be found there. `list-panes` lists panes by their
 # command, the unique per-launch script path being the identity evidence.
 _AMBIGUOUS_FRAME = r"""#!/usr/bin/env python3
-import json, os, sys
+import os, sys
+# The fake is test scaffolding: keep a hostile cwd / PYTHONPATH `json.py` for
+# the helper under test out of the fake's own imports.
+_hostile = {"", os.getcwd(), *os.environ.get("PYTHONPATH", "").split(os.pathsep)}
+sys.path[:] = [p for p in sys.path if p not in _hostile]
+import json
 d = os.environ["STUB_DIR"]
 mode = os.environ.get("STUB_MODE", "")
 def jl(name, default):
@@ -620,3 +625,58 @@ def test_pane_launch_with_extra_arguments_has_no_provable_identity(
 
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
     assert len([c for c in frame.calls() if "new-pane" in c]) == 1, frame.calls()
+
+
+def test_hostile_local_json_module_cannot_fabricate_pane_identity(
+    tmp_path: Path,
+) -> None:
+    """The parser must run isolated: a `json.py` in the caller's cwd or on
+    PYTHONPATH shadowed the stdlib and made a title-only pane "present"."""
+    hostile = tmp_path / "hostile cwd"
+    hostile.mkdir()
+    (hostile / "json.py").write_text(
+        "import sys\n"
+        "def load(fp):\n"
+        "    return [{'id': 1, 'is_plugin': False, 'exited': False,\n"
+        "             'terminal_command': sys.argv[1]}]\n",
+        encoding="utf-8",
+    )
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "")
+    pane = _pane(title=SCRIPT, terminal_command="/bin/zsh")
+    (frame.dir / "panes.raw").write_text(json.dumps([pane]), encoding="utf-8")
+    result = _run_face(
+        scene,
+        f'_vetcoders_vc_frame_pane_present "{frame.bin}" host-a {shlex.quote(SCRIPT)}',
+        cwd=hostile,
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PYTHONPATH": str(hostile),
+        },
+    )
+
+    assert "RC=[1]" in result.stdout, result.stdout + result.stderr
+
+
+def test_isolated_parser_still_confirms_the_real_pane_from_a_hostile_cwd(
+    tmp_path: Path,
+) -> None:
+    hostile = tmp_path / "hostile cwd"
+    hostile.mkdir()
+    (hostile / "json.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "")
+    (frame.dir / "panes.raw").write_text(json.dumps([_pane()]), encoding="utf-8")
+    result = _run_face(
+        scene,
+        f'_vetcoders_vc_frame_pane_present "{frame.bin}" host-a {shlex.quote(SCRIPT)}',
+        cwd=hostile,
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PYTHONPATH": str(hostile),
+        },
+    )
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
