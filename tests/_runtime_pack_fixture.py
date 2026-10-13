@@ -240,3 +240,64 @@ def seed_runtime_pack(
         shutil.copyfile("/usr/bin/true", target)
         target.chmod(0o755)
     return payload
+
+
+def stage_build_lease_fixture(repo: Path) -> None:
+    """Stage the real lease entrypoint and its eager import closure."""
+    for name in ("vc-build-lease", "project-python"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, repo / "scripts" / name)
+    package = repo / "vibecrafted-core/vibecrafted_core"
+    package.mkdir(parents=True, exist_ok=True)
+    # Avoid unrelated runtime bootstrap; supervisor still gets the real version.
+    version = (REPO_ROOT / "VERSION").read_text().strip()
+    (package / "__init__.py").write_text(f"__version__ = {version!r}\n")
+    for name in (
+        "cache_lifecycle",
+        "clock",
+        "portable_lock",
+        "report_contract",
+        "run_mutation",
+        "run_triage",
+        "runtime_transcript",
+        "server_config",
+        "server_supervisor",
+        "settlement",
+    ):
+        shutil.copy2(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core" / f"{name}.py", package
+        )
+
+
+def seed_private_git_fixture(repo: Path, *tracked: str) -> str:
+    """Create a private repository without inheriting Git routing or policy."""
+    import subprocess
+
+    env = private_git_fixture_environment()
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "agents@vetcoders.io"),
+        ("config", "user.name", "fixture"),
+        ("add", "--", *tracked),
+        ("commit", "-q", "-m", "fixture"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repo), *args], env=env, check=True, capture_output=True
+        )
+    return subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], env=env, text=True
+    ).strip()
+
+
+def private_git_fixture_environment() -> dict[str, str]:
+    """Preserve ordinary child environment, fence inherited Git routing/policy."""
+    import os
+
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env.update(
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
+    return env

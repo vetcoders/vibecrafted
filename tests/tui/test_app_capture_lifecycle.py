@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 
@@ -91,9 +91,10 @@ def write_json(path: Path, value: dict) -> None:
 
 
 @pytest.fixture
-def lane(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     if not Path("/usr/bin/codesign").exists():
         pytest.skip("requires macOS strict codesign")
+    fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
     parent = tmp_path / "Applications"
     parent.mkdir()
     env = {"PATH": os.environ["PATH"]}

@@ -17,6 +17,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from _runtime_pack_fixture import (
+    private_git_fixture_environment,
+    seed_private_git_fixture,
+    stage_build_lease_fixture,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
 # The builder sources its pinned toolchain before it parses an argument, so the
@@ -60,18 +66,31 @@ def _stage_repo(tmp_path: Path, name: str = "checkout") -> tuple[Path, str]:
             shutil.copy2(src, repo / "scripts/lib" / src.name)
     (repo / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
     # Living-tree dirt check ignores /build the same way the real checkout does.
-    (repo / ".gitignore").write_text("/build\n/dist\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "/build\n/dist\n/target\n__pycache__/\n*.pyc\n", encoding="utf-8"
+    )
     fake_bin = repo / "fake-bin"
     fake_bin.mkdir()
     rustup = fake_bin / "rustup"
     rustup.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     rustup.chmod(0o755)
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "agents@vetcoders.io")
-    _git(repo, "config", "user.name", "fixture")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-q", "-m", "fixture")
-    head = _git(repo, "rev-parse", "HEAD")
+    stage_build_lease_fixture(repo)
+    # Declare reconstructible cache geometry before cleanliness/help baselines.
+    subprocess.run(
+        [
+            str(repo / "scripts/vc-build-lease"),
+            "--root",
+            str(repo / "build"),
+            "--lease-root",
+            str(repo / "target"),
+            "--",
+            "/usr/bin/true",
+        ],
+        check=True,
+        capture_output=True,
+        env=private_git_fixture_environment(),
+    )
+    head = seed_private_git_fixture(repo, ".")
     return repo, head
 
 
@@ -560,3 +579,76 @@ def test_production_entrypoint_has_no_fake_stage_escape() -> None:
     assert "release_single_flight_acquire_output" in flight
     assert "release_single_flight_physical_identity" in flight
     assert 'case "$dist_abs" in' not in flight
+
+
+def test_staged_repo_runs_real_lease_and_excludes_competing_cleaner(tmp_path):
+    repo, _ = _stage_repo(tmp_path)
+    root = repo / "build"
+    proof = r"""
+import fcntl, json, os, pathlib, stat, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+fd = int(os.environ["VIBECRAFTED_BUILD_LEASE_FD"])
+held = os.fstat(fd)
+named = (root / ".vc-build-lease").stat()
+assert stat.S_ISREG(held.st_mode)
+assert (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+cleaner = subprocess.run([sys.executable, "-c", '''
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(75)
+raise SystemExit(0)
+''', str(root / ".vc-build-lease")], check=False)
+assert cleaner.returncode == 75
+print(json.dumps({"inode": held.st_ino}), flush=True)
+os.execvp("bash", ["bash", sys.argv[2], "--runtime-pack-only"])
+"""
+    # Keep the real lease across the complete existing single-flight driver.
+    stage = tmp_path / "leased-driver"
+    proc = subprocess.Popen(
+        [
+            str(repo / "scripts/vc-build-lease"),
+            "--root",
+            str(root),
+            "--",
+            str(repo / "scripts/project-python"),
+            "-c",
+            proof,
+            str(root),
+            str(DRIVER),
+        ],
+        env=_driver_env(repo, stage),
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    import fcntl
+
+    try:
+        try:
+            _wait_for(stage / "snapshot")
+        except AssertionError:
+            stdout, stderr = _drain(proc)
+            raise AssertionError((stdout, stderr)) from None
+        inode = (root / ".vc-build-lease").stat().st_ino
+        with (root / ".vc-build-lease").open("rb") as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError("driver lost its actual build lease")
+        (stage / "continue").touch()
+        stdout, stderr = proc.communicate(timeout=10)
+        assert proc.returncode == 0, stderr
+        assert json.loads(stdout)["inode"] == inode
+        assert (stage / "continued-after-wait").exists()
+    finally:
+        _drain(proc)
+    # Once the entire driver ends a competing owner acquires the same inode.
+    with (root / ".vc-build-lease").open("rb") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert os.fstat(stream.fileno()).st_ino == inode
