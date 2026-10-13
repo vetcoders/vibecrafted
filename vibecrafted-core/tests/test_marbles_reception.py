@@ -244,16 +244,19 @@ def _provider(bin_dir: Path, *, scenario: str):
             if scenario == 'missing-disposition':
                 data['attacked'] = [finding]
                 data['resolved'] = data['discovered'] = []
-            if scenario == 'invalid':
+            if scenario in {'invalid','plain-invalid'}:
                 data['schema'] = 'unknown'
             if scenario == 'receiver-mutates':
                 (root / 'assigned.txt').write_text('illegal READ edit')
+            if scenario == 'plain-blocked':
+                data.update(scope_verified=False, gate='unknown', blocker='required external acceptance unavailable')
             if scenario == 'external-blocker':
                 data['blocker'] = 'external decision needed'
             body = '```marbles-reception\n' + json.dumps(data) + '\n```\n'
         final_report = '---\n' + yaml.safe_dump(fields) + '---\n' + body + '\n'
-        if receiver and scenario == 'stdout':
-            print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':final_report}}),flush=True)
+        if receiver and scenario in {'stdout','plain-stdout','plain-blocked','plain-invalid'}:
+            emitted = '# READ verification\n\n' + body if scenario.startswith('plain-') else final_report
+            print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':emitted}}),flush=True)
         else:
             report.write_text(final_report)
         print('fixture phase settled',flush=True)
@@ -390,12 +393,17 @@ def test_public_marbles_verifies_then_continues_without_worker_history(tmp_path,
         )
         assert captured["receiver"]
         if agent == "codex":
-            assert "--dangerously-bypass-approvals-and-sandbox" not in captured["argv"]
-            assert 'sandbox_mode="read-only"' in captured["argv"]
+            assert "--dangerously-bypass-approvals-and-sandbox" in captured["argv"]
+            assert 'sandbox_mode="read-only"' not in captured["argv"]
         meta = json.loads(
             Path(receiver["report"]).with_suffix(".meta.json").read_text()
         )
         assert meta["receiver_guard"]["kind"] == "macos_source_write_deny"
+        if agent == "codex":
+            assert (
+                meta["receiver_guard"]["native_tool_sandbox"]
+                == "bypassed_under_external_guard"
+            )
 
 
 @pytest.mark.parametrize(
@@ -440,6 +448,38 @@ def test_public_receiver_can_emit_report_without_file_write(tmp_path):
     assert result.returncode == 0
     assert parent["reception"]["verdict"] == "converged"
     assert len(parent["receivers"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("scenario", "status", "finalized"),
+    [
+        ("plain-stdout", "completed", "true"),
+        ("plain-blocked", "blocked", "true"),
+        ("plain-invalid", "completed", "false"),
+    ],
+)
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS public receiver fixture")
+def test_plain_stdout_receiver_attestation_follows_verified_evidence(
+    tmp_path, scenario, status, finalized
+):
+    from vibecrafted_core.report_contract import parse_report_path
+
+    _, launch, _, parent, _ = _public_run(tmp_path, scenario, count=2)
+    for receiver in parent["receivers"]:
+        parsed = parse_report_path(Path(receiver["report"]))
+        assert parsed.ok and parsed.run_id == receiver["run_id"]
+        assert parsed.fields["session_id"] == receiver["agent_session_id"]
+        assert parsed.fields["status"] == parsed.fields["claim_status"] == status
+        assert parsed.fields["finalized"] == finalized
+        assert bool(parsed.fields.get("claim")) is (finalized == "true")
+        meta = json.loads(
+            Path(receiver["report"]).with_suffix(".meta.json").read_text()
+        )
+        assert meta["status"] == "completed" and meta["exit_code"] == 0
+    assert parent["reception"]["verdict"] == (
+        "converged" if scenario == "plain-stdout" else "blocked"
+    )
+    assert parent["run_id"] == launch["run_id"]
 
 
 @pytest.mark.parametrize("measured", [True, False])
@@ -503,7 +543,9 @@ def test_receiver_guard_unsupported_host_is_explicit(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux public READ guard refusal")
 def test_public_linux_records_completed_write_but_blocked_reception(tmp_path):
-    result, _, completion, parent, _ = _public_run(tmp_path, "converge", count=2)
+    result, _, completion, parent, _ = _public_run(
+        tmp_path, "converge", count=2, agent="kimi"
+    )
     assert result.returncode == 1 and completion["completed"]
     assert parent["status"] == parent["reception"]["verdict"] == "blocked"
     assert parent["reception"]["reason"].startswith("receiver_source_guard_unavailable")
@@ -530,6 +572,118 @@ def test_receiver_guard_protects_unicode_root_and_git_metadata(tmp_path):
         assert result.returncode != 0 and "PermissionError" in result.stderr
     assert (root / "README.md").read_text() == "seed\n"
     assert not (root / ".git" / "forbidden").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS Codex tool sandbox")
+def test_codex_single_external_boundary_runs_gates_with_external_outputs(tmp_path):
+    import shutil
+
+    from test_cli_execution_controls import _git_repo
+    from vibecrafted_core.marbles_reception import readonly_command
+
+    codex = shutil.which("codex")
+    if not codex:
+        pytest.skip("installed Codex sandbox command unavailable")
+    parent_root = tmp_path / "parent-repo"
+    _git_repo(parent_root)
+    root = tmp_path / "assigned-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "-qb", "receiver-test", str(root)],
+        cwd=parent_root,
+        check=True,
+    )
+    external_report = tmp_path / "outside-report.md"
+    external_report.write_text("receipt outside source")
+    external_output = tmp_path / "gate-output"
+    read = (
+        "from pathlib import Path; import subprocess; assert Path('README.md').read_text().strip() == 'seed'; assert Path("
+        + repr(str(external_report))
+        + ").read_text() == 'receipt outside source'; print(subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip())"
+    )
+    readonly = [
+        codex,
+        "sandbox",
+        "-c",
+        'sandbox_mode="read-only"',
+        "-c",
+        'approval_policy="never"',
+        "--",
+        sys.executable,
+        "-c",
+        read,
+    ]
+    # Reproduce the actual restrictive inner profile rejected under the outer.
+    stacked, _ = readonly_command(str(root), readonly)
+    failed = subprocess.run(
+        stacked, cwd=root, capture_output=True, text=True, timeout=20, check=False
+    )
+    assert (
+        failed.returncode != 0
+        and "sandbox_apply: Operation not permitted" in failed.stderr
+    )
+    bypass = [
+        codex,
+        "sandbox",
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "-c",
+        'approval_policy="never"',
+        "--",
+        sys.executable,
+        "-c",
+        read,
+    ]
+    single, guard = readonly_command(str(root), bypass, "codex")
+    assert single[0] == "/usr/bin/sandbox-exec"
+    assert guard["kind"] == "macos_source_write_deny"
+    assert guard["native_tool_sandbox"] == "bypassed_under_external_guard"
+    success = subprocess.run(
+        single, cwd=root, capture_output=True, text=True, timeout=20, check=False
+    )
+    assert success.returncode == 0 and len(success.stdout.strip()) == 40, success.stderr
+    write_output = (
+        "from pathlib import Path;Path("
+        + repr(str(external_output))
+        + ").write_text('gate output')"
+    )
+    no_output = subprocess.run(
+        [*readonly[:-1], write_output],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert no_output.returncode != 0 and not external_output.exists()
+    output = subprocess.run(
+        [*single[:-1], write_output],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert output.returncode == 0 and external_output.read_text() == "gate output", (
+        output.stderr
+    )
+    # Worktree shared metadata is outside source and must still be protected.
+    for target in (root / "README.md", parent_root / ".git" / "forbidden"):
+        write = (
+            "from pathlib import Path;Path("
+            + repr(str(target))
+            + ").write_text('forbidden')"
+        )
+        denied = subprocess.run(
+            [*single[:-1], write],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert denied.returncode != 0 and "PermissionError" in denied.stderr
+    assert (root / "README.md").read_text().strip() == "seed"
+    assert not (parent_root / ".git" / "forbidden").exists()
 
 
 def test_current_report_schema_preserves_machine_identity_and_foreign_meta(

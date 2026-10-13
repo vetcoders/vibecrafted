@@ -20,14 +20,23 @@ WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 SETS = ("attacked", "resolved", "still_open", "discovered", "regressions")
 
 
-def readonly_command(root: str, command: list[str]) -> tuple[list[str], dict[str, str]]:
+def readonly_command(
+    root: str, command: list[str], provider: str = ""
+) -> tuple[list[str], dict[str, str]]:
     """Confine every receiver provider to read-only source and Git metadata.
 
-    Provider planning flags cannot uniformly run verification commands (Kimi
-    print mode rejects them). Use one source boundary independent of provider
-    flags. Unsupported hosts refuse reception rather than fall back to bypass.
-    Artifacts and native provider stores remain writable outside the tree.
+    Codex's restrictive inner tool sandbox cannot start under the outer guard,
+    and native read-only also refuses needed external verification outputs.
+    Use one scoped external boundary; Codex explicitly bypasses the inner
+    sandbox only while this source/Git write-deny profile is active.
+    Unsupported hosts refuse reception rather than fall back to prompt-only READ.
     """
+    path = Path(root).resolve()
+    if provider == "codex" and not (
+        "--dangerously-bypass-approvals-and-sandbox" in command
+        or 'sandbox_mode="danger-full-access"' in command
+    ):
+        raise ValueError("receiver_codex_inner_sandbox_not_disabled")
     sandbox = (
         "/usr/bin/sandbox-exec"
         if sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
@@ -37,7 +46,6 @@ def readonly_command(root: str, command: list[str]) -> tuple[list[str], dict[str
         raise ValueError(
             "receiver_source_guard_unavailable:requires_macos_sandbox_exec"
         )
-    path = Path(root).resolve()
     result = subprocess.run(
         [
             "git",
@@ -63,6 +71,10 @@ def readonly_command(root: str, command: list[str]) -> tuple[list[str], dict[str
     )
     return [sandbox, "-p", profile, *command], {
         "kind": "macos_source_write_deny",
+        "provider": provider,
+        "native_tool_sandbox": "bypassed_under_external_guard"
+        if provider == "codex"
+        else "provider_default",
         "root": str(path),
         "git_common_dir": common,
         "boundary": "assigned source and shared Git metadata; provider stores/artifacts outside remain writable",
