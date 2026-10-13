@@ -1656,8 +1656,11 @@ def test_public_resume_success_path_one_aicx_one_provider_canonical_ids(
         for line in frame_log.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    provider_tabs = [c for c in calls if "new-tab" in c and BOUND_SESSION in c]
-    assert len(provider_tabs) == 1, calls
+    assert not _retired_tabs(calls), calls
+    panes = _interactive_panes(calls, BOUND_SESSION)
+    assert len(panes) == 1, calls
+    assert len(_interactive_panes(calls)) == 1, calls
+    _assert_titled_scripted_pane(panes[0], repo=project_dir.name, root=project_dir)
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
@@ -2415,6 +2418,35 @@ def _first_index(calls: list[list[str]], needle: str) -> int:
     return -1
 
 
+def _interactive_panes(
+    calls: list[list[str]], session: str | None = None
+) -> list[list[str]]:
+    """The provider surface of an interactive launch: a `new-pane --floating`
+    (the Agents surface), optionally addressed to exactly one session. A
+    `new-tab` is the retired projection and is asserted absent separately."""
+    return [
+        argv
+        for argv in calls
+        if "new-pane" in argv
+        and "--floating" in argv
+        and (session is None or argv[:2] == ["--session", session])
+    ]
+
+
+def _retired_tabs(calls: list[list[str]]) -> list[list[str]]:
+    return [argv for argv in calls if "new-tab" in argv and "--help" not in argv]
+
+
+def _assert_titled_scripted_pane(
+    pane: list[str], *, repo: str, root: Path, agent: str = "codex"
+) -> None:
+    """Correctly named (`<repo> · <agent> · <model>`, model unknown without an
+    override), launched in the exact root, with its own launch script."""
+    assert pane[pane.index("--name") + 1] == f"{repo} · {agent} · unknown", pane
+    assert Path(pane[pane.index("--cwd") + 1]).resolve() == root.resolve(), pane
+    assert Path(pane[pane.index("--") + 1]).is_file(), pane
+
+
 def _foreground_attach_index(calls: list[list[str]]) -> int:
     """Index of the blocking handover, which is `attach <session>` and nothing else.
 
@@ -2440,15 +2472,17 @@ def test_provider_tab_is_created_before_the_foreground_attach(
     result, calls = _run_child_resume(tmp_path)
 
     created = _first_index(calls, "--new-session-with-layout")
-    new_tab = _first_index(calls, "new-tab")
+    panes = _interactive_panes(calls)
     attach = _foreground_attach_index(calls)
 
     assert created >= 0, f"the project session was never created: {calls}"
-    assert new_tab >= 0, f"no provider tab was created: {calls}\n{result.stdout}"
+    assert len(panes) == 1, f"expected one provider pane: {calls}\n{result.stdout}"
+    assert not _retired_tabs(calls), calls
     assert attach >= 0, f"the terminal was never handed over: {calls}"
-    assert created < new_tab < attach, (
+    new_pane = calls.index(panes[0])
+    assert created < new_pane < attach, (
         "wrong order -- the foreground attach must be the LAST act: "
-        f"created={created} new_tab={new_tab} attach={attach} calls={calls}"
+        f"created={created} new_pane={new_pane} attach={attach} calls={calls}"
     )
 
 
@@ -2744,10 +2778,19 @@ def test_child_creates_exactly_one_tab_and_one_aicx_pack(tmp_path: Path) -> None
     """Exactly once: no duplicated AICX composition, no second provider launch."""
     _result, calls = _run_child_resume(tmp_path)
 
-    tabs = [argv for argv in calls if "new-tab" in argv and "--help" not in argv]
+    panes = _interactive_panes(calls)
     attaches = [argv for argv in calls if argv[:1] == ["attach"]]
-    assert len(tabs) == 1, f"expected exactly one provider tab, got {tabs}"
+    assert not _retired_tabs(calls), calls
+    assert len(panes) == 1, f"expected exactly one provider pane, got {panes}"
     assert len(attaches) == 1, f"expected exactly one handover, got {attaches}"
+    # The pane lands in the very session that was created and then attached.
+    created = calls[_first_index(calls, "--new-session-with-layout")]
+    session = created[-1]
+    assert panes[0][:2] == ["--session", session], (panes, created)
+    assert attaches[0] == ["attach", session], attaches
+    _assert_titled_scripted_pane(
+        panes[0], repo="mlx-batch-runner", root=tmp_path / "mlx-batch-runner"
+    )
 
     aicx = tmp_path / "aicx-called.txt"
     assert aicx.exists(), "the child must assemble the continuity pack"
