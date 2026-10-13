@@ -1203,7 +1203,7 @@ cmd_fork_help() {
   printf '  --repo <path|org/name>              canonical repository (--root: equivalent legacy alias)\n'
   printf '  --runtime visible|terminal          bare interactive fork (default: visible)\n'
   printf '  --runtime headless                  task fork with --prompt/--file (default with input)\n'
-  printf '  --placement right|floating          pane shape (default: right)\n'
+  printf '  --placement right|floating          pane shape (default: floating)\n'
   printf '  --model <name>                      provider model override\n'
   printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
   printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
@@ -6441,7 +6441,7 @@ cmd_fork() {
     return 1
   }
 
-  local selector="" run_id="" runtime="" placement="right"
+  local selector="" run_id="" runtime="" placement="floating"
   local input_explicit=""
   local model="" permissions="" repo_dir="" root_dir="" prompt=""
   local plan_file="" base="" execution="" worktree=""
@@ -6584,16 +6584,15 @@ cmd_fork() {
     if [[ "$runtime" == terminal ]]; then
       _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
     else
-      _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" "$command_text" "$root_dir"
+      _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" "$command_text" "$root_dir" "" "$agent"
     fi
     return $?
   fi
 
-  local vc_frame_bin session_name repo_label pane_title cmd_script
+  local vc_frame_bin session_name pane_title cmd_script
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
   session_name="$projection_host"
-  repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
-  pane_title="${agent} fork @${repo_label} ${session_id}"
+  pane_title="$(_vetcoders_interactive_pane_title "$agent" "$root_dir" "$model")"
   cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
   _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
 

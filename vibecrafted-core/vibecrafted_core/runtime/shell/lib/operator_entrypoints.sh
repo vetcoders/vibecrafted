@@ -77,7 +77,7 @@ _vetcoders_skill_init() {
   # Prepare (create detached when absent) -> provider tab -> enter last. An
   # explicit --repo/--root is the declared workspace, exactly as for resume.
   _vetcoders_launch_interactive_declaration init "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }
 
 # Plain-terminal init: no vc-frame tab, no layout — the agent starts in this
@@ -150,7 +150,7 @@ _vetcoders_skill_operator() {
   case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
   _vetcoders_launch_interactive_declaration operator "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }
 
 # vc-partner launcher — interactive partner session, same family as init.
@@ -202,5 +202,5 @@ _vetcoders_skill_partner() {
   _vetcoders_require_vc_frame || return 1
 
   _vetcoders_launch_interactive_declaration partner "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }

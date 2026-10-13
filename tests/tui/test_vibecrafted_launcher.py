@@ -3408,10 +3408,9 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     assert payload[:3] == ["--session", "operator-test", "action"]
     assert "new-pane" in payload
     assert "new-tab" not in payload
-    assert payload[payload.index("--direction") + 1] == "right"
-    assert payload[payload.index("--name") + 1] == (
-        f"codex fork @Loctree/aicx {expected_session}"
-    )
+    assert "--floating" in payload
+    assert "--direction" not in payload
+    assert payload[payload.index("--name") + 1] == "aicx · codex · gpt-test"
     separator = payload.index("--")
     command_body = Path(payload[separator + 1]).read_text(encoding="utf-8")
     import shlex

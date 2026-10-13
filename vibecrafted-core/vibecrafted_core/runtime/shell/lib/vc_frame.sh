@@ -525,7 +525,7 @@ _vetcoders_normalize_declared_contract_root() {
 # resume: the declared root routes through the declared-workspace owner.
 _vetcoders_launch_interactive_declaration() {
   local verb="$1" runtime="$2" tab_name="$3" command_text="$4"
-  local declared_root="${5:-}" receipt="${6:-}"
+  local declared_root="${5:-}" receipt="${6:-}" agent="${7:-}"
   _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$declared_root" "$verb" || return 1
   if [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
     printf '%s: no visible operator target could be prepared here; refusing to start %s in a session nobody can see.\n' \
@@ -533,7 +533,7 @@ _vetcoders_launch_interactive_declaration() {
     printf '  run the %s from a terminal, or let the public entry open one.\n' "$verb" >&2
     return 1
   fi
-  _vetcoders_spawn_into_operator_session "$tab_name" "$command_text" || return 1
+  _vetcoders_spawn_into_operator_session "$tab_name" "$command_text" "$agent" || return 1
   printf '%s launched in workspace session: %s\n' "$verb" "$VIBECRAFTED_OPERATOR_SESSION"
   [[ -z "$declared_root" ]] || printf '  root:    %s\n' "$declared_root"
   [[ -z "$receipt" ]] || printf '%s\n' "$receipt"
@@ -1886,6 +1886,20 @@ _vetcoders_vc_frame_session_action() {
   return 0
 }
 
+# Readable identity of an interactive agent pane: `<repo> · <agent> · <model>`.
+# The repo is the checkout's own name (no org), the agent is the provider that
+# THIS launch starts, and the model is the explicit override the launch was
+# admitted with. No override means the model is not known here: `unknown`,
+# never a guess. Derived per launch, so a workspace reused by another provider
+# is retitled by the launch instead of inheriting the earlier occupant.
+_vetcoders_interactive_pane_title() {
+  local agent="${1:-}" root_dir="${2:-}" model="${3:-}"
+  printf '%s · %s · %s\n' "$(basename "$root_dir")" "$agent" "${model:-unknown}"
+}
+
+# Third argument `agent` is the explicit interactive opt-in: the provider is
+# projected as a titled float above the workspace's current content. Without it
+# (the Marbles orchestrator tab) the helper keeps its tab semantics.
 _vetcoders_spawn_into_operator_session() {
   vc_raise_launcher_limits
   local PATH="${PATH:-}"
@@ -1893,6 +1907,7 @@ _vetcoders_spawn_into_operator_session() {
   export PATH
   local tab_name="$1"
   local command_text="$2"
+  local interactive_agent="${3:-}"
   # Operator-UI path (vc-init / operator agent / resume): land in the prepared
   # operator seat. Skill *workers* use scripts/lib spawn_launch (G7 per-project
   # host). Optional: VIBECRAFTED_WORKER_SESSION forces the G7 worker host here
@@ -1930,6 +1945,27 @@ _vetcoders_spawn_into_operator_session() {
   # readable trail for debugging.
   cmd_script="$(_vetcoders_tmp_script_path "vc-spawn-cmd" "$root_dir")"
   _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
+  if [[ -n "$interactive_agent" ]]; then
+    local pane_title
+    pane_title="$(_vetcoders_interactive_pane_title "$interactive_agent" "$root_dir" "${_vetcoders_contract_model:-}")"
+    if _vetcoders_vc_frame_session_action "$vc_frame_bin" "$session_name" \
+      action new-pane --floating --width 62% --height 80% \
+      --name "$pane_title" \
+      --cwd "$root_dir" \
+      -- "$cmd_script"; then
+      printf 'launch accepted: run_id=%s target=%s/%s watch=vc-frame attach %s\n' \
+        "$run_id" "$session_name" "$pane_title" "$session_name"
+      return 0
+    else
+      action_status=$?
+    fi
+    printf 'launch failed: run_id=%s target=%s/%s status=%s\n' \
+      "$run_id" "$session_name" "$pane_title" "$action_status" >&2
+    if [[ -n "${VETCODERS_VC_FRAME_LAST_ERROR:-}" ]]; then
+      printf '%s\n' "$VETCODERS_VC_FRAME_LAST_ERROR" >&2
+    fi
+    return "$action_status"
+  fi
   # --after-base (W2-B-4c): run tabs grow from the base card, newest right of
   # it, instead of drifting to the rail's far end. Probe the binary — a stale
   # install without the flag degrades to the old append placement.

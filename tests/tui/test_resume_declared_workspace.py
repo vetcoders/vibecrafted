@@ -532,7 +532,14 @@ def _creates(calls: list[dict]) -> list[dict]:
 
 
 def _new_tabs(calls: list[dict]) -> list[dict]:
-    return [c for c in calls if "new-tab" in c["argv"] and "--help" not in c["argv"]]
+    """The surfaces opened for a provider: a tab, or -- since interactive
+    launches became titled floats on the Agents surface -- a floating pane."""
+    return [
+        c
+        for c in calls
+        if ("new-tab" in c["argv"] and "--help" not in c["argv"])
+        or ("new-pane" in c["argv"] and "--floating" in c["argv"])
+    ]
 
 
 def _attaches(calls: list[dict]) -> list[dict]:
@@ -881,7 +888,9 @@ def test_stale_marker_with_a_terminal_enters_the_declared_workspace(
     order = [c["argv"] for c in calls]
     created_at = next(i for i, a in enumerate(order) if "--create-background" in a)
     tab_at = next(
-        i for i, a in enumerate(order) if "new-tab" in a and "--help" not in a
+        i
+        for i, a in enumerate(order)
+        if ("new-tab" in a or "new-pane" in a) and "--help" not in a
     )
     attach_at = next(i for i, a in enumerate(order) if a[:1] == ["attach"])
     assert created_at < tab_at < attach_at, order
@@ -934,7 +943,9 @@ def test_live_attached_client_elsewhere_is_switched_onto_the_declared_workspace(
     ], switches
     order = [c["argv"] for c in calls]
     tab_at = next(
-        i for i, a in enumerate(order) if "new-tab" in a and "--help" not in a
+        i
+        for i, a in enumerate(order)
+        if ("new-tab" in a or "new-pane" in a) and "--help" not in a
     )
     switch_at = next(i for i, a in enumerate(order) if "switch-session" in a)
     assert tab_at < switch_at, order
