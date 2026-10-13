@@ -1418,7 +1418,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     preferenceChoice: PreferenceResolutionChoice? = nil
   ) throws -> [String] {
     let terminalHost = appRoot.appendingPathComponent(
-      "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
+      "Contents/MacOS/vc-terminal")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
     var arguments = [
       "--pack", pack.path,

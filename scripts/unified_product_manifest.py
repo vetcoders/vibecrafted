@@ -20,13 +20,11 @@ from urllib.parse import urlsplit
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 
-# Product code whose kind the walker must not have to guess. Every declared
-# vc-terminal.app is named from the contract's own tuple, so adding a payload
-# that carries the bundle cannot leave its executable inventoried as a resource.
+# Fixed main-app terminal and its helpers are executable payload.
 _DECLARED_CODE = {
+    "Contents/MacOS/vc-terminal",
     "Contents/Helpers/vc-frame",
     "Contents/Resources/runtime/bin/vc-start",
-    *(f"{bundle}/Contents/MacOS/alacritty" for bundle in contract.TERMINAL_APP_BUNDLES),
 }
 
 
@@ -245,7 +243,7 @@ def produce_app(args: argparse.Namespace) -> None:
             app,
             name="vc-terminal",
             source=args.terminal_source.resolve(),
-            product_relative="Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
+            product_relative="Contents/MacOS/vc-terminal",
             git_sha=args.terminal_sha,
             version=args.version,
         ),
@@ -314,7 +312,7 @@ def produce_app(args: argparse.Namespace) -> None:
         "files": files,
         "entrypoints": {
             "app": outer_relative,
-            "terminal": "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
+            "terminal": "Contents/MacOS/vc-terminal",
             "frame": "Contents/Helpers/vc-frame",
         },
         "launch_contract": contract._canonical_launch_contract(),

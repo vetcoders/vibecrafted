@@ -64,6 +64,56 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_swift_bootstrap_passes_existing_main_app_helper_argv(tmp_path: Path) -> None:
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is unavailable")
+    delegate = (
+        REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
+    ).read_text()
+    start = delegate.index(
+        "  private func runtimePackInstallArguments(\n    pack: URL,"
+    )
+    end = delegate.index("  private func decodeCanonicalRuntimeInstall", start)
+    function = delegate[start:end].replace("private func", "func", 1)
+    app = tmp_path / "Vibecrafted.app"
+    for relative in ("Contents/MacOS/vc-terminal", "Contents/Helpers/vc-frame"):
+        _write_executable(app / relative)
+    source = tmp_path / "bootstrap.swift"
+    source.write_text(
+        "import Foundation\n"
+        "struct PreferenceResolutionChoice { let action: String; let currentSha256: String; let incomingSha256: String; let path: String }\n"
+        + function
+        + "\nlet app = URL(fileURLWithPath: CommandLine.arguments[1])\n"
+        + 'let argv = try runtimePackInstallArguments(pack: app.appendingPathComponent("pack.tar.gz"), appRoot: app, sourceRevision: "source", terminalRevision: "terminal", frameRevision: "frame")\n'
+        + "print(String(data: try JSONEncoder().encode(argv), encoding: .utf8)!)\n"
+    )
+    executable = tmp_path / "bootstrap"
+    compiled = subprocess.run(
+        [swiftc, str(source), "-o", str(executable)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    result = subprocess.run(
+        [str(executable), str(app)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    argv = json.loads(result.stdout)
+    terminal = Path(argv[argv.index("--terminal-host") + 1])
+    frame = Path(argv[argv.index("--frame-helper") + 1])
+    assert terminal == app / "Contents/MacOS/vc-terminal"
+    assert frame == app / "Contents/Helpers/vc-frame"
+    assert terminal.is_file() and os.access(terminal, os.X_OK)
+    assert frame.is_file() and os.access(frame, os.X_OK)
+    assert argv[argv.index("--app-root") + 1] == str(app)
+
+
 def _prefixed_sha256(path: Path) -> str:
     return f"sha256:{_sha256(path)}"
 
@@ -473,15 +523,17 @@ def _terminal_bundle_fixture(
 
 
 def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
-    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    terminal_relative = "Contents/MacOS/vc-terminal"
     for relative in (
         "Contents/MacOS/Vibecrafted",
+        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
         (app / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(macho_executable, app / relative)
     for relative in (
+        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
@@ -490,14 +542,17 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
     primary_shell.parent.mkdir(parents=True, exist_ok=True)
     primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
     primary_shell.chmod(0o755)
-    # Both declared bundles: the App's Helpers copy and the one the Runtime
-    # Pack materializes for its own standalone install, which arrives inside
-    # the App because the whole pack payload is staged under Resources/runtime.
-    terminal_bundle_entries = [
-        entry
-        for bundle_relative in contract.TERMINAL_APP_BUNDLES
-        for entry in _terminal_bundle_fixture(app, bundle_relative, macho_executable)
-    ]
+    terminal_files = [_entry(app, terminal_relative, kind="executable")]
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
+    ):
+        relative = f"Contents/Resources/fonts/{name}"
+        resource = app / relative
+        resource.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / "assets/fonts/source-code-pro" / name, resource)
+        terminal_files.append(_entry(app, relative, kind="resource"))
     terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
     terminal_config.parent.mkdir(parents=True, exist_ok=True)
     terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -514,11 +569,12 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleIconFile": contract.PRODUCT_ICON_FILE,
                 "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1",
+                "ATSApplicationFontsPath": "fonts",
             },
             handle,
         )
     terminal_product_entry = next(
-        entry for entry in terminal_bundle_entries if entry["path"] == terminal_relative
+        entry for entry in terminal_files if entry["path"] == terminal_relative
     )
     frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
 
@@ -623,7 +679,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
                 kind="resource",
             ),
-            *terminal_bundle_entries,
+            *terminal_files,
             frame_product_entry,
             _entry(app, terminal_binding["manifest_path"], kind="config"),
             _entry(app, frame_binding["manifest_path"], kind="config"),
@@ -948,7 +1004,7 @@ def _developer_id_release_app(root: Path, macho_executable: Path) -> Path:
     app = root / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     nested = [
-        app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
+        app / "Contents/MacOS/vc-terminal",
         app / "Contents/Helpers/vc-frame",
         app / "Contents/Resources/runtime/bin/vc-start",
     ]
@@ -1134,7 +1190,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         ) : delegate.index("func applicationSupportsSecureRestorableState")
     ]
     assert "    false\n" in termination_handler
-    assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
+    assert "Contents/MacOS/vc-terminal" in delegate
     # A normal launch first asks the installer-owned read-only resolver which
     # generation is current. Only a truly absent runtime may bootstrap the
     # bundled carrier; an unusable one must be refused rather than overwritten.
@@ -2352,36 +2408,48 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _assert_error(expected_code, lambda: contract.verify_app(app))
 
 
-def test_app_accepts_both_declared_terminal_bundles(
+def test_app_accepts_fixed_main_app_terminal_and_font_resources(
     tmp_path: Path, macho_executable: Path
 ) -> None:
-    """The Runtime Pack's own bundle is product, not contraband.
-
-    Before this, `verify_app` compared every nested .app against a list holding
-    only the Helpers copy, so the moment the pack payload staged under
-    Resources/runtime brought its own vc-terminal.app the whole product was
-    rejected as carrying a forbidden nested bundle.
-    """
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-
-    nested = sorted(
-        path.relative_to(app).as_posix()
-        for path in app.rglob("*")
-        if path.is_dir() and path.suffix.lower() == ".app"
-    )
-    assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
+    assert not any(path.suffix.lower() == ".app" for path in app.rglob("*"))
+    assert manifest["entrypoints"]["terminal"] == "Contents/MacOS/vc-terminal"
+    assert manifest["launch_contract"]["program"] == manifest["entrypoints"]["terminal"]
     declared = {entry["path"] for entry in manifest["files"]}
-    for bundle in contract.TERMINAL_APP_BUNDLES:
-        assert f"{bundle}/Contents/MacOS/alacritty" in declared
-        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
-        assert (app / bundle / "Contents/_CodeSignature/CodeResources").is_file()
-        # The seal is proof, never payload: nothing under it may be inventoried.
-        assert not any(
-            item.startswith(f"{bundle}/Contents/_CodeSignature") for item in declared
-        )
-
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
+    ):
+        relative = f"Contents/Resources/fonts/{name}"
+        assert relative in declared
+        assert (app / relative).read_bytes() == (
+            REPO_ROOT / "assets/fonts/source-code-pro" / name
+        ).read_bytes()
     assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        "Contents/Helpers/vc-terminal.app",
+        "Contents/Resources/runtime/libexec/vc-terminal.app",
+    ],
+)
+def test_current_app_rejects_historical_nested_terminal_geometry(
+    tmp_path: Path, macho_executable: Path, bundle: str
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    manifest["files"].extend(_terminal_bundle_fixture(app, bundle, macho_executable))
+    seal = f"{bundle}/Contents/_CodeSignature/CodeResources"
+    manifest["files"].append(_entry(app, seal, kind="config"))
+    _write_app_manifest(app, manifest, sign=False)
+    with pytest.raises(contract.ProductContractError) as refused:
+        contract.verify_app(app)
+    assert refused.value.code == contract.E_BUNDLE
+    assert bundle in str(refused.value)
 
 
 @pytest.mark.parametrize("stranger", ["Stranger.app", "Stranger.APP"])
@@ -2436,72 +2504,73 @@ def test_app_refuses_an_undeclared_nested_bundle_in_any_suffix_case(
     assert f"Contents/Resources/{stranger}" in str(refused.value)
 
 
-@pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
-        ("wrong_identity", contract.E_BUNDLE),
-        ("wrong_display_name", contract.E_BUNDLE),
-        ("plist_is_not_a_dictionary", contract.E_BUNDLE),
-        ("plist_is_malformed_xml", contract.E_BUNDLE),
-        ("icon_absent_from_inventory", contract.E_INVENTORY),
-        ("bundle_seal_removed", contract.E_PROOF),
+        ("missing", contract.E_MISSING),
+        ("symlink", contract.E_MISSING),
+        ("code_mismatch", contract.E_HASH),
+        ("unsigned", contract.E_PROOF),
+        ("font_missing", contract.E_MISSING),
+        ("font_undeclared", contract.E_INVENTORY),
+        ("fonts_path", contract.E_BUNDLE),
     ],
 )
-def test_every_declared_terminal_bundle_is_held_to_one_identity(
-    tmp_path: Path,
-    macho_executable: Path,
-    bundle: str,
-    mutation: str,
-    expected_code: int,
+def test_fixed_terminal_and_resources_fail_closed(
+    tmp_path: Path, macho_executable: Path, mutation: str, expected_code: int
 ) -> None:
-    """Same canonical identity, same proof, whichever payload carries it.
-
-    Parametrized over both declared bundles on purpose: a check that only ever
-    ran against the Helpers copy is how the two assemblies drifted apart in the
-    first place. A malformed Info.plist is a contract failure with a code, not
-    an AttributeError escaping the verifier.
-    """
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    plist_path = app / bundle / "Contents/Info.plist"
-
-    def _reseal_plist(payload: Any) -> None:
-        with plist_path.open("wb") as handle:
-            plistlib.dump(payload, handle)
-        _resync_plist_entry()
-
-    def _resync_plist_entry() -> None:
-        relative = f"{bundle}/Contents/Info.plist"
-        entry = next(item for item in manifest["files"] if item["path"] == relative)
-        entry.update(_entry(app, relative, kind="config"))
-
-    if mutation == "wrong_identity":
-        with plist_path.open("rb") as handle:
-            info = plistlib.load(handle)
-        info["CFBundleIdentifier"] = "io.example.vc-terminal"
-        _reseal_plist(info)
-    elif mutation == "wrong_display_name":
-        with plist_path.open("rb") as handle:
-            info = plistlib.load(handle)
-        info["CFBundleDisplayName"] = "Alacritty"
-        _reseal_plist(info)
-    elif mutation == "plist_is_not_a_dictionary":
-        _reseal_plist(["not", "a", "dictionary"])
-    elif mutation == "plist_is_malformed_xml":
-        plist_path.write_bytes(b'<?xml version="1.0"?><plist version="1.0"><dict>\n')
-        _resync_plist_entry()
-    elif mutation == "icon_absent_from_inventory":
-        icon_relative = f"{bundle}/Contents/Resources/alacritty.icns"
-        (app / icon_relative).unlink()
-        manifest["files"] = [
-            item for item in manifest["files"] if item["path"] != icon_relative
-        ]
-    elif mutation == "bundle_seal_removed":
-        shutil.rmtree(app / bundle / "Contents/_CodeSignature")
-
+    terminal = app / "Contents/MacOS/vc-terminal"
+    font = "Contents/Resources/fonts/SourceCodePro[wght].ttf"
+    if mutation == "missing":
+        terminal.unlink()
+    elif mutation == "symlink":
+        terminal.unlink()
+        terminal.symlink_to(macho_executable)
+    elif mutation == "code_mismatch":
+        _mutate_macho_code_byte(terminal)
+    elif mutation == "unsigned":
+        subprocess.run(
+            ["/usr/bin/codesign", "--remove-signature", str(terminal)], check=True
+        )
+        entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == "Contents/MacOS/vc-terminal"
+        )
+        entry.update(_entry(app, entry["path"], kind="executable"))
+        binding = next(
+            item for item in manifest["modules"] if item["module"] == "vc-terminal"
+        )
+        assembly = json.loads((app / binding["assembly_receipt_path"]).read_text())
+        assembly["files"][0]["product_sha256"] = entry["sha256"]
+        _write_json(app / binding["assembly_receipt_path"], assembly)
+        binding["assembly_receipt_sha256"] = _sha256(
+            app / binding["assembly_receipt_path"]
+        )
+        receipt_entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == binding["assembly_receipt_path"]
+        )
+        receipt_entry.update(_entry(app, receipt_entry["path"], kind="config"))
+    elif mutation == "font_missing":
+        (app / font).unlink()
+    elif mutation == "font_undeclared":
+        (app / font).unlink()
+        manifest["files"] = [item for item in manifest["files"] if item["path"] != font]
+    elif mutation == "fonts_path":
+        plist = app / "Contents/Info.plist"
+        info = plistlib.loads(plist.read_bytes())
+        info["ATSApplicationFontsPath"] = "elsewhere"
+        plist.write_bytes(plistlib.dumps(info))
+        entry = next(
+            item for item in manifest["files"] if item["path"] == "Contents/Info.plist"
+        )
+        entry.update(_entry(app, entry["path"], kind="config"))
+        manifest["outer_bundle_code"]["info_plist_sha256"] = _sha256(plist)
     _write_app_manifest(app, manifest, sign=False)
-
     _assert_error(expected_code, lambda: contract.verify_app(app))
 
 
@@ -2540,10 +2609,8 @@ def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
 
     declared = {entry["path"] for entry in produced["files"]}
     assert intruder in declared
-    for bundle in contract.TERMINAL_APP_BUNDLES:
-        assert f"{bundle}/Contents/_CodeSignature/CodeResources" not in declared
-        assert f"{bundle}/Contents/MacOS/alacritty" in declared
-        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
+    assert "Contents/MacOS/vc-terminal" in declared
+    assert "Contents/Resources/fonts/SourceCodePro[wght].ttf" in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(

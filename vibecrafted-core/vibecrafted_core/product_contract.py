@@ -242,37 +242,23 @@ _LAUNCH_ENV_DENYLIST = frozenset(
     }
 )
 _WALKAROUND_TEMP_PARENT = Path("/tmp")
-_LAUNCH_TERMINAL = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+_LAUNCH_TERMINAL = "Contents/MacOS/vc-terminal"
 _LAUNCH_FRAME = "Contents/Helpers/vc-frame"
 _LAUNCH_CONFIG = "Contents/Resources/terminal/vibecrafted.toml"
 _LAUNCH_SHELL = "Contents/Resources/runtime/bin/vc-start"
 _LAUNCH_PRIMARY_SHELL = (
     "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh"
 )
-_TERMINAL_HELPER_APP = "Contents/Helpers/vc-terminal.app"
-# The Runtime Pack is independently launchable, so it materializes its own
-# branded terminal bundle beside its flat native host; the App then copies that
-# whole payload into Contents/Resources/runtime. Two .app directories therefore
-# reach the customer inside one Vibecrafted.app, and they are the same product
-# identity assembled by one builder function. Name both here: a bundle absent
-# from this tuple is an unknown nested customer app and still fails closed.
-_TERMINAL_RUNTIME_APP = "Contents/Resources/runtime/libexec/vc-terminal.app"
-TERMINAL_APP_BUNDLES = (_TERMINAL_HELPER_APP, _TERMINAL_RUNTIME_APP)
-_TERMINAL_BUNDLE_ID = "io.vetcoders.vc-terminal"
-_TERMINAL_BUNDLE_EXECUTABLE = "alacritty"
-_TERMINAL_BUNDLE_ICON = "alacritty.icns"
-_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
-# Signature artefacts, not payload. `codesign` writes a bundle's
-# Contents/_CodeSignature when it seals that bundle; the release builder seals
-# every nested bundle BEFORE it writes the product inventory and seals the
-# outer bundle AFTER. So each declared nested bundle already carries a seal the
-# inventory must not claim, and the outer seal does not exist yet. The writer
-# (scripts/unified_product_manifest.py) and this reader share exactly this list
-# so neither can quietly exempt a path the other still counts.
+_TERMINAL_FONT_FILES = (
+    "Contents/Resources/fonts/SourceCodePro[wght].ttf",
+    "Contents/Resources/fonts/SourceCodePro-Italic[wght].ttf",
+    "Contents/Resources/fonts/OFL.txt",
+)
+# Only the main app's seal is signature metadata. A nested .app is forbidden,
+# and its seal must not gain an inventory exemption.
 _SIGNATURE_INVENTORY_EXCLUSIONS = (
     Path("Contents/_CodeSignature"),
     Path("Contents/CodeResources"),
-    *(Path(bundle) / "Contents/_CodeSignature" for bundle in TERMINAL_APP_BUNDLES),
 )
 PRODUCT_MANIFEST_REFERENT = "manifests/product-manifest.json"
 RUNTIME_MANIFEST_REFERENT = "manifests/runtime-manifest.json"
@@ -2211,59 +2197,6 @@ def _verify_product_module_receipts(
             _fail(E_ENTRYPOINT, f"product entrypoint is not bound to {name} receipt")
 
 
-def _verify_terminal_app_bundle(
-    app: Path,
-    relative: str,
-    *,
-    files: Mapping[str, Mapping[str, Any]],
-) -> None:
-    """One identity, one proof, for every vc-terminal.app the product carries.
-
-    The App helper and the Runtime Pack's own bundle come out of a single
-    builder function, so a per-payload allowance here would let them drift back
-    apart without the gate noticing. A bundle whose Info.plist cannot be parsed
-    — or parses to something that is not a dictionary — is a contract failure
-    with a code, never an AttributeError from the verifier.
-    """
-    bundle = app / relative
-    plist_path = bundle / "Contents/Info.plist"
-    try:
-        with plist_path.open("rb") as handle:
-            plist = plistlib.load(handle)
-    except (OSError, ValueError, ExpatError) as exc:
-        _fail(E_BUNDLE, f"terminal bundle Info.plist is invalid: {relative}: {exc}")
-    if not isinstance(plist, dict):
-        _fail(
-            E_BUNDLE,
-            f"terminal bundle Info.plist top level must be a dictionary: {relative}",
-        )
-    canonical = {
-        "CFBundleIdentifier": _TERMINAL_BUNDLE_ID,
-        "CFBundleExecutable": _TERMINAL_BUNDLE_EXECUTABLE,
-        "CFBundleIconFile": _TERMINAL_BUNDLE_ICON,
-        "CFBundleDisplayName": _TERMINAL_BUNDLE_DISPLAY_NAME,
-        "CFBundleName": _TERMINAL_BUNDLE_DISPLAY_NAME,
-    }
-    for key, expected in canonical.items():
-        if plist.get(key) != expected:
-            _fail(E_BUNDLE, f"terminal bundle {key} is not canonical: {relative}")
-    for name, declared in (
-        ("executable", f"{relative}/Contents/MacOS/{_TERMINAL_BUNDLE_EXECUTABLE}"),
-        ("icon", f"{relative}/Contents/Resources/{_TERMINAL_BUNDLE_ICON}"),
-    ):
-        if declared not in files:
-            _fail(
-                E_INVENTORY,
-                f"terminal bundle {name} is absent from signed inventory: {declared}",
-            )
-    _verify_assembler_signed_macho(bundle, relative=relative)
-    if _codesign_identifier(bundle) != _TERMINAL_BUNDLE_ID:
-        _fail(
-            E_PROOF,
-            f"terminal bundle signature Identifier is not canonical: {relative}",
-        )
-
-
 def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str, Any]:
     """Verify one explicit assembled Vibecrafted.app and its product manifest."""
     app = Path(app_path)
@@ -2380,10 +2313,17 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         for path in app.rglob("*")
         if path.is_dir() and path.suffix.lower() == ".app"
     )
-    if nested_apps != sorted(TERMINAL_APP_BUNDLES):
+    if nested_apps:
         _fail(E_BUNDLE, f"nested customer app bundles are forbidden: {nested_apps}")
-    for terminal_bundle in TERMINAL_APP_BUNDLES:
-        _verify_terminal_app_bundle(app, terminal_bundle, files=validated.entries)
+    if plist.get("ATSApplicationFontsPath") != "fonts":
+        _fail(E_BUNDLE, "main app must declare its private terminal font directory")
+    for relative in _TERMINAL_FONT_FILES:
+        entry = validated.entries.get(relative)
+        if entry is None or entry["kind"] != "resource" or entry["size"] == 0:
+            _fail(
+                E_INVENTORY,
+                f"terminal font resource is absent from signed inventory: {relative}",
+            )
     _verify_product_module_receipts(
         app,
         modules,
@@ -4206,49 +4146,12 @@ def _self_test() -> int:
         primary_shell.parent.mkdir(parents=True, exist_ok=True)
         primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
         primary_shell.chmod(0o755)
-        terminal_bundle_files: list[dict[str, Any]] = []
-        for bundle_relative in TERMINAL_APP_BUNDLES:
-            terminal_app = app / bundle_relative
-            bundle_executable = terminal_app / "Contents/MacOS/alacritty"
-            bundle_executable.parent.mkdir(parents=True, exist_ok=True)
-            if not bundle_executable.exists():
-                shutil.copy2(executable, bundle_executable)
-                _run_tool(
-                    [codesign, "--force", "--sign", "-", str(bundle_executable)],
-                    failure_code=E_PROOF,
-                    context="self-test could not sign terminal bundle executable",
-                )
-            terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-            terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-            terminal_icon.write_bytes(b"terminal-icns-fixture")
-            with (terminal_app / "Contents/Info.plist").open("wb") as handle:
-                plistlib.dump(
-                    {
-                        "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                        "CFBundleExecutable": "alacritty",
-                        "CFBundleIconFile": "alacritty.icns",
-                        "CFBundleName": "VC Terminal",
-                        "CFBundleDisplayName": "VC Terminal",
-                        "CFBundlePackageType": "APPL",
-                    },
-                    handle,
-                )
-            _run_tool(
-                [codesign, "--force", "--sign", "-", str(terminal_app)],
-                failure_code=E_PROOF,
-                context=f"self-test could not sign terminal bundle {bundle_relative}",
-            )
-            terminal_bundle_files.extend(
-                _fixture_entry(app, relative, kind=kind)
-                for relative, kind in (
-                    (f"{bundle_relative}/Contents/MacOS/alacritty", "executable"),
-                    (f"{bundle_relative}/Contents/Info.plist", "config"),
-                    (
-                        f"{bundle_relative}/Contents/Resources/alacritty.icns",
-                        "resource",
-                    ),
-                )
-            )
+        terminal_files = [_fixture_entry(app, _LAUNCH_TERMINAL, kind="executable")]
+        for relative in _TERMINAL_FONT_FILES:
+            resource = app / relative
+            resource.parent.mkdir(parents=True, exist_ok=True)
+            resource.write_bytes(b"self-test-font-resource")
+            terminal_files.append(_fixture_entry(app, relative, kind="resource"))
         terminal_config = app / _LAUNCH_CONFIG
         terminal_config.parent.mkdir(parents=True, exist_ok=True)
         terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -4265,13 +4168,12 @@ def _self_test() -> int:
                     "CFBundleIconFile": PRODUCT_ICON_FILE,
                     "CFBundleShortVersionString": "1.0.0",
                     "CFBundleVersion": "1",
+                    "ATSApplicationFontsPath": "fonts",
                 },
                 handle,
             )
         terminal_product_entry = next(
-            entry
-            for entry in terminal_bundle_files
-            if entry["path"] == _LAUNCH_TERMINAL
+            entry for entry in terminal_files if entry["path"] == _LAUNCH_TERMINAL
         )
         frame_product_entry = _fixture_entry(
             app, "Contents/Helpers/vc-frame", kind="executable"
@@ -4379,7 +4281,7 @@ def _self_test() -> int:
                     f"Contents/Resources/{PRODUCT_ICON_FILE}",
                     kind="resource",
                 ),
-                *terminal_bundle_files,
+                *terminal_files,
                 frame_product_entry,
                 _fixture_entry(app, terminal_binding["manifest_path"], kind="config"),
                 _fixture_entry(app, frame_binding["manifest_path"], kind="config"),
