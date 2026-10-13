@@ -2669,13 +2669,194 @@ def test_iter_sse_rejects_oversized_lines_and_frames(
     with monkeypatch.context() as scoped:
         scoped.setattr(guardian_module, "MAX_SSE_LINE_BYTES", 8)
         with pytest.raises(GuardianProtocolError, match="line exceeds"):
-            list(iter_sse(["data: payload\n"]))
+            list(iter_sse([": comment\n"]))
 
     with monkeypatch.context() as scoped:
         scoped.setattr(guardian_module, "MAX_SSE_LINE_BYTES", 32)
         scoped.setattr(guardian_module, "MAX_SSE_FRAME_BYTES", 12)
         with pytest.raises(GuardianProtocolError, match="frame exceeds"):
             list(iter_sse(["id: 1\n", "data: x\n", "\n"]))
+
+
+def test_iter_sse_accepts_canonical_launch_json_within_frame_budget() -> None:
+    # The actual serializer emits one data line. Archived launch metadata can
+    # repeat a ~29 KB command three times; it still fits the 1 MiB frame bound.
+    data = json.dumps(
+        {
+            "kind": "launch",
+            "payload": {
+                name: ["x" * 29000]
+                for name in ("command", "dispatch_command", "worker_command")
+            },
+        }
+    )
+    assert guardian_module.MAX_SSE_LINE_BYTES < len(data)
+    assert len(data) < guardian_module.MAX_SSE_FRAME_BYTES
+    assert list(iter_sse(frame(v2_cursor(1), data))) == [SSEFrame(v2_cursor(1), data)]
+
+
+def test_large_launch_replay_preserves_settlement_and_caught_up(
+    tmp_path: Path,
+) -> None:
+    large_launch = json.dumps({"kind": "launch", "payload": {"command": "x" * 90000}})
+    settlement = frame(v2_cursor(2), settlement_data("after-large-launch", 1, "f"))
+    response = FakeResponse(
+        [
+            *boundary(v2_cursor(0)),
+            *frame(v2_cursor(1), large_launch),
+            *settlement,
+            *caught_up(v2_cursor(2)),
+        ]
+    )
+    state = GuardianState(
+        path=tmp_path / "state.json", cursor=v2_cursor(0), baseline_complete=True
+    )
+    notifications: list[GuardianNotification] = []
+    worker = GuardianWorker(
+        server_url="http://127.0.0.1:3024",
+        state=state,
+        notifier=notifications.append,
+        opener=QueueOpener(
+            response, FakeResponse([*settlement, *caught_up(v2_cursor(2))])
+        ),
+    )
+
+    first = worker.consume_connection()
+    replay = worker.consume_connection()
+
+    assert first.frames == 2
+    assert first.completed_actions == 1
+    assert replay.completed_actions == 0
+    assert len(notifications) == 1
+    reloaded = GuardianState.load(state.path)
+    assert reloaded.cursor == v2_cursor(2)
+    assert reloaded.baseline_complete
+    assert not reloaded.pending
+
+
+def test_guardian_http_line_reads_are_bounded_by_frame_budget(tmp_path: Path) -> None:
+    import io
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def __init__(self) -> None:
+            super().__init__(
+                b"data: " + b"x" * (2 * guardian_module.MAX_SSE_FRAME_BYTES)
+            )
+            self.headers = {"Content-Type": "text/event-stream"}
+            self.read_limits: list[int] = []
+
+        def readline(self, size: int = -1) -> bytes:
+            self.read_limits.append(size)
+            return super().readline(size)
+
+        def __iter__(self):
+            while line := self.readline():
+                yield line
+
+    response = Response()
+    worker = GuardianWorker(
+        server_url="http://127.0.0.1:3024",
+        state=GuardianState(path=tmp_path / "state.json"),
+        opener=lambda _request, timeout: response,
+    )
+    with pytest.raises(GuardianProtocolError, match="frame exceeds"):
+        worker.consume_connection()
+    assert response.closed
+    assert response.read_limits == [guardian_module.MAX_SSE_FRAME_BYTES + 1]
+
+
+@pytest.mark.parametrize("prefix", ["id:", "event:", ":", "unknown:"])
+def test_iter_sse_retains_non_data_line_limit(prefix: str) -> None:
+    with pytest.raises(GuardianProtocolError, match="line exceeds"):
+        list(iter_sse([prefix + "x" * guardian_module.MAX_SSE_LINE_BYTES + "\n"]))
+
+
+def test_iter_sse_exact_frame_boundary_and_multiline_overflow() -> None:
+    headers = ["id: 1\n", "data: ", "\n", "\n"]
+    data = "x" * (guardian_module.MAX_SSE_FRAME_BYTES - sum(map(len, headers)))
+    assert list(iter_sse(frame(1, data))) == [SSEFrame(1, data)]
+    with pytest.raises(GuardianProtocolError, match="frame exceeds"):
+        list(iter_sse(frame(1, data + "x")))
+    with pytest.raises(GuardianProtocolError, match="frame exceeds"):
+        list(iter_sse(["data: " + "x" * 300000 + "\n"] * 4))
+
+
+def test_guardian_real_http_replays_large_launch_with_bounded_reads(
+    tmp_path: Path,
+) -> None:
+    import http.client
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    large_launch = json.dumps({"kind": "launch", "payload": {"command": "x" * 90000}})
+    wire = "".join(
+        [
+            *frame(v2_cursor(1), large_launch),
+            *frame(v2_cursor(2), settlement_data("http-after-large-launch", 1, "f")),
+            *caught_up(v2_cursor(2)),
+        ]
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    read_limits: list[int] = []
+    connections: list[http.client.HTTPConnection] = []
+
+    def opener(_request: Any, *, timeout: float) -> Any:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=timeout
+        )
+        connections.append(connection)
+        connection.request("GET", "/api/control/events")
+        response = connection.getresponse()
+        readline = response.readline
+
+        def read(size: int = -1) -> bytes:
+            read_limits.append(size)
+            return readline(size)
+
+        response.readline = read
+        return response
+
+    state = GuardianState(
+        path=tmp_path / "state.json", cursor=v2_cursor(0), baseline_complete=True
+    )
+    notifications: list[GuardianNotification] = []
+    ready: list[bool] = []
+    worker = GuardianWorker(
+        server_url=f"http://127.0.0.1:{server.server_port}",
+        state=state,
+        notifier=notifications.append,
+        ready_callback=lambda: ready.append(True),
+        opener=opener,
+    )
+    try:
+        stats = worker.consume_connection()
+    finally:
+        for connection in connections:
+            connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert stats.completed_actions == len(notifications) == 1
+    assert ready == [True]
+    assert read_limits and set(read_limits) == {guardian_module.MAX_SSE_FRAME_BYTES + 1}
+    assert GuardianState.load(state.path).cursor == v2_cursor(2)
 
 
 def test_protocol_requires_exact_base_media_types(tmp_path: Path) -> None:

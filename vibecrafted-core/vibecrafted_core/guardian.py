@@ -1765,7 +1765,12 @@ def iter_sse(
             if isinstance(raw_line, bytes)
             else raw_line.encode("utf-8", errors="replace")
         )
-        if len(encoded_line) > MAX_SSE_LINE_BYTES:
+        # The canonical serializer emits each JSON event on one data line.
+        # Launch records can exceed the control-line cap while still fitting
+        # the existing cumulative frame budget below.
+        if len(encoded_line) > MAX_SSE_LINE_BYTES and not encoded_line.startswith(
+            b"data:"
+        ):
             raise GuardianProtocolError(f"SSE line exceeds {MAX_SSE_LINE_BYTES} bytes")
         frame_bytes += len(encoded_line)
         if frame_bytes > MAX_SSE_FRAME_BYTES:
@@ -3267,7 +3272,16 @@ class GuardianWorker:
                     self._ready_announced = True
 
                 def stop_aware_lines() -> Iterator[bytes | str]:
-                    for line in response:
+                    # urllib's iterator reads a whole line without a bound.
+                    # One byte beyond the frame budget detects an oversized
+                    # or truncated continuation before any payload is parsed.
+                    readline = getattr(response, "readline", None)
+                    lines = (
+                        iter(lambda: readline(MAX_SSE_FRAME_BYTES + 1), b"")
+                        if callable(readline)
+                        else iter(response)
+                    )
+                    for line in lines:
                         if stop_requested():
                             return
                         yield line

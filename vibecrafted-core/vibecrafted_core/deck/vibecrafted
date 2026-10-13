@@ -2076,8 +2076,15 @@ _server_helper_python() {
 }
 
 _server_python() {
-  local python_bin
+  local python_bin core_dir owner_root
   python_bin="$(_server_helper_python)" || return $?
+  if [[ "${1:-}" == "pair-health" && -f "${2:-}/guardian.execution.json" ]]; then
+    # -I deliberately ignores ambient PYTHONPATH. Admit only the physical
+    # launcher's selected core for the embedded Guardian probe.
+    core_dir="$(_core_module_dir)" || return 78
+    owner_root="$(_script_owner_root)" || return 78
+    set -- "$@" "$core_dir" "$owner_root"
+  fi
   "$python_bin" -I - "$@" <<'PY'
 from __future__ import annotations
 
@@ -3054,6 +3061,28 @@ elif operation == "status-read":
 elif operation == "pair-health":
     runtime_dir = Path(args[0])
     if (runtime_dir / "guardian.execution.json").exists():
+        if len(args) != 3:
+            fail("selected launcher core missing for embedded Guardian probe", 78)
+        core_dir = Path(args[-2])
+        owner_root = Path(args[-1])
+        package_dir = core_dir / "vibecrafted_core"
+        resolved_core = core_dir.resolve()
+        resolved_package = package_dir.resolve()
+        if not (
+            resolved_core == owner_root / "vibecrafted-core"
+            and resolved_package == resolved_core / "vibecrafted_core"
+        ) and not (
+            owner_root.name == "vibecrafted_core"
+            and resolved_package == owner_root
+            and resolved_core == owner_root.parent
+        ):
+            fail("selected launcher core outside physical owner", 78)
+        if not core_dir.is_absolute() or any(
+            not path.is_file() or path.is_symlink()
+            for path in (package_dir / "__init__.py", package_dir / "server_supervisor.py")
+        ):
+            fail("selected launcher core missing for embedded Guardian probe", 78)
+        sys.path.insert(0, str(core_dir))
         from vibecrafted_core.server_supervisor import (
             SupervisorPaths, _managed_pair_in_process_healthy, _managed_pair_snapshot,
         )
