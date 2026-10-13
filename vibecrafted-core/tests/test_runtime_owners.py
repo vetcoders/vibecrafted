@@ -128,12 +128,21 @@ def test_native_host_has_real_product_process_identity(tmp_path):
     (root / "bin").mkdir(parents=True)
     # A fixture borrows the local dev interpreter read-only. Production embeds
     # the pinned library/stdlib under the signed generation, with no symlinks.
-    library = str(sysconfig.get_config_var("LDLIBRARY"))
-    assert (Path(sys.base_prefix) / "lib" / library).exists()
+    configured_library = str(sysconfig.get_config_var("LDLIBRARY"))
+    if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        library_source = (
+            Path(sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX")) / configured_library
+        )
+    else:
+        library_source = Path(sysconfig.get_config_var("LIBDIR")) / configured_library
+    assert library_source.is_file(), library_source
+    # The payload owns a flat library filename even when the dev interpreter
+    # reports its library relative to a Python.framework prefix.
+    library = library_source.name
     if sys.platform == "darwin":
         library_root = root / "python/lib"
         library_root.mkdir(parents=True)
-        shutil.copyfile(Path(sys.base_prefix) / "lib" / library, library_root / library)
+        shutil.copyfile(library_source, library_root / library)
         # Borrow only the stdlib; native code is copied into this generation.
         (
             library_root / f"python{sys.version_info.major}.{sys.version_info.minor}"
@@ -208,7 +217,7 @@ def main():
         # even when it exposes the same ABI and the payload copy is present.
         overridden = subprocess.run(
             [str(binary), "-c", "raise SystemExit(0)"],
-            env={**os.environ, "DYLD_LIBRARY_PATH": str(Path(sys.base_prefix) / "lib")},
+            env={**os.environ, "DYLD_LIBRARY_PATH": str(library_source.parent)},
             capture_output=True,
             text=True,
             check=False,
@@ -242,6 +251,13 @@ def main():
         ).stdout.strip()
         assert observed.endswith("vc-server-supervisor")
         assert binary.read_bytes()[:2] != b"#!"
+        parents = subprocess.run(
+            ["/bin/ps", "-ax", "-o", "ppid="],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        assert str(process.pid) not in parents
     finally:
         process.terminate()
         process.communicate(timeout=3)
