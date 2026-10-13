@@ -5448,8 +5448,12 @@ cmd_core_workflow_skill() {
 }
 
 cmd_init() {
-  # Leading --help must never be parsed as an agent name (vc-init --help audit).
-  if _is_help_flag "${1:-}"; then
+  # Deck help is leading or immediately after a registered agent, before CLI
+  # admission. Later flags belong to the helper; prompt values and -- tails
+  # must never be scanned as help requests.
+  if _is_help_flag "${1:-}" || {
+    _has_agent "${1:-}" && _is_help_flag "${2:-}"
+  }; then
     cmd_init_help
     return 0
   fi
