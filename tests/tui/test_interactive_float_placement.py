@@ -25,6 +25,7 @@ records exact argv/cwd (never a live session, never a paid provider):
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,73 @@ def test_spawn_helper_without_the_interactive_opt_in_keeps_the_tab(
     tabs = _new_tabs(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == HOST, calls
     assert not _float_panes(calls), calls
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _linked_worktree(scene: Scene, tmp_path: Path) -> Path:
+    """A real linked worktree whose directory name is a run name, not the repo."""
+    linked = tmp_path / "run 261013 abc"
+    _git(scene.root, "worktree", "add", "-q", "-b", "wt-label", str(linked))
+    nested = linked / "deep dir" / "inner"
+    nested.mkdir(parents=True)
+    return nested
+
+
+def test_linked_worktree_launch_is_labelled_with_the_repo_not_the_run(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    nested = _linked_worktree(scene, tmp_path)
+    result = _run_face(
+        scene,
+        "_vetcoders_skill_init codex --model gpt-test-3",
+        tty=True,
+        terminal_entry=True,
+        cwd=nested,
+    )
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    panes = _float_panes(scene.calls())
+    assert [_pane_name(c) for c in panes] == ["vibecrafted · codex · gpt-test-3"], [
+        c["argv"] for c in scene.calls()
+    ]
+    assert not _new_tabs(scene.calls())
+
+
+def test_title_helper_resolves_the_common_repo_from_a_nested_linked_cwd(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    nested = _linked_worktree(scene, tmp_path)
+    result = _run_face(scene, f'_vetcoders_interactive_pane_title codex "{nested}" m1')
+
+    assert "vibecrafted · codex · m1" in result.stdout, result.stdout + result.stderr
+
+
+def test_title_helper_outside_git_keeps_the_directory_name(tmp_path: Path) -> None:
+    """No Git geometry means no verified repo identity: the plain directory
+    name stays, exactly as before, and nothing is invented."""
+    scene = _scene(tmp_path)
+    plain = tmp_path / "plain dir"
+    plain.mkdir()
+    result = _run_face(scene, f'_vetcoders_interactive_pane_title claude "{plain}" ""')
+
+    assert "plain dir · claude · unknown" in result.stdout, (
+        result.stdout + result.stderr
+    )

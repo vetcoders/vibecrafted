@@ -1892,9 +1892,26 @@ _vetcoders_vc_frame_session_action() {
 # admitted with. No override means the model is not known here: `unknown`,
 # never a guess. Derived per launch, so a workspace reused by another provider
 # is retitled by the launch instead of inheriting the earlier occupant.
+#
+# The repo name is read from the same Git geometry repository_claims
+# canonical_repo_identity uses: the common Git dir's parent, so a linked
+# worktree (a run directory) and a nested cwd both name their repository, not
+# their checkout. A non-Git directory keeps its plain directory name; that is
+# a label, not a verified repository identity. Local Git reads only.
 _vetcoders_interactive_pane_title() {
   local agent="${1:-}" root_dir="${2:-}" model="${3:-}"
-  printf '%s · %s · %s\n' "$(basename "$root_dir")" "$agent" "${model:-unknown}"
+  local repo="" common="" top=""
+  common="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$root_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+  if [[ -n "$common" ]]; then
+    if [[ "$(basename "$common")" == .git ]]; then
+      repo="$(basename "$(dirname "$common")")"
+    else
+      top="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$root_dir" rev-parse --show-toplevel 2>/dev/null)" || top=""
+      [[ -z "$top" ]] || repo="$(basename "$top")"
+    fi
+  fi
+  [[ -n "$repo" ]] || repo="$(basename "$root_dir")"
+  printf '%s · %s · %s\n' "$repo" "$agent" "${model:-unknown}"
 }
 
 # Third argument `agent` is the explicit interactive opt-in: the provider is
