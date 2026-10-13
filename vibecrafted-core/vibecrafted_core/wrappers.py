@@ -723,7 +723,16 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
     group via `workflow.stop_run` and reports the outcome.
     """
     parser = argparse.ArgumentParser(
-        description="Stop a Vibecrafted run by terminating its launcher process group."
+        prog="vibecrafted stop",
+        description="Stop a Vibecrafted run by terminating its launcher process group.",
+        epilog="Examples: vibecrafted stop codex --last|--run-id <id>; "
+        "vibecrafted stop --agent codex --run-id <id>",
+    )
+    parser.add_argument(
+        "agent_positional",
+        nargs="?",
+        choices=sorted(AGENTS | {"swarm"}),
+        metavar="AGENT",
     )
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
@@ -731,6 +740,9 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--reason", default="operator stop request")
     parser.add_argument("--grace-seconds", type=float, default=2.0)
     ns = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    if ns.agent and ns.agent_positional and ns.agent != ns.agent_positional:
+        parser.error("positional agent and --agent disagree")
+    agent = str(ns.agent or ns.agent_positional or "").strip()
 
     from .control_plane import lookup_run, sync_state
     from .workflow import stop_run
@@ -740,7 +752,6 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
         if not ns.last:
             parser.error("required: --run-id or --last")
         snapshot = sync_state()
-        agent = str(ns.agent or "").strip()
         for key in ("active_runs", "recent_runs"):
             for run in snapshot.get(key) or []:
                 if agent and str(run.get("agent") or "") != agent:
@@ -760,11 +771,23 @@ def stop_main(argv: Sequence[str] | None = None) -> int:
             print(f"run_id={run_id} stop failed reason=run_not_found", file=sys.stderr)
             return 1
 
-    result = stop_run(
-        run_id,
-        reason=ns.reason,
-        grace_seconds=ns.grace_seconds,
-    )
+    from .control_plane import control_plane_home
+    from .run_mutation import run_mutation_locks
+
+    with run_mutation_locks(control_plane_home(), run_id=run_id):
+        if agent:
+            selected = lookup_run(run_id)
+            if selected is None or selected.get("agent") != agent:
+                print(
+                    f"run_id={run_id} stop failed reason=agent_run_mismatch",
+                    file=sys.stderr,
+                )
+                return 1
+        result = stop_run(
+            run_id,
+            reason=ns.reason,
+            grace_seconds=ns.grace_seconds,
+        )
     child_codes = [_print_stop_result(child) for child in result.get("children", [])]
     parent_code = _print_stop_result(result)
     if result.get("cascade_complete") is False:

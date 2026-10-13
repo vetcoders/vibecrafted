@@ -4040,19 +4040,23 @@ def _runtime_run_dir(run_id: str) -> Path:
     return control_plane_home() / "runtime_runs" / run_id
 
 
-def _report_from_meta(meta: Path) -> Path | None:
-    """Resolve the report path recorded in a meta.json, if it still exists on disk."""
+def _artifact_from_meta(meta: Path, field: str) -> Path | None:
+    """Read one artifact location from durable identity, preserving its geometry."""
     try:
         payload = json.loads(meta.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
-    raw = str(payload.get("report") or payload.get("latest_report") or "")
+    raw = str(payload.get(field) or payload.get(f"latest_{field}") or "")
     if not raw:
         return None
     candidate = Path(raw).expanduser()
     return candidate if candidate.is_file() else None
+
+
+def _report_from_meta(meta: Path) -> Path | None:
+    return _artifact_from_meta(meta, "report")
 
 
 def _resolve_run_in_artifacts(run_id: str) -> ResolvedRun | None:
@@ -4090,6 +4094,8 @@ def resolve_run(run_id: str) -> ResolvedRun:
     if run_dir.is_dir():
         meta = run_dir / "meta.json"
         transcript = run_dir / "transcript.log"
+        if meta.is_file():
+            transcript = _artifact_from_meta(meta, "transcript") or transcript
         return ResolvedRun(
             run_id=target,
             source="runtime_runs",

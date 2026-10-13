@@ -7023,7 +7023,8 @@ main() {
     partner) cmd_partner "$@" ;;
     resume) cmd_resume "$@" ;;
     fork) cmd_fork "$@" ;;
-    observe|await|stop) cmd_lifecycle_command "$cmd" "$@" ;;
+    stop) cmd_core_cli stop "$@" ;;
+    observe|await) cmd_lifecycle_command "$cmd" "$@" ;;
     gui) cmd_gui "$@" ;;
     server) cmd_server "$@" ;;
     tui) cmd_tui "$@" ;;

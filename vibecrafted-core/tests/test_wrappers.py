@@ -322,6 +322,9 @@ def test_stop_main_prints_success_for_stopped_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
+        control_plane, "lookup_run", lambda run_id: {"run_id": run_id, "agent": "codex"}
+    )
+    monkeypatch.setattr(
         workflow,
         "stop_run",
         lambda run_id, *, reason, grace_seconds: {
@@ -377,7 +380,11 @@ def test_stop_main_accepts_last_for_agent(
             "recent_runs": [],
         },
     )
-    monkeypatch.setattr(control_plane, "lookup_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr(
+        control_plane,
+        "lookup_run",
+        lambda run_id: {"run_id": run_id, "agent": "claude"},
+    )
     monkeypatch.setattr(
         workflow,
         "stop_run",
@@ -402,6 +409,10 @@ def test_stop_main_accepts_last_for_agent(
 def test_stop_main_swarm_reports_each_child_and_incomplete_cascade(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], complete: bool
 ) -> None:
+    monkeypatch.setattr(
+        control_plane, "lookup_run", lambda run_id: {"run_id": run_id, "agent": "swarm"}
+    )
+
     def stopped(run_id: str) -> dict:
         return {
             "accepted": True,

@@ -457,6 +457,13 @@ WORKER_SIGNAL_DISCIPLINE = (
     "  the foreground and finish everything — work, report, commits — within\n"
     "  this turn.\n"
 )
+CHILD_INBOX_DISCIPLINE = (
+    "- At useful checkpoints and before finishing, run "
+    'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --receive.\n'
+    "- Handle each addressed message, then ACK its exact message_id with "
+    'vibecrafted message --run-id "$VIBECRAFTED_RUN_ID" --ack MESSAGE_ID.\n'
+    "- Queue acceptance is not recipient acknowledgement or automatic delivery.\n"
+)
 
 
 def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
@@ -478,6 +485,7 @@ def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
             "are receiver-only. Do not read them or author the next brief.\n"
         )
     track = f"- Track: {label}\n" if kind != "marbles" else ""
+    inbox = CHILD_INBOX_DISCIPLINE if kind == "marbles" else ""
     tail = f"\nTrack: {label}\n" if kind == "marbles" else ""
     return f"""You are running as a supervised Vibecrafted {kind} worker.
 
@@ -487,7 +495,7 @@ Contract:
 {track}- Do not launch external agent fleets.
 - Write your durable report to VIBECRAFTED_REPORT_PATH.
 - Let stdout/stderr form VIBECRAFTED_TRANSCRIPT_PATH.
-{WORKER_SIGNAL_DISCIPLINE}{marbles_blindness}
+{WORKER_SIGNAL_DISCIPLINE}{inbox}{marbles_blindness}
 Operator prompt:
 {prompt}{tail}
 """
@@ -674,6 +682,51 @@ async def _run_child(
         agent=agent,
         prompt=prompt,
     )
+    # Marbles WRITE/READ executors belong to the existing durable identity
+    # owner. The adjacent artifact metadata is only a terminal projection.
+    sidecar = meta
+    registered = kind in {"marbles", "marbles-reception"}
+    if registered:
+        from .control_plane import control_plane_home
+        from .run_mutation import mutate_run_meta
+
+        meta = control_plane_home() / "runtime_runs" / run_id / "meta.json"
+        if meta.exists():
+            raise ValueError(f"child_run_already_registered:{run_id}")
+
+        def git_identity(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", root, *args],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+
+        branch = git_identity("symbolic-ref", "--quiet", "--short", "HEAD")
+        baseline_sha = git_identity("rev-parse", "HEAD")
+
+        def register(latest: dict[str, object]) -> dict[str, object]:
+            if latest:
+                raise ValueError(f"child_run_already_registered:{run_id}")
+            return {
+                "run_id": run_id,
+                "agent": agent,
+                **selection,
+                "parent_run_id": _parent_run_id(),
+                "workflow_kind": kind,
+                "root": str(Path(root).resolve()),
+                "report": str(report),
+                "transcript": str(transcript),
+                "artifact_meta": str(sidecar),
+                "branch": branch,
+                "baseline_sha": baseline_sha,
+                "runtime_root": child_env.get("VIBECRAFTED_RUNTIME_ROOT", ""),
+                "status": "created",
+                "agent_session_id": "",
+            }
+
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
@@ -700,6 +753,10 @@ async def _run_child(
             effort,
         )
     child_env = _child_env(agent, report, transcript, meta, model)
+    if registered:
+        # Override the supervisor's ambient overlay too. A new executor may
+        # discover a resumed session, but cannot borrow the parent's declaration.
+        child_env["VIBECRAFTED_AGENT_SESSION_ID"] = ""
     if kind == "marbles-reception":
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
     child_command = _resolve_agent_command(agent, child_command, child_env)
@@ -710,17 +767,35 @@ async def _run_child(
         child_command, receiver_guard = await asyncio.to_thread(
             readonly_command, root, child_command, agent
         )
-    _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
-    if receiver_guard is not None:
-        _write_json(
-            meta,
-            {
-                "run_id": run_id,
-                "agent": agent,
-                **selection,
-                "receiver_guard": receiver_guard,
-            },
+    if registered:
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        mutate_run_meta(
+            control_plane_home(),
+            meta_path=meta,
+            run_id=run_id,
+            mutator=register,
+            create=True,
         )
+    else:
+        _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
+    if receiver_guard is not None:
+        if registered:
+            mutate_run_meta(
+                control_plane_home(),
+                meta_path=meta,
+                run_id=run_id,
+                mutator=lambda latest: {**latest, "receiver_guard": receiver_guard},
+            )
+        else:
+            _write_json(
+                meta,
+                {
+                    "run_id": run_id,
+                    "agent": agent,
+                    **selection,
+                    "receiver_guard": receiver_guard,
+                },
+            )
     if _tee_enabled():
         print(f"\n===== {kind}:{label}:{agent} =====", flush=True)
 
@@ -739,21 +814,56 @@ async def _run_child(
             flush=True,
         )
 
-    handle: AsyncRunHandle = await AsyncSupervisor().run(
-        run_id=run_id,
-        command=child_command,
-        root=root,
-        env=child_env,
-        meta_path=meta,
-        report_path=report,
-        transcript_path=transcript,
-        prompt_file_path=prompt_file,
-        require_report=True,
-        require_transcript_output=False,
-        tee_output=_tee_enabled(),
-        on_output=child_activity,
-        salvage_report_from_stream=kind == "marbles-reception",
-    )
+    try:
+        handle: AsyncRunHandle = await AsyncSupervisor().run(
+            run_id=run_id,
+            command=child_command,
+            root=root,
+            env=child_env,
+            meta_path=meta,
+            report_path=report,
+            transcript_path=transcript,
+            prompt_file_path=prompt_file,
+            require_report=True,
+            require_transcript_output=False,
+            tee_output=_tee_enabled(),
+            on_output=child_activity,
+            salvage_report_from_stream=kind == "marbles-reception",
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        failure_reason = f"child_launch_failed:{type(exc).__name__}"
+        if registered:
+
+            def fail_unspawned(latest: dict[str, object]) -> dict[str, object]:
+                if latest.get("status") == "created":
+                    latest.update(
+                        status="failed",
+                        state="failed",
+                        liveness="terminal",
+                        terminal_reason=failure_reason,
+                    )
+                return latest
+
+            mutate_run_meta(
+                control_plane_home(),
+                meta_path=meta,
+                run_id=run_id,
+                mutator=fail_unspawned,
+            )
+        raise
+    finally:
+        if registered:
+            mutate_run_meta(
+                control_plane_home(),
+                meta_path=meta,
+                run_id=run_id,
+                mutator=lambda latest: {
+                    **latest,
+                    "terminal_sha": git_identity("rev-parse", "HEAD"),
+                },
+            )
+            # Never resolve from or promote this projection back into identity.
+            _write_json(sidecar, json.loads(meta.read_text(encoding="utf-8")))
     validation = handle.artifact_validation
     settled = getattr(handle, "telemetry", None)
     counts = settled.usage.flat() if settled is not None else {}
@@ -1690,7 +1800,7 @@ Work only against the assigned repository: {root}
 Do not edit code, commit, switch branch, launch workers, or write a next plan.
 Emit your verified report as the final stdout response. The runtime persists it
 at VIBECRAFTED_REPORT_PATH; do not write the report or any other file yourself.
-{WORKER_SIGNAL_DISCIPLINE}
+{WORKER_SIGNAL_DISCIPLINE}{CHILD_INBOX_DISCIPLINE}
 Read the candidate report completely: {candidate.report}
 Verify the actual current files, diff/commit and relevant gates against this unchanged task:
 {prompt}
@@ -1698,8 +1808,11 @@ Verify the actual current files, diff/commit and relevant gates against this unc
 The task above defines immutable acceptance and scope. Its edit, commit, touch,
 install and other WRITE-only execution steps are NOT permission for this READ phase.
 Do not touch source inputs to force freshness. Preserve the source write guard.
-Use canonical external test outputs and their normal shared-target leases where
-the task requires them. Do not invent a private Rust target or bypass a lease.
+All task execution and resource constraints also bind READ, including any
+no-build or no-private-target rule. External outputs are permitted only when
+the unchanged task permits them and its canonical shared-target leases are held.
+Do not invent a private Cargo/Rust target, reuse arbitrary external outputs,
+or bypass a lease. Unavailable compliant verification means unknown/escalation.
 For Python checks disable source caches (PYTHONDONTWRITEBYTECODE=1, pytest
 -p no:cacheprovider) and place temporary outputs outside the assigned tree.
 If a required gate cannot run without source writes, report gate unknown and
