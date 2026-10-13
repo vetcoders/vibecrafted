@@ -10,6 +10,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -17,7 +18,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
+from _runtime_pack_fixture import (
+    bind_private_child_installer,
+    fixed_terminal_fixture,
+    private_child_command,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 
 from scripts import vetcoders_install as installer
 
@@ -95,6 +102,32 @@ def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     if not Path("/usr/bin/codesign").exists():
         pytest.skip("requires macOS strict codesign")
     fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
+    # Seatbelt refuses the system setuid ps. Borrow its exact native bytes
+    # without privilege in this private fixture, retaining the real census.
+    private_ps = tmp_path / "ps"
+    shutil.copyfile("/bin/ps", private_ps)
+    private_ps.chmod(0o755)
+    assert private_ps.read_bytes() == Path("/bin/ps").read_bytes()
+    subprocess.run(
+        private_child_command(
+            ["/usr/bin/codesign", "--force", "--sign", "-", str(private_ps)],
+            allowed=(Path("/usr/bin/codesign"),),
+        ),
+        check=True,
+        capture_output=True,
+    )
+    helper_source = HELPER.read_text()
+    assert helper_source.count("/bin/ps") == 2
+    helper = tmp_path / "vc-app-update.sh"
+    helper.write_text(helper_source.replace("/bin/ps", str(private_ps)))
+    monkeypatch.setattr(sys.modules[__name__], "HELPER", helper)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(
+            installer._FIXED_TERMINAL_HOST, fixture_root=tmp_path
+        ),
+    )
     parent = tmp_path / "Applications"
     parent.mkdir()
     env = {"PATH": os.environ["PATH"]}
@@ -144,17 +177,51 @@ def app(path: Path, number: int) -> Path:
     core = resources / "runtime/vibecrafted-core/vibecrafted_core"
     core.mkdir(parents=True)
     shutil.copy(ROOT / "vibecrafted-core/vibecrafted_core/runtime_paths.py", core)
+    bind_private_child_installer(
+        resources / "runtime",
+        installer._FIXED_TERMINAL_HOST,
+        fixture_root=installer._FIXED_TERMINAL_HOST.parents[5],
+    )
     subprocess.run(
-        ["/usr/bin/codesign", "--force", "--sign", "-", str(path)],
+        private_child_command(
+            ["/usr/bin/codesign", "--force", "--sign", "-", str(path)],
+            allowed=(Path("/usr/bin/codesign"),),
+        ),
         check=True,
         capture_output=True,
     )
     return path
 
 
+def _app_child_command(command: list[str], env: dict[str, str]) -> list[str]:
+    root = Path(env["HOME"]).parent
+    allowed = [
+        Path("/usr/bin/true"),
+        Path("/usr/bin/codesign"),
+        Path("/usr/sbin/lsof"),
+        HELPER.parent / "ps",
+        installer._FIXED_TERMINAL_HOST,
+    ]
+    pgrep = shutil.which("pgrep", path=env["PATH"])
+    if pgrep and Path(pgrep).resolve().is_relative_to(root):
+        allowed.append(Path(pgrep))
+    return private_child_command(command, allowed=tuple(allowed), fixture_root=root)
+
+
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", str(HELPER), *args, "--expected-team", "not set"],
+        _app_child_command(
+            [
+                "/bin/bash",
+                str(HELPER),
+                *args,
+                "--expected-team",
+                "not set",
+                "--open-bin",
+                "/usr/bin/true",
+            ],
+            env,
+        ),
         env=env,
         capture_output=True,
         text=True,
@@ -358,17 +425,22 @@ def test_live_and_delayed_handoff_not_pruned(lane):
     ]
     release = state / "release"
     process = subprocess.Popen(
-        [
-            "/bin/bash",
-            str(HELPER),
-            *args,
-            "--expected-team",
-            "not set",
-            "--hold-after",
-            "ready",
-            "--until",
-            str(release),
-        ],
+        _app_child_command(
+            [
+                "/bin/bash",
+                str(HELPER),
+                *args,
+                "--expected-team",
+                "not set",
+                "--hold-after",
+                "ready",
+                "--until",
+                str(release),
+                "--open-bin",
+                "/usr/bin/true",
+            ],
+            env,
+        ),
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -516,12 +588,17 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
         wrapper.write_text("#!/bin/sh\nexit 0\n")
         wrapper.chmod(0o755)
         subprocess.run(
-            ["/usr/bin/codesign", "--force", "--sign", "-", str(source)],
+            private_child_command(
+                ["/usr/bin/codesign", "--force", "--sign", "-", str(source)],
+                allowed=(Path("/usr/bin/codesign"),),
+            ),
             check=True,
             capture_output=True,
         )
         result = subprocess.run(
-            ["/bin/bash", str(repo / "scripts/install-app.sh")],
+            _app_child_command(
+                ["/bin/bash", str(repo / "scripts/install-app.sh")], env
+            ),
             env=env,
             capture_output=True,
             text=True,

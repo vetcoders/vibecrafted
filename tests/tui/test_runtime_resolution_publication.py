@@ -17,7 +17,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import REPO_ROOT, fixed_terminal_fixture, seed_runtime_pack
+from _runtime_pack_fixture import (
+    REPO_ROOT,
+    fixed_terminal_fixture,
+    private_child_command,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 from vibecrafted_core.vc_frame_staging import (
     resolve_clipboard_command,
     resolve_pane_shell,
@@ -35,6 +41,97 @@ _ADVANCED_MOUSE_ACTIONS_SCALAR = re.compile(
 _ADVANCED_MOUSE_ACTIONS_BLOCK = re.compile(
     r"(?:^//[^\n]*\n)*^advanced_mouse_actions (?:true|false)$", re.MULTILINE
 )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt policy controls")
+def test_private_child_fence_controls(tmp_path):
+    allowed = tmp_path / "allowed"
+    refused = tmp_path / "refused"
+    for path in (allowed, refused):
+        path.write_text("#!/bin/bash\nprintf 'private-canary\\n'\n")
+        path.chmod(0o700)
+    positive = subprocess.run(
+        private_child_command([str(allowed)], allowed=(allowed,)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert positive.returncode == 0 and positive.stdout == "private-canary\n"
+    for command in ([str(refused)], ["/bin/bash", "-c", f'exec "{refused}"']):
+        denied = subprocess.run(
+            private_child_command(command, allowed=(allowed,)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert denied.returncode != 0 and "Operation not permitted" in denied.stderr
+        assert "private-canary" not in denied.stdout
+    network = subprocess.run(
+        private_child_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import errno,socket; s=socket.socket(); "
+                    "assert s.connect_ex(('127.0.0.1', 9)) == errno.EPERM"
+                ),
+            ]
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert network.returncode == 0, network.stderr
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "symlink", "code"])
+def test_copied_child_host_admission_precedes_drift_refusal(installed, damage):
+    paths, payload, result = installed
+    host = installer._FIXED_TERMINAL_HOST
+    generation = Path(result["root"])
+    assert host.read_bytes() == (generation / "libexec/vc-terminal").read_bytes()
+    script = """
+import importlib.util, sys
+from pathlib import Path
+payload, generation = map(Path, sys.argv[1:])
+sys.path.insert(0, str(payload / "scripts"))
+spec = importlib.util.spec_from_file_location("private_owner", payload / "scripts/vetcoders_install.py")
+owner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = owner
+spec.loader.exec_module(owner)
+owner.sys.platform = "darwin"
+try:
+    print(owner._product_terminal_host(generation=generation, app_root=None))
+except owner.RuntimeInstallRefusal as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(23)
+"""
+    command = private_child_command(
+        [sys.executable, "-B", "-c", script, str(payload), str(generation)],
+        allowed=(host,),
+        fixture_root=host.parents[4],
+    )
+    positive = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert positive.returncode == 0 and positive.stdout.strip() == str(host)
+    prior = _snapshot(paths["runtime_home"])
+    if damage == "missing":
+        host.unlink()
+    elif damage == "malformed":
+        host.write_bytes(b"#!/bin/sh\nexit 0\n")
+    elif damage == "symlink":
+        host.unlink()
+        host.symlink_to(generation / "libexec/vc-terminal")
+    else:
+        host.write_bytes(host.read_bytes() + b"fixture code drift")
+    negative = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert negative.returncode == 23, negative.stderr
+    reason = (
+        "differs from candidate signed terminal code"
+        if damage == "code"
+        else "host missing or malformed"
+    )
+    assert reason in negative.stderr
+    assert _snapshot(paths["runtime_home"]) == prior
 
 
 # This observer is deliberately independent of the installer's digest/receipt code.
@@ -64,6 +161,11 @@ def _snapshot(root: Path) -> dict[str, tuple]:
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
     fixed_terminal_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(installer._FIXED_TERMINAL_HOST),
+    )
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -471,7 +573,7 @@ def test_parallel_resolvers_are_read_only_and_agree(installed, capsys):
     command = [
         sys.executable,
         "-B",
-        str(REPO_ROOT / "scripts/vetcoders_install.py"),
+        str(Path(result["root"]) / "scripts/vetcoders_install.py"),
         "runtime-resolve",
         "--runtime-home",
         str(paths["runtime_home"]),
@@ -480,7 +582,18 @@ def test_parallel_resolvers_are_read_only_and_agree(installed, capsys):
 
     def invoke(_):
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=20, check=True
+            private_child_command(
+                command,
+                allowed=(
+                    installer._FIXED_TERMINAL_HOST,
+                    Path(result["root"]) / "libexec/vc-terminal",
+                ),
+                fixture_root=installer._FIXED_TERMINAL_HOST.parents[4],
+            ),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
         )
         return json.loads(completed.stdout)
 
@@ -1116,8 +1229,13 @@ def _crash_install(payload: Path, paths: dict, cut: str) -> None:
 import os, sys
 from pathlib import Path
 from argparse import Namespace
-from scripts import vetcoders_install as owner
 payload, runtime, product, launcher, cut = map(str, sys.argv[1:])
+import importlib.util
+sys.path.insert(0, str(Path(payload) / "scripts"))
+spec = importlib.util.spec_from_file_location("private_installer", Path(payload) / "scripts/vetcoders_install.py")
+owner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = owner
+spec.loader.exec_module(owner)
 real_replace = os.replace
 rollback = False
 
@@ -1137,17 +1255,21 @@ os.replace = crash
 owner.cmd_runtime_install(Namespace(payload_root=payload, app_root=None, terminal_host=None, frame_helper=None))
 """
     result = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-c",
-            script,
-            str(payload),
-            str(paths["runtime_home"]),
-            str(paths["product_config"]),
-            str(paths["launcher_home"]),
-            cut,
-        ],
+        private_child_command(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                script,
+                str(payload),
+                str(paths["runtime_home"]),
+                str(paths["product_config"]),
+                str(paths["launcher_home"]),
+                cut,
+            ],
+            allowed=(installer._FIXED_TERMINAL_HOST, payload / "bin/vc-terminal"),
+            fixture_root=installer._FIXED_TERMINAL_HOST.parents[4],
+        ),
         cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,

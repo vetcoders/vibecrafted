@@ -403,7 +403,7 @@ def test_notarize_only_takes_the_lock_and_leaves_selection(
     pack = tmp_path / "prior.tar.gz"
     pack.write_bytes(b"exact-owned-pack-bytes")
     digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    (repo / "build").mkdir()
+    (repo / "build").mkdir(exist_ok=True)
     (repo / "build/runtime-pack-selection.json").write_text(
         "{\n"
         '  "schema": "vibecrafted.runtime-pack-selection.v1",\n'

@@ -8,12 +8,18 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
+from _runtime_pack_fixture import (
+    fixed_terminal_fixture,
+    private_child_command,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 
 from scripts import vetcoders_install as installer
 from tests.tui.test_runtime_pack_rescue import (
@@ -36,6 +42,11 @@ ARCHIVE_ROOT = "VibecraftedRuntime"
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
     fixed_terminal_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(installer._FIXED_TERMINAL_HOST),
+    )
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -142,17 +153,48 @@ def _wrapper_flags(version: str) -> list[str]:
     ]
 
 
+def _wrapper_command(arguments: list[str], env: dict[str, str]) -> list[str]:
+    host = installer._FIXED_TERMINAL_HOST
+    root = host.parents[4].resolve()
+    witnesses = [host]
+    for name in ("uname", "xcode-select", "bash", "python3", "openssl"):
+        selected = shutil.which(name, path=env.get("PATH"))
+        if selected and Path(selected).resolve().is_relative_to(root):
+            witnesses.append(Path(selected))
+    return private_child_command(
+        ["/bin/bash", str(WRAPPER), *arguments],
+        allowed=tuple(witnesses),
+        fixture_root=root,
+    )
+
+
 def _run_wrapper(
     *arguments: str, env: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["bash", str(WRAPPER), *arguments],
+    completed = subprocess.run(
+        _wrapper_command(list(arguments), env),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
+    witness = (
+        installer._FIXED_TERMINAL_HOST.parents[4] / "fixture-child-executions.jsonl"
+    )
+    with witness.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "arguments": arguments,
+                    "exit": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                }
+            )
+            + "\n"
+        )
+    return completed
 
 
 def _json_out(result: subprocess.CompletedProcess[str]) -> dict:
@@ -207,7 +249,7 @@ def _start_lock_holder(
     script.write_text(_lock_holder_script(lock, ready, child_pid), encoding="utf-8")
     script.chmod(0o700)
     holder = subprocess.Popen(
-        ["bash", str(script)],
+        private_child_command(["/bin/bash", str(script)]),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -239,7 +281,7 @@ def _acquire_once(
     )
     script.chmod(0o700)
     return subprocess.run(
-        ["bash", str(script)],
+        private_child_command(["/bin/bash", str(script)]),
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -340,7 +382,7 @@ def _start_public_wrapper(
     stderr_file = stderr_path.open("w", encoding="utf-8")
     try:
         proc = subprocess.Popen(
-            ["bash", str(WRAPPER), *arguments],
+            _wrapper_command(list(arguments), env),
             cwd=str(REPO_ROOT),
             stdout=stdout_file,
             stderr=stderr_file,
@@ -1044,7 +1086,7 @@ def test_stat_helpers_return_numeric_owner_and_mode(
     )
     script.chmod(0o700)
     probed = subprocess.run(
-        ["bash", str(script)],
+        private_child_command(["/bin/bash", str(script)]),
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,

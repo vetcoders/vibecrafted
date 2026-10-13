@@ -9,14 +9,177 @@ from __future__ import annotations
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 import sys
+import sysconfig
 from collections.abc import Callable
 from pathlib import Path
 
 from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def private_child_command(
+    command: list[str],
+    *,
+    allowed: tuple[Path, ...] = (),
+    fixture_root: Path | None = None,
+) -> list[str]:
+    """Fence only a disposable fixture child, including its absolute execs.
+
+    On Darwin missing OS enforcement is a refusal, never a PATH-only approximation.
+    Non-Darwin preserves the original argv; no portable fence is claimed.
+    The literals are read-only tools, the test interpreter and explicit private
+    witnesses. GUI/service executables and outgoing network are never admitted.
+    """
+    # Parent-authorized preservation of the existing portable subprocess seam.
+    # This branch provides no Linux OS fence and is not verified by this worker.
+    if sys.platform != "darwin":
+        return command
+    if not Path("/usr/bin/sandbox-exec").is_file():
+        raise RuntimeError("private child requires a working Seatbelt execution fence")
+    tools = (
+        "/bin/bash",
+        "/bin/sh",
+        "/bin/zsh",
+        "/bin/mkdir",
+        "/bin/chmod",
+        "/bin/rm",
+        "/bin/mv",
+        "/bin/cp",
+        "/bin/cat",
+        "/bin/sleep",
+        "/bin/date",
+        "/usr/bin/env",
+        "/usr/bin/dirname",
+        "/usr/bin/basename",
+        "/usr/bin/stat",
+        "/usr/bin/id",
+        "/usr/bin/uname",
+        "/usr/bin/sed",
+        "/usr/bin/awk",
+        "/usr/bin/grep",
+        "/usr/bin/head",
+        "/usr/bin/tail",
+        "/usr/bin/sort",
+        "/usr/bin/find",
+        "/usr/bin/tar",
+        "/usr/bin/mktemp",
+        "/usr/bin/openssl",
+        "/usr/bin/shasum",
+        "/usr/bin/perl",
+        "/usr/bin/python3",
+        "/usr/bin/wc",
+        "/usr/bin/tr",
+        "/usr/bin/ditto",
+        "/usr/bin/plutil",
+        "/usr/bin/uuidgen",
+    )
+    paths = {
+        p
+        for tool in tools
+        if Path(tool).is_file()
+        for p in (Path(tool), Path(tool).resolve())
+    }
+    paths.update((Path(sys.executable).resolve(), *(p.resolve() for p in allowed)))
+    if sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        framework_python = (
+            Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+        )
+        assert framework_python.is_file()
+        paths.add(framework_python.resolve())
+    for python in (
+        Path("/Library/Developer/CommandLineTools/usr/bin/python3"),
+        Path(
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/Current/Resources/Python.app/Contents/MacOS/Python"
+        ),
+    ):
+        if python.is_file():
+            paths.add(python.resolve())
+    for name in ("python3", "openssl", "bash"):
+        selected = shutil.which(name)
+        if selected:
+            paths.update((Path(selected), Path(selected).resolve()))
+    literals = " ".join(f"(literal {json.dumps(str(p))})" for p in sorted(paths))
+    if fixture_root is not None:
+        root = fixture_root.resolve()
+        assert root != Path("/") and root != Path("/Applications")
+        # The real materializer chooses a random staging name. Its only
+        # executable fixture Python shim is source-sealed before this child.
+        verbs = "|".join(
+            re.escape(name) for name in sorted(installer._RUNTIME_WRAPPER_VERBS)
+        )
+        verbs = "|".join(
+            re.escape(name) for name in sorted(installer._RUNTIME_WRAPPER_VERBS)
+        )
+        pattern = (
+            "^"
+            + re.escape(str(root)).replace(r"\-", "-")
+            + r"/([^/]+/)*(bin/(python3|vibecrafted|vibecrafted-mcp|vc-frame|vc-server|vc-server-supervisor|vc-start|vc-workflow|vc-terminal|"
+            + verbs
+            + "|"
+            + re.escape(installer.SECURE_WALKAROUND_LAUNCHER)
+            + r")|libexec/(vc-frame|vc-terminal)|(config/alacritty|vc-terminal)/launch-primary-shell[.]zsh)$"
+        )
+        literals += f" (regex {json.dumps(pattern)})"
+    profile = (
+        "(version 1)(allow default)(deny network*)(deny signal)(deny mach-lookup)"
+        '(deny file-read* file-write* (subpath "/Applications"))'
+        f"(deny process-exec)(allow process-exec {literals})"
+    )
+    return ["/usr/bin/sandbox-exec", "-p", profile, *command]
+
+
+def bind_private_child_installer(
+    payload: Path, host: Path, *, fixture_root: Path | None = None
+) -> None:
+    """Bind a copied owner before its source/crypto seal, never the real owner.
+
+    Reuse the publication-hold fixture's pre-main instrumentation seam. Only
+    this private app and private native terminal namespace receive the signer
+    boundary double; all real admission, provenance and publication code runs.
+    """
+    root = (fixture_root or host.parents[4]).resolve()
+    assert host.is_relative_to(root) and root != Path("/")
+    assert host != Path("/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal")
+    target = payload / "scripts/vetcoders_install.py"
+    source = target.read_text(encoding="utf-8")
+    guard = 'if __name__ == "__main__":\n    sys.exit(main())\n'
+    assert source.count(guard) == 1
+    binding = f"""
+# Test-private binding, included in source provenance before publication.
+_FIXED_TERMINAL_HOST = Path({str(host)!r})
+_VC_FIXTURE_ROOT = Path({str(root)!r})
+def _vc_fixture_signed_terminal_identity(path):
+    path = Path(path)
+    if path == _FIXED_TERMINAL_HOST.parents[2]:
+        path = _FIXED_TERMINAL_HOST
+    elif (path.is_symlink() or not path.resolve().is_relative_to(_VC_FIXTURE_ROOT)
+          or path.name != "vc-terminal" or path.parent.name not in ("MacOS", "bin", "libexec")):
+        raise RuntimeInstallRefusal("fixture signer refuses foreign terminal identity")
+    if not _is_native_executable(path):
+        raise RuntimeInstallRefusal("fixture signer requires real native terminal bytes")
+    return hashlib.sha256(path.read_bytes()).hexdigest(), "FIXTURE_TEAM"
+_signed_terminal_identity = _vc_fixture_signed_terminal_identity
+
+"""
+    target.write_text(source.replace(guard, binding + guard, 1), encoding="utf-8")
+
+
+def private_runtime_pack_seed(host: Path, *, fixture_root: Path | None = None):
+    """Compose a module's explicit child binding with its existing seal hook."""
+
+    def seed(payload: Path, *, before_source_seal=None, **options):
+        def before(root: Path):
+            if before_source_seal is not None:
+                before_source_seal(root)
+            bind_private_child_installer(root, host, fixture_root=fixture_root)
+
+        return seed_runtime_pack(payload, before_source_seal=before, **options)
+
+    return seed
 
 
 def fixed_terminal_fixture(monkeypatch, tmp_path: Path) -> None:
