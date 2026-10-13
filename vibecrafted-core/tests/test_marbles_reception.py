@@ -450,6 +450,24 @@ def test_public_receiver_can_emit_report_without_file_write(tmp_path):
     assert len(parent["receivers"]) == 2
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS guarded public workflow")
+def test_public_parent_report_retains_prelaunch_machine_identity(tmp_path):
+    from vibecrafted_core.report_contract import parse_report_path
+
+    result, launch, _, parent, _ = _public_run(tmp_path, "converge", count=1)
+    assert result.returncode == 0
+    report = parse_report_path(Path(launch["report"]))
+    canonical = parent["runtime_session_id"]
+    assert canonical and canonical not in {"pending-unset", "aggregated", "unknown"}
+    assert report.run_id == parent["run_id"] == launch["run_id"]
+    assert report.fields["session_id"] == parent["session_id"] == canonical
+    assert parent["launch_session_id"] == launch["session_id"]
+    assert parent["runtime_session_id"] == parent["vibecrafted_session_id"]
+    assert parent["agent_session_id"] == ""
+    assert parent["provider_session_id"]["value"] == "unknown"
+    assert f"session_id: {canonical}" in report.body.split("run_closure:", 1)[1]
+
+
 @pytest.mark.parametrize(
     ("scenario", "status", "finalized"),
     [

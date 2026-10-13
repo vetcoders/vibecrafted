@@ -1277,6 +1277,7 @@ def _write_parent_report(
         or os.environ.get("VIBECRAFTED_AGENT")
         or (results[0].agent if results else "runtime")
     )
+    receipt["session_id"] = session_id
     lines = [
         "---",
         f"status: {status}",
