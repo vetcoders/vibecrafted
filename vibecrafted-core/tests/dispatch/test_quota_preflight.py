@@ -432,3 +432,55 @@ def test_contract_agy_is_scoped_to_its_model(tmp_path: Path, board: Board) -> No
 
     assert report.ok is True
     assert "scoped to model" in _quota_messages(report)[0]
+
+
+# --- hostile boards: nothing may escape as an exception or a fabricated state ---
+
+
+def _one_cut_dispatch() -> Any:
+    """``requirements`` reads only ``cuts[*].{id,agent,model}``."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(cuts=[SimpleNamespace(id="c1", agent="codex", model="")])
+
+
+@pytest.mark.parametrize("age", [float("inf"), float("nan"), True, "7", -1])
+def test_non_finite_or_non_numeric_age_is_unmeasured_not_a_crash(age: Any) -> None:
+    """``Infinity``/``NaN`` parse from JSON; ``int(inf)`` used to raise in the report."""
+    card = item("codex", "low", age_s=age)
+    diagnosis = quota_preflight.diagnose(
+        _one_cut_dispatch(),
+        server_url="http://127.0.0.1:1",
+        fetch=lambda _url, _timeout: {"agents": [card]},
+    )
+    (finding,) = diagnosis.findings
+    assert finding.state == "low"
+    assert finding.observed_age_s is None
+    assert diagnosis.warnings and not diagnosis.errors
+
+
+def test_truncated_http_body_is_a_visible_warning_not_an_exception() -> None:
+    """``IncompleteRead`` is an ``HTTPException``, not an ``OSError``."""
+    import http.client
+
+    def torn(_url: str, _timeout: float) -> Any:
+        raise http.client.IncompleteRead(b"{", 10)
+
+    diagnosis = quota_preflight.diagnose(
+        _one_cut_dispatch(), server_url="http://127.0.0.1:1", fetch=torn
+    )
+    assert not diagnosis.errors
+    assert any("quota board unavailable" in m for _p, m in diagnosis.warnings)
+    assert diagnosis.findings[0].state == "absent"
+
+
+def test_override_receipt_path_never_clobbers_an_earlier_decision(
+    tmp_path: Path,
+) -> None:
+    first = quota_preflight.receipt_path(tmp_path)
+    quota_preflight.publish_receipt(first, {"n": 1})
+    second = quota_preflight.receipt_path(tmp_path)
+    assert second != first
+    quota_preflight.publish_receipt(second, {"n": 2})
+    assert json.loads(first.read_text())["n"] == 1
+    assert json.loads(second.read_text())["n"] == 2

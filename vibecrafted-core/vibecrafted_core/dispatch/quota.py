@@ -19,7 +19,9 @@ call.
 
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -182,7 +184,13 @@ def fetch_board(
     url = f"{server_url.rstrip('/')}{QUOTA_PATH}{query}"
     try:
         payload = (fetch or _http_get_json)(url, _PROBE_TIMEOUT_S)
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        OSError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         return {}, f"{type(exc).__name__}: {exc}"
     agents = payload.get("agents") if isinstance(payload, dict) else None
     if not isinstance(agents, list):
@@ -204,6 +212,13 @@ def _model_covered(scope_model: str, wanted: str) -> bool:
     return left in right or right in left
 
 
+def _finite_age(age: Any) -> float | None:
+    """Age in seconds, or ``None``: bools, NaN/Infinity and negatives are not ages."""
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return None
+    return float(age) if math.isfinite(age) and age >= 0 else None
+
+
 def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
     agent = requirement.agent
     if item is None:
@@ -216,8 +231,7 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
     pool = str(scope.get("pool") or item.get("pool") or agent)
     account = str(scope.get("account") or item.get("account") or "")
     source = str(item.get("source") or "")
-    age = item.get("age_s")
-    age_s = float(age) if isinstance(age, (int, float)) and age >= 0 else None
+    age_s = _finite_age(item.get("age_s"))
     state = item.get("state")
     detail = str(item.get("detail") or item.get("headline") or "")
     if not isinstance(state, str) or state not in KNOWN_STATES:
@@ -321,9 +335,7 @@ def _apply_shared_pool(
             pool=finding.pool,
             account=finding.account or account,
             source=str(item.get("source") or ""),
-            observed_age_s=item.get("age_s")
-            if isinstance(item.get("age_s"), (int, float))
-            else None,
+            observed_age_s=_finite_age(item.get("age_s")),
             detail=f"shared pool reported exhausted by agent '{reporter}'",
         )
     return finding
@@ -417,6 +429,16 @@ def diagnose(
         elif finding.state != "ok":
             diagnosis.warnings.append((path, _describe(finding)))
     return diagnosis
+
+
+def receipt_path(directory: Path) -> Path:
+    """Next free override-receipt path: an earlier decision is never overwritten."""
+    base = directory / "quota-override-receipt.json"
+    candidate, n = base, 1
+    while candidate.exists():
+        n += 1
+        candidate = base.with_name(f"quota-override-receipt-{n}.json")
+    return candidate
 
 
 def publish_receipt(path: Path, receipt: dict[str, Any]) -> None:
