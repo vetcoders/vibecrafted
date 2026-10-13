@@ -11,6 +11,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import seed_private_git_fixture, stage_build_lease_fixture
 from vibecrafted_core.runtime_pack_contract import (
     REQUIRED_FOUNDATION_EXECUTABLES,
     RuntimePackContractError,
@@ -1528,7 +1529,8 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     # 5d41de86: the builder reads VERSION from the bound ROOT_SHA
     # (`git show "$ROOT_SHA:VERSION"`), not from the working tree, so the
     # fixture commits it -- otherwise every preflight dies on that read first.
-    head = _git_repo(repo, "VERSION")
+    stage_build_lease_fixture(repo)
+    head = seed_private_git_fixture(repo, "VERSION")
     previous = repo / "dist/Vibecrafted_RuntimePack_previous-darwin-arm64.tar.gz"
     previous.write_bytes(b"the pack that succeeded yesterday")
     _selection_record(
@@ -2265,3 +2267,66 @@ def test_a_carrier_swapped_after_publication_fails_the_producers_own_record(
 
     assert result.returncode != 0
     assert "recorded digest" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("producer", ["preflight", "single-flight"])
+def test_builder_repo_producers_isolate_hostile_git_routing(
+    tmp_path, monkeypatch, producer
+):
+    from tests.tui.test_release_single_flight import _stage_repo
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "README").write_text("owned victim\n")
+    seed_private_git_fixture(victim, ".")
+    subprocess.run(
+        ["git", "-C", str(victim), "config", "user.name", "owned-victim"],
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        check=True,
+        capture_output=True,
+    )
+    (victim / "foreign-dirty").write_bytes(b"must remain uncommitted")
+    before = {
+        str(p.relative_to(victim)): p.read_bytes()
+        for p in victim.rglob("*")
+        if p.is_file()
+    }
+    hostile = {
+        "GIT_DIR": str(victim / ".git"),
+        "GIT_WORK_TREE": str(victim),
+        "GIT_COMMON_DIR": str(victim / ".git"),
+        "GIT_INDEX_FILE": str(victim / ".git/index"),
+        "GIT_OBJECT_DIRECTORY": str(victim / ".git/objects"),
+        "GIT_CONFIG": str(victim / ".git/config"),
+        "GIT_CONFIG_GLOBAL": str(victim / ".git/config"),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "user.name",
+        "GIT_CONFIG_VALUE_0": "foreign override",
+    }
+    for key, value in hostile.items():
+        monkeypatch.setenv(key, value)
+    repo, head, *_ = (
+        _preflight_builder_repo(tmp_path)
+        if producer == "preflight"
+        else _stage_repo(tmp_path)
+    )
+    after = {
+        str(p.relative_to(victim)): p.read_bytes()
+        for p in victim.rglob("*")
+        if p.is_file()
+    }
+    assert after == before  # HEAD, index, objects, worktree and config bytes.
+    assert {key: os.environ[key] for key in hostile} == hostile
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(repo), *args], env=env, text=True
+        ).strip()
+
+    assert git("rev-parse", "HEAD") == head
+    assert git("config", "--local", "user.name") == "fixture"
+    assert git("show", "HEAD:VERSION") == (
+        VERSION if producer == "preflight" else "4.3.1"
+    )
+    assert not (repo / "foreign-dirty").exists()

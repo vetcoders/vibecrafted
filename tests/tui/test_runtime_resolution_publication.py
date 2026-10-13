@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
+from _runtime_pack_fixture import REPO_ROOT, fixed_terminal_fixture, seed_runtime_pack
 from vibecrafted_core.vc_frame_staging import (
     resolve_clipboard_command,
     resolve_pane_shell,
@@ -63,6 +63,7 @@ def _snapshot(root: Path) -> dict[str, tuple]:
 
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
+    fixed_terminal_fixture(monkeypatch, tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))

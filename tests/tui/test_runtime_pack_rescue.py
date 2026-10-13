@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 
@@ -87,6 +87,7 @@ def _seal_runtime_pack_for_admission(payload: Path) -> Path:
 
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
+    fixed_terminal_fixture(monkeypatch, tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -2288,3 +2289,63 @@ def test_normal_missing_history_recovery_preserves_unknown_user_configuration(
         with pytest.raises(RuntimeError, match="recovery refused"):
             installer.cmd_runtime_install(_ns(newer))
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "malformed", "symlink", "code", "team", "main-team"]
+)
+def test_private_paired_host_refuses_drift_and_preserves_prior_runtime(
+    tmp_path, roots, installed, monkeypatch, capsys, damage
+):
+    # Exercise Darwin admission even on Linux using real native fixture bytes.
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    host = installer._FIXED_TERMINAL_HOST
+    generation = Path(installed[2]["root"])
+    assert host.read_bytes() == (generation / "libexec/vc-terminal").read_bytes()
+    assert (
+        installer._product_terminal_host(generation=generation, app_root=None) == host
+    )
+    before = {
+        str(p.relative_to(roots["runtime_home"])): p.read_bytes()
+        for p in roots["runtime_home"].rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
+    if damage == "missing":
+        host.unlink()
+    elif damage == "malformed":
+        (host.parents[1] / "Info.plist").write_bytes(b"invalid plist")
+    elif damage == "symlink":
+        target = host.with_name("foreign-native")
+        host.rename(target)
+        host.symlink_to(target)
+    elif damage == "code":
+        host.write_bytes(host.read_bytes() + b"foreign code")
+    else:
+        original = installer._signed_terminal_identity
+        monkeypatch.setattr(
+            installer,
+            "_signed_terminal_identity",
+            lambda p: (
+                original(p)[0],
+                "FOREIGN_TEAM"
+                if p == (host if damage == "team" else host.parents[2])
+                else original(p)[1],
+            ),
+        )
+    payload = seed_runtime_pack(tmp_path / "new-candidate", version="9.9.9+drift")
+    _seal_runtime_pack_for_admission(payload)
+    reason = (
+        "host missing or malformed"
+        if damage in {"missing", "malformed", "symlink"}
+        else "main app and terminal signing owners differ"
+        if damage == "main-team"
+        else "fixed host differs from candidate signed terminal code"
+    )
+    with pytest.raises(installer.RuntimeInstallRefusal, match=reason):
+        installer.cmd_runtime_install(_ns(payload))
+    after = {
+        str(p.relative_to(roots["runtime_home"])): p.read_bytes()
+        for p in roots["runtime_home"].rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
+    assert after == before

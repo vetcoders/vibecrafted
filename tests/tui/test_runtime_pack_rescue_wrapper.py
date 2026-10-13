@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 from tests.tui.test_runtime_pack_rescue import (
@@ -35,6 +35,7 @@ ARCHIVE_ROOT = "VibecraftedRuntime"
 
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
+    fixed_terminal_fixture(monkeypatch, tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
