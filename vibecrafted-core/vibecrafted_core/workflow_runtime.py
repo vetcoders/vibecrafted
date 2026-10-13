@@ -22,7 +22,7 @@ from .marbles_reception import SCHEMA as RECEPTION_SCHEMA
 from .marbles_reception import read_evidence, readonly_command, receive, tree_receipt
 from .model_overrides import _with_model_override
 from .package_resources import package_root
-from .report_contract import parse_report_path
+from .report_contract import parse_report_path, stamp_launcher_report_identity
 from .research_config import (
     SUPPORTED_RESEARCH_AGENTS,
     ResearchAgentSelection,
@@ -657,7 +657,7 @@ async def _run_child(
         model_source=model_source,
         effort=effort,
         effort_source=effort_source,
-        permissions="read-only"
+        permissions="bypass"
         if kind == "marbles-reception" and agent == "codex"
         else "",
     )
@@ -687,9 +687,7 @@ async def _run_child(
                 if command is not None
                 else _stdin_command(
                     agent,
-                    controls=resolve_execution_controls(
-                        "codex", permissions="read-only"
-                    )
+                    controls=resolve_execution_controls("codex", permissions="bypass")
                     if kind == "marbles-reception" and agent == "codex"
                     else None,
                 ),
@@ -706,7 +704,7 @@ async def _run_child(
         # Provider flags still come from their canonical owners. This guard is
         # the READ source boundary, including shared worktree Git metadata.
         child_command, receiver_guard = await asyncio.to_thread(
-            readonly_command, root, child_command
+            readonly_command, root, child_command, agent
         )
     _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
     if receiver_guard is not None:
@@ -1803,21 +1801,6 @@ async def run_marbles(
             # fingerprint on both sides of READ, not just HEAD or clean status.
             try:
                 command = native_resume_argv(agent, result.agent_session_id)
-                if agent == "codex":
-                    # exec resume has -c, but no --sandbox option. Configure
-                    # the same policy as the canonical read-only exec owner;
-                    # never inherit the WRITE resume bypass flag.
-                    command = [
-                        part
-                        for part in command
-                        if part != "--dangerously-bypass-approvals-and-sandbox"
-                    ]
-                    command[3:3] = [
-                        "-c",
-                        'sandbox_mode="read-only"',
-                        "-c",
-                        'approval_policy="never"',
-                    ]
                 receiver_mode = "native_resume"
             except ValueError:
                 command = None
@@ -1842,17 +1825,46 @@ async def run_marbles(
                 raise ValueError("receiver_modified_assigned_tree")
             if receiver.exit_code != 0 or not receiver.artifact_ok:
                 raise ValueError("receiver_execution_or_artifact_failed")
-            if _child_report_status(receiver) in _LOOP_STOP_REPORT_STATUSES:
-                raise ValueError(f"receiver_report_{_child_report_status(receiver)}")
             evidence = read_evidence(
                 receiver.report, candidate_run_id=result.run_id, tree=tree
             )
-            state = receive(
+            candidate_state = receive(
                 state,
                 evidence,
                 report=receiver.report,
                 no_source_progress=tree["source_hash"] == before["source_hash"],
             )
+            declared = _child_report_status(receiver)
+            if declared == "failed" or (
+                declared == "blocked" and candidate_state["verdict"] != "blocked"
+            ):
+                raise ValueError(f"receiver_report_{declared}_contradicts_reception")
+            # Stdout-only READ artifacts are persisted by the runtime. Attest
+            # only after schema, candidate identity and source immutability
+            # were checked; process exit zero alone never finalizes a claim.
+            phase_status = (
+                "blocked" if candidate_state["verdict"] == "blocked" else "completed"
+            )
+            stamp_launcher_report_identity(
+                receiver.report,
+                run_id=receiver.run_id,
+                session_id=parse_report_path(receiver.report).fields.get(
+                    "session_id", ""
+                ),
+                agent=receiver.agent,
+                skill="marbles-reception",
+                status=phase_status,
+                runtime_fields={
+                    "status": phase_status,
+                    "claim_status": phase_status,
+                    "finalized": "true",
+                    "claim_kind": "marbles-reception",
+                    "claim": f"Validated READ evidence for {result.run_id} at {tree['head']}; gate {candidate_state['gate']}, verdict {candidate_state['verdict']}.",
+                    "reception_verdict": str(candidate_state["verdict"]),
+                    "reception_gate": str(candidate_state["gate"]),
+                },
+            )
+            state = candidate_state
             rounds.append(
                 {
                     **state,
