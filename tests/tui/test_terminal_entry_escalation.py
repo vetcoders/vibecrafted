@@ -42,6 +42,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import plistlib
 import shlex
 import subprocess
 import sys
@@ -3107,6 +3108,108 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     assert _parent_aicx_calls(tmp_path) == []
 
 
+def _terminal_path_fence(
+    entry: Path, host: Path, witnesses: tuple[Path, ...] = ()
+) -> list[str]:
+    """Only the copied entry, recording host and their interpreters may exec."""
+    if sys.platform != "darwin":
+        return [str(entry)]
+    sandbox = Path("/usr/bin/sandbox-exec")
+    assert sandbox.is_file(), "no enforceable child-only macOS execution fence"
+    allowed = {
+        entry.resolve(),
+        host.resolve(),
+        # Darwin admission checks X_OK on the generation witness as well.
+        # Seatbelt applies process-exec to that check, before any exec occurs.
+        (entry.parent.parent / "libexec/vc-terminal").resolve(),
+        Path(sys.executable).resolve(),
+        Path("/bin/bash"),
+        Path("/usr/bin/uname"),
+        Path("/usr/libexec/PlistBuddy"),
+        *(path.resolve() for path in witnesses),
+    }
+    literals = " ".join(
+        f"(literal {json.dumps(str(path))})" for path in sorted(allowed)
+    )
+    profile = (
+        f"(version 1)(allow default)(deny process-exec)(allow process-exec {literals})"
+    )
+    return [str(sandbox), "-p", profile, str(entry)]
+
+
+def _terminal_path_bind_bundle(source: str, bundle: Path) -> str:
+    """Bind both fixed-host checks in the test copy; fail on source drift."""
+    bindings = {
+        'local candidate="${1:-}" bundle=/Applications/Vibecrafted.app': f'local candidate="${{1:-}}" bundle={shlex.quote(str(bundle))}',
+        'local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal': f'local fallback="$1" candidate={shlex.quote(str(bundle / "Contents/MacOS/vc-terminal"))}',
+    }
+    for original, replacement in bindings.items():
+        assert source.count(original) == 1, (
+            f"fixed-host fixture binding drift: {original}"
+        )
+        source = source.replace(original, replacement, 1)
+    return source
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS execution sandbox")
+def test_terminal_path_fence_controls(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed-canary"
+    refused = tmp_path / "refused-canary"
+    for path in (allowed, refused):
+        _write(path, "#!/bin/bash\nprintf controlled-canary\n")
+    command = _terminal_path_fence(allowed, allowed)
+    positive = subprocess.run(
+        command, capture_output=True, text=True, timeout=10, check=False
+    )
+    assert positive.returncode == 0, positive.stderr
+    assert positive.stdout == "controlled-canary"
+    command[-1] = str(refused)
+    negative = subprocess.run(
+        command, capture_output=True, text=True, timeout=10, check=False
+    )
+    assert negative.returncode != 0
+    assert "Operation not permitted" in negative.stderr
+    assert negative.stdout == ""
+    # The fence also survives a permitted shell execing an absolute child.
+    child = subprocess.run(
+        [*command[:-1], "/bin/bash", "-c", 'exec "$1"', "canary", str(refused)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert child.returncode != 0
+    assert "Operation not permitted" in child.stderr
+    assert child.stdout == ""
+    # Admission's -x check must refuse the same path without executing it.
+    admission = subprocess.run(
+        [
+            *command[:-1],
+            "/bin/bash",
+            "-c",
+            '[[ -x "$1" && ! -x "$2" ]]',
+            "canary",
+            str(allowed),
+            str(refused),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert admission.returncode == 0, admission.stderr
+
+
+def test_terminal_path_bundle_binding_fails_closed(tmp_path: Path) -> None:
+    source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
+    for changed in (
+        source.replace("bundle=/Applications", "bundle=/changed"),
+        source + source,
+    ):
+        with pytest.raises(AssertionError, match="fixture binding drift"):
+            _terminal_path_bind_bundle(changed, tmp_path / "private app")
+
+
 def _run_terminal_path_entry(
     tmp_path: Path,
     *,
@@ -3114,29 +3217,49 @@ def _run_terminal_path_entry(
     inherited_path: str,
     declare_runtime_home: bool = True,
     inherited_runtime_root: Path | None = None,
+    argv: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Run the physical terminal entry against a host that records its child env."""
     home = tmp_path / "home"
     generation = runtime_home / "releases" / "4.3.1+gSELECTED"
     capture = tmp_path / "terminal-path.json"
     entry = generation / "scripts" / "vc-terminal-product-entry.sh"
-    _write(
-        entry,
-        (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
-            encoding="utf-8"
-        ),
+    source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
     )
+    bundle = tmp_path / "private applications/Vibecrafted.app"
+    host = generation / "libexec/vc-terminal"
+    if sys.platform == "darwin":
+        source = _terminal_path_bind_bundle(source, bundle)
+        host = bundle / "Contents/MacOS/vc-terminal"
+        _write(
+            bundle / "Contents/Info.plist",
+            plistlib.dumps(
+                {
+                    "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                    "CFBundleExecutable": "Vibecrafted",
+                }
+            ).decode(),
+        )
+        # The generation is still required by admission, but must never win.
+        _write(generation / "libexec/vc-terminal", "#!/bin/bash\nexit 99\n")
+    _write(entry, source)
     _write(home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[window]\n")
     _write(
-        generation / "libexec/vc-terminal",
+        host,
         f"#!{sys.executable}\n"
-        "import json, os, shutil\n"
+        "import json, os, shutil, sys\n"
         f"open({str(capture)!r}, 'w').write(json.dumps({{\n"
         "  'path': os.environ.get('PATH', ''),\n"
         "  'founder_tool': shutil.which('founder-tool'),\n"
         "  'runtime_home': os.environ.get('VIBECRAFTED_RUNTIME_HOME'),\n"
         "  'runtime_root': os.environ.get('VIBECRAFTED_RUNTIME_ROOT'),\n"
         "  'runtime_bin': os.environ.get('VIBECRAFTED_RUNTIME_BIN'),\n"
+        "  'root': os.environ.get('VIBECRAFTED_ROOT'),\n"
+        "  'host': os.environ.get('VIBECRAFTED_TERMINAL_HOST'),\n"
+        "  'argv': sys.argv[1:],\n"
+        "  'pythonpath': os.environ.get('PYTHONPATH'),\n"
+        "  'pythonhome': os.environ.get('PYTHONHOME'),\n"
         "}))\n",
     )
     env = os.environ.copy()
@@ -3148,18 +3271,65 @@ def _run_terminal_path_entry(
         "VIBECRAFTED_PYTHON",
         "VIBECRAFTED_VC_FRAME_BIN",
         "VIBECRAFTED_TERMINAL_HOST",
+        "PYTHONPATH",
+        "PYTHONHOME",
     ):
         env.pop(name, None)
-    env.update({"HOME": str(home), "PATH": inherited_path})
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": inherited_path,
+            "VIBECRAFTED_HOME": str(tmp_path / "isolated-vibecrafted"),
+        }
+    )
     if declare_runtime_home:
         env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
     if inherited_runtime_root is not None:
         env["VIBECRAFTED_RUNTIME_ROOT"] = str(inherited_runtime_root)
+    # shutil.which also uses X_OK. Admit only the two existing private PATH
+    # witnesses, checking their bytes rather than allowing inherited PATH dirs.
+    witnesses = []
+    for directory in ("founder bin", "founder-bin"):
+        witness = tmp_path / directory / "founder-tool"
+        if witness.exists():
+            assert not witness.is_symlink()
+            assert witness.read_text() == "#!/bin/sh\nprintf founder-tool\n"
+            witnesses.append(witness)
     result = subprocess.run(
-        [str(entry)], capture_output=True, text=True, env=env, check=False
+        [*_terminal_path_fence(entry, host, tuple(witnesses)), *argv],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(capture.read_text(encoding="utf-8"))
+
+
+def test_terminal_path_entry_records_private_host_and_exact_argv(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime home"
+    argv = ("--title", "space ' quote", "-e", "/private/record-only", "--root", "a b")
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path="/usr/bin:/bin", argv=argv
+    )
+    generation = runtime_home / "releases/4.3.1+gSELECTED"
+    host = (
+        tmp_path / "private applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-terminal"
+    )
+    assert receipt["host"] == str(host)
+    assert receipt["root"] == receipt["runtime_root"] == str(generation)
+    assert receipt["argv"] == [
+        "--config-file",
+        str(tmp_path / "home/.config/vibecrafted/vc-terminal/vc-terminal.toml"),
+        *argv,
+    ]
+    assert receipt["pythonpath"] is None
+    assert receipt["pythonhome"] is None
 
 
 def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
