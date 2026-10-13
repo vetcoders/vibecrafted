@@ -4,7 +4,7 @@
     "vc-frame": {
       "repository": "https://github.com/vetcoders/vc-frame.git",
       "version": "4.4.0",
-      "revision": "26705da0c8f327895b6997a0f65222bc6cf6943e"
+      "revision": "b8f6f5f73e18aa990df6ea1d9dc42dda99f8d8a5"
     },
     "vc-terminal": {
       "repository": "https://github.com/vetcoders/vc-terminal.git",
