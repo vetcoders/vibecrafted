@@ -531,7 +531,7 @@ def _creates(calls: list[dict]) -> list[dict]:
     return [c for c in calls if "--create-background" in c["argv"]]
 
 
-def _new_tabs(calls: list[dict]) -> list[dict]:
+def _interactive_surfaces(calls: list[dict]) -> list[dict]:
     """The surfaces opened for a provider: a tab, or -- since interactive
     launches became titled floats on the Agents surface -- a floating pane."""
     return [
@@ -676,7 +676,7 @@ def test_explicit_root_from_stale_attached_marker_opens_the_declared_workspace(
     assert all(value is None for value in launch["markers"].values()), launch
     # The escalating parent does nothing else: no create, no tab, no client,
     # no AICX, nothing addressed to the stale or the foreign session.
-    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
     assert not scene.aicx_capture.exists(), "an explicit --session assembled AICX"
@@ -723,7 +723,7 @@ def test_inherited_unqualified_terminal_entry_opens_requested_root_before_aicx(
     assert launch["boundary_owner"] == str(scene.generation / "bin" / "vibecrafted")
     assert all(value is None for value in launch["markers"].values()), launch
     assert not scene.aicx_capture.exists(), "AICX ran before terminal admission"
-    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
 
@@ -822,7 +822,7 @@ def test_same_root_watched_ambient_marker_does_not_bypass_no_tty_admission(
         == scene.root.resolve()
     )
     assert launch["boundary"] == "1", launch
-    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
 
 
@@ -851,7 +851,7 @@ def test_child_shape_without_a_terminal_fails_closed_before_creating(
     assert "cannot be entered from this process" in result.stderr, result.stderr
     assert "Resume launched" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=1.0) is None
-    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
     assert not scene.aicx_capture.exists()
@@ -925,7 +925,7 @@ def test_live_attached_client_elsewhere_is_switched_onto_the_declared_workspace(
     _assert_no_panic(result, calls)
     assert f"TARGET=[{place}]" in result.stdout, result.stdout + result.stderr
 
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root
 
@@ -973,7 +973,7 @@ def test_repeat_reuses_the_live_declared_workspace_without_a_duplicate(
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert not _creates(calls), f"a live workspace session was created again: {calls}"
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == "session-project-b", calls
     assert len(_switches(calls)) == 1, calls
     live = scene.live_file.read_text(encoding="utf-8").split()
@@ -1003,7 +1003,7 @@ def test_attached_client_already_in_the_declared_workspace_is_reused(
     assert not _creates(calls), calls
     assert not _switches(calls), calls
     assert not _attaches(calls), calls
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == "session-project-b", calls
     assert "ambient context" not in result.stderr, result.stderr
 
@@ -1031,7 +1031,7 @@ def test_ambient_operator_session_env_does_not_override_the_declared_root(
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert f"TARGET=[{place}]" in result.stdout, result.stdout + result.stderr
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     # Under a pty the shell's stderr is merged into the captured stream.
     assert (
@@ -1059,7 +1059,7 @@ def test_plain_terminal_creates_and_attaches_the_declared_workspace(
     _assert_no_panic(result, calls)
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root
     attaches = _attaches(calls)
@@ -1095,7 +1095,7 @@ def test_no_tty_outside_a_frame_escalates_with_session_and_absolute_root(
         str(scene.root),
     ], hosted
     # The escalating parent does nothing else: no tab, no create, no AICX.
-    assert not _new_tabs(scene.calls()) and not _creates(scene.calls())
+    assert not _interactive_surfaces(scene.calls()) and not _creates(scene.calls())
     assert not scene.aicx_capture.exists()
 
 
@@ -1113,8 +1113,8 @@ def test_repo_and_root_are_one_declaration(tmp_path: Path) -> None:
     for result in (by_root, by_repo):
         assert "RC=[0]" in result.stdout, result.stdout + result.stderr
         assert "TARGET=[session-project-b]" in result.stdout, result.stdout
-    root_tab = _new_tabs(root_scene.calls())[0]
-    repo_tab = _new_tabs(repo_scene.calls())[0]
+    root_tab = _interactive_surfaces(root_scene.calls())[0]
+    repo_tab = _interactive_surfaces(repo_scene.calls())[0]
     assert _session_of(root_tab) == _session_of(repo_tab) == "session-project-b"
     assert _cwd_of(root_tab).name == _cwd_of(repo_tab).name == "project-b"
     root_admission = _tab_admission(root_tab)
@@ -1163,7 +1163,7 @@ def test_declared_root_with_spaces_binds_the_exact_cwd_and_session(
     assert len(creates) == 1 and creates[0]["argv"][-1] == "session-repo-with-space", (
         calls
     )
-    tabs = _new_tabs(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1, calls
     assert _cwd_of(tabs[0]) == scene.root, tabs
     admission = _tab_admission(tabs[0])
@@ -1194,7 +1194,7 @@ def test_failed_workspace_creation_is_reported_and_launches_nothing_elsewhere(
     assert "could not create the workspace session session-project-b" in result.stderr
     assert "could not read the layout file" in result.stderr, result.stderr
     assert "Resume launched" not in result.stdout, result.stdout
-    assert not _new_tabs(calls), calls
+    assert not _interactive_surfaces(calls), calls
     assert not _switches(calls) and not _attaches(calls), calls
     _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
 
@@ -1269,7 +1269,7 @@ def test_shell_missing_host_create_clears_only_the_client_context(
     assert creates[0]["VC_FRAME_PANE_ID"] is None, creates
     # Only that one invocation was sanitized; the parent keeps its own state.
     assert f"PARENT_MARKER=[{host}]" in result.stdout, result.stdout
-    assert len(_new_tabs(calls)) == 2, calls
+    assert len(_interactive_surfaces(calls)) == 2, calls
 
 
 def test_spawn_missing_host_create_clears_only_the_client_context(
@@ -1313,7 +1313,7 @@ def test_spawn_missing_host_create_clears_only_the_client_context(
     assert len(creates) == 1, calls
     assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
     assert creates[0]["ZELLIJ_SESSION_NAME"] is None, creates
-    assert len(_new_tabs(calls)) == 2, calls
+    assert len(_interactive_surfaces(calls)) == 2, calls
 
 
 # --------------------------------------------------------------------------

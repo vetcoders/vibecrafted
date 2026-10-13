@@ -87,7 +87,9 @@ _attaches = _declared._attaches
 _creates = _declared._creates
 _cwd_of = _declared._cwd_of
 _expected_place = _declared._expected_place
-_new_tabs = _agent_surfaces = _declared._new_tabs
+_interactive_surfaces = _declared._interactive_surfaces
+# Unowned consumers (test_installed_declaration_spawn) import the old name.
+_new_tabs = _interactive_surfaces
 _root_aware_owner_cli = _declared._root_aware_owner_cli
 _session_of = _declared._session_of
 _shell_argv = _declared._shell_argv
@@ -315,7 +317,7 @@ def test_face_from_stale_marker_without_tty_opens_the_terminal_with_exact_argv(
     # The parent admitted exactly this declaration once and started nothing;
     # it touched no session: the child enters, once, where the provider starts.
     assert _assert_one_unstarted_admission(scene, verb) == admission
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
@@ -371,7 +373,7 @@ def test_face_child_creates_detached_hangs_the_tab_then_enters(
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
     assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root, tabs
     # The tab carries the admitted command for this face (36614036).
@@ -405,7 +407,7 @@ def test_init_child_reuses_a_live_workspace_and_still_enters_it(
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert not _creates(calls), calls
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == "session-vibecrafted", calls
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == [
@@ -443,7 +445,7 @@ def test_operator_with_a_terminal_and_a_stale_marker_prepares_its_own_target(
     assert scene.terminal_launch(wait=1.0) is None, "a terminal was opened over a TTY"
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
@@ -477,7 +479,7 @@ def test_face_child_without_a_terminal_fails_closed(tmp_path: Path, verb: str) -
     assert "launched in workspace session" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=1.0) is None
     assert not any(_started(scene, a) for a in _admitted(scene)), _admitted(scene)
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
 
@@ -508,7 +510,7 @@ def test_watched_live_marker_keeps_the_in_frame_path(tmp_path: Path) -> None:
     assert scene.terminal_launch(wait=1.0) is None, (
         "a watched pane was rerouted to a window"
     )
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == FOREIGN_LIVE, calls
     assert not _creates(calls) and not _attaches(calls), calls
     inner, admission = _fixtures.script_handoff(_tab_script(tabs[0]))
@@ -537,7 +539,7 @@ def test_live_but_unattended_marker_is_not_a_surface(tmp_path: Path) -> None:
     inner, admission = _fixtures.spawn_handoff(_hosted(launch))
     _assert_declaration(inner, admission, verb="init", root=scene.root)
     assert _assert_one_unstarted_admission(scene, "init") == admission
-    assert not _agent_surfaces(scene.calls()) and not _creates(scene.calls())
+    assert not _interactive_surfaces(scene.calls()) and not _creates(scene.calls())
 
 
 def test_explicit_operator_session_that_is_watched_keeps_the_direct_path(
@@ -556,7 +558,7 @@ def test_explicit_operator_session_that_is_watched_keeps_the_direct_path(
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert scene.terminal_launch(wait=1.0) is None
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == FOREIGN_LIVE, calls
 
 
@@ -578,7 +580,7 @@ def test_explicit_operator_session_without_a_watcher_opens_a_terminal(
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert launch is not None, result.stderr
     assert launch["markers"]["VIBECRAFTED_OPERATOR_SESSION"] is None, launch
-    assert not _agent_surfaces(scene.calls()) and not _creates(scene.calls())
+    assert not _interactive_surfaces(scene.calls()) and not _creates(scene.calls())
 
 
 def test_rejected_terminal_host_is_a_failure_not_a_launch(tmp_path: Path) -> None:
@@ -596,7 +598,7 @@ def test_rejected_terminal_host_is_a_failure_not_a_launch(tmp_path: Path) -> Non
     # at most that one admission and never a started provider.
     admitted = _admitted(scene)
     assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
-    assert not _agent_surfaces(scene.calls()) and not _creates(scene.calls())
+    assert not _interactive_surfaces(scene.calls()) and not _creates(scene.calls())
 
 
 def test_bare_resume_from_stale_marker_without_tty_opens_the_terminal(
@@ -895,9 +897,9 @@ def test_fork_current_from_stale_marker_without_tty_opens_the_repo_workspace_ter
     # one admission, never started, and no AICX lookup at all (591b6dde).
     assert _assert_one_unstarted_admission(scene, "fork") == admission
     assert not scene.aicx_calls(), scene.aicx_calls()
-    assert not _panes(calls) and not _agent_surfaces(calls) and not _creates(calls), (
-        calls
-    )
+    assert (
+        not _panes(calls) and not _interactive_surfaces(calls) and not _creates(calls)
+    ), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
 
@@ -929,7 +931,7 @@ def test_fork_child_enters_the_repo_workspace_with_the_fork_as_a_tab(
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
     assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root.resolve(), tabs
     script = _tab_script(tabs[0])
@@ -979,8 +981,8 @@ def test_fork_from_stale_marker_with_a_terminal_declares_the_workspace(
     assert "ambient context" in result.stdout + result.stderr, result.stdout
     assert _creates(calls) and _creates(calls)[0]["argv"][-1] == place, calls
     assert (
-        len(_agent_surfaces(calls)) == 1
-        and _session_of(_agent_surfaces(calls)[0]) == place
+        len(_interactive_surfaces(calls)) == 1
+        and _session_of(_interactive_surfaces(calls)[0]) == place
     )
     assert _attaches(calls) and _attaches(calls)[0]["argv"] == ["attach", place]
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
@@ -1042,7 +1044,7 @@ def test_fork_rejected_terminal_is_reported_and_starts_nothing(
     assert "rejected this launch" in result.stderr, result.stderr
     assert "launched" not in result.stdout, result.stdout
     assert not scene.calls() or not (
-        _panes(scene.calls()) or _agent_surfaces(scene.calls())
+        _panes(scene.calls()) or _interactive_surfaces(scene.calls())
     )
     admitted = _admitted(scene)
     assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
@@ -1121,7 +1123,7 @@ def test_face_child_under_strict_mode_reaches_the_provider_once(
     _assert_no_panic(result, calls)
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     inner, admission = _fixtures.script_handoff(_tab_script(tabs[0]))
     _assert_declaration(
@@ -1163,7 +1165,7 @@ def test_face_under_strict_mode_without_a_tty_still_opens_the_terminal(
     )
     assert launch["boundary"] == "1", launch
     assert _assert_one_unstarted_admission(scene, verb) == admission
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
 
 
@@ -1188,7 +1190,7 @@ def test_face_under_strict_mode_rejected_terminal_is_nonzero(
     assert scene.terminal_launch(wait=0.5) is not None, "the host was never asked"
     admitted = _admitted(scene)
     assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
 
 
 @pytest.mark.parametrize("verb", ["init", "operator", "partner"])
@@ -1219,7 +1221,7 @@ def test_public_deck_face_child_reaches_the_provider_once(
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
     assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
-    tabs = _agent_surfaces(calls)
+    tabs = _interactive_surfaces(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root.resolve(), tabs
     script = _tab_script(tabs[0])
@@ -1277,7 +1279,7 @@ def test_public_deck_face_without_a_tty_opens_the_terminal_with_exact_argv(
     assert _assert_one_unstarted_admission(scene, verb) == admission
     assert launch["boundary"] == "1", launch
     assert all(value is None for value in launch["markers"].values()), launch
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
@@ -1303,7 +1305,7 @@ def test_public_deck_face_rejected_terminal_is_a_failure(
     assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
     assert "launched in workspace session" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=0.5) is not None, "the host was never asked"
-    assert not _creates(calls) and not _agent_surfaces(calls), calls
+    assert not _creates(calls) and not _interactive_surfaces(calls), calls
 
 
 # --------------------------------------------------------------------------
