@@ -682,7 +682,7 @@ def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
         encoding="utf-8"
     )
     assert "cfa2c367ed36ba9179a05fff32ab1221060cb04e" in builder
-    assert "b8f6f5f73e18aa990df6ea1d9dc42dda99f8d8a5" in builder
+    assert "81093a490c3fd1f5dfcb6731299d57c6df5465a4" in builder
     assert "cargo build --release --bin alacritty" in builder
     assert "cargo xtask build --release" in builder
     assert "libexec\\vc-terminal.exe" in builder
