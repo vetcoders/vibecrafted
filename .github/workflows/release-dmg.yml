@@ -30,7 +30,7 @@ on:
       frame_ref:
         description: vc-frame immutable donor revision
         required: false
-        default: bc8b8d97153e92b2018ad51cfd3039035428679f
+        default: 26705da0c8f327895b6997a0f65222bc6cf6943e
       terminal_ref:
         description: vc-terminal immutable donor revision
         required: false
@@ -99,7 +99,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: vetcoders/vc-frame
-          ref: ${{ inputs.frame_ref || 'bc8b8d97153e92b2018ad51cfd3039035428679f' }}
+          ref: ${{ inputs.frame_ref || '26705da0c8f327895b6997a0f65222bc6cf6943e' }}
           path: vc-frame
           fetch-depth: 0
           persist-credentials: false
