@@ -87,8 +87,9 @@ pub use scaffold_verifiers::{
     execute_brief_verifiers, execute_brief_verifiers_in_repo, extract_brief_verifier_commands,
 };
 pub use usage::{
-    USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension, UsageDimensions,
-    UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens, UsageTotals,
+    PROVIDER_POOLS, USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension,
+    UsageDimensions, UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens,
+    UsageTotals, provider_pool,
 };
 pub use usage_agy::{
     AgyAdapterDiagnostics, AgyEstimatedCost, AgyEstimatedTokens, AgyFileError, AgyModelRate,

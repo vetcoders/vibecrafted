@@ -25,7 +25,31 @@ pub const USAGE_REPORT_SCHEMA: &str = "vibecrafted.usage-report.v1";
 pub const USAGE_PROVIDER_ADAPTERS: &[&str] = &[
     "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot",
 ];
+/// Canonical billing pool per launcher: the one company-level vocabulary the
+/// quota board's `scope.pool`, the UI provider-picker seeds and the usage
+/// provider filter all share. Launcher names stay valid filters; a pool name
+/// selects every launcher drawing on it. 1:1 today — a pool shared by two
+/// launchers would be a deliberate contract change, not a default.
+pub const PROVIDER_POOLS: &[(&str, &str)] = &[
+    ("agy", "google"),
+    ("claude", "anthropic"),
+    ("codex", "openai"),
+    ("copilot", "github"),
+    ("cursor", "anysphere"),
+    ("grok", "xai"),
+    ("junie", "jetbrains"),
+    ("kimi", "moonshot"),
+];
 const MAX_META_BYTES: u64 = 1024 * 1024;
+
+/// The canonical pool a launcher draws on, when known.
+#[must_use]
+pub fn provider_pool(agent: &str) -> Option<&'static str> {
+    PROVIDER_POOLS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(agent))
+        .map(|(_, pool)| *pool)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UsageFilter {
@@ -388,14 +412,22 @@ pub(crate) fn matches_filter(run: &UsageRun, filter: &UsageFilter) -> bool {
 
 /// A picker option is a dimension name (`display_value`), so a filter must
 /// match by that same name — including `unknown`, which stays selectable.
+/// The picker also seeds pool names (`anthropic`, `openai`, …): a pool name
+/// selects every launcher drawing on it, even when the row itself carries
+/// only launcher vocabulary.
 fn provider_matches(provider: &Value, agent: &Value, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| {
         let trimmed = expected.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return true;
         }
-        display_value(provider).eq_ignore_ascii_case(trimmed)
-            || display_value(agent).eq_ignore_ascii_case(trimmed)
+        let names = [display_value(provider), display_value(agent)];
+        names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(trimmed))
+            || names.iter().any(|name| {
+                provider_pool(name).is_some_and(|pool| pool.eq_ignore_ascii_case(trimmed))
+            })
     })
 }
 

@@ -190,3 +190,61 @@ async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
         }
     }
 }
+
+#[tokio::test]
+async fn usage_api_provider_filter_roundtrips_seeded_pool_names() {
+    // The UI seeds the provider picker with pool names (google, anthropic,
+    // openai, github, anysphere, xai, jetbrains, moonshot). Every seed must be
+    // a working filter against rows that carry launcher vocabulary, or the
+    // picker offers options that silently select nothing.
+    let home = TestHome::new(); // pre-seeded: codex VC run ("run-usd")
+    fs::create_dir_all(home.0.join("control_plane/runtime_runs/run-claude")).expect("run dir");
+    fs::write(
+        home.0.join("control_plane/runtime_runs/run-claude/meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "run-claude",
+            "agent": "claude",
+            "agent_model": "claude-opus-5-5",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                      "events": 1, "tokens_input": 3, "tokens_cached_input": 0,
+                      "tokens_cache_write": 0, "tokens_output": 2, "tokens_total": 5},
+            "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+        }))
+        .expect("json"),
+    )
+    .expect("meta");
+
+    let (status, _, anthropic) = get(&home.0, "/api/usage?window=all&provider=anthropic").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(anthropic["totals"]["runs"], 1, "anthropic selects claude rows");
+    assert_eq!(anthropic["runs"][0]["run_id"], "run-claude");
+
+    let (_, _, openai) = get(&home.0, "/api/usage?window=all&provider=openai").await;
+    assert_eq!(openai["totals"]["runs"], 1, "openai selects codex rows");
+    assert_eq!(openai["runs"][0]["run_id"], "run-usd");
+
+    let (_, _, launcher) = get(&home.0, "/api/usage?window=all&provider=codex").await;
+    assert_eq!(launcher["totals"]["runs"], 1, "launcher names keep working");
+
+    for seed in [
+        "google",
+        "anthropic",
+        "openai",
+        "github",
+        "anysphere",
+        "xai",
+        "jetbrains",
+        "moonshot",
+    ] {
+        let (status, _, _) = get(&home.0, &format!("/api/usage?window=all&provider={seed}")).await;
+        assert_eq!(status, StatusCode::OK, "seeded picker value {seed}");
+    }
+    let (_, _, anysphere) = get(&home.0, "/api/usage?window=all&provider=anysphere").await;
+    assert_eq!(
+        anysphere["totals"]["runs"], 0,
+        "a pool with no rows is honestly empty, not an error"
+    );
+}

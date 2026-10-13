@@ -119,13 +119,13 @@
       "model": null,
       "name": "Cursor",
       "observed_at": "<observed_at>",
-      "pool": "cursor",
+      "pool": "anysphere",
       "present": true,
       "provenance": "cloud_unavailable",
       "scope": {
         "account": null,
         "model": null,
-        "pool": "cursor"
+        "pool": "anysphere"
       },
       "source": "~/.vibecrafted/telemetry/cursor/quota.json",
       "stale": false,

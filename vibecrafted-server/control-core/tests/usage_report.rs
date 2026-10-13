@@ -763,3 +763,117 @@ fn every_dimension_name_round_trips_through_its_filter_including_unknown() {
     }
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn provider_filter_roundtrips_pool_names_and_launcher_names() {
+    // The UI provider picker seeds pool vocabulary (anthropic, openai, …)
+    // while most rows carry launcher names in `provider`/`agent`. Both names
+    // for the same capacity must select the same runs, or the seeded picker
+    // options silently filter to nothing.
+    let home = fixture_home("provider-pools");
+    write_meta(
+        &home,
+        "claude-run",
+        json!({
+            "run_id": "claude-run", "agent": "claude", "status": "completed", "exit_code": 0,
+            "completed_at": "2026-10-12T11:00:00Z",
+            "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                      "events": 1, "tokens_input": 5, "tokens_cached_input": 0, "tokens_cache_write": 0,
+                      "tokens_output": 2, "tokens_total": 7},
+            "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+        }),
+    );
+    write_meta(
+        &home,
+        "cursor-run",
+        json!({
+            "run_id": "cursor-run", "agent": "cursor", "status": "completed", "exit_code": 0,
+            "completed_at": "2026-10-12T11:00:00Z",
+            "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                      "events": 1, "tokens_input": 1, "tokens_cached_input": 0, "tokens_cache_write": 0,
+                      "tokens_output": 2, "tokens_total": 3},
+            "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+        }),
+    );
+    let plane = ControlPlane::new(&home);
+    let filter = |provider: &str| UsageFilter {
+        provider: Some(provider.into()),
+        ..UsageFilter::default()
+    };
+
+    let by_pool = plane.usage_report(now(), filter("anthropic"));
+    assert_eq!(
+        by_pool.runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+        ["claude-run"],
+        "pool name selects its launcher's rows"
+    );
+    assert_eq!(
+        plane.usage_report(now(), filter("claude")).totals.runs,
+        1,
+        "launcher names stay valid"
+    );
+    let anysphere = plane.usage_report(now(), filter("anysphere"));
+    assert_eq!(
+        anysphere.runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+        ["cursor-run"]
+    );
+    assert_eq!(
+        plane.usage_report(now(), filter("openai")).totals.runs,
+        0,
+        "a pool with no recorded runs is honestly empty"
+    );
+    // Case-insensitive, like the direct names.
+    assert_eq!(plane.usage_report(now(), filter("Anthropic")).totals.runs, 1);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn every_seeded_pool_name_selects_exactly_its_own_launcher() {
+    // One VC run per adapter; each picker seed (pool vocabulary) must select
+    // exactly the run of its own launcher — 1:1, no overlap, no empty seed.
+    let home = fixture_home("provider-pool-map");
+    let pairs = [
+        ("agy", "google"),
+        ("claude", "anthropic"),
+        ("codex", "openai"),
+        ("copilot", "github"),
+        ("cursor", "anysphere"),
+        ("grok", "xai"),
+        ("junie", "jetbrains"),
+        ("kimi", "moonshot"),
+    ];
+    assert_eq!(
+        pairs.len(),
+        control_core::USAGE_PROVIDER_ADAPTERS.len(),
+        "test inventory tracks the adapter inventory"
+    );
+    for (agent, _) in &pairs {
+        write_meta(
+            &home,
+            &format!("run-{agent}"),
+            json!({
+                "run_id": format!("run-{agent}"), "agent": agent, "status": "completed", "exit_code": 0,
+                "completed_at": "2026-10-12T11:00:00Z",
+                "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                          "events": 1, "tokens_input": 1, "tokens_cached_input": 0, "tokens_cache_write": 0,
+                          "tokens_output": 1, "tokens_total": 2},
+                "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+            }),
+        );
+    }
+    let plane = ControlPlane::new(&home);
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (agent, pool) in &pairs {
+        assert!(seen.insert(pool), "pool {pool} listed twice");
+        let report = plane.usage_report(
+            now(),
+            UsageFilter {
+                provider: Some((*pool).into()),
+                ..UsageFilter::default()
+            },
+        );
+        let ids: Vec<_> = report.runs.iter().map(|run| run.run_id.as_str()).collect();
+        assert_eq!(ids, [format!("run-{agent}")], "pool {pool}");
+    }
+    fs::remove_dir_all(home).ok();
+}

@@ -852,17 +852,9 @@ fn parse_fleet(id: &'static str, value: &Value) -> QuotaFields {
 }
 
 fn default_pool_for(id: &str) -> Option<String> {
-    Some(match id {
-        "agy" => "google".to_string(),
-        "claude" => "anthropic".to_string(),
-        "codex" => "openai".to_string(),
-        "copilot" => "github".to_string(),
-        "cursor" => "cursor".to_string(),
-        "grok" => "xai".to_string(),
-        "junie" => "jetbrains".to_string(),
-        "kimi" => "moonshot".to_string(),
-        _ => id.to_string(),
-    })
+    // One owner of the launcher→pool vocabulary (control-core); the usage
+    // report filter and the UI picker seeds speak the same names.
+    Some(control_core::usage::provider_pool(id).unwrap_or(id).to_string())
 }
 
 fn iso_to_ts(iso: &str) -> Option<u64> {

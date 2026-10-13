@@ -466,3 +466,50 @@ async fn board_matches_the_committed_wire_contract() {
         "wire shape drifted; rerun with VC_UPDATE_QUOTA_CONTRACT=1 and review the diff"
     );
 }
+
+#[tokio::test]
+async fn pool_vocabulary_is_the_canonical_company_names_the_picker_seeds() {
+    // The usage picker seeds google/anthropic/openai/github/anysphere/xai/
+    // jetbrains/moonshot. The quota board's pool scope must speak the same
+    // names, or cross-surface filters and pool accounting disagree.
+    let home = TestHome::new();
+    let (_, _, board) = get(&home.0, "/api/usage/quota").await;
+    let pools: Vec<_> = board["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .map(|item| {
+            (
+                item["id"].as_str().expect("id").to_string(),
+                item["scope"]["pool"].as_str().expect("pool").to_string(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("agy", "google"),
+        ("claude", "anthropic"),
+        ("codex", "openai"),
+        ("copilot", "github"),
+        ("cursor", "anysphere"),
+        ("grok", "xai"),
+        ("junie", "jetbrains"),
+        ("kimi", "moonshot"),
+    ]
+    .into_iter()
+    .map(|(id, pool)| (id.to_string(), pool.to_string()))
+    .collect();
+    assert_eq!(pools, expected, "one pool vocabulary across surfaces");
+
+    let ids = |board: &Value| -> Vec<String> {
+        board["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, _, by_pool) = get(&home.0, "/api/usage/quota?pool=anysphere").await;
+    assert_eq!(ids(&by_pool), ["cursor"]);
+    let (_, _, by_provider) = get(&home.0, "/api/usage/quota?provider=anysphere").await;
+    assert_eq!(ids(&by_provider), ["cursor"]);
+}
