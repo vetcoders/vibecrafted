@@ -20,6 +20,7 @@ call.
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -198,10 +199,9 @@ def fetch_board(
 
 
 def _model_covered(scope_model: str, wanted: str) -> bool:
-    if not scope_model or not wanted:
+    if not scope_model:
         return True
-    left, right = scope_model.lower(), wanted.lower()
-    return left in right or right in left
+    return scope_model.casefold() == wanted.casefold()
 
 
 def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
@@ -217,7 +217,14 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
     account = str(scope.get("account") or item.get("account") or "")
     source = str(item.get("source") or "")
     age = item.get("age_s")
-    age_s = float(age) if isinstance(age, (int, float)) and age >= 0 else None
+    age_s = None
+    if isinstance(age, (int, float)) and not isinstance(age, bool):
+        try:
+            numeric_age = float(age)
+        except OverflowError:
+            numeric_age = math.inf
+        if math.isfinite(numeric_age) and numeric_age >= 0:
+            age_s = numeric_age
     state = item.get("state")
     detail = str(item.get("detail") or item.get("headline") or "")
     if not isinstance(state, str) or state not in KNOWN_STATES:
@@ -244,6 +251,14 @@ def _evaluate(requirement: Requirement, item: dict[str, Any] | None) -> Finding:
                 f"nothing measured for {requirement.model!r}"
             ),
         )
+    # Validate the server's evidence envelope, not its quota arithmetic/TTL.
+    # An inconsistent or untimed card cannot prove current capacity.
+    if state in {"ok", "low", "exhausted"}:
+        if item.get("stale") is True:
+            state = "stale"
+        elif age_s is None:
+            state = "unknown" if age is None else "malformed"
+            detail = "observation carries no usable age; " + detail
     return _finding(
         requirement,
         state,
@@ -287,31 +302,35 @@ def _pool_key(item: dict[str, Any]) -> tuple[str, str]:
 
 def _exhausted_pools(
     items: dict[str, dict[str, Any]],
-) -> dict[tuple[str, str], tuple[str, dict[str, Any]]]:
-    """Pools (pool, account) that a fresh, confirmed observation says are empty."""
-    found: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+) -> dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]:
+    """Candidate observations; each still needs model and evidence validation."""
+    found: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     for agent, item in items.items():
         pool, account = _pool_key(item)
         if pool and item.get("state") == "exhausted":
-            found.setdefault((pool, account), (agent, item))
+            found.setdefault((pool, account), []).append((agent, item))
     return found
 
 
 def _apply_shared_pool(
-    finding: Finding, exhausted: dict[tuple[str, str], tuple[str, dict[str, Any]]]
+    finding: Finding, exhausted: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]
 ) -> Finding:
     """A pool is one capacity: any agent drawing on an exhausted pool is blocked.
 
-    Accounts must match when both sides name one; an unnamed side joins the pool.
+    Cross-agent sharing requires a known matching account. Missing account
+    identity is uncertainty, not evidence that two agents draw the same capacity.
     """
     if finding.state == "exhausted" or not finding.pool:
         return finding
-    for (pool, account), (reporter, item) in exhausted.items():
-        if pool != finding.pool:
-            continue
-        if account and finding.account and account != finding.account:
-            continue
+    if not finding.account:
+        return finding
+    for reporter, item in exhausted.get((finding.pool, finding.account), []):
         if reporter == finding.agent:
+            continue
+        observation = _evaluate(
+            Requirement(reporter, finding.model, finding.cuts), item
+        )
+        if observation.state != "exhausted":
             continue
         return Finding(
             agent=finding.agent,
@@ -319,11 +338,9 @@ def _apply_shared_pool(
             cuts=finding.cuts,
             state="exhausted",
             pool=finding.pool,
-            account=finding.account or account,
-            source=str(item.get("source") or ""),
-            observed_age_s=item.get("age_s")
-            if isinstance(item.get("age_s"), (int, float))
-            else None,
+            account=finding.account,
+            source=observation.source,
+            observed_age_s=observation.observed_age_s,
             detail=f"shared pool reported exhausted by agent '{reporter}'",
         )
     return finding

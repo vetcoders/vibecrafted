@@ -381,6 +381,12 @@ CONTRACT = Path(__file__).parent / "fixtures" / "quota_board_contract.json"
 
 def _contract_board(board: Board) -> dict[str, Any]:
     payload = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    # The Rust golden normalizes wall-clock-dependent ages, not the wire types.
+    for card in payload["agents"]:
+        if card["age_s"] == "<fresh>":
+            card["age_s"] = 5
+        elif card["age_s"] == "<old>":
+            card["age_s"] = 9000
     board.raw = json.dumps(payload).encode()
     return {item["agent"]: item for item in payload["agents"]}
 
@@ -416,7 +422,10 @@ def test_contract_every_other_state_warns_and_never_blocks(
     items = _contract_board(board)
     assert items[agent]["state"] == state
 
-    report = diagnose_file(_plan(tmp_path, (agent, "")), check_quotas=True)
+    report = diagnose_file(
+        _plan(tmp_path, (agent, items[agent]["scope"]["model"] or "")),
+        check_quotas=True,
+    )
 
     assert report.ok is True and report.errors == ()
     assert needle in _quota_messages(report)[0]
@@ -432,3 +441,152 @@ def test_contract_agy_is_scoped_to_its_model(tmp_path: Path, board: Board) -> No
 
     assert report.ok is True
     assert "scoped to model" in _quota_messages(report)[0]
+
+
+@pytest.mark.parametrize(
+    "reported,wanted", [("model-a", "model-a-plus"), ("model-a-plus", "model-a")]
+)
+def test_model_scope_is_an_identity_not_a_substring(
+    tmp_path: Path, board: Board, reported: str, wanted: str
+) -> None:
+    board.agents = [item("codex", "exhausted", scope_model=reported)]
+    report = diagnose_file(_plan(tmp_path, ("codex", wanted)), check_quotas=True)
+    assert report.ok is True
+    assert report.quota_findings[0]["state"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "reported,wanted,blocked",
+    [
+        ("model-a", "model-b", False),
+        ("model-a", "model-a", True),
+        (None, "model-b", True),
+    ],
+)
+def test_shared_pool_preserves_reporter_model_scope(
+    tmp_path: Path, board: Board, reported: str | None, wanted: str, blocked: bool
+) -> None:
+    board.agents = [
+        item(
+            "copilot", "exhausted", pool="shared", account="team", scope_model=reported
+        ),
+        item("cursor", "unknown", pool="shared", account="team"),
+    ]
+    report = diagnose_file(_plan(tmp_path, ("cursor", wanted)), check_quotas=True)
+    assert report.ok is not blocked
+    assert report.quota_findings[0]["state"] == ("exhausted" if blocked else "unknown")
+
+
+@pytest.mark.parametrize(
+    "reporter_account,target_account,blocked",
+    [
+        ("team", None, False),
+        (None, "team", False),
+        ("other", "team", False),
+        ("team", "team", True),
+    ],
+)
+def test_shared_pool_requires_a_confirmed_same_account(
+    tmp_path: Path,
+    board: Board,
+    reporter_account: str | None,
+    target_account: str | None,
+    blocked: bool,
+) -> None:
+    board.agents = [
+        item("copilot", "exhausted", pool="shared", account=reporter_account),
+        item("cursor", "unknown", pool="shared", account=target_account),
+    ]
+    report = diagnose_file(_plan(tmp_path, ("cursor", "model-a")), check_quotas=True)
+    assert report.ok is not blocked
+
+
+def test_shared_pool_retains_every_model_scoped_observation(
+    tmp_path: Path, board: Board
+) -> None:
+    board.agents = [
+        item(
+            "copilot", "exhausted", pool="shared", account="team", scope_model="model-a"
+        ),
+        item(
+            "codex", "exhausted", pool="shared", account="team", scope_model="model-b"
+        ),
+        item("cursor", "unknown", pool="shared", account="team"),
+    ]
+    report = diagnose_file(_plan(tmp_path, ("cursor", "model-b")), check_quotas=True)
+    assert report.ok is False
+    assert "codex" in report.errors[0].message
+
+
+@pytest.mark.parametrize("age", [float("inf"), float("nan"), -1, True, "invalid", None])
+@pytest.mark.parametrize("shared", [False, True])
+def test_unusable_observation_age_warns_without_blocking_or_crashing(
+    tmp_path: Path, board: Board, age: Any, shared: bool
+) -> None:
+    board.agents = [
+        item(
+            "copilot" if shared else "cursor",
+            "exhausted",
+            pool="shared",
+            account="team",
+            age_s=age,
+        )
+    ]
+    if shared:
+        board.agents.append(item("cursor", "unknown", pool="shared", account="team"))
+    report = diagnose_file(_plan(tmp_path, ("cursor", "model-a")), check_quotas=True)
+    assert report.ok is True
+    assert report.quota_findings[0]["state"] != "exhausted"
+    assert _quota_messages(report)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_stale_flag_cannot_carry_current_exhaustion(
+    tmp_path: Path, board: Board, shared: bool
+) -> None:
+    board.agents = [
+        item(
+            "copilot" if shared else "cursor",
+            "exhausted",
+            pool="shared",
+            account="team",
+            stale=True,
+        )
+    ]
+    if shared:
+        board.agents.append(item("cursor", "unknown", pool="shared", account="team"))
+    report = diagnose_file(_plan(tmp_path, ("cursor", "model-a")), check_quotas=True)
+    assert report.ok is True
+    assert _quota_messages(report)
+
+
+def test_unknown_effective_model_cannot_match_a_model_scoped_card(
+    tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "vibecrafted_core.agent_stream.resolve_default_model", lambda _agent: ""
+    )
+    board.agents = [item("cursor", "exhausted", scope_model="model-a")]
+    report = diagnose_file(_plan(tmp_path, ("cursor", "")), check_quotas=True)
+    assert report.ok is True
+    assert report.quota_findings[0]["state"] == "unknown"
+
+
+def test_shared_scoped_exhaustion_refuses_the_whole_batch_before_reservation(
+    tmp_path: Path, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board.agents = [
+        item("claude", "ok"),
+        item(
+            "copilot", "exhausted", pool="shared", account="team", scope_model="model-a"
+        ),
+        item("cursor", "unknown", pool="shared", account="team"),
+    ]
+    plan = _plan(tmp_path, ("claude", ""), ("cursor", "model-a"))
+
+    def forbidden(*_a: object, **_k: object) -> None:
+        pytest.fail("shared exhaustion must refuse before reservation or first launch")
+
+    monkeypatch.setattr(dispatch_cli, "reserve_run_id", forbidden)
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
+    assert dispatch_cli.main([str(plan), "--json"]) == 1
