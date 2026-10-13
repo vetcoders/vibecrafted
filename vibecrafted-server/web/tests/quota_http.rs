@@ -369,6 +369,72 @@ async fn refresh_is_explicit_and_unsupported_agents_are_ignored() {
     assert_eq!(card(&board, "codex")["state"], "exhausted");
 }
 
+#[tokio::test]
+async fn a_files_self_declared_agent_cannot_redefine_its_pool_scope() {
+    let home = TestHome::new();
+    // A fleet snapshot sitting in claude's slot that claims to be codex: the
+    // card is still the claude observation. Pool scope comes from the provider
+    // slot being read, never from untrusted file content — admission blocks on
+    // pools, so a misplaced file must not contaminate another provider's pool.
+    home.write_json(
+        "claude",
+        &json!({"agent": "codex", "generated_at": iso(5),
+                "quota": {"status": "RESOURCE_EXHAUSTED"}}),
+    );
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=claude").await;
+
+    let claude = &board["agents"][0];
+    assert_eq!(claude["state"], "exhausted");
+    assert_eq!(claude["scope"]["pool"], "anthropic");
+    assert_eq!(claude["pool"], "anthropic");
+}
+
+#[tokio::test]
+async fn an_explicit_refresh_reports_its_outcome_on_the_board() {
+    let home = TestHome::new();
+
+    // cursor has no authoritative quota source: the collector answers
+    // `unavailable` and the board says so — a preflight can tell "no source"
+    // apart from "the refresh never ran".
+    let (status, _, board) = get(
+        &home.0,
+        "/api/usage/quota?refresh=preflight&agents=cursor,not-a-provider",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let refresh = &board["refresh"];
+    assert_eq!(refresh["mode"], "quota");
+    assert_eq!(refresh["started"], true);
+    let agents = refresh["agents"].as_array().expect("refresh agents");
+    let cursor = agents
+        .iter()
+        .find(|item| item["agent"] == "cursor")
+        .expect("cursor row");
+    assert_eq!(cursor["status"], "unavailable");
+    assert!(
+        agents.iter().all(|item| item["agent"] != "not-a-provider"),
+        "unsupported providers are not probed"
+    );
+
+    let (_, _, skipped) = get(
+        &home.0,
+        "/api/usage/quota?refresh=preflight&agents=not-a-provider",
+    )
+    .await;
+    assert_eq!(skipped["refresh"]["mode"], "quota");
+    assert_eq!(skipped["refresh"]["started"], false);
+    assert!(
+        skipped["refresh"]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("no supported provider")
+    );
+
+    // A plain read carries no refresh block at all.
+    let (_, _, plain) = get(&home.0, "/api/usage/quota").await;
+    assert!(plain.get("refresh").is_none());
+}
+
 /// The wire contract shared with the Python dispatch doctor: the dispatch tests
 /// serve this same file and must read every state from it.
 #[tokio::test]

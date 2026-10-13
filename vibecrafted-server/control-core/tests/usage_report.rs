@@ -638,6 +638,53 @@ fn malformed_local_projections_stay_absent_not_zero() {
 }
 
 #[test]
+fn a_local_session_without_token_measurements_stays_unknown_not_zero() {
+    let home = fixture_home("local-unmeasured");
+    // A real session the scanner saw, whose day rows carry day+model but no
+    // token fields at all: the activity is counted, its tokens are not a
+    // measured zero.
+    write_cache(
+        &home,
+        "claude",
+        json!({"/s/claude/unmeasured-0001.jsonl":
+            fleet_entry("unmeasured-0001", "claude-opus-5-5", -60,
+                vec![json!({"day": "2026-10-12", "model": "claude-opus-5-5"})])}),
+    );
+    // Same honesty on the archive fallback: a day/model row without any
+    // token bucket is an unmeasured observation, never a known 0.
+    let archive = home.join("telemetry/archive");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(
+        archive.join("grok.jsonl"),
+        "{\"day\": \"2026-10-12\", \"model\": \"grok-4\"}\n",
+    )
+    .unwrap();
+
+    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+
+    let local: Vec<_> = report.runs.iter().filter(|r| r.origin == "local").collect();
+    assert_eq!(local.len(), 2, "unmeasured activity is still counted");
+    for run in &local {
+        assert_eq!(
+            run.tokens.tokens_total["value"], "unknown",
+            "{} observed a session, not a 0-token measurement",
+            run.run_id
+        );
+        assert_eq!(run.status, "observed");
+        assert_eq!(run.exit_code, None);
+    }
+    assert_eq!(report.totals.runs_tokens_unknown, 2);
+    assert_eq!(
+        report.totals.tokens_total_known, 0,
+        "no fabricated known zero enters the totals"
+    );
+    // A measured row next to an unmeasured one keeps its own numbers.
+    assert_eq!(source(&report, "claude").counted, 1);
+    assert_eq!(source(&report, "grok").counted, 1);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
 fn every_dimension_name_round_trips_through_its_filter_including_unknown() {
     let home = fixture_home("local-picker");
     vc_codex_run(&home, "sess-vc-only-1");
