@@ -137,24 +137,57 @@ def _infer_agent(command: Sequence[str]) -> str:
 
 
 def _json_text_fragment(event: dict[str, object]) -> str:
-    """Extract the display text (if any) from one parsed JSON stream event line."""
+    """Select assistant evidence using the canonical agent_stream event shapes.
+
+    Pane rendering also includes thinking and tool output, so its display text
+    is not an attestation. Only explicit assistant/answer fields belong here.
+    """
+    if event.get("role") not in (None, "assistant") or event.get("parent_tool_use_id"):
+        return ""
+
+    def content_text(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(
+                block["text"]
+                for block in value
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+        return ""
+
     event_type = str(event.get("type") or "")
     if event_type == "assistant.message" and isinstance(event.get("data"), dict):
-        return str(event["data"].get("content") or "")
-    if event_type == "thought":
-        return ""
+        return content_text(event["data"].get("content"))
+    if event_type == "assistant":
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") in (None, "assistant"):
+            return content_text(message.get("content"))
+        return content_text(event.get("content")) if message is None else ""
+    if event.get("role") == "assistant":
+        return content_text(event.get("content"))
     if event_type == "item.completed":
         item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "agent_message":
             text = item.get("text")
             return text if isinstance(text, str) else ""
+    if event_type == "result" or event.get("event") == "result":
+        if event.get("is_error"):
+            return ""
+        result = event.get("result")
+        return content_text(
+            result.get("response") if isinstance(result, dict) else result
+        )
     if event_type == "text":
-        value = event.get("data")
-        return value if isinstance(value, str) else ""
-    for key in ("message", "text", "content", "data"):
-        value = event.get(key)
-        if isinstance(value, str):
-            return value
+        return content_text(
+            event.get("data") or event.get("text") or event.get("content")
+        )
+    if event_type == "content":
+        content = event.get("content")
+        if isinstance(content, dict) and content.get("type") == "text":
+            return content_text(content.get("text"))
     return ""
 
 
@@ -166,19 +199,41 @@ def _fallback_report_body(transcript_text: str) -> str:
     """
     text_fragments: list[str] = []
     plain_lines: list[str] = []
+    json_transport = False
+    fence = ""
     for line in transcript_text.splitlines():
         stripped = line.strip()
         if not stripped:
+            plain_lines.append(line)
+            continue
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            fence = "" if fence == marker else marker
+            plain_lines.append(line)
+            continue
+        if fence:
+            plain_lines.append(line)
             continue
         if stripped.startswith("{"):
+            json_transport = True
             try:
                 loaded = json.loads(stripped)
             except json.JSONDecodeError:
-                if not is_grok_ignorable_transport_error(line):
-                    plain_lines.append(line)
                 continue
             if isinstance(loaded, dict):
-                text_fragments.append(_json_text_fragment(loaded))
+                fragment = _json_text_fragment(loaded)
+                is_result = (
+                    loaded.get("type") == "result" or loaded.get("event") == "result"
+                )
+                # Claude's terminal result repeats its final assistant message.
+                # Suppress only that exact mirror; conflicting text stays visible
+                # so reception can reject ambiguous blocks rather than hide them.
+                if fragment and not (
+                    is_result and text_fragments and fragment == text_fragments[-1]
+                ):
+                    if is_result and text_fragments:
+                        text_fragments.append("\n")
+                    text_fragments.append(fragment)
             continue
         if is_grok_ignorable_transport_error(line):
             continue
@@ -186,6 +241,8 @@ def _fallback_report_body(transcript_text: str) -> str:
     body = "".join(text_fragments).strip()
     if body:
         return body + "\n"
+    if json_transport:
+        return ""
     return "\n".join(plain_lines).strip() + ("\n" if plain_lines else "")
 
 

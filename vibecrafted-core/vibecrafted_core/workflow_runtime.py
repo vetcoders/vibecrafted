@@ -470,6 +470,10 @@ def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
             "- You are intentionally blind to prior marbles runs.\n"
             "- Do not read sibling child reports/transcripts or receiver state.\n"
             "- One bounded WRITE cut, one commit, one report; then leave.\n"
+            "- Preserve report run_id/session_id exactly. Set finalized: true "
+            "with one non-empty truthful claim when this bounded invocation "
+            "has a terminal outcome; partial/blocked status can be finalized. "
+            "This does not claim the whole unchanged task has converged.\n"
             "- Reception/RECEPTION.md, ledger, rankings and prior verification "
             "are receiver-only. Do not read them or author the next brief.\n"
         )
@@ -1637,6 +1641,29 @@ def _reception_prompt(
     tree: dict[str, str],
     rounds: Sequence[dict[str, object]],
 ) -> str:
+    def finding(key: str, evidence: str) -> dict[str, str]:
+        return {
+            "id": key,
+            "severity": "medium",
+            "cluster": "example",
+            "evidence": evidence,
+        }
+
+    open_example = finding(
+        "example-open", "Observed gap remains; record actual candidate evidence"
+    )
+    closed_example = finding(
+        "example-closed", "Rechecked previous gap; record actual closure evidence"
+    )
+    examples = {
+        "attacked": [open_example, closed_example],
+        "resolved": [closed_example],
+        "still_open": [open_example],
+        "discovered": [finding("example-new", "New verified gap in current candidate")],
+        "regressions": [
+            finding("example-regression", "Previously working behavior now fails")
+        ],
+    }
     sample = {
         "schema": RECEPTION_SCHEMA,
         "root": tree["root"],
@@ -1689,12 +1716,22 @@ for each check. Gate is pass only when all required checks passed, fail when any
 unknown when unavailable. scope_verified requires actual coverage of the assigned task.
 External/product/substrate blockers go in blocker. Only explicitly resolved ids close.
 Each finding is an object with id, severity, cluster, evidence; resolved must also be attacked.
+All five sets contain finding OBJECTS, never bare string ids. Every attacked id
+must have an explicit disposition: resolved if verified closed, or an open set
+(still_open/discovered/regressions) if unresolved. Missing disposition is invalid.
+Keep severity/cluster consistent for a stable id, and never mark the same id resolved
+and open. Prior findings omitted here remain open in the ledger.
 The runtime computes metrics and the final decision; do not invent metrics or accept debt.
 Emit exactly one fenced `marbles-reception` JSON block in your report, with this schema:
 ```marbles-reception
 {json.dumps(sample, indent=2)}
 ```
 checks contains objects: {{"command": "exact command", "exit_code": 0, "evidence": "actual result"}}.
+Finding-object illustration for all five sets (not observed facts; replace these
+examples with actual findings/evidence, or [] when the set is verified empty):
+```json
+{json.dumps(examples, indent=2)}
+```
 An empty ledger is a finding to verify, not a default. Missing evidence blocks reception.
 Finalize your report with an honest status and non-empty claim. Then leave.
 """

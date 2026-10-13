@@ -29,6 +29,109 @@ def _runtime_meta(tmp_path: Path, run_id: str) -> Path:
     return tmp_path / "home" / "control_plane" / "runtime_runs" / run_id / "meta.json"
 
 
+def test_fallback_retains_claude_final_text_once_without_display_noise():
+    answer = "# READ verification\n\n```marbles-reception\n{}\n```"
+    events = [
+        {"type": "user", "message": {"role": "user", "content": answer}},
+        {"role": "tool", "content": answer},
+        {"type": "tool_result", "text": answer},
+        {"type": "thinking", "text": answer},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": answer},
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": answer},
+                    {"type": "tool_use", "input": {"command": answer}},
+                    {"type": "text", "text": answer},
+                ],
+            },
+        },
+        {"type": "result", "subtype": "success", "result": answer},
+    ]
+    transcript = "\n".join(json.dumps(event) for event in events)
+    assert supervisor_async_module._fallback_report_body(transcript) == answer + "\n"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "result", "result": "final assistant answer"},
+        {"role": "assistant", "content": "final assistant answer"},
+        {"event": "result", "result": {"response": "final assistant answer"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "final assistant answer"},
+        },
+    ],
+)
+def test_fallback_understands_canonical_provider_answer_shapes(event):
+    assert supervisor_async_module._fallback_report_body(json.dumps(event)) == (
+        "final assistant answer\n"
+    )
+
+
+def test_fallback_does_not_coerce_malformed_json_transport_into_report():
+    broken = (
+        '{"type": "assistant", "message": "unterminated\n```marbles-reception\n{}\n```'
+    )
+    assert not supervisor_async_module._fallback_report_body(broken)
+
+
+def test_fallback_keeps_different_terminal_evidence_for_validation():
+    first = "```marbles-reception\n{}\n```"
+    second = '```marbles-reception\n{"different": true}\n```'
+    transcript = "\n".join(
+        json.dumps(event)
+        for event in [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": first}]},
+            },
+            {"type": "result", "result": second},
+        ]
+    )
+    assert (
+        supervisor_async_module._fallback_report_body(transcript).count(
+            "```marbles-reception"
+        )
+        == 2
+    )
+
+
+def test_fallback_preserves_plain_markdown_with_fenced_json():
+    body = '# plain report\n\n```marbles-reception\n{"actual": true}\n```\n'
+    assert supervisor_async_module._fallback_report_body(body) == body
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"role": "tool", "content": "poison"},
+        {"role": "user", "content": "poison"},
+        {"type": "thinking", "text": "poison"},
+        {"type": "error", "message": "poison"},
+        {"type": "unknown", "data": "poison"},
+        {"type": "result", "is_error": True, "result": "poison"},
+        {"type": "assistant", "message": {"role": "tool", "content": "poison"}},
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "subagent-tool",
+            "message": {"content": [{"type": "text", "text": "poison"}]},
+        },
+    ],
+)
+def test_fallback_excludes_unattested_structured_output(event):
+    assert not supervisor_async_module._fallback_report_body(json.dumps(event))
+
+
 def test_lifecycle_transition_table_rejects_backwards_transition() -> None:
     assert transition_allowed(RunState.CREATED, RunState.PROCESS_SPAWNED)
     assert not transition_allowed(RunState.REPORT_VALIDATED, RunState.ACTIVE)

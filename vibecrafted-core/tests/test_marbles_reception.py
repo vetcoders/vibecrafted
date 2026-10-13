@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -106,6 +107,36 @@ def test_fresh_write_prompts_keep_complete_unchanged_task_in_common_prefix():
     assert task in prefix and "Contract:" in prefix
     assert "Track: marbles-L1" in prompts[0] and "Track: marbles-L2" in prompts[1]
     assert "reception.json" not in prefix and "delta_weighted" not in prefix
+
+
+def test_generated_read_finding_examples_validate_and_preserve_open_debt(tmp_path):
+    from types import SimpleNamespace
+
+    from vibecrafted_core.marbles_reception import read_evidence, receive
+    from vibecrafted_core.workflow_runtime import _reception_prompt
+
+    prompt = _reception_prompt(
+        "/assigned",
+        "same unchanged task",
+        SimpleNamespace(run_id="child", report=Path("candidate.md")),
+        {"root": "/assigned", "head": "abc"},
+        [],
+    )
+    examples = json.loads(re.search(r"```json\n(.*?)```", prompt, re.DOTALL).group(1))
+    report = tmp_path / "example.md"
+    report.write_text(
+        "```marbles-reception\n" + json.dumps(_evidence(**examples)) + "\n```\n"
+    )
+    evidence = read_evidence(
+        report, candidate_run_id="child", tree={"root": "/assigned", "head": "abc"}
+    )
+    result = receive(None, evidence, report=report, no_source_progress=False)
+    assert {item["id"] for item in result["open_findings"]} == {
+        "example-open",
+        "example-new",
+        "example-regression",
+    }
+    assert result["verdict"] == "not_converged"
 
 
 @pytest.mark.parametrize(
@@ -246,6 +277,11 @@ def _provider(bin_dir: Path, *, scenario: str):
                 data['resolved'] = data['discovered'] = []
             if scenario in {'invalid','plain-invalid'}:
                 data['schema'] = 'unknown'
+            if scenario == 'claude-invalid':
+                data['attacked'] = ['assigned-gap']
+            if scenario == 'claude-missing-disposition':
+                data['attacked'] = [finding]
+                data['resolved'] = data['discovered'] = []
             if scenario == 'receiver-mutates':
                 (root / 'assigned.txt').write_text('illegal READ edit')
             if scenario == 'plain-blocked':
@@ -254,7 +290,18 @@ def _provider(bin_dir: Path, *, scenario: str):
                 data['blocker'] = 'external decision needed'
             body = '```marbles-reception\n' + json.dumps(data) + '\n```\n'
         final_report = '---\n' + yaml.safe_dump(fields) + '---\n' + body + '\n'
-        if receiver and scenario in {'stdout','plain-stdout','plain-blocked','plain-invalid'}:
+        if not receiver and scenario == 'claude-invalid':
+            fields.update(finalized=False, claim='')
+            final_report = '---\n' + yaml.safe_dump(fields) + '---\n' + body + '\n'
+        if receiver and scenario.startswith('claude-'):
+            emitted = '# READ verification\n\n' + body
+            print(json.dumps({'type':'user','message':{'role':'user','content':[{'type':'text','text':emitted}]}}),flush=True)
+            print(json.dumps({'type':'assistant','message':{'role':'assistant','content':[
+                {'type':'thinking','thinking':emitted},
+                {'type':'tool_use','name':'Bash','input':{'command':emitted}},
+                {'type':'text','text':emitted}]}}),flush=True)
+            print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':emitted}),flush=True)
+        elif receiver and scenario in {'stdout','plain-stdout','plain-blocked','plain-invalid'}:
             emitted = '# READ verification\n\n' + body if scenario.startswith('plain-') else final_report
             print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':emitted}}),flush=True)
         else:
@@ -448,6 +495,43 @@ def test_public_receiver_can_emit_report_without_file_write(tmp_path):
     assert result.returncode == 0
     assert parent["reception"]["verdict"] == "converged"
     assert len(parent["receivers"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("scenario", "verdict", "reason"),
+    [
+        ("claude-stdout", "converged", "verified_ledger_empty"),
+        ("claude-invalid", "blocked", "invalid_finding:attacked"),
+        (
+            "claude-missing-disposition",
+            "blocked",
+            "attacked_finding_without_disposition",
+        ),
+    ],
+)
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS public Claude READ")
+def test_public_claude_assistant_and_mirrored_result_are_one_report(
+    tmp_path, scenario, verdict, reason
+):
+    from vibecrafted_core.report_contract import parse_report_path
+
+    _, _, completion, parent, _ = _public_run(
+        tmp_path, scenario, count=2, agent="claude"
+    )
+    assert parent["reception"]["verdict"] == verdict
+    assert parent["reception"]["reason"] == reason
+    assert completion["timed_out"] is False
+    for receiver in parent["receivers"]:
+        report = Path(receiver["report"])
+        assert report.read_text().count("```marbles-reception") == 1
+        assert "# READ verification" in report.read_text()
+        assert parse_report_path(report).fields["finalized"] == (
+            "true" if verdict == "converged" else "false"
+        )
+    if scenario == "claude-invalid":
+        candidate = parse_report_path(Path(parent["children"][0]["report"]))
+        assert candidate.fields["finalized"] == "false"
+        assert not candidate.claim
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS guarded public workflow")
