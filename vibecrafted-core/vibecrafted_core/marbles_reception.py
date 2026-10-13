@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -29,7 +28,11 @@ def readonly_command(root: str, command: list[str]) -> tuple[list[str], dict[str
     flags. Unsupported hosts refuse reception rather than fall back to bypass.
     Artifacts and native provider stores remain writable outside the tree.
     """
-    sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
+    sandbox = (
+        "/usr/bin/sandbox-exec"
+        if sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
+        else None
+    )
     if not sandbox:
         raise ValueError(
             "receiver_source_guard_unavailable:requires_macos_sandbox_exec"
@@ -52,7 +55,10 @@ def readonly_command(root: str, command: list[str]) -> tuple[list[str], dict[str
     common = str(Path(result.stdout.strip()).resolve())
     profile = (
         "(version 1) (allow default) (deny file-write* "
-        + " ".join(f"(subpath {json.dumps(value)})" for value in (str(path), common))
+        + " ".join(
+            f"(subpath {json.dumps(value, ensure_ascii=False)})"
+            for value in (str(path), common)
+        )
         + ")"
     )
     return [sandbox, "-p", profile, *command], {

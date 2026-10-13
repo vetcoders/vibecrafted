@@ -64,6 +64,7 @@ class ChildResult:
     cost_usd: float | None = None
     resume_command: str = ""
     completed_at: str = ""
+    usage_events: int = 0
 
 
 def _parent_run_id() -> str:
@@ -311,7 +312,16 @@ def _result_meta(result: ChildResult) -> dict[str, object]:
         "cost_usd": result.cost_usd if result.cost_usd is not None else "unknown",
         "resume_command": result.resume_command,
         "completed_at": result.completed_at,
+        "usage_events": result.usage_events,
     }
+    if result.usage_events <= 0:
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        ):
+            payload[key] = "unknown"
     if result.tokens_cache_write is not None:
         payload["tokens_cache_write"] = result.tokens_cache_write
     if result.model_override_skip_reason:
@@ -324,15 +334,24 @@ def _parent_receipt(results: Sequence[ChildResult]) -> dict[str, object]:
     tokens_input = sum(result.tokens_input for result in results)
     tokens_cached_input = sum(result.tokens_cached_input for result in results)
     tokens_output = sum(result.tokens_output for result in results)
+    cost = _sum_cost_usd(results)
     receipt: dict[str, object] = {
         "session_id": "aggregated" if results else "",
         "tokens_input": tokens_input,
         "tokens_cached_input": tokens_cached_input,
         "tokens_output": tokens_output,
-        "tokens_total": _tokens_total(tokens_input, tokens_cached_input, tokens_output),
-        "cost_usd": _sum_cost_usd(results),
-        "cost_source": "children_sum" if results else "none",
+        "tokens_total": sum(_child_tokens_total(result) for result in results),
+        "cost_usd": cost,
+        "cost_source": "children_sum" if cost is not None else "unknown",
     }
+    if not results or any(result.usage_events <= 0 for result in results):
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        ):
+            receipt[key] = "unknown"
     cache_write = _sum_cache_write(results)
     if cache_write is not None:
         receipt["tokens_cache_write"] = cache_write
@@ -454,18 +473,19 @@ def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
             "- Reception/RECEPTION.md, ledger, rankings and prior verification "
             "are receiver-only. Do not read them or author the next brief.\n"
         )
+    track = f"- Track: {label}\n" if kind != "marbles" else ""
+    tail = f"\nTrack: {label}\n" if kind == "marbles" else ""
     return f"""You are running as a supervised Vibecrafted {kind} worker.
 
 Contract:
 - Work in repository root: {root}
 - Skill: vc-{kind}
-- Track: {label}
-- Do not launch external agent fleets.
+{track}- Do not launch external agent fleets.
 - Write your durable report to VIBECRAFTED_REPORT_PATH.
 - Let stdout/stderr form VIBECRAFTED_TRANSCRIPT_PATH.
 {WORKER_SIGNAL_DISCIPLINE}{marbles_blindness}
 Operator prompt:
-{prompt}
+{prompt}{tail}
 """
 
 
@@ -766,6 +786,9 @@ async def _run_child(
         else handle.cost_usd,
         resume_command=handle.resume_command,
         completed_at=handle.completed_at.isoformat() if handle.completed_at else "",
+        usage_events=settled.usage.events
+        if settled is not None
+        else handle.usage_events,
     )
 
 
@@ -837,6 +860,9 @@ def _child_result_from_meta(label: str, meta_path: Path) -> ChildResult | None:
         completed_at=str(
             payload.get("completed_at") or payload.get("updated_at") or ""
         ),
+        usage_events=(_optional_int((payload.get("usage") or {}).get("events")) or 0)
+        if isinstance(payload.get("usage"), dict)
+        else 0,
     )
 
 
@@ -1807,6 +1833,11 @@ async def run_marbles(
                 prompt_body=_reception_prompt(root, prompt, result, tree, rounds),
             )
             receivers.append(receiver)
+            if (
+                receiver_mode == "native_resume"
+                and receiver.agent_session_id != result.agent_session_id
+            ):
+                raise ValueError("receiver_native_session_identity_mismatch")
             if await asyncio.to_thread(tree_receipt, root) != tree:
                 raise ValueError("receiver_modified_assigned_tree")
             if receiver.exit_code != 0 or not receiver.artifact_ok:
@@ -1820,7 +1851,7 @@ async def run_marbles(
                 state,
                 evidence,
                 report=receiver.report,
-                no_source_progress=tree == before,
+                no_source_progress=tree["source_hash"] == before["source_hash"],
             )
             rounds.append(
                 {

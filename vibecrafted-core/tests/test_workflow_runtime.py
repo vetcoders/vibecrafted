@@ -1249,7 +1249,12 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
     parent = json.loads(Path(receipt["meta"]).read_text())
     assert len(parent["children"]) == 1
     assert parent["reception"]["verdict"] == "blocked"
-    assert parent["reception"]["reason"] == "reception_block_missing_or_ambiguous"
+    if sys.platform == "darwin":
+        assert parent["reception"]["reason"] == "reception_block_missing_or_ambiguous"
+    else:
+        assert parent["reception"]["reason"].startswith(
+            "receiver_source_guard_unavailable"
+        )
     assert parent["exit_code"] == 1
     for child in parent["children"]:
         capture = json.loads(
