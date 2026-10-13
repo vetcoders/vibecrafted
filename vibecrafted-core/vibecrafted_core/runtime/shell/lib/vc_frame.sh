@@ -1743,21 +1743,51 @@ _vetcoders_vc_frame_action_name_arg() {
 }
 
 # Pane creation is not idempotent and a pane never appears in tab metadata.
-# Identity evidence is the launch's own script path (unique per launch) in the
-# engine's pane inventory -- never the title, which can collide.
+# Identity evidence is structured: exactly one live terminal pane in
+# `action list-panes --json --all` whose `terminal_command` IS the launch's own
+# script path. Frame builds that field from the pane's launch declaration
+# (RunCommand Display: command path, then space-joined args), and every
+# new-pane launch here passes one unique script with no arguments. Title, cwd,
+# tab name and live `pane_command` are not identity, and a substring of the raw
+# text proves nothing. A non-list, malformed or schema-mismatched answer, a
+# failed query, no interpreter, zero or duplicate matches are all "unknown";
+# there is no host-python fallback.
 _vetcoders_vc_frame_pane_present() {
   local vc_frame_bin="${1:-}"
   local session_name="${2:-}"
   local pane_script="${3:-}"
-  local raw=""
+  local raw="" py=""
   [[ -n "$vc_frame_bin" && -n "$pane_script" ]] || return 1
+  py="$(_vetcoders_internal_python 2>/dev/null)" || return 1
+  [[ -n "$py" ]] || return 1
   if [[ -n "$session_name" ]]; then
-    raw="$("$vc_frame_bin" --session "$session_name" action list-panes --json --command 2>/dev/null || true)"
+    raw="$("$vc_frame_bin" --session "$session_name" action list-panes --json --all 2>/dev/null)" || return 1
   else
-    raw="$("$vc_frame_bin" action list-panes --json --command 2>/dev/null || true)"
+    raw="$("$vc_frame_bin" action list-panes --json --all 2>/dev/null)" || return 1
   fi
   [[ -n "$raw" ]] || return 1
-  printf '%s' "$raw" | command grep -Fq "$pane_script" 2>/dev/null
+  printf '%s' "$raw" | "$py" -c '
+import json, sys
+want = sys.argv[1]
+try:
+    panes = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(panes, list) or not all(isinstance(p, dict) for p in panes):
+    sys.exit(1)
+hits = 0
+for p in panes:
+    pid = p.get("id")
+    if (
+        isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and p.get("is_plugin") is False
+        and p.get("exited") is False
+        and p.get("terminal_command") == want
+    ):
+        hits += 1
+sys.exit(0 if hits == 1 else 1)
+' "$pane_script" 2>/dev/null
 }
 
 # Lightweight name presence via list-sessions/list-tabs JSON when available.
@@ -1811,15 +1841,24 @@ _vetcoders_vc_frame_session_action() {
   [[ "$#" -ge 1 ]] || return 1
 
   local err_file out_file action_status=0 err=""
-  local tab_name="" pane_script="" prev_arg="" arg=""
+  local tab_name="" pane_script="" is_new_pane=0 arg="" after_sep=0 after_count=0
   tab_name="$(_vetcoders_vc_frame_action_name_arg "$@" 2>/dev/null || true)"
-  # A new-pane may have landed even when its ACK was lost; it is never
-  # reissued, and the script after `--` is the identity to look for.
-  for arg in "$@"; do
-    [[ "$arg" != new-pane ]] || prev_arg=new-pane
-    pane_script="$arg"
-  done
-  [[ "$prev_arg" == new-pane ]] || pane_script=""
+  # A new-pane may have landed even when its ACK was lost, so it is never
+  # reissued. Classify the ACTION (`action new-pane`), not any argv word: a
+  # tab merely NAMED new-pane is still a tab. The identity to look for is the
+  # single script argument after `--`.
+  if [[ "${1:-}" == action && "${2:-}" == new-pane ]]; then
+    is_new_pane=1
+    for arg in "$@"; do
+      if ((after_sep)); then
+        after_count=$((after_count + 1))
+        pane_script="$arg"
+      elif [[ "$arg" == -- ]]; then
+        after_sep=1
+      fi
+    done
+    ((after_count == 1)) || pane_script=""
+  fi
   # The X's must END the template: BSD mktemp(1) treats `XXXXXX.err` as a
   # literal name, so every action on the host shared ONE file, and two
   # launches at the same instant (two shells, a worker beside the Founder)
@@ -1837,7 +1876,8 @@ _vetcoders_vc_frame_session_action() {
 
   _vetcoders_vc_frame_ack_presence_ok() {
     local label="${1:-presence}"
-    if [[ -n "$pane_script" ]]; then
+    if ((is_new_pane)); then
+      [[ -n "$pane_script" ]] || return 1
       sleep 1
       if _vetcoders_vc_frame_pane_present "$vc_frame_bin" "$session_name" "$pane_script"; then
         printf 'vc-frame action ACK ambiguous (%s) but the pane for %s is present; treating as success\n' \
@@ -1893,7 +1933,7 @@ _vetcoders_vc_frame_session_action() {
         rm -f "$err_file" "$out_file"
         return 0
       fi
-      if [[ -n "$pane_script" ]]; then
+      if ((is_new_pane)); then
         # Pane creation may already have been accepted: reissuing it could
         # open a second provider. Report it unconfirmed instead.
         VETCODERS_VC_FRAME_LAST_ERROR="${err:-vc-frame action exit ${action_status}}"$'\n'"new-pane ACK ambiguous and pane not confirmed; not reissued"

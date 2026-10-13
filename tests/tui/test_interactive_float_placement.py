@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -258,6 +260,10 @@ if args[:2] == ["action", "list-tabs"]:
 if args[:2] == ["action", "list-panes"]:
     if mode == "no-pane-listing":
         sys.exit(1)
+    raw = os.path.join(d, "panes.raw")
+    if os.path.exists(raw):
+        sys.stdout.write(open(raw).read())
+        sys.exit(0)
     print(json.dumps(jl("panes.json", [])))
     sys.exit(0)
 if args[:2] == ["action", "new-pane"] or args[:2] == ["action", "new-tab"]:
@@ -284,7 +290,16 @@ if args[:2] == ["action", "new-pane"] or args[:2] == ["action", "new-tab"]:
         save("created.json", n)
         if kind == "new-pane" and mode != "ack-lost-hidden":
             p = jl("panes.json", [])
-            p.append({"title": name, "pane_command": script})
+            p.append(
+                {
+                    "id": len(p) + 1,
+                    "is_plugin": False,
+                    "exited": False,
+                    "title": name,
+                    "terminal_command": script,
+                    "pane_command": "/bin/zsh",
+                }
+            )
             save("panes.json", p)
         if kind == "new-tab":
             t = jl("tabs.json", [])
@@ -332,7 +347,11 @@ def _spawn(scene: Scene, frame: _Frame, kind: str = "new-pane", name: str = "T")
         f'_vetcoders_vc_frame_session_action "{frame.bin}" host-a '
         f'action {kind} {" ".join(extra)} --name "{name}" --cwd "{scene.root}" '
         f'-- "{script}"',
-        extra_env={"STUB_DIR": str(frame.dir), "STUB_MODE": frame.mode},
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "STUB_MODE": frame.mode,
+            "VIBECRAFTED_PYTHON": sys.executable,
+        },
     )
 
 
@@ -375,7 +394,17 @@ def test_a_same_title_pane_is_not_evidence_of_this_launch(tmp_path: Path) -> Non
     scene = _scene(tmp_path)
     frame = _Frame(tmp_path, "same-title")
     (frame.dir / "panes.json").write_text(
-        json.dumps([{"title": "T", "pane_command": "/some/other/script.sh"}])
+        json.dumps(
+            [
+                {
+                    "id": 5,
+                    "is_plugin": False,
+                    "exited": False,
+                    "title": "T",
+                    "terminal_command": "/some/other/script.sh",
+                }
+            ]
+        )
     )
     result = _spawn(scene, frame, name="T")
 
@@ -414,3 +443,180 @@ def test_ambiguous_tab_ack_keeps_the_tab_presence_semantics(tmp_path: Path) -> N
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert len(frame.creations("new-tab")) == 1, frame.calls()
+
+
+# --------------------------------------------------------------------------
+# pane identity is structured: terminal_command == the launch's own script
+# --------------------------------------------------------------------------
+
+SCRIPT = "/tmp/vc-spawn-cmd-identity-17.sh"
+
+
+def _pane(**fields) -> dict:
+    base = {
+        "id": 7,
+        "is_plugin": False,
+        "exited": False,
+        "title": "T",
+        "terminal_command": SCRIPT,
+        "pane_command": "/bin/zsh",
+        "tab_name": "work",
+        "pane_cwd": "/tmp",
+    }
+    base.update(fields)
+    return base
+
+
+def _present(tmp_path: Path, payload, script: str = SCRIPT, raw: bool = False) -> bool:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "")
+    text = payload if raw else json.dumps(payload)
+    (frame.dir / "panes.raw").write_text(text, encoding="utf-8")
+    result = _run_face(
+        scene,
+        f'_vetcoders_vc_frame_pane_present "{frame.bin}" host-a {shlex.quote(script)}',
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "VIBECRAFTED_PYTHON": sys.executable,
+        },
+    )
+    assert "RC=[" in result.stdout, result.stdout + result.stderr
+    return "RC=[0]" in result.stdout
+
+
+def test_exact_terminal_command_is_pane_identity(tmp_path: Path) -> None:
+    assert _present(tmp_path, [_pane()])
+
+
+def test_title_only_match_is_not_identity(tmp_path: Path) -> None:
+    """Parent's counterexample: the token lives in an unrelated title while the
+    pane runs zsh. A raw substring match called this present."""
+    pane = _pane(title=SCRIPT, terminal_command="/bin/zsh")
+    assert not _present(tmp_path, [pane])
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"terminal_command": None, "pane_command": SCRIPT},
+        {"terminal_command": "/bin/zsh", "pane_cwd": SCRIPT},
+        {"terminal_command": "/bin/zsh", "tab_name": SCRIPT},
+        {"terminal_command": SCRIPT + "x"},
+        {"terminal_command": SCRIPT + " --arg"},
+        {"terminal_command": "/other" + SCRIPT},
+        {"is_plugin": True},
+        {"exited": True},
+        {"id": "7"},
+        {"id": True},
+    ],
+    ids=[
+        "live-pane_command-only",
+        "cwd-collision",
+        "tab-name-collision",
+        "longer-path",
+        "extra-argument",
+        "prefixed-path",
+        "plugin-pane",
+        "exited-pane",
+        "string-id",
+        "bool-id",
+    ],
+)
+def test_other_metadata_or_wrong_pane_type_is_not_identity(
+    tmp_path: Path, fields: dict
+) -> None:
+    assert not _present(tmp_path, [_pane(**fields)])
+
+
+def test_duplicate_identity_is_unknown(tmp_path: Path) -> None:
+    assert not _present(tmp_path, [_pane(id=1), _pane(id=2)])
+
+
+def test_one_live_pane_beside_an_exited_twin_is_unique(tmp_path: Path) -> None:
+    assert _present(tmp_path, [_pane(id=1, exited=True), _pane(id=2)])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["not json", '[{"id": 7,', "{}", '{"panes": []}', "null", "[1, 2]", ""],
+    ids=["text", "truncated", "object", "wrapped", "null", "scalars", "empty"],
+)
+def test_malformed_or_non_list_answers_are_unknown(
+    tmp_path: Path, payload: str
+) -> None:
+    assert not _present(tmp_path, payload, raw=True)
+
+
+def test_unicode_and_spaces_in_the_script_path_decode_exactly(tmp_path: Path) -> None:
+    script = '/tmp/ünï cöde/łódź launch "q" cmd.sh'
+    assert _present(tmp_path, [_pane(terminal_command=script)], script=script)
+    # json.dumps escaped it as \uXXXX / \" -- decoding, not text search, matched.
+    scene_dir = tmp_path / "ambiguous-frame"
+    assert "\\u" in (scene_dir / "panes.raw").read_text(encoding="utf-8")
+
+
+def test_failed_pane_query_is_unknown(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "no-pane-listing")
+    result = _run_face(
+        scene,
+        f'_vetcoders_vc_frame_pane_present "{frame.bin}" host-a "{SCRIPT}"',
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "STUB_MODE": "no-pane-listing",
+            "VIBECRAFTED_PYTHON": sys.executable,
+        },
+    )
+    assert "RC=[1]" in result.stdout, result.stdout + result.stderr
+
+
+def test_no_owned_interpreter_is_unknown_never_a_host_python(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "")
+    (frame.dir / "panes.raw").write_text(json.dumps([_pane()]), encoding="utf-8")
+    result = _run_face(
+        scene,
+        "_vetcoders_internal_python() { return 1; }; "
+        f'_vetcoders_vc_frame_pane_present "{frame.bin}" host-a "{SCRIPT}"',
+        extra_env={"STUB_DIR": str(frame.dir)},
+    )
+    assert "RC=[1]" in result.stdout, result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------
+# action classification: the action boundary, not any argv word
+# --------------------------------------------------------------------------
+
+
+def test_a_tab_named_new_pane_keeps_tab_semantics(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "ack-lost")
+    result = _spawn(scene, frame, kind="new-tab", name="new-pane")
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert len(frame.creations("new-tab")) == 1, frame.calls()
+
+
+def test_pane_launch_with_extra_arguments_has_no_provable_identity(
+    tmp_path: Path,
+) -> None:
+    """Only a single script argument after `--` is an identity; anything else
+    is unconfirmed (and still never reissued)."""
+    scene = _scene(tmp_path)
+    frame = _Frame(tmp_path, "ack-lost")
+    script = scene.tmp_path / "launch-extra.sh"
+    script.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+    result = _run_face(
+        scene,
+        f'_vetcoders_vc_frame_session_action "{frame.bin}" host-a '
+        f'action new-pane --floating --name T --cwd "{scene.root}" '
+        f'-- "{script}" extra',
+        extra_env={
+            "STUB_DIR": str(frame.dir),
+            "STUB_MODE": "ack-lost",
+            "VIBECRAFTED_PYTHON": sys.executable,
+        },
+    )
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert len([c for c in frame.calls() if "new-pane" in c]) == 1, frame.calls()
