@@ -14,7 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import fixed_terminal_fixture, seed_runtime_pack
+from _runtime_pack_fixture import (
+    fixed_terminal_fixture,
+    private_child_command,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 
 from scripts import vetcoders_install as installer
 
@@ -88,6 +93,11 @@ def _seal_runtime_pack_for_admission(payload: Path) -> Path:
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
     fixed_terminal_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(installer._FIXED_TERMINAL_HOST),
+    )
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -2222,13 +2232,17 @@ def test_expected_install_refusal_is_actionable_public_cli(tmp_path, roots, bad_
     else:
         (payload / "VERSION").unlink()
     result = subprocess.run(
-        [
-            sys.executable,
-            installer.__file__,
-            "runtime-install",
-            "--payload-root",
-            str(payload),
-        ],
+        private_child_command(
+            [
+                sys.executable,
+                str(payload / "scripts/vetcoders_install.py"),
+                "runtime-install",
+                "--payload-root",
+                str(payload),
+            ],
+            allowed=(installer._FIXED_TERMINAL_HOST,),
+            fixture_root=tmp_path,
+        ),
         capture_output=True,
         text=True,
         check=False,
