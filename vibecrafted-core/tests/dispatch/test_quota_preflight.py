@@ -590,3 +590,25 @@ def test_shared_scoped_exhaustion_refuses_the_whole_batch_before_reservation(
     monkeypatch.setattr(dispatch_cli, "reserve_run_id", forbidden)
     monkeypatch.setattr(dispatch_cli, "run_dispatch", forbidden)
     assert dispatch_cli.main([str(plan), "--json"]) == 1
+
+
+def _one_cut_dispatch() -> Any:
+    """``requirements`` reads only ``cuts[*].{id,agent,model}``."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(cuts=[SimpleNamespace(id="c1", agent="codex", model="")])
+
+
+def test_truncated_http_body_is_a_visible_warning_not_an_exception() -> None:
+    """``IncompleteRead`` is an ``HTTPException``, not an ``OSError``."""
+    import http.client
+
+    def torn(_url: str, _timeout: float) -> Any:
+        raise http.client.IncompleteRead(b"{", 10)
+
+    diagnosis = quota_preflight.diagnose(
+        _one_cut_dispatch(), server_url="http://127.0.0.1:1", fetch=torn
+    )
+    assert not diagnosis.errors
+    assert any("quota board unavailable" in m for _p, m in diagnosis.warnings)
+    assert diagnosis.findings[0].state == "absent"

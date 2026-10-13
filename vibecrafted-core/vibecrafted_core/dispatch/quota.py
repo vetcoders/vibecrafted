@@ -19,6 +19,7 @@ call.
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -183,7 +184,13 @@ def fetch_board(
     url = f"{server_url.rstrip('/')}{QUOTA_PATH}{query}"
     try:
         payload = (fetch or _http_get_json)(url, _PROBE_TIMEOUT_S)
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        OSError,
+        ValueError,
+        TimeoutError,
+    ) as exc:
         return {}, f"{type(exc).__name__}: {exc}"
     agents = payload.get("agents") if isinstance(payload, dict) else None
     if not isinstance(agents, list):
