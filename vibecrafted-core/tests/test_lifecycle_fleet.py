@@ -292,31 +292,179 @@ def test_child_meta_is_json_control_plane_record(tmp_path: Path, monkeypatch) ->
 
 def _seed_repo(path: Path) -> str:
     """A real git repo: the dispatcher refuses to build geometry without one."""
+    # cwd cannot override inherited repository, object, index or config routing.
+    # Keep the test environment, but give this synthetic repo its own Git state.
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env.update(
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
     path.mkdir(parents=True, exist_ok=True)
     for args in (
         ("init", "-q"),
         ("config", "user.email", "agents@vetcoders.io"),
         ("config", "user.name", "lifecycle-fleet-test"),
     ):
-        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", *args], cwd=path, env=env, check=True, capture_output=True
+        )
     (path / "README.md").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
     subprocess.run(
-        ["git", "commit", "-q", "-m", "seed"], cwd=path, check=True, capture_output=True
+        ["git", "add", "-A"], cwd=path, env=env, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "seed"],
+        cwd=path,
+        env=env,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/vetcoders/fixture.git"],
         cwd=path,
+        env=env,
         check=True,
         capture_output=True,
     )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=path,
+        env=env,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "routing",
+    [
+        "ordinary",
+        "repository",
+        "common-dir",
+        "index-objects",
+        "config-file",
+        "config-count",
+        "config-parameters",
+        "config-global-system",
+    ],
+)
+def test_seed_repo_fences_inherited_git_environment(
+    tmp_path: Path, monkeypatch, routing
+):
+    # The victim is an independent real repository, never the test checkout.
+    victim = tmp_path / "owned victim"
+    victim.mkdir()
+    home = tmp_path / "private-home"
+    home.mkdir()
+    clean_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+
+    def git(repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            env=clean_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git(victim, "init", "-q", "--template=")
+    git(victim, "config", "user.name", "owned-victim")
+    git(victim, "config", "user.email", "victim@example.invalid")
+    (victim / "sentinel").write_text("owned baseline\n", encoding="utf-8")
+    git(victim, "add", "sentinel")
+    git(victim, "commit", "-qm", "owned baseline")
+    victim_head = git(victim, "rev-parse", "HEAD")
+    (victim / "sentinel").write_text("foreign tracked dirt\n", encoding="utf-8")
+    (victim / "staged").write_text("foreign staged dirt\n", encoding="utf-8")
+    git(victim, "add", "staged")
+    (victim / "foreign-dirty.txt").write_text(
+        "foreign untracked dirt\n", encoding="utf-8"
+    )
+    hooks = victim / ".git/hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text(
+        f"#!/bin/sh\nprintf inherited-hook > {shlex.quote(str(victim / 'hook-ran'))}\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    foreign_config = tmp_path / "foreign-config"
+    foreign_config.write_text(
+        f"[core]\nhooksPath = {json.dumps(str(hooks))}\n", encoding="utf-8"
+    )
+    foreign_config_before = foreign_config.read_bytes()
+
+    def snapshot() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(victim)): path.read_bytes()
+            for path in victim.rglob("*")
+            if path.is_file()
+        }
+
+    before = snapshot()
+    for key in list(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(home))
+    hostile = {
+        "ordinary": {},
+        "repository": {"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim)},
+        "common-dir": {"GIT_COMMON_DIR": str(victim / ".git")},
+        "index-objects": {
+            "GIT_INDEX_FILE": str(victim / ".git/index"),
+            "GIT_OBJECT_DIRECTORY": str(victim / ".git/objects"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(victim / ".git/objects"),
+        },
+        "config-file": {"GIT_CONFIG": str(victim / ".git/config")},
+        "config-count": {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": str(hooks),
+        },
+        "config-parameters": {
+            "GIT_CONFIG_PARAMETERS": f"'core.hooksPath'={shlex.quote(str(hooks))}",
+        },
+        "config-global-system": {
+            "GIT_CONFIG_GLOBAL": str(foreign_config),
+            "GIT_CONFIG_SYSTEM": str(foreign_config),
+        },
+    }[routing]
+    for key, value in hostile.items():
+        monkeypatch.setenv(key, value)
+    caller_environment = dict(os.environ)
+    intended = tmp_path / "intended fixture"
+    head = _seed_repo(intended)
+    if dict(os.environ) != caller_environment:
+        pytest.fail("seed helper mutated the caller environment")
+    after = snapshot()
+    assert after == before
+    assert after[".git/HEAD"] == before[".git/HEAD"]
+    assert after[".git/index"] == before[".git/index"]
+    assert after[".git/config"] == before[".git/config"]
+    assert foreign_config.read_bytes() == foreign_config_before
+    assert git(victim, "rev-parse", "HEAD") == victim_head
+    assert git(intended, "rev-parse", "--show-toplevel") == str(intended.resolve())
+    assert git(intended, "rev-parse", "HEAD") == head
+    assert git(intended, "log", "-1", "--format=%s") == "seed"
+    assert git(intended, "ls-tree", "--name-only", "HEAD") == "README.md"
+    assert git(intended, "show", "HEAD:README.md") == "seed"
+    assert git(intended, "status", "--porcelain") == ""
+    assert git(intended, "config", "--local", "user.name") == "lifecycle-fleet-test"
+    assert git(intended, "config", "--local", "user.email") == "agents@vetcoders.io"
+    assert git(intended, "remote", "get-url", "origin") == (
+        "https://github.com/vetcoders/fixture.git"
+    )
 
 
 def test_mission_cut_agents_reads_the_provider_pin_beside_each_cut() -> None:
