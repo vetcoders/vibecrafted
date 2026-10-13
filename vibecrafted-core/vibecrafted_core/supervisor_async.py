@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import signal
 import sys
@@ -37,10 +38,14 @@ from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
 from .telemetry import (
+    CostRecord,
     RunTelemetry,
+    Unknown,
+    UsageRecord,
     build_run_telemetry,
     parent_session_ids,
     resolve_provider_session_id,
+    tokens_total,
     usage_record,
 )
 
@@ -206,6 +211,11 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         failure = attribute_failure(
             handle.transcript_path, handle.exit_code, agent=handle.agent
         )
+    aggregate = _workflow_parent_telemetry(handle, failure)
+    if aggregate is not None:
+        handle.agent_model = "aggregated"
+        handle.telemetry = aggregate
+        return aggregate
     if handle.stream_session_id:
         candidate, candidate_source = (
             handle.stream_session_id,
@@ -229,6 +239,162 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         completed_at=handle.completed_at.isoformat() if handle.completed_at else None,
     )
     return handle.telemetry
+
+
+def _workflow_parent_telemetry(handle: AsyncRunHandle, failure) -> RunTelemetry | None:
+    """Reduce terminal child receipts, never the orchestration Python stream.
+
+    Only the source-owned workflow module may publish this aggregate. Read
+    each exact terminal child meta and cross-check identity/usage mirrors;
+    arbitrary report prose or a precomputed parent sum is not evidence.
+    """
+    if len(handle.command) < 3 or handle.command[1:3] != (
+        "-m",
+        "vibecrafted_core.workflow_runtime",
+    ):
+        return None
+    if handle.meta_path is None:
+        return None
+    reason = "no terminal child receipts"
+    events = 0
+    totals = {
+        key: 0
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        )
+    }
+    cache_write = 0
+    cache_known = True
+    cost = 0.0
+    cost_known = True
+    valid = False
+    try:
+        parent = json.loads(handle.meta_path.read_text())
+        if not isinstance(parent, dict) or parent.get("run_id") != handle.run_id:
+            raise ValueError("workflow_parent_identity_mismatch")
+        children = parent.get("children")
+        receivers = parent.get("receivers", [])
+        if not isinstance(children, list) or not isinstance(receivers, list):
+            raise TypeError("workflow_child_receipts_missing")
+        rows = children + receivers
+        if isinstance(parent.get("synthesis"), dict) and parent["synthesis"]:
+            rows.append(parent["synthesis"])
+        if not rows:
+            raise ValueError("no terminal child receipts")
+        seen: set[str] = set()
+        all_known = True
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("run_id"), str):
+                raise TypeError("invalid_workflow_child_receipt")
+            run_id = row["run_id"]
+            if not run_id.startswith(handle.run_id + "-") or run_id in seen:
+                raise ValueError("workflow_child_identity_conflict")
+            seen.add(run_id)
+            report = Path(row["report"])
+            child = json.loads(report.with_suffix(".meta.json").read_text())
+            for key in ("run_id", "agent", "report", "transcript", "exit_code"):
+                if child.get(key) != row.get(key):
+                    raise ValueError(f"workflow_child_receipt_mismatch:{key}")
+            if Path(
+                str(child.get("root") or "")
+            ).resolve() != handle.root.resolve() or not child.get("completed_at"):
+                raise ValueError("workflow_child_not_terminal_on_assigned_root")
+            usage = child.get("usage")
+            if (
+                not isinstance(usage, dict)
+                or usage.get("schema") != "vibecrafted.usage.v1"
+            ):
+                raise ValueError("invalid_workflow_child_usage_schema")
+            count = usage.get("events")
+            if type(count) is not int or count < 0:
+                raise ValueError("invalid_workflow_child_usage_events")
+            events += count
+            values = {key: usage.get(key) for key in totals}
+            known = count > 0 and all(
+                type(value) is int and value >= 0 for value in values.values()
+            )
+            if usage.get("unit") != "tokens" or (count > 0 and not known):
+                raise ValueError("invalid_workflow_child_usage_values")
+            if known:
+                if values["tokens_total"] != tokens_total(
+                    values["tokens_input"],
+                    values["tokens_cached_input"],
+                    values["tokens_output"],
+                ):
+                    raise ValueError("contradictory_workflow_child_usage")
+                for key, value in values.items():
+                    if child.get(key) != value or row.get(key) != value:
+                        raise ValueError(f"contradictory_workflow_child_usage:{key}")
+                    totals[key] += value
+            else:
+                if not all(
+                    isinstance(value, dict)
+                    and value.get("value") == "unknown"
+                    and value.get("reason")
+                    for value in values.values()
+                ):
+                    raise ValueError("unmeasured_workflow_child_claims_known_usage")
+                if any(
+                    child.get(key) != "unknown" or row.get(key) != "unknown"
+                    for key in values
+                ):
+                    raise ValueError("contradictory_workflow_child_unknown_usage")
+                all_known = False
+            created = usage.get("tokens_cache_write")
+            if type(created) is int and created >= 0:
+                cache_write += created
+            else:
+                cache_known = False
+            child_cost = child.get("cost")
+            if not isinstance(child_cost, dict):
+                raise TypeError("invalid_workflow_child_cost")
+            amount = child_cost.get("amount")
+            if (
+                type(amount) in {int, float}
+                and math.isfinite(amount)
+                and amount >= 0
+                and child_cost.get("currency") == "USD"
+                and not child_cost.get("unit")
+            ):
+                if child_cost.get("source") != "provider_reported" and not str(
+                    child_cost.get("source")
+                ).startswith("estimated:"):
+                    raise ValueError("unmeasured_workflow_child_claims_known_cost")
+                if child.get("cost_usd") != amount or row.get("cost_usd") != amount:
+                    raise ValueError("contradictory_workflow_child_cost")
+                cost += amount
+            else:
+                cost_known = False
+        valid = all_known
+        reason = "one or more child phases have unmeasured usage"
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        reason = f"workflow aggregate refused: {error}"
+        cost_known = False
+    missing = Unknown(reason=reason)
+    usage = UsageRecord(
+        **{key: value if valid else missing for key, value in totals.items()},
+        tokens_cache_write=cache_write
+        if valid and cache_known
+        else Unknown(reason="child cache-write usage incomplete"),
+        source="children_sum",
+        events=events if valid else 0,
+    )
+    return RunTelemetry(
+        usage=usage,
+        cost=CostRecord(
+            amount=round(cost, 6)
+            if cost_known
+            else Unknown(reason="child cost evidence incomplete or invalid"),
+            source="children_sum" if cost_known else "unknown",
+        ),
+        failure=failure,
+        provider_session_id=Unknown(reason="workflow parent has no provider session"),
+        provider_session_source="none",
+        model="aggregated",
+    )
 
 
 def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -1236,6 +1402,10 @@ class AsyncSupervisor:
             )
 
         status = "completed" if handle.exit_code == 0 else "failed"
+        telemetry = _run_telemetry(handle)
+        runtime_fields = telemetry.frontmatter_fields()
+        if telemetry.usage.source == "children_sum" and not telemetry.usage.known:
+            runtime_fields["usage_reason"] = telemetry.usage.tokens_input.reason
         stamp_launcher_report_identity(
             report,
             run_id=handle.run_id,
@@ -1243,9 +1413,9 @@ class AsyncSupervisor:
             agent=handle.agent or "unknown",
             skill=handle.skill or "unknown",
             status=status,
-            model=handle.agent_model,
+            model=telemetry.model,
             claim_digest=handle.claim_digest,
-            runtime_fields=_run_telemetry(handle).frontmatter_fields(),
+            runtime_fields=runtime_fields,
         )
 
     def _sync_stream_summary(
