@@ -2767,6 +2767,40 @@ def test_guardian_http_line_reads_are_bounded_by_frame_budget(tmp_path: Path) ->
     assert response.read_limits == [guardian_module.MAX_SSE_FRAME_BYTES + 1]
 
 
+@pytest.mark.parametrize("text_mode", [False, True], ids=["bytes", "text"])
+def test_guardian_bounded_reader_terminates_at_bytes_and_text_eof(
+    tmp_path: Path, text_mode: bool
+) -> None:
+    import io
+
+    class Response(io.StringIO if text_mode else io.BytesIO):
+        status = 200
+
+        def __init__(self) -> None:
+            wire = ": ping\n\n"
+            super().__init__(wire if text_mode else wire.encode())
+            self.headers = {"Content-Type": "text/event-stream"}
+            self.read_limits: list[int] = []
+
+        def readline(self, size: int = -1) -> bytes | str:
+            self.read_limits.append(size)
+            assert len(self.read_limits) <= 4, "reader continued after text EOF"
+            return super().readline(size)
+
+    response = Response()
+    worker = GuardianWorker(
+        server_url="http://127.0.0.1:3024",
+        state=GuardianState(path=tmp_path / "state.json"),
+        opener=lambda _request, timeout: response,
+    )
+
+    stats = worker.consume_connection()
+
+    assert stats.heartbeats == 1
+    assert response.closed
+    assert response.read_limits == [guardian_module.MAX_SSE_FRAME_BYTES + 1] * 3
+
+
 @pytest.mark.parametrize("prefix", ["id:", "event:", ":", "unknown:"])
 def test_iter_sse_retains_non_data_line_limit(prefix: str) -> None:
     with pytest.raises(GuardianProtocolError, match="line exceeds"):

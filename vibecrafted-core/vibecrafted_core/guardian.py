@@ -3282,6 +3282,8 @@ class GuardianWorker:
                         else iter(response)
                     )
                     for line in lines:
+                        if callable(readline) and line in (b"", ""):
+                            return
                         if stop_requested():
                             return
                         yield line
