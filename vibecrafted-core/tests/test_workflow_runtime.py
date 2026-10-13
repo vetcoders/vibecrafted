@@ -951,12 +951,16 @@ def test_research_runtime_tees_child_output(
     assert "fake worker ok" in out
 
 
-def test_marbles_runtime_supervises_loops(monkeypatch, tmp_path: Path) -> None:
+def test_loop_runtime_aggregates_completed_write_children(
+    monkeypatch, tmp_path: Path
+) -> None:
     home = _runtime_env(monkeypatch, tmp_path, "marb-test")
 
     rc = workflow_runtime.main(
         [
             "marbles",
+            "--workflow",
+            "polarize",
             "--agent",
             "codex",
             "--root",
@@ -972,9 +976,9 @@ def test_marbles_runtime_supervises_loops(monkeypatch, tmp_path: Path) -> None:
 
     assert rc == 0
     report = (home / "parent.md").read_text(encoding="utf-8")
-    assert "vc-marbles supervised run" in report
-    assert "marbles-L1" in report
-    assert "marbles-L2" in report
+    assert "vc-polarize supervised run" in report
+    assert "polarize-L1" in report
+    assert "polarize-L2" in report
     assert "agent_session_id: codex-session" in report
     assert "agent_model: codex-model" in report
     assert "session_id: aggregated" in report
@@ -993,14 +997,14 @@ def test_marbles_runtime_supervises_loops(monkeypatch, tmp_path: Path) -> None:
     assert meta["cost_source"] == "children_sum"
     assert meta["children"][0]["tokens_total"] == 15
     assert meta["children"][1]["cost_usd"] == 0.015
-    assert (home / "marb-test-children" / "marbles-L1.md").is_file()
-    assert (home / "marb-test-children" / "marbles-L2.md").is_file()
+    assert (home / "marb-test-children" / "polarize-L1.md").is_file()
+    assert (home / "marb-test-children" / "polarize-L2.md").is_file()
     l2_transcript = (
-        home / "marb-test-children" / "marbles-L2.transcript.log"
+        home / "marb-test-children" / "polarize-L2.transcript.log"
     ).read_text(encoding="utf-8")
-    assert "intentionally blind to prior marbles runs" in l2_transcript
+    assert "intentionally blind to prior marbles runs" not in l2_transcript
     assert "Previous loop report" not in l2_transcript
-    assert "marbles-L1.md" not in l2_transcript
+    assert "polarize-L1.md" not in l2_transcript
 
 
 def _fake_kimi(bin_dir: Path, *, outcome: str = "completed") -> None:
@@ -1046,33 +1050,28 @@ def _fake_kimi(bin_dir: Path, *, outcome: str = "completed") -> None:
 def test_kimi_marbles_consumes_materialized_prompt_in_two_settled_rounds(
     monkeypatch, tmp_path: Path, model: str
 ) -> None:
-    home = _runtime_env(monkeypatch, tmp_path, "marb-kimi")
+    _runtime_env(monkeypatch, tmp_path, "marb-kimi")
     _fake_kimi(tmp_path / "bin")
     monkeypatch.setenv("VIBECRAFTED_EFFORT_REQUESTED", "high")
     root = tmp_path / "assigned tree"
     root.mkdir()
     prompt = "Full plan: żółw\n'quoted' $HOME `literal`\n" + "tail-proof " * 5000
 
-    rc = workflow_runtime.main(
-        [
-            "marbles",
-            "--agent",
-            "kimi",
-            "--root",
-            str(root),
-            "--prompt",
-            prompt,
-            "--count",
-            "2",
-            "--depth",
-            "4",
-            *(["--model", model] if model else []),
+    async def rounds():
+        return [
+            await workflow_runtime._run_child(
+                kind="marbles",
+                label=f"marbles-L{index}",
+                agent="kimi",
+                root=str(root),
+                prompt=workflow_runtime._loop_prompt("marbles", prompt, index, 2, 4),
+                model_requested=model,
+            )
+            for index in range(1, 3)
         ]
-    )
 
-    assert rc == 0
-    parent = json.loads((home / "parent.meta.json").read_text())
-    assert parent["status"] == "completed"
+    results = asyncio.run(rounds())
+    parent = {"children": [workflow_runtime._result_meta(result) for result in results]}
     assert len(parent["children"]) == 2
     identities = set()
     reports = set()
@@ -1119,6 +1118,10 @@ def test_kimi_marbles_consumes_materialized_prompt_in_two_settled_rounds(
 def test_kimi_marbles_requires_report_and_terminal_success(
     monkeypatch, tmp_path: Path, outcome: str
 ) -> None:
+    from test_cli_execution_controls import _git_repo
+
+    root = tmp_path / "assigned"
+    _git_repo(root)
     home = _runtime_env(monkeypatch, tmp_path, "marb-kimi-failure")
     _fake_kimi(tmp_path / "bin", outcome=outcome)
     rc = workflow_runtime.main(
@@ -1127,7 +1130,7 @@ def test_kimi_marbles_requires_report_and_terminal_success(
             "--agent",
             "kimi",
             "--root",
-            str(tmp_path),
+            str(root),
             "--prompt",
             "settle honestly",
             "--count",
@@ -1174,7 +1177,7 @@ def test_supervised_child_preserves_explicit_command_override(
     assert Path(result.transcript).read_text().splitlines()[0] == "--caller-owned"
 
 
-def test_public_source_marbles_kimi_runs_both_rounds_in_selected_worktree(
+def test_public_source_marbles_kimi_blocks_unstructured_reception(
     monkeypatch, tmp_path: Path
 ) -> None:
     from test_cli_execution_controls import _git_repo
@@ -1232,7 +1235,7 @@ def test_public_source_marbles_kimi_runs_both_rounds_in_selected_worktree(
         timeout=90,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
     receipt, completion = [json.loads(line) for line in result.stdout.splitlines()]
     assert receipt["accepted"] is True
     assert completion["completed"] is True
@@ -1244,8 +1247,10 @@ def test_public_source_marbles_kimi_runs_both_rounds_in_selected_worktree(
     command = receipt["worker_command"]
     assert command[:3] == [sys.executable, "-m", "vibecrafted_core.workflow_runtime"]
     parent = json.loads(Path(receipt["meta"]).read_text())
-    assert len(parent["children"]) == 2
-    assert parent["exit_code"] == 0
+    assert len(parent["children"]) == 1
+    assert parent["reception"]["verdict"] == "blocked"
+    assert parent["reception"]["reason"] == "reception_block_missing_or_ambiguous"
+    assert parent["exit_code"] == 1
     for child in parent["children"]:
         capture = json.loads(
             Path(child["report"]).with_suffix(".capture.json").read_text()
@@ -1309,7 +1314,7 @@ def test_polarize_runtime_reuses_loop_with_polarize_identity(
         ("completed", 3, 0, "completed"),
     ],
 )
-def test_marbles_loop_stops_on_child_report_status(
+def test_polarize_loop_stops_on_child_report_status(
     monkeypatch,
     tmp_path: Path,
     child_status: str,
@@ -1327,6 +1332,8 @@ def test_marbles_loop_stops_on_child_report_status(
     rc = workflow_runtime.main(
         [
             "marbles",
+            "--workflow",
+            "polarize",
             "--agent",
             "codex",
             "--root",
@@ -1347,12 +1354,12 @@ def test_marbles_loop_stops_on_child_report_status(
     report = (home / "parent.md").read_text(encoding="utf-8")
     assert report.splitlines()[1] == f"status: {expected_parent_status}"
     child_dir = home / f"marb-status-{child_status}-children"
-    assert (child_dir / "marbles-L1.md").is_file()
-    assert (child_dir / "marbles-L2.md").is_file() is (expected_children > 1)
-    assert (child_dir / "marbles-L3.md").is_file() is (expected_children > 2)
+    assert (child_dir / "polarize-L1.md").is_file()
+    assert (child_dir / "polarize-L2.md").is_file() is (expected_children > 1)
+    assert (child_dir / "polarize-L3.md").is_file() is (expected_children > 2)
 
 
-def test_marbles_loop_missing_frontmatter_is_not_a_stop(
+def test_polarize_loop_missing_frontmatter_is_not_a_stop(
     monkeypatch, tmp_path: Path
 ) -> None:
     """Unreadable/absent frontmatter must not invent a blocked stop."""
@@ -1362,6 +1369,8 @@ def test_marbles_loop_missing_frontmatter_is_not_a_stop(
     rc = workflow_runtime.main(
         [
             "marbles",
+            "--workflow",
+            "polarize",
             "--agent",
             "codex",
             "--root",
