@@ -4349,7 +4349,7 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "portable_python_load_pin" in builder
     assert "scripts/lib/portable-python.sh" in builder
     assert "uv python install 3.12.3" not in builder
-    assert 'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"' in builder
+    assert 'install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}"' in builder
     assert "python3.12" not in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
