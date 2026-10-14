@@ -522,6 +522,18 @@ def _declared(scene: Scene, flag: str = "--root") -> str:
     )
 
 
+def _assert_selected_resume_handoff(hosted: list[str], scene: Scene, flag: str) -> None:
+    assert hosted[0].endswith("launch-primary-shell.zsh")
+    assert hosted[1] == str(scene.generation / "bin/vibecrafted")
+    assert hosted[2:5] == ["resume", "codex", "--session-selection"]
+    selection = json.loads(hosted[5])
+    assert selection["accepted"] is True
+    assert selection["agent"] == "codex"
+    assert selection["agent_session_id"] == NATIVE_SESSION
+    assert selection["selection_root"] == str(scene.root.resolve())
+    assert hosted[6:] == ["--session", NATIVE_SESSION, flag, str(scene.root)]
+
+
 def _expected_place(scene: Scene) -> str:
     tag = "".join(ch if ch.isalnum() else "-" for ch in scene.root.name)
     return f"session-{tag}"
@@ -663,14 +675,7 @@ def test_explicit_root_from_stale_attached_marker_opens_the_declared_workspace(
         == scene.root.resolve()
     )
     hosted = argv[argv.index("-e") + 1 :]
-    assert hosted[2:] == [
-        "resume",
-        "codex",
-        "--session",
-        NATIVE_SESSION,
-        "--root",
-        str(scene.root),
-    ], hosted
+    _assert_selected_resume_handoff(hosted, scene, "--root")
     # The child is outside the frame the parent inherited its markers from.
     assert launch["boundary"] == "1", launch
     assert all(value is None for value in launch["markers"].values()), launch
@@ -1086,14 +1091,7 @@ def test_no_tty_outside_a_frame_escalates_with_session_and_absolute_root(
         == scene.root.resolve()
     )
     hosted = argv[argv.index("-e") + 1 :]
-    assert hosted[2:] == [
-        "resume",
-        "codex",
-        "--session",
-        NATIVE_SESSION,
-        flag,
-        str(scene.root),
-    ], hosted
+    _assert_selected_resume_handoff(hosted, scene, flag)
     # The escalating parent does nothing else: no tab, no create, no AICX.
     assert not _interactive_surfaces(scene.calls()) and not _creates(scene.calls())
     assert not scene.aicx_capture.exists()

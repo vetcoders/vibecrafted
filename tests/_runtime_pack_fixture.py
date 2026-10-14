@@ -98,7 +98,10 @@ def private_child_command(
     ):
         if python.is_file():
             paths.add(python.resolve())
-    for name in ("python3", "openssl", "bash"):
+    # Hosted macOS selects Homebrew perl/shasum before their system twins.
+    # Admit these exact selected executables, retaining the exec deny for all
+    # other paths (and the network/Mach/signal/Applications boundaries).
+    for name in ("python3", "openssl", "bash", "perl", "shasum"):
         selected = shutil.which(name)
         if selected:
             paths.update((Path(selected), Path(selected).resolve()))
@@ -130,6 +133,44 @@ def private_child_command(
         f"(deny process-exec)(allow process-exec {literals})"
     )
     return ["/usr/bin/sandbox-exec", "-p", profile, *command]
+
+
+def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
+    """Bind only a copied wrapper to a private Main bundle, retaining its checks.
+
+    The argv/environment tests use a recording executable, not the GUI host.
+    Production paths and signer policy remain untouched.
+    """
+    assert wrapper != REPO_ROOT / "scripts/vc-terminal-product-entry.sh"
+    bundle = wrapper.parents[2] / "Applications/Vibecrafted.app"
+    assert bundle.is_absolute() and bundle != Path("/Applications/Vibecrafted.app")
+    host = bundle / "Contents/MacOS/vc-terminal"
+    host.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(native, host)
+    host.chmod(0o755)
+    (bundle / "Contents/Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                "CFBundleExecutable": "Vibecrafted",
+            }
+        )
+    )
+    text = wrapper.read_text()
+    for old, replacement in (
+        (
+            "bundle=/Applications/Vibecrafted.app",
+            "bundle=" + installer.shlex_quote(str(bundle)),
+        ),
+        (
+            "candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal",
+            "candidate=" + installer.shlex_quote(str(host)),
+        ),
+    ):
+        assert text.count(old) == 1
+        text = text.replace(old, replacement, 1)
+    wrapper.write_text(text)
+    return host if sys.platform == "darwin" else native
 
 
 def bind_private_child_installer(

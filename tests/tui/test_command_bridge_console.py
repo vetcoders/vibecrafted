@@ -28,7 +28,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 TUI = REPO / "vibecrafted-app" / "tui-agent"
-TARGET = TUI / "target"
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", str(REPO / "vibecrafted-app/target")))
 ANSI = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)")
 NAV_BUDGET_S = 0.250
 
@@ -334,7 +334,15 @@ def test_command_bridge_home_console_pty(
     thread.start()
     down = b"\x1b[B"
     try:
-        first = session.drain(2.0)
+        # The fixture deliberately delays the asynchronous source for 2s.
+        # Wait for its observable Ready projection instead of racing that
+        # same 2s boundary and asserting against the loading screen.
+        first = ""
+        ready_deadline = time.monotonic() + 10.0
+        while time.monotonic() < ready_deadline:
+            first += session.drain(0.1)
+            if all(band in first for band in ("Live", "Needs attention", "Failed")):
+                break
         for band in ("Live", "Needs attention", "Failed"):
             assert band in first, first
         assert "[Global]" in first, first

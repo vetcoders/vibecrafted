@@ -2070,9 +2070,7 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
         env=env,
     )
 
-    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
-        encoding="utf-8"
-    )
+    assert not python_capture.exists(), "Voc must draw before a blocking CLI sync"
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert f"--state-root {installed_root / 'control_plane'}" in tui_args
     assert f"--deck {current_root / 'scripts' / 'vibecrafted'}" in tui_args
@@ -2206,9 +2204,7 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
         env=env,
     )
 
-    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
-        encoding="utf-8"
-    )
+    assert not python_capture.exists(), "Voc owns asynchronous projection refresh"
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert "--runtime headless" in tui_args
     assert f"--deck {current_root / 'scripts' / 'vibecrafted'}" in tui_args

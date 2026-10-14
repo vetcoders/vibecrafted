@@ -25,7 +25,11 @@ from vibecrafted_core.env_allowlist import filter_headless_worker_env
 from vibecrafted_core.runtime_paths import pin_runtime_python
 
 from scripts import vetcoders_install as installer
-from tests._runtime_pack_fixture import seed_runtime_pack
+from tests._runtime_pack_fixture import (
+    bind_private_terminal_wrapper,
+    private_child_command,
+    seed_runtime_pack,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UTIL_SH = REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/scripts/lib/util.sh"
@@ -420,11 +424,16 @@ def test_terminal_entry_pins_the_terminal_it_opens(world: dict[str, Path]) -> No
         f'python3 -c "{PROBE}"\n'
     )
     host.chmod(0o755)
+    selected_host = bind_private_terminal_wrapper(entry, host)
     config = world["home"] / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     config.parent.mkdir(parents=True)
     config.write_text("[general]\n")
     result = _run(
-        ["/bin/bash", str(entry), "-e", "/usr/bin/true"],
+        private_child_command(
+            ["/bin/bash", str(entry), "-e", "/usr/bin/true"],
+            allowed=(selected_host, Path("/usr/libexec/PlistBuddy")),
+            fixture_root=generation,
+        ),
         _base_env(world),
         world["home"],
     )

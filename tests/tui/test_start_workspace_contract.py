@@ -60,6 +60,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import bind_private_terminal_wrapper, private_child_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_CORE_DIR = REPO_ROOT / "vibecrafted-core"
@@ -816,6 +817,9 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
         f"with open({str(native_done)!r}, 'a') as f: f.write(json.dumps({{'status':rc}})+'\\n')\n"
         "sys.exit(os.waitstatus_to_exitcode(rc))\n",
     )
+    selected_host = bind_private_terminal_wrapper(
+        scene.generation / "bin/vc-terminal", scene.generation / "libexec/vc-terminal"
+    )
     _write(
         scene.generation / "bin/vc-start",
         "#!/bin/bash\n"
@@ -905,19 +909,30 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
         f"#!{sys.executable}\nimport sys\n"
         f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
         "if sys.argv[1:2] == ['workspace']:\n"
-        "    from vibecrafted_core.cli import main\n"
-        "    sys.exit(main(sys.argv[1:]))\n"
+        "    from vibecrafted_core.workspace_catalog import workspace_cli_main\n"
+        "    sys.exit(workspace_cli_main(sys.argv[2:]))\n"
         "sys.exit(0)\n",
     )
     script = _entry_script(scene, "vc-start --repo " + shlex.quote(str(scene.root)))
     run = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import pty,sys;sys.exit(pty.spawn("
-            + repr(_shell_argv(shell, script))
-            + "))",
-        ],
+        private_child_command(
+            [
+                sys.executable,
+                "-c",
+                "import pty,sys;sys.exit(pty.spawn("
+                + repr(_shell_argv(shell, script))
+                + "))",
+            ],
+            allowed=(
+                scene.owner,
+                selected_host,
+                scene.generation
+                / "vibecrafted-core/vibecrafted_core/config/vc-frame/pane-python",
+                Path(shutil.which("git")),
+                Path("/usr/libexec/PlistBuddy"),
+            ),
+            fixture_root=tmp_path,
+        ),
         check=False,
         env=env,
         cwd=scene.root,
@@ -1408,6 +1423,8 @@ def _run(
     developer_root: bool = False,
     owned_terminal: bool = False,
     timeout: int = 120,
+    fence_children: bool = False,
+    allowed_children: tuple[Path, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run the REAL public entry (`vc-start` from dispatch.sh) in a fresh shell."""
     env = scene.env(extra_env)
@@ -1426,6 +1443,10 @@ def _run(
     else:
         argv = _shell_argv(shell, script)
         stdin = subprocess.DEVNULL
+    if fence_children:
+        argv = private_child_command(
+            argv, allowed=(scene.owner, *allowed_children), fixture_root=scene.tmp_path
+        )
     return subprocess.run(
         argv,
         check=False,
@@ -3355,8 +3376,8 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
         "import sys\n"
         f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
         "if sys.argv[1:2] == ['workspace']:\n"
-        "    from vibecrafted_core.cli import main\n"
-        "    sys.exit(main(sys.argv[1:]))\n"
+        "    from vibecrafted_core.workspace_catalog import workspace_cli_main\n"
+        "    sys.exit(workspace_cli_main(sys.argv[2:]))\n"
         "sys.exit(0)\n",
     )
     _write(
@@ -4203,8 +4224,8 @@ def test_foreign_start_handoff_crosses_real_terminal_and_primary_shell(
 ) -> None:
     scene = Scene(tmp_path, live=("vc-host",), clients=("vc-host",))
     receipt_path = tmp_path / "primary-receipt.json"
-    # A valid older ambient bundle must not displace this generation's flat
-    # host when there is no generation .app. No GUI runs in this fixture.
+    # A valid older ambient bundle must not displace the selected product host.
+    # Bind only the copied wrapper; the child fence forbids installed GUI exec.
     import plistlib
 
     older = tmp_path / "old/Vibecrafted.app/Contents/Helpers/vc-terminal.app"
@@ -4240,6 +4261,10 @@ def test_foreign_start_handoff_crosses_real_terminal_and_primary_shell(
         "os.chdir(args[args.index('--working-directory')+1])\n"
         "sys.exit(pty.spawn(['/bin/bash',*args[boundary+1:]]))\n",
     )
+    selected_host = bind_private_terminal_wrapper(
+        scene.generation / "bin/vc-terminal",
+        scene.generation / "libexec/vc-terminal",
+    )
     _write(
         scene.generation / "bin/vc-start",
         f"#!{sys.executable}\n"
@@ -4266,6 +4291,8 @@ def test_foreign_start_handoff_crosses_real_terminal_and_primary_shell(
         scene,
         invocation + shlex.join([*args, "--repo", str(scene.root)]),
         tty=True,
+        fence_children=True,
+        allowed_children=(selected_host, Path("/usr/libexec/PlistBuddy")),
         extra_env={
             "VIBECRAFTED_TERMINAL_HOST": str(older_host),
             "VC_FRAME": "1",

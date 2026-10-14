@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
 from datetime import UTC, datetime
@@ -95,6 +96,18 @@ def _prepare_fake_marbles_bundle(tmp_path: Path) -> tuple[Path, Path]:
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/scripts/lib",
         scripts_dir / "lib",
+    )
+    # This fixture copies the shell library, not the Python package above it.
+    # Bind that private copy to its real owner instead of relying on an
+    # editable import inherited by Linux but absent in bare macOS Python.
+    util = scripts_dir / "lib/util.sh"
+    owner = 'source_root="$(cd "$lib_dir/../../../.." && pwd)"'
+    source = util.read_text()
+    assert source.count(owner) == 1
+    util.write_text(
+        source.replace(
+            owner, "source_root=" + shlex.quote(str(REPO_ROOT / "vibecrafted-core"))
+        )
     )
 
     for name in (
@@ -301,6 +314,41 @@ def _prepare_fake_marbles_bundle(tmp_path: Path) -> tuple[Path, Path]:
     return scripts_dir, capture_file
 
 
+def test_fake_bundle_resolves_artifacts_without_ambient_pythonpath(tmp_path):
+    scripts, _ = _prepare_fake_marbles_bundle(tmp_path)
+    home = tmp_path / "isolated"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.update(
+        HOME=str(home),
+        VIBECRAFTED_HOME=str(home / ".vibecrafted"),
+        VIBECRAFTED_PYTHON=str(Path(sys.base_prefix) / "bin/python3"),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1/common.sh"; spawn_store_dir "$2"',
+            "fixture",
+            str(scripts),
+            str(REPO_ROOT),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(
+        home
+        / ".vibecrafted/artifacts"
+        / _org_repo()
+        / datetime.now().strftime("%Y_%m%d")
+    )
+
+
 def _delay_next_plan_write(script_path: Path) -> None:
     marker = 'next_plan="$(_loop_child_plan "$next")"'
     replacement = 'sleep "${MARBLES_TEST_DELAY_NEXT_PLAN:-0}"\n' + marker
@@ -326,13 +374,42 @@ def _expected_operator_session(run_id: str | None = None) -> str:
 
 def _marbles_state_dirs(crafted_home: Path) -> list[Path]:
     marbles_dir = crafted_home / "marbles"
-    live = [
-        path
-        for path in marbles_dir.iterdir()
-        if path.is_dir() and path.name != "_archived"
-    ]
-    archived = list((marbles_dir / "_archived").glob("*/*"))
-    return live + archived
+    deadline = time.monotonic() + 5
+    while True:
+        live = [
+            path
+            for path in marbles_dir.iterdir()
+            if path.is_dir() and path.name != "_archived"
+        ]
+        archived = list((marbles_dir / "_archived").glob("*/*"))
+        # The verifier may archive between the two directory observations.
+        # Require the actual state file, retrying only this publication gap.
+        observed = [path for path in live + archived if (path / "state.json").is_file()]
+        if observed or time.monotonic() >= deadline:
+            return observed
+        time.sleep(0.02)
+
+
+def test_state_discovery_retries_archive_publication_gap(tmp_path, monkeypatch):
+    home = tmp_path / "crafted"
+    archived = home / "marbles/_archived"
+    state = archived / "2026-10-14/marb-fixture"
+    state.mkdir(parents=True)
+    (state / "state.json").write_text("{}")
+    original_glob = Path.glob
+    calls = 0
+
+    def observe(path, pattern):
+        nonlocal calls
+        if path == archived:
+            calls += 1
+            if calls == 1:
+                return iter(())
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", observe)
+    assert _marbles_state_dirs(home) == [state]
+    assert calls >= 2
 
 
 def _org_repo() -> str:

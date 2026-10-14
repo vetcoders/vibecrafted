@@ -939,12 +939,16 @@ def _update_owner_functions(*names: str) -> str:
     return "\n".join(bodies)
 
 
+@pytest.mark.parametrize(
+    "metadata_reader",
+    ["private"] + (["native"] if Path("/usr/bin/plutil").is_file() else []),
+)
 @pytest.mark.parametrize("mode", ["complete", "recover_fixed", "recover_historical"])
 @pytest.mark.parametrize(
     "damage", ["none", "missing", "symlink", "not_executable", "unknown_authority"]
 )
 def test_update_owner_executes_exact_existing_terminal_handoff(
-    tmp_path: Path, mode: str, damage: str
+    tmp_path: Path, mode: str, damage: str, metadata_reader: str
 ) -> None:
     root = tmp_path.resolve()
     source = root / "prior.app"
@@ -1023,6 +1027,21 @@ def test_update_owner_executes_exact_existing_terminal_handoff(
         "restore_prior_runtime",
         "complete_replacement",
     )
+    if metadata_reader == "private":
+        # This test owns locator/handoff semantics, not Apple's JSON reader.
+        # Run a strict file-backed reader on every OS; Darwin additionally
+        # runs the identical cases with the actual plutil above.
+        reader = root / "plutil"
+        reader.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            "from pathlib import Path\n"
+            "assert sys.argv[1:6] == ['-extract', 'launch_contract.program', 'raw', '-o', '-']\n"
+            "value = json.loads(Path(sys.argv[6]).read_text())['launch_contract']['program']\n"
+            "assert isinstance(value, str)\nprint(value)\n"
+        )
+        reader.chmod(0o755)
+        assert functions.count("/usr/bin/plutil") == 1
+        functions = functions.replace("/usr/bin/plutil", shlex.quote(str(reader)))
     shell = (
         "set -euo pipefail\n"
         + functions

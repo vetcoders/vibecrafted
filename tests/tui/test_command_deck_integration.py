@@ -245,7 +245,7 @@ def test_single_native_host_source_contract() -> None:
         assert name not in delegate + window
 
 
-def test_package_has_distinct_art_and_no_competing_tray() -> None:
+def test_package_has_canonical_app_icon_and_no_competing_tray() -> None:
     project = (SHELL / "app/project.yml").read_text()
     makefile = (SHELL / "Makefile").read_text()
     builder = (ROOT / "scripts/build-vibecrafted-release.sh").read_text()
@@ -255,7 +255,11 @@ def test_package_has_distinct_art_and_no_competing_tray() -> None:
     assert "libvibecrafted_shell_ffi" in project  # notifications still consume FFI
     assert "docs/presence/logo-master.png" in builder + makefile
     assert "VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO" not in builder
-    assert '"$TERMINAL_REPO/assets/icon/vc-terminal-icon.png"' in builder
+    assert (
+        'ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$SOURCE_ROOT/docs/presence/logo-master.png}"'
+        in builder
+    )
+    assert '"$ICON_SOURCE" "$resources/Vibecrafted.icns"' in builder
     assert 'install -m 0644 "$resources/Vibecrafted.icns"' not in builder
     assert "image.isTemplate = true" in tray
     assert "image.isTemplate = false" not in tray

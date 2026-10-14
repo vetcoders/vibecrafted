@@ -149,6 +149,21 @@ def app(path: Path, number: int) -> Path:
     executable.parent.mkdir()
     executable.write_text(f"#!/bin/sh\nexit {number}\n")
     executable.chmod(0o755)
+    # Complete replacement now requires the flat Terminal and Frame tuple.
+    # Borrow harmless native bytes; this fixture never starts either engine.
+    for relative in ("Contents/MacOS/vc-terminal", "Contents/Helpers/vc-frame"):
+        engine = path / relative
+        engine.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile("/usr/bin/true", engine)
+        engine.chmod(0o755)
+        subprocess.run(
+            private_child_command(
+                ["/usr/bin/codesign", "--force", "--sign", "-", str(engine)],
+                allowed=(Path("/usr/bin/codesign"),),
+            ),
+            check=True,
+            capture_output=True,
+        )
     with (path / "Contents/Info.plist").open("wb") as handle:
         plistlib.dump(
             {
@@ -201,7 +216,14 @@ def _app_child_command(command: list[str], env: dict[str, str]) -> list[str]:
         Path("/usr/sbin/lsof"),
         HELPER.parent / "ps",
         installer._FIXED_TERMINAL_HOST,
+        root
+        / "Applications/Vibecrafted.app/Contents/Resources/runtime-pack/install-runtime-pack.sh",
+        root / "Applications/Vibecrafted.app/Contents/MacOS/vc-terminal",
+        root / "Applications/Vibecrafted.app/Contents/Helpers/vc-frame",
     ]
+    empty_main_probe = root / "fixture-bin/swift-main-empty"
+    if empty_main_probe.is_file():
+        allowed.append(empty_main_probe)
     pgrep = shutil.which("pgrep", path=env["PATH"])
     if pgrep and Path(pgrep).resolve().is_relative_to(root):
         allowed.append(Path(pgrep))
@@ -555,6 +577,11 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
     (repo / "scripts").mkdir(parents=True)
     (repo / "dist").mkdir()
     shutil.copy(ROOT / "scripts/install-app.sh", repo / "scripts/install-app.sh")
+    ownership = Path(
+        "vibecrafted-app/shell-agent/app/Vibecrafted/AppInstanceOwnership.swift"
+    )
+    (repo / ownership).parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / ownership, repo / ownership)
     # Only fixture wiring differs: the real helper still performs all mutation,
     # strict codesign, locking, publication observation, and fd-bound disposal.
     (repo / "scripts/vc-app-update.sh").write_text(
@@ -564,6 +591,25 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
     )
     binaries = parent.parent / "fixture-bin"
     binaries.mkdir()
+    # This receipt/disposal test has no running Main. The real AppKit/quit
+    # adapter is exercised by test_install_app_main_identity; never let this
+    # filesystem fixture enumerate or signal host applications through Swift.
+    empty_main_probe = binaries / "swift-main-empty"
+    empty_main_probe.write_text(
+        f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
+        "assert len(sys.argv) == 3\n"
+        "source = Path(sys.argv[1]).read_text()\n"
+        "assert 'enum AppInstanceOwnership' in source\n"
+        "assert 'func installMainSnapshot' in source\n"
+        "assert Path(sys.argv[2]).name == 'Vibecrafted.app'\n"
+    )
+    empty_main_probe.chmod(0o755)
+    copied_wrapper = repo / "scripts/install-app.sh"
+    text = copied_wrapper.read_text()
+    assert text.count("/usr/bin/swift ") == 1
+    copied_wrapper.write_text(
+        text.replace("/usr/bin/swift ", str(empty_main_probe) + " ", 1)
+    )
     (binaries / "pgrep").write_text("#!/bin/sh\nexit 1\n")
     (binaries / "pgrep").chmod(0o755)
     env.update(

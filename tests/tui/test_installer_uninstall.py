@@ -503,7 +503,7 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert app_root.exists()
 
 
-def test_runtime_install_uses_helper_app_as_public_terminal_host(
+def test_runtime_install_selects_platform_host_over_legacy_helper_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
@@ -537,20 +537,26 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
     )
     installed = json.loads(capsys.readouterr().out)
     generation = runtime_home / "releases/9.9.9+g12345678"
-    assert Path(installed["terminal_host"]) == installer._FIXED_TERMINAL_HOST
+    expected_host = (
+        installer._FIXED_TERMINAL_HOST
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-terminal"
+    )
+    assert Path(installed["terminal_host"]) == expected_host
     assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert (generation / "libexec/vc-terminal").is_file()
     path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
     assert "VIBECRAFTED_TERMINAL_HOST=" in path_wrapper
-    assert str(installer._FIXED_TERMINAL_HOST) in path_wrapper
-    assert str(generation / "libexec/vc-terminal") not in path_wrapper
+    assert str(expected_host) in path_wrapper
+    if sys.platform == "darwin":
+        assert str(generation / "libexec/vc-terminal") not in path_wrapper
     assert str(generation / "bin/vc-terminal") in path_wrapper
 
 
-def test_runtime_install_uses_generation_bundle_without_app_root(
+def test_runtime_install_selects_platform_host_without_app_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A standalone generation supplies its own Finder/Dock terminal identity."""
+    """Darwin requires the paired Main; other hosts use the flat generation engine."""
     home = tmp_path / "home"
     runtime_home = home / ".local/share/vibecrafted"
     launcher_home = home / ".local/bin"
@@ -581,7 +587,12 @@ def test_runtime_install_uses_generation_bundle_without_app_root(
     generation = runtime_home / "releases/9.9.9+g12345678"
     generation_host = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     assert installed["app_root"] == ""
-    assert Path(installed["terminal_host"]) == installer._FIXED_TERMINAL_HOST
+    expected_host = (
+        installer._FIXED_TERMINAL_HOST
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-terminal"
+    )
+    assert Path(installed["terminal_host"]) == expected_host
     assert not installer._is_product_bundle_terminal_host(generation_host)
     assert (generation_host.parents[1] / "Info.plist").is_file()
     assert (generation_host.parents[1] / "Resources/Vibecrafted.icns").is_file()

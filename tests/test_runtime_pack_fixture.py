@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -21,8 +23,36 @@ import pytest
 
 from scripts import vetcoders_install as installer
 from tests._runtime_pack_fixture import (
+    fixed_terminal_fixture,
+    private_child_command,
     seed_runtime_pack,
 )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt exec policy")
+@pytest.mark.parametrize("tool", ["perl", "shasum"])
+def test_private_child_admits_selected_tool_variant(tmp_path, monkeypatch, tool):
+    tools = tmp_path / "selected-tools"
+    tools.mkdir()
+    executable = tools / tool
+    shutil.copyfile(f"/usr/bin/{tool}", executable)
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    data = tmp_path / "data"
+    data.write_text("fixture-data")
+    argv = (
+        [str(executable), "-e", "print qq(tool-ok\\n)"]
+        if tool == "perl"
+        else [str(executable), "-a", "256", str(data)]
+    )
+    result = subprocess.run(
+        private_child_command(argv),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("tool-ok" if tool == "perl" else str(data)) in result.stdout
 
 
 def test_seed_runtime_pack_includes_offline_synthetic_foundation_installer_and_roots(
@@ -94,6 +124,7 @@ def test_missing_foundations_installer_fails_unless_explicitly_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Missing foundations installer fails install; skip_foundations allows bypass."""
+    fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
     home = tmp_path / "home"
     home.mkdir()
     runtime_home = home / ".local" / "share" / "vibecrafted"

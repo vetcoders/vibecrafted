@@ -1097,8 +1097,11 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         assert f"attach --create-background {expected_session}" in payload
         assert "--new-session-with-layout" in payload
         assert f"--session {expected_session} --new-session-with-layout" not in payload
-        assert f"--session {expected_session} action new-tab" in payload
-        assert f"run_id=interactive target={expected_session}/claude" in result.stdout
+        assert f"--session {expected_session} action new-pane --floating" in payload
+        assert (
+            f"run_id=interactive target={expected_session}/{REPO_ROOT.name} · claude · unknown"
+            in result.stdout
+        )
         assert f"watch=vc-frame attach {expected_session}" in result.stdout
         assert "There is no active session!" not in result.stderr
         outcomes.append((result.returncode, result.stdout, result.stderr))

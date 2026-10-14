@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import bind_private_terminal_wrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCT_ENTRY = REPO_ROOT / "scripts" / "vc-terminal-product-entry.sh"
@@ -49,6 +50,7 @@ def _generation(tmp_path: Path) -> tuple[Path, Path]:
         "}))\n",
         0o755,
     )
+    bind_private_terminal_wrapper(wrapper, generation / "libexec" / "vc-terminal")
     return wrapper, capture
 
 

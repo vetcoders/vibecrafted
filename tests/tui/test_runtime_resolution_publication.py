@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from _runtime_pack_fixture import (
     REPO_ROOT,
+    bind_private_terminal_wrapper,
     fixed_terminal_fixture,
     private_child_command,
     private_runtime_pack_seed,
@@ -362,9 +363,12 @@ def test_ready_resolution_uses_generation_host_and_one_physical_config(
     paths, _, result = installed
     envelope = _resolve(paths, capsys, status="ready")
     assert envelope["runtime"]["root"] == result["root"]
-    assert envelope["runtime"]["terminal_host"] == str(
-        Path(result["root"]) / "libexec/vc-terminal"
+    expected_host = (
+        installer._FIXED_TERMINAL_HOST
+        if sys.platform == "darwin"
+        else Path(result["root"]) / "libexec/vc-terminal"
     )
+    assert envelope["runtime"]["terminal_host"] == str(expected_host)
     assert envelope["runtime"]["frame_config"] == str(
         Path.home() / ".config/vibecrafted/vc-frame"
     )
@@ -1699,6 +1703,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('VIBECRAFTED_RUNTIME_ROOT','VIBECRAFTED_RUNTIME_BIN','VIBECRAFTED_ROOT','VIBECRAFTED_TERMINAL_HOST','VIBECRAFTED_VC_FRAME_BIN','VIBECRAFTED_PYTHON','XDG_CONFIG_HOME','VC_FRAME_CONFIG_DIR','VC_FRAME_CONFIG_FILE','PYTHONPATH')}}}}))\n"
     )
     host.chmod(0o755)
+    selected_host = bind_private_terminal_wrapper(wrapper, host)
     monkeypatch.setenv("HOME", str(home))
     for key in (
         "VIBECRAFTED_RUNTIME_ROOT",
@@ -1725,7 +1730,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
             assert environment[key] == str(generation)
         assert environment["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
-        assert environment["VIBECRAFTED_TERMINAL_HOST"] == str(host)
+        assert environment["VIBECRAFTED_TERMINAL_HOST"] == str(selected_host)
         assert environment["VIBECRAFTED_VC_FRAME_BIN"] == str(
             generation / "libexec/vc-frame"
         )
@@ -1787,65 +1792,47 @@ def _terminal_wrapper_generation(tmp_path: Path) -> tuple[Path, Path, Path]:
     libexec = generation / "libexec/vc-terminal"
     libexec.write_text("#!/bin/sh\nprintf 'libexec-ran\\n'\n")
     libexec.chmod(0o755)
-    return generation, wrapper, libexec
+    selected_host = bind_private_terminal_wrapper(wrapper, libexec)
+    return generation, wrapper, selected_host
 
 
 @pytest.mark.skipif(
     sys.platform != "darwin",
     reason=".app is a Darwin identity mechanism; other platforms keep the flat host",
 )
-def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
-    tmp_path, monkeypatch
-):
+def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
     home = tmp_path / "home"
     entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
     entry.write_text("[general]\n")
-    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
-    bundle_host = (
-        tmp_path
-        / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    generation, wrapper, host = _terminal_wrapper_generation(tmp_path)
+    host.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'host': sys.argv[0]}))\n"
     )
-    _bundle_capture_host(bundle_host, sys.executable)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    legacy = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(legacy, sys.executable)
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(legacy))
     result = subprocess.run(
         [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
-    capture = json.loads(result.stdout)
-    assert capture["host"] == str(bundle_host)
-    assert capture["argv"] == ["--config-file", str(entry), "-e", "true"]
-
-    generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
-    _bundle_capture_host(generation_bundle, sys.executable)
-    monkeypatch.delenv("VIBECRAFTED_TERMINAL_HOST")
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    capture = json.loads(result.stdout)
-    assert capture["host"] == str(generation_bundle)
-
-    # An incomplete bundle must not masquerade as a valid branded host.
-    (generation_bundle.parents[1] / "Resources/alacritty.icns").unlink()
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "libexec-ran\n"
-
-    # Nor may a complete bundle that never received the canonical stamp: the
-    # donor ships its own CFBundleName and the builder overwrites it in both
-    # payloads, so an unstamped bundle is somebody else's app.
-    donor_bundle = tmp_path / "donor/vc-terminal.app/Contents/MacOS/alacritty"
-    _bundle_capture_host(donor_bundle, sys.executable, name="Alacritty")
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(donor_bundle))
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "libexec-ran\n"
+    captured = json.loads(result.stdout)
+    assert captured["host"] == str(host)
+    assert captured["argv"] == ["--config-file", str(entry), "-e", "true"]
+    # A generation bundle or inherited override never rescues a missing or
+    # symlinked fixed host. Keep the flat generation engine present as control.
+    host.unlink()
+    for symlink in (False, True):
+        if symlink:
+            host.symlink_to(legacy)
+        refused = subprocess.run(
+            [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+        )
+        assert refused.returncode == 78, refused.stderr
+        assert not refused.stdout
+        assert "fixed signed host missing" in refused.stderr
 
 
 @pytest.mark.skipif(
