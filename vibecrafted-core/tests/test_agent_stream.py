@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from vibecrafted_core.agent_stream import AgentStreamParser, resolve_default_model
 from vibecrafted_core.telemetry import estimate_cost_usd
 
@@ -246,6 +247,61 @@ def test_resolve_default_model_reads_codex_config(tmp_path, monkeypatch) -> None
         )
         == "gpt-5.3-codex"
     )
+
+
+@pytest.mark.parametrize(
+    "agent",
+    ["claude", "codex", "gemini", "grok", "junie", "agy", "kimi", "copilot", "cursor"],
+)
+def test_default_model_uses_only_selected_provider_environment(agent) -> None:
+    env = {
+        name.upper() + "_MODEL": name + "-model"
+        for name in (
+            "claude",
+            "codex",
+            "gemini",
+            "grok",
+            "junie",
+            "agy",
+            "kimi",
+            "copilot",
+            "cursor",
+        )
+    }
+    assert resolve_default_model(agent, env=env) == agent + "-model"
+    env["VIBECRAFTED_PARENT_MODEL"] = "generic-override"
+    assert resolve_default_model(agent, env=env) == "generic-override"
+    assert (
+        resolve_default_model(agent, command=[agent, "--model=explicit"], env=env)
+        == "explicit"
+    )
+
+
+def test_default_model_empty_environment_is_not_ambient(monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDE_MODEL", "ambient")
+    assert resolve_default_model("claude", env={}) == ""
+
+
+def test_stream_filter_keeps_provider_default_under_foreign_environment(
+    monkeypatch,
+) -> None:
+    from io import BytesIO
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    monkeypatch.delenv("VIBECRAFTED_PARENT_MODEL", raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", "foreign")
+    monkeypatch.setenv("CODEX_MODEL", "selected")
+    out = BytesIO()
+    assert (
+        filter_stream(
+            "codex",
+            stdin=BytesIO(b'{"type":"thread.started","thread_id":"t"}\n'),
+            stdout=out,
+        )
+        == 0
+    )
+    assert "model: selected" in out.getvalue().decode()
 
 
 def test_cost_estimates_lock_user_reported_grok_and_codex_regressions() -> None:

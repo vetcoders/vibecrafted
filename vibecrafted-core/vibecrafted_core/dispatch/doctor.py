@@ -17,6 +17,7 @@ from vibecrafted_core.repository_claims import (
 from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.runtime_receipt import ArtifactIdentityError
 
+from . import quota as quota_preflight
 from .model import Dispatch
 from .schema import doctor_dispatch
 from .worktrees import canonical_artifact_root, repo_identity
@@ -51,14 +52,21 @@ class DoctorReport:
     errors: tuple[DoctorError, ...]
     warnings: tuple[DoctorWarning, ...] = ()
     dispatch: Dispatch | None = None
+    quota_override_receipt: dict[str, Any] | None = None
+    quota_findings: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Render this report as a JSON-safe mapping (omits the parsed ``dispatch``)."""
-        return {
+        result: dict[str, Any] = {
             "ok": self.ok,
             "errors": [error.to_dict() for error in self.errors],
             "warnings": [warning.to_dict() for warning in self.warnings],
         }
+        if self.quota_findings:
+            result["quota"] = list(self.quota_findings)
+        if self.quota_override_receipt is not None:
+            result["quota_override_receipt"] = self.quota_override_receipt
+        return result
 
 
 def diagnose_text(text: str, *, base_dir: str | Path | None = None) -> DoctorReport:
@@ -74,8 +82,22 @@ def diagnose_text(text: str, *, base_dir: str | Path | None = None) -> DoctorRep
     )
 
 
-def diagnose_file(path: str | Path, *, run_id: str = "") -> DoctorReport:
-    """Validate a dispatch TOML file on disk; an unreadable file is reported as an error."""
+def diagnose_file(
+    path: str | Path,
+    *,
+    run_id: str = "",
+    check_quotas: bool = False,
+    ignore_usage_quota_warnings: bool = False,
+    quota_enforce: bool = True,
+    server_url: str | None = None,
+    quota_fetch: quota_preflight.Fetch | None = None,
+) -> DoctorReport:
+    """Validate a dispatch TOML file on disk; an unreadable file is reported as an error.
+
+    ``check_quotas`` adds the shared-observation quota preflight (the batch is
+    refused on confirmed exhaustion of a needed pool);
+    ``ignore_usage_quota_warnings`` bypasses only that refusal.
+    """
     source = Path(path).expanduser()
     try:
         text = source.read_text(encoding="utf-8")
@@ -90,11 +112,33 @@ def diagnose_file(path: str | Path, *, run_id: str = "") -> DoctorReport:
     if report.dispatch is None:
         return report
     runtime_errors = diagnose_runtime(report.dispatch, run_id=run_id) if run_id else ()
+
+    quota_errors: tuple[DoctorError, ...] = ()
+    quota_warnings: tuple[DoctorWarning, ...] = ()
+    quota_receipt: dict[str, Any] | None = None
+    quota_findings: tuple[dict[str, Any], ...] = ()
+    if check_quotas or ignore_usage_quota_warnings:
+        diagnosis = quota_preflight.diagnose(
+            report.dispatch,
+            ignore_warnings=ignore_usage_quota_warnings,
+            enforce=quota_enforce,
+            server_url=server_url,
+            fetch=quota_fetch,
+        )
+        quota_errors = tuple(DoctorError(p, m) for p, m in diagnosis.errors)
+        quota_warnings = tuple(DoctorWarning(p, m) for p, m in diagnosis.warnings)
+        quota_receipt = diagnosis.receipt()
+        quota_findings = tuple(item.to_dict() for item in diagnosis.findings)
+
+    all_errors = (*report.errors, *runtime_errors, *quota_errors)
+    all_warnings = (*report.warnings, *quota_warnings)
     return DoctorReport(
-        ok=not report.errors and not runtime_errors,
-        errors=(*report.errors, *runtime_errors),
-        warnings=report.warnings,
+        ok=not all_errors,
+        errors=all_errors,
+        warnings=all_warnings,
         dispatch=report.dispatch,
+        quota_override_receipt=quota_receipt,
+        quota_findings=quota_findings,
     )
 
 
@@ -293,9 +337,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--run-id", default="", help="also validate one runtime receipt ledger"
     )
+    parser.add_argument(
+        "--check-quotas",
+        action="store_true",
+        default=False,
+        help="preflight check agent quota pools",
+    )
+    parser.add_argument(
+        "--ignore-usage-quota-warnings",
+        action="store_true",
+        default=False,
+        help="bypass quota exhaustion errors and record override receipt",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="vc-server origin for the quota board (default: VC_SERVER_URL, then config)",
+    )
     args = parser.parse_args(argv)
 
-    report = diagnose_file(args.dispatch_file, run_id=args.run_id)
+    report = diagnose_file(
+        args.dispatch_file,
+        run_id=args.run_id,
+        check_quotas=args.check_quotas or args.ignore_usage_quota_warnings,
+        ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        server_url=args.server_url,
+    )
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:

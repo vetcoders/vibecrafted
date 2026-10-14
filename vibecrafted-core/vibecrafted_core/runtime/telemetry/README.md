@@ -55,21 +55,39 @@ telemetry archive         # backfill every present engine into the daily archive
 `install.sh` in each engine dir remains for operators who already installed
 those names; the product launcher is `telemetry`.
 
-## voc
+## Who collects
 
-Mission Control fleet health reads the quota JSON files on-read (no daemon
-required for the panel). Missing files are silent — the operator may not run
-that agent. Daemons keep the files fresh.
+`vc-server` owns collection. On its own schedule (every 300 s by default;
+`VIBECRAFTED_USAGE_COLLECT_INTERVAL_S`, `0` disables) it runs one bounded
+one-shot of these same engines — `fleet_engine` for six providers, the kimi
+harvest — which refreshes `$VIBECRAFTED_HOME/telemetry/<agent>/` (`scan-cache.json`,
+`quota.json`) and `archive/<agent>.jsonl`. Nothing stays resident: no per-provider
+daemon and no Python monitor child is needed for the numbers to move, and a
+second collection inside the interval is a no-op. Everything on that schedule
+reads local files only.
+
+The network is touched solely by a quota refresh, on explicit request
+(`GET /api/usage/quota?refresh=network`, the "Refresh quota" button) or as a
+plan's preflight (`refresh=preflight&agents=a,b`). Only providers with a
+provider-owned source answer (kimi probe, agy transcript 429 scan); every other
+provider reports `unknown` — quota exhaustion is never inferred from token
+totals. Agy keeps estimated transcripts only, so its local usage stays
+`unavailable` rather than becoming a zero.
 
 ## Web
 
-`vc-server` `/usage` leads with the same files: two cards (Antigravity, Kimi)
-above Cost & usage. `GET /api/usage/quota`. Shadow prices stay `api-equiv`.
-A missing file is a quiet card, not an alarm.
+`vc-server` `/usage` shows one card per provider (all eight, alphabetical, no
+provider first) from `GET /api/usage/quota`: `state` (`ok`, `low`, `exhausted`,
+`stale`, `unknown`, `absent`, `malformed`), source, age and pool/account/model
+scope. `exhausted` is only ever a fresh observation; an old one is `stale`. The
+usage table merges Vibecrafted runs (`origin: vc`) with all other local sessions
+(`origin: local`); a session a VC run already carries is counted once. Shadow
+prices stay `api-equiv`.
 
-## LaunchAgents (optional)
+## LaunchAgents (legacy, optional)
 
-Templates:
+The server-owned collector replaces these; they remain only for operators who
+already installed the standalone engines. Templates:
 
 - `com.vetcoders.telemetry.agy.plist.template`
 - `com.vetcoders.telemetry.kimi.plist.template`

@@ -63,14 +63,19 @@
 //!
 //! * `GET /api/usage` — canonical per-run token and cost report. Currencies
 //!   stay separate; unknown measurements stay unknown.
-//! * `GET /api/usage/quota` — live agy/kimi quota cards from the local monitor
-//!   files. Missing files are absent, not errors.
+//! * `GET /api/usage/quota` — one shared observation card per supported
+//!   provider (state, source, age, pool/account/model scope), read from the
+//!   telemetry projections. `?refresh=preflight&agents=a,b` first asks the
+//!   server-owned collector for those providers' authoritative quota sources.
+//!   Missing files are `absent`, not errors.
 //!
 //! The Loctree report and AICX routes are not part of this router: they carry
 //! their own boundaries and live in [`crate::tools`].
 
 #[cfg(feature = "ssr")]
 mod caretaker;
+#[cfg(feature = "ssr")]
+pub mod collector;
 #[cfg(feature = "ssr")]
 mod events_sse;
 #[cfg(feature = "ssr")]

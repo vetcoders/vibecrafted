@@ -140,68 +140,53 @@ async fn usage_api_projects_filters_totals_and_validation() {
 }
 
 #[tokio::test]
-async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
+async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
     let home = TestHome::new();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
-    let agy = json!({
-        "ts": ts,
-        "model_id": "gemini-3.1-pro-high",
-        "metrics": {"estimated_tokens": 12400, "cost_usd": 0.042},
-        "quota": {"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}
-    });
-    let kimi = json!({
-        "ts": ts,
-        "kind": "ok",
-        "plan": "Coding",
-        "limit5h": {"usedRatio": 0.97},
-        "monthTotal": {"usedRatio": 0.41},
-        "monthCode": {"usedRatio": 0.12}
-    });
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", agy.to_string());
-        std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi.to_string());
-    }
+    // Host activity the collector left behind (the real fleet_engine entry shape).
+    let dir = home.0.join("telemetry/claude");
+    fs::create_dir_all(&dir).expect("telemetry dir");
+    let mtime = chrono::Utc::now().timestamp() as f64 - 60.0;
+    fs::write(
+        dir.join("scan-cache.json"),
+        serde_json::to_vec(
+            &json!({"files": {"/s/claude/aaaa1111-2222-3333-4444-555566667777.jsonl": {
+                "parser": 3,
+                "days": [{"day": "2026-10-12", "model": "claude-opus-5-5",
+                          "input_tokens": 10, "output_tokens": 5,
+                          "cache_read_tokens": 0, "cache_creation_tokens": 0}],
+                "record": {"id": "aaaa1111-2222-3333-4444-555566667777", "mtime": mtime}
+            }}}),
+        )
+        .expect("json"),
+    )
+    .expect("scan cache");
 
-    let (status, cache, board) = get(&home.0, "/api/usage/quota").await;
+    let (status, _, all) = get(&home.0, "/api/usage?window=all").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cache, "no-store");
-    assert_eq!(board["schema"], "vibecrafted.quota-dashboard.v1");
-    let agents = board["agents"].as_array().expect("agents");
-    assert_eq!(agents.len(), 2);
-    assert_eq!(agents[0]["id"], "agy");
-    assert_eq!(agents[0]["status"], "blocked");
-    assert_eq!(agents[0]["headline"], "EXHAUSTED");
-    assert!(
-        agents[0]["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("api-equiv")
-    );
-    assert_eq!(agents[0]["tokens"], 12400);
-    assert_eq!(agents[1]["id"], "kimi");
-    assert_eq!(agents[1]["status"], "blocked");
-    assert_eq!(agents[1]["bars"][0]["label"], "5h");
-    assert_eq!(agents[1]["bars"][0]["level"], "blocked");
-    assert_eq!(agents[1]["bars"][1]["text"], "41%");
+    let origins: Vec<_> = all["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .map(|run| run["origin"].as_str().expect("origin").to_string())
+        .collect();
+    assert!(origins.contains(&"vc".to_string()) && origins.contains(&"local".to_string()));
+    assert_eq!(all["local_sources"].as_array().expect("sources").len(), 8);
 
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", "/nonexistent/agy-quota.json");
-        std::env::set_var(
-            "VIBECRAFTED_KIMI_QUOTA_JSON",
-            "/nonexistent/kimi-quota.json",
-        );
-    }
-    let (status, _, quiet) = get(&home.0, "/api/usage/quota").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(quiet["agents"][0]["present"], false);
-    assert_eq!(quiet["agents"][0]["status"], "absent");
-    assert_eq!(quiet["agents"][1]["status"], "absent");
-
-    unsafe {
-        std::env::remove_var("VIBECRAFTED_AGY_QUOTA_JSON");
-        std::env::remove_var("VIBECRAFTED_KIMI_QUOTA_JSON");
+    // The picker lists exactly the dimension names the API reports; choosing any
+    // of them must return exactly that dimension's runs.
+    for (picker, param) in [
+        ("providers", "provider"),
+        ("agents", "agent"),
+        ("models", "model"),
+    ] {
+        let names = all["dimensions"][picker].as_array().expect("dimension");
+        assert!(!names.is_empty(), "{picker}");
+        for dimension in names {
+            let name = dimension["name"].as_str().expect("name");
+            let uri = format!("/api/usage?window=all&{param}={name}");
+            let (status, _, filtered) = get(&home.0, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(filtered["totals"]["runs"], dimension["runs"], "{uri}");
+        }
     }
 }

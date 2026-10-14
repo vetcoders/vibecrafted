@@ -15,6 +15,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::usage_local::{LocalSource, VcSessions, read_local_usage};
 use crate::{ControlPlane, is_safe_run_id};
 
 pub const USAGE_REPORT_SCHEMA: &str = "vibecrafted.usage-report.v1";
@@ -45,6 +46,10 @@ pub struct UsageReport {
     pub dimensions: UsageDimensions,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
+    /// Per-provider account of the local side: what was read, what matched a
+    /// VC run, what is unavailable. Unknown stays visible here.
+    #[serde(default)]
+    pub local_sources: Vec<LocalSource>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,8 +78,16 @@ pub struct UsageRun {
     pub failure: Option<String>,
     pub provider_session_id: Value,
     pub telemetry_source: String,
+    /// `vc` — recorded by the Vibecrafted runtime; `local` — observed on the
+    /// host outside any VC run.
+    #[serde(default = "origin_vc")]
+    pub origin: String,
     #[serde(default, rename = "unpricedModels")]
     pub unpriced_models: Vec<String>,
+}
+
+fn origin_vc() -> String {
+    "vc".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -138,12 +151,18 @@ impl ControlPlane {
     pub fn usage_report(&self, now: DateTime<Utc>, filter: UsageFilter) -> UsageReport {
         let runtime_runs = self.control_plane_home().join("runtime_runs");
         let cutoff = filter.since.map(|duration| now - duration);
-        let mut runs = fs::read_dir(&runtime_runs)
+        let recorded = fs::read_dir(&runtime_runs)
             .ok()
             .into_iter()
             .flatten()
             .filter_map(Result::ok)
             .filter_map(|entry| read_usage_run(&entry.path()))
+            .collect::<Vec<_>>();
+        // Session ids of EVERY recorded run, before window/filter: a local
+        // session must not reappear because its VC twin was filtered out.
+        let vc_sessions = VcSessions::from_runs(&recorded);
+        let mut runs = recorded
+            .into_iter()
             .filter(|run| {
                 cutoff.is_none_or(|cutoff| {
                     parse_timestamp(&run.recorded_at).is_some_and(|stamp| stamp >= cutoff)
@@ -158,6 +177,22 @@ impl ControlPlane {
                 .then_with(|| left.run_id.cmp(&right.run_id))
         });
         recover_lazy_transcripts(&runtime_runs, &mut runs);
+
+        // Local activity of every provider, deduplicated against the runs the
+        // runtime already accounts for (those keep origin `vc`).
+        let local = read_local_usage(
+            &self.home().join("telemetry"),
+            &vc_sessions,
+            cutoff,
+            &filter,
+        );
+        runs.extend(local.runs);
+        runs.sort_by(|left, right| {
+            right
+                .recorded_at
+                .cmp(&left.recorded_at)
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        });
 
         let totals = totals(&runs);
         let dimensions = UsageDimensions {
@@ -183,6 +218,7 @@ impl ControlPlane {
             runs,
             totals,
             dimensions,
+            local_sources: local.sources,
         }
     }
 }
@@ -266,6 +302,7 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
         } else {
             "meta(legacy-uninstrumented)".to_string()
         },
+        origin: origin_vc(),
     })
 }
 
@@ -343,17 +380,32 @@ fn cost_from(block: Option<&Map<String, Value>>) -> UsageCost {
     }
 }
 
-fn matches_filter(run: &UsageRun, filter: &UsageFilter) -> bool {
-    field_matches(&run.provider, filter.provider.as_deref())
+pub(crate) fn matches_filter(run: &UsageRun, filter: &UsageFilter) -> bool {
+    provider_matches(&run.provider, &run.agent, filter.provider.as_deref())
         && field_matches(&run.agent, filter.agent.as_deref())
         && field_matches(&run.model, filter.model.as_deref())
 }
 
+/// A picker option is a dimension name (`display_value`), so a filter must
+/// match by that same name — including `unknown`, which stays selectable.
+fn provider_matches(provider: &Value, agent: &Value, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| {
+        let trimmed = expected.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+            return true;
+        }
+        display_value(provider).eq_ignore_ascii_case(trimmed)
+            || display_value(agent).eq_ignore_ascii_case(trimmed)
+    })
+}
+
 fn field_matches(value: &Value, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| {
-        value
-            .as_str()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+        let trimmed = expected.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+            return true;
+        }
+        display_value(value).eq_ignore_ascii_case(trimmed)
     })
 }
 
@@ -440,7 +492,7 @@ fn value_or_unknown(value: Option<&Value>, reason: &str) -> Value {
         .unwrap_or_else(|| unknown(reason))
 }
 
-fn unknown(reason: &str) -> Value {
+pub(crate) fn unknown(reason: &str) -> Value {
     json!({"value": "unknown", "reason": reason})
 }
 
@@ -576,7 +628,7 @@ fn lazy_telemetry(jobs: &[Value]) -> Option<BTreeMap<String, Value>> {
     Some(by_id)
 }
 
-fn telemetry_python() -> Option<Command> {
+pub(crate) fn telemetry_python() -> Option<Command> {
     let executable = explicit_python("VIBECRAFTED_PYTHON")
         .or_else(runtime_python)
         .unwrap_or_else(|| PathBuf::from("python3"));
@@ -626,6 +678,6 @@ fn source_core_dir() -> Option<PathBuf> {
     None
 }
 
-fn regular_file(path: &Path) -> bool {
+pub(crate) fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
 }

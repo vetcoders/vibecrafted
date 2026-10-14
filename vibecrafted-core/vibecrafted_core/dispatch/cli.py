@@ -26,6 +26,7 @@ from .model import (
     Verify,
     classify_base,
 )
+from .quota import publish_receipt as publish_quota_receipt
 from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
@@ -127,6 +128,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="RUN_ID",
         help="remove only settled per-cut worktrees/targets; retain branches and evidence",
     )
+    parser.add_argument(
+        "--ignore-usage-quota-warnings",
+        action="store_true",
+        help="bypass confirmed quota exhaustion admission gate; record deliberate override receipt",
+    )
     return parser
 
 
@@ -161,7 +167,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     source = Path(args.dispatch_file).expanduser()
 
-    report = diagnose_file(source)
+    report = diagnose_file(
+        source,
+        check_quotas=True,
+        ignore_usage_quota_warnings=args.ignore_usage_quota_warnings,
+        quota_enforce=not args.resume,
+    )
     if not report.ok:
         _print_doctor(report, json_output=args.json)
         return 1
@@ -204,6 +215,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
+    if report.quota_override_receipt is not None:
+        # The override is a durable decision: no receipt, no launch.
+        try:
+            for attempt in range(32):
+                name = (
+                    "quota-override-receipt.json"
+                    if attempt == 0
+                    else f"quota-override-receipt-{attempt}.json"
+                )
+                try:
+                    publish_quota_receipt(
+                        artifacts_dir / name, report.quota_override_receipt
+                    )
+                except FileExistsError:
+                    if attempt == 31:
+                        raise
+                else:
+                    break
+        except OSError as exc:
+            print(
+                f"quota override receipt could not be published ({exc}); "
+                "refusing to launch without a durable override decision",
+                file=sys.stderr,
+            )
+            return 1
     # The supervisor is silent on stdout until the whole DAG settles; its live
     # surface is tracker.md/journal.md, rewritten from second zero. Say so
     # BEFORE launching, or every observer concludes the launch hung
