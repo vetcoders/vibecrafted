@@ -38,87 +38,82 @@ printf '%s\n' \
   'This is one shot ephemeral shell unless you PIN ● it. Type command and forget.' \
   'You can open a real shell by pressing [+] in the tab bar anytime.'
 
-# Resolve the owned runtime interpreter (Python >= 3.11 with tomllib) to read
-# the operator's persistent configuration via the canonical config owner.
-# Host python3 (e.g. macOS 3.9.6) lacks tomllib and is rejected.
-_vc_quick_resolve_python() {
-  local candidate
-  for candidate in \
-    "${VIBECRAFTED_PYTHON:-}" \
-    "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/bin/python3}" \
-    "${VIBECRAFTED_RUNTIME_BIN:+${VIBECRAFTED_RUNTIME_BIN}/python3}" \
-    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/bin/python3}" \
-    "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin/python3}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)/.venv/bin/python3" \
-    python3.14 python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
-
-_vc_quick_python_core_path() {
-  if [[ -n "${VIBECRAFTED_CORE_PYTHONPATH:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_CORE_PYTHONPATH"
-    return 0
+# Locate and source canonical Vetcoders core authority for runtime and
+# interpreter resolution. Sourcing core.sh establishes _vetcoders_owned_core_dir
+# and _vetcoders_owned_python_bin with installed-generation failclosed policy.
+_vc_quick_core_sh=""
+_vc_quick_tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
+for _c in \
+  "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh}" \
+  "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh}" \
+  "${VIBECRAFTED_CORE_DIR:+${VIBECRAFTED_CORE_DIR}/vibecrafted_core/runtime/shell/lib/core.sh}" \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../runtime/shell/lib" 2>/dev/null && pwd)/core.sh" \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../shell/lib" 2>/dev/null && pwd)/core.sh" \
+  "${_vc_quick_tools_home}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"; do
+  if [[ -n "$_c" && -r "$_c" ]]; then
+    _vc_quick_core_sh="$_c"
+    break
   fi
-  local script_dir candidate
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  for candidate in \
-    "$(cd "$script_dir/../../.." 2>/dev/null && pwd)" \
-    "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/vibecrafted-core}" \
-    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/vibecrafted-core}"; do
-    [[ -n "$candidate" ]] || continue
-    if [[ -d "$candidate/vibecrafted_core" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
+done
+unset _vc_quick_tools_home
 
 # Quick cmd profile selection: default is "product". An explicit preference
 # in ~/.config/vibecrafted/config.toml under [terminal] quick_cmd_profile='personal'
 # loads the user's ~/.zshrc via personal-shell once before hooks become active.
 # Unknown or malformed settings are reported honestly to stderr and fall back safely.
+_vc_quick_saved_runtime_root="${VIBECRAFTED_RUNTIME_ROOT-}"
+_vc_quick_saved_runtime_root_set="${VIBECRAFTED_RUNTIME_ROOT+1}"
+
 _vc_quick_profile_preference="product"
-if _py="$(_vc_quick_resolve_python 2>/dev/null)"; then
-  _core_dir="$(_vc_quick_python_core_path 2>/dev/null || true)"
-  _pref_err=""
-  if command -v mktemp >/dev/null 2>&1; then
-    _pref_err="$(mktemp 2>/dev/null || true)"
+_vc_quick_owned_py=""
+# Sourcing core.sh resolves the canonical Vetcoders core and python interpreter.
+# shellcheck disable=SC1090
+if [[ -n "$_vc_quick_core_sh" ]] && source "$_vc_quick_core_sh" 2>/dev/null; then
+  _py="$(_vetcoders_owned_python_bin 2>/dev/null || true)"
+  _core_dir="$(_vetcoders_owned_core_dir 2>/dev/null || true)"
+  if [[ -n "$_py" && -x "$_py" ]]; then
+    _vc_quick_owned_py="$_py"
   fi
-  _pref_out=""
-  _pref_rc=0
-  if [[ -n "$_core_dir" ]]; then
-    if [[ -n "$_pref_err" ]]; then
-      _pref_out="$(PYTHONPATH="${_core_dir}${PYTHONPATH:+:$PYTHONPATH}" "$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
-    else
-      _pref_out="$(PYTHONPATH="${_core_dir}${PYTHONPATH:+:$PYTHONPATH}" "$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
+  if [[ -n "$_py" && -x "$_py" && -n "$_core_dir" && -d "$_core_dir" ]]; then
+    _pref_err=""
+    if command -v mktemp >/dev/null 2>&1; then
+      _pref_err="$(mktemp "${TMPDIR:-/tmp}/vc_quick_pref.XXXXXX" 2>/dev/null || true)"
     fi
-  else
+    _pref_out=""
+    _pref_rc=0
     if [[ -n "$_pref_err" ]]; then
-      _pref_out="$("$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
+      _pref_out="$("$_py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from vibecrafted_core.server_config import _main_cli; raise SystemExit(_main_cli(sys.argv[1:]))' "$_core_dir" quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
     else
-      _pref_out="$("$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
+      _pref_out="$("$_py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from vibecrafted_core.server_config import _main_cli; raise SystemExit(_main_cli(sys.argv[1:]))' "$_core_dir" quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
     fi
+    if (( _pref_rc == 0 )) && [[ -n "$_pref_out" ]]; then
+      _vc_quick_profile_preference="$_pref_out"
+    elif (( _pref_rc != 0 )) && [[ -n "$_pref_err" && -s "$_pref_err" ]]; then
+      cat "$_pref_err" >&2
+    fi
+    if [[ -n "$_pref_err" && -f "$_pref_err" ]]; then
+      rm -f "$_pref_err"
+    fi
+    unset _pref_err _pref_out _pref_rc
   fi
-  if (( _pref_rc == 0 )) && [[ -n "$_pref_out" ]]; then
-    _vc_quick_profile_preference="$_pref_out"
-  elif (( _pref_rc != 0 )) && [[ -n "$_pref_err" && -s "$_pref_err" ]]; then
-    cat "$_pref_err" >&2
-  fi
-  if [[ -n "$_pref_err" && -f "$_pref_err" ]]; then
-    rm -f "$_pref_err"
-  fi
-  unset _py _core_dir _pref_err _pref_out _pref_rc
+  unset _py _core_dir
 fi
+unset _vc_quick_core_sh _c
+
+if [[ -n "${_vc_quick_owned_py:-}" ]]; then
+  export _VC_QUICK_PYTHON="${_vc_quick_owned_py}"
+else
+  unset _VC_QUICK_PYTHON
+fi
+unset _vc_quick_owned_py
+
+if [[ -n "${_vc_quick_saved_runtime_root_set:-}" ]]; then
+  export VIBECRAFTED_RUNTIME_ROOT="${_vc_quick_saved_runtime_root}"
+else
+  unset VIBECRAFTED_RUNTIME_ROOT
+fi
+unset _vc_quick_saved_runtime_root _vc_quick_saved_runtime_root_set
+
 export _VC_QUICK_CMD_PROFILE="${_vc_quick_profile_preference}"
 
 # The Quick lane ZDOTDIR is product state, regenerated on every launch so an
@@ -152,7 +147,7 @@ _vc_quick_pin_state() {
     print -r -- unpinned
     return 0
   fi
-  if ! command -v vc-frame >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  if ! command -v vc-frame >/dev/null 2>&1 || [[ -z "${_VC_QUICK_PYTHON:-}" || ! -x "${_VC_QUICK_PYTHON}" ]]; then
     print -r -- unpinned
     return 0
   fi
@@ -163,7 +158,7 @@ _vc_quick_pin_state() {
   fi
   # The heredoc is python's program (stdin). The JSON rides in argv so it
   # is not swallowed by that redirection.
-  python3 - "${raw}" <<'PY'
+  "${_VC_QUICK_PYTHON}" -I - "${raw}" <<'PY'
 import json
 import os
 import sys

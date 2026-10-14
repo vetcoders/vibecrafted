@@ -9,9 +9,10 @@ stub on PATH instead of a substituted $SHELL.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
-import sys
 import time
+import venv
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,6 +99,7 @@ def _run_quick_cmd(
     frame_exit: int = 0,
     interrupt: bool = False,
     extra_env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Drive the wrapper with a `probe` PATH stub and a vc-frame stub."""
 
@@ -128,7 +130,7 @@ def _run_quick_cmd(
         capture_output=True,
         text=True,
         env=env,
-        cwd=tmp_path,
+        cwd=cwd or tmp_path,
         timeout=20,
         check=False,
     )
@@ -1025,10 +1027,36 @@ def _install_interactive_profile(tmp_path: Path) -> Path:
     return target
 
 
+def _make_installed_generation(
+    tmp_path: Path,
+    *,
+    version: str = "4.4.0",
+    valid_python: bool = True,
+) -> Path:
+    """Create a private copied-owner installed runtime generation fixture.
+
+    The generation sits under `releases/<version>`, satisfying
+    `_vetcoders_is_installed_generation_product`. Its core is copied from the
+    repository, binding the real owned interpreter (`bin/python3`) without
+    falling back to host python or ambient environment.
+    """
+    gen = tmp_path / "releases" / version
+    gen.mkdir(parents=True, exist_ok=True)
+    if valid_python:
+        venv.EnvBuilder(with_pip=False, symlinks=True).create(gen)
+    core_root = gen / "vibecrafted-core"
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+        core_root / "vibecrafted_core",
+    )
+    return gen
+
+
 def test_quick_cmd_untouched_product_preference_does_not_source_user_zshrc(
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     sentinel = tmp_path / "sentinel.log"
     (tmp_path / ".zshrc").write_text(
         f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
@@ -1039,7 +1067,7 @@ def test_quick_cmd_untouched_product_preference_does_not_source_user_zshrc(
         tmp_path,
         "probe untouched\n",
         panes=panes,
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1057,6 +1085,7 @@ def test_quick_cmd_personal_preference_sources_user_zshrc_exactly_once(
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     config_dir = tmp_path / ".config" / "vibecrafted"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
@@ -1072,7 +1101,7 @@ def test_quick_cmd_personal_preference_sources_user_zshrc_exactly_once(
         tmp_path,
         "probe personal\n",
         panes=panes,
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1093,6 +1122,7 @@ def test_quick_cmd_personal_preference_pinned_pane_survives_and_keeps_single_loa
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     config_dir = tmp_path / ".config" / "vibecrafted"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
@@ -1108,7 +1138,7 @@ def test_quick_cmd_personal_preference_pinned_pane_survives_and_keeps_single_loa
         tmp_path,
         "probe one\nprobe two\nexit\n",
         panes=panes,
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1129,6 +1159,7 @@ def test_quick_cmd_personal_preference_unrelated_pane_survives(
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     config_dir = tmp_path / ".config" / "vibecrafted"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
@@ -1144,7 +1175,7 @@ def test_quick_cmd_personal_preference_unrelated_pane_survives(
         "probe self\n",
         panes=panes,
         pane_id="terminal_18",
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1157,6 +1188,7 @@ def test_quick_cmd_malformed_preference_handled_honestly_and_falls_back(
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     config_dir = tmp_path / ".config" / "vibecrafted"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
@@ -1172,7 +1204,7 @@ def test_quick_cmd_malformed_preference_handled_honestly_and_falls_back(
         tmp_path,
         "probe fallback\n",
         panes=panes,
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1191,6 +1223,7 @@ def test_quick_cmd_malformed_toml_handled_honestly_and_falls_back(
     tmp_path: Path,
 ) -> None:
     _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
     config_dir = tmp_path / ".config" / "vibecrafted"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
@@ -1206,7 +1239,7 @@ def test_quick_cmd_malformed_toml_handled_honestly_and_falls_back(
         tmp_path,
         "probe fallback\n",
         panes=panes,
-        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
     )
 
     assert result.returncode == 0, result.stderr
@@ -1215,5 +1248,139 @@ def test_quick_cmd_malformed_toml_handled_honestly_and_falls_back(
     assert events == [
         "ran fallback",
         "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_installed_owned_interpreter_wins_over_hostile_environment(
+    tmp_path: Path,
+) -> None:
+    """Installed physical runtime core + valid owned interpreter wins over
+    hostile env, PATH, cwd, and ambient VIBECRAFTED_PYTHON."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+
+    # 1. Hostile python on PATH that records sentinel and exits with error
+    host_bin = tmp_path / "hostile_bin"
+    host_bin.mkdir()
+    hostile_python_sentinel = tmp_path / "hostile_python_called.log"
+    for name in ("python3", "python"):
+        p = host_bin / name
+        p.write_text(
+            f"#!/bin/sh\necho hit >> '{hostile_python_sentinel}'\nexit 79\n",
+            encoding="utf-8",
+        )
+        p.chmod(0o755)
+
+    # 2. Hostile json.py in cwd
+    hostile_cwd = tmp_path / "hostile_cwd"
+    hostile_cwd.mkdir()
+    (hostile_cwd / "json.py").write_text(
+        "raise RuntimeError('HOSTILE CWD JSON IMPORTED')\n",
+        encoding="utf-8",
+    )
+
+    # 3. Hostile module in ambient PYTHONPATH
+    hostile_lib = tmp_path / "hostile_lib" / "vibecrafted_core"
+    hostile_lib.mkdir(parents=True)
+    (hostile_lib / "__init__.py").write_text(
+        "raise RuntimeError('HOSTILE PYTHONPATH LIB IMPORTED')\n",
+        encoding="utf-8",
+    )
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal_sourced.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "personal_ok\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    stub_dir = tmp_path / "stubs"
+    bin_dir = tmp_path / "bin"
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe hostile_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PATH": f"{host_bin}:{stub_dir}:{bin_dir}:/usr/bin:/bin",
+            "PYTHONPATH": str(tmp_path / "hostile_lib"),
+            "VIBECRAFTED_PYTHON": str(host_bin / "python3"),
+        },
+        cwd=hostile_cwd,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not hostile_python_sentinel.exists(), (
+        "Hostile python on PATH / VIBECRAFTED_PYTHON must never be invoked"
+    )
+    assert personal_sentinel.exists(), (
+        "Personal profile must be loaded via canonical owned interpreter"
+    )
+    assert personal_sentinel.read_text(encoding="utf-8").strip() == "personal_ok"
+    assert events == [
+        "ran hostile_check",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_installed_owner_python_absent_refuses_host_fallback(
+    tmp_path: Path,
+) -> None:
+    """When installed owner python is missing, it refuses to fall back to
+    public/ambient host python and safely defaults to product profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path, valid_python=False)
+
+    host_bin = tmp_path / "hostile_bin"
+    host_bin.mkdir()
+    hostile_python_sentinel = tmp_path / "hostile_python_called.log"
+    for name in ("python3", "python"):
+        p = host_bin / name
+        p.write_text(
+            f"#!/bin/sh\necho hit >> '{hostile_python_sentinel}'\nexit 79\n",
+            encoding="utf-8",
+        )
+        p.chmod(0o755)
+
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    user_zshrc_sentinel = tmp_path / "user_zshrc_sourced.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{user_zshrc_sentinel}"\n', encoding="utf-8"
+    )
+
+    stub_dir = tmp_path / "stubs"
+    bin_dir = tmp_path / "bin"
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe absent_python\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PATH": f"{host_bin}:{stub_dir}:{bin_dir}:/usr/bin:/bin",
+            "VIBECRAFTED_PYTHON": str(host_bin / "python3"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not hostile_python_sentinel.exists(), (
+        "Public/host python must not be executed when installed owner python is absent"
+    )
+    assert not user_zshrc_sentinel.exists(), (
+        "Default product profile must be used when interpreter cannot be resolved"
+    )
+    assert events == [
+        "ran absent_python",
         "frame action close-pane --pane-id terminal_18",
     ]
