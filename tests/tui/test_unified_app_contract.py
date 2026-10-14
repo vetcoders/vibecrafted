@@ -1971,16 +1971,220 @@ def test_valid_app_has_one_bundle_identity_and_three_bound_entrypoints(
     )
 
 
+def _native_python_library_source(
+    config_var: Callable[[str], Any] = sysconfig.get_config_var,
+    *,
+    platform_name: str = sys.platform,
+    base_prefix: str = sys.base_prefix,
+) -> Path:
+    """Locate the running interpreter's CPython library for a fixture copy.
+
+    Mirrors ``test_native_host_has_real_product_process_identity``: a Darwin
+    framework build reports LDLIBRARY relative to PYTHONFRAMEWORKPREFIX, any
+    other build relative to LIBDIR. Relocated standalone builds can still
+    report their build-time LIBDIR, so the interpreter's own prefix lib is the
+    second, never-borrowed candidate.
+    """
+    configured = str(config_var("LDLIBRARY"))
+    if platform_name == "darwin" and config_var("PYTHONFRAMEWORK"):
+        candidates = [Path(str(config_var("PYTHONFRAMEWORKPREFIX"))) / configured]
+    else:
+        candidates = [
+            Path(str(config_var("LIBDIR"))) / configured,
+            Path(base_prefix) / "lib" / configured,
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(f"no CPython library among {candidates}")
+
+
+# Stable-ABI symbols scripts/native-python-entrypoint.c links. Never executed.
+_LIBPYTHON_STAND_IN_SOURCE = """#include <stddef.h>
+#include <wchar.h>
+int Py_BytesMain(int argc, char **argv) { (void)argc; (void)argv; return 0; }
+wchar_t *Py_DecodeLocale(const char *arg, size_t *size) {
+  (void)arg; (void)size; return NULL;
+}
+void Py_SetPythonHome(const wchar_t *home) { (void)home; }
+"""
+
+
+def _native_python_payload_library(
+    library_dir: Path,
+    config_var: Callable[[str], Any] = sysconfig.get_config_var,
+    *,
+    platform_name: str = sys.platform,
+    base_prefix: str = sys.base_prefix,
+    version: tuple[int, int] = sys.version_info[:2],
+) -> Path:
+    """Write the payload CPython library the release producer would embed.
+
+    A portable interpreter's own library already has payload geometry and is
+    copied under its flat name. A Darwin framework library is host-bound by
+    construction (LC_RPATH into the package prefix, compiled-in Cellar
+    prefix), which the product contract rightly refuses; production embeds
+    python-build-standalone instead. That host gets an inert stand-in under
+    the production ``libpython3.N.dylib`` name exporting the linked ABI.
+    """
+    source = _native_python_library_source(
+        config_var, platform_name=platform_name, base_prefix=base_prefix
+    )
+    library_dir.mkdir(parents=True)
+    if platform_name == "darwin" and config_var("PYTHONFRAMEWORK"):
+        library = library_dir / f"libpython{version[0]}.{version[1]}.dylib"
+        _compile_macho(
+            library,
+            source=_LIBPYTHON_STAND_IN_SOURCE,
+            extra_args=("-dynamiclib", f"-Wl,-install_name,@rpath/{library.name}"),
+        )
+        return library
+    library = library_dir / source.name
+    shutil.copyfile(source, library)
+    return library
+
+
+def test_native_python_library_source_resolves_framework_geometry(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "opt/python@3.14/Frameworks"
+    base_prefix = frameworks / "Python.framework/Versions/3.14"
+    library = base_prefix / "Python"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"framework-python")
+    # Homebrew's geometry: the old base_prefix/lib join names a missing file.
+    assert not (base_prefix / "lib" / "Python.framework/Versions/3.14/Python").exists()
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(base_prefix / "lib"),
+    }
+
+    source = _native_python_library_source(
+        config.get, platform_name="darwin", base_prefix=str(base_prefix)
+    )
+
+    assert source == library
+    assert source.name == "Python"
+
+
+@pytest.mark.parametrize("libdir_state", ["reported", "build_time"])
+def test_native_python_library_source_resolves_portable_lib_geometry(
+    tmp_path: Path, libdir_state: str
+) -> None:
+    base_prefix = tmp_path / "cpython-3.14-macos-aarch64-none"
+    library = base_prefix / "lib/libpython3.14.dylib"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"portable-python")
+    config = {
+        "LDLIBRARY": "libpython3.14.dylib",
+        "PYTHONFRAMEWORK": "",
+        "PYTHONFRAMEWORKPREFIX": "",
+        "LIBDIR": (
+            str(library.parent)
+            if libdir_state == "reported"
+            else str(tmp_path / "install/lib")
+        ),
+    }
+
+    source = _native_python_library_source(
+        config.get, platform_name="darwin", base_prefix=str(base_prefix)
+    )
+
+    assert source == library
+    assert source.name == "libpython3.14.dylib"
+
+
+def test_native_python_library_source_refuses_missing_library(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "Frameworks"
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(tmp_path / "lib"),
+    }
+    # A framework build never falls back to an unrelated prefix library.
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/Python.framework/Versions/3.14").mkdir(parents=True)
+    (tmp_path / "lib/Python.framework/Versions/3.14/Python").write_bytes(b"x")
+
+    with pytest.raises(AssertionError, match="no CPython library"):
+        _native_python_library_source(
+            config.get, platform_name="darwin", base_prefix=str(tmp_path)
+        )
+
+
+def test_native_python_payload_replaces_host_bound_framework_library(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "opt/python@3.14/Frameworks"
+    framework_library = frameworks / "Python.framework/Versions/3.14/Python"
+    framework_library.parent.mkdir(parents=True)
+    framework_library.write_bytes(b"/opt/homebrew/Cellar/python@3.14 prefix")
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(framework_library.parent / "lib"),
+    }
+
+    library = _native_python_payload_library(
+        tmp_path / "runtime/python/lib",
+        config.get,
+        platform_name="darwin",
+        base_prefix=str(framework_library.parent),
+        version=(3, 14),
+    )
+
+    assert library.name == "libpython3.14.dylib"
+    assert b"/opt/homebrew" not in library.read_bytes()
+    assert framework_library.read_bytes() != library.read_bytes()
+    assert {"_Py_BytesMain", "_Py_DecodeLocale", "_Py_SetPythonHome"} <= set(
+        subprocess.run(
+            ["nm", "-gjU", str(library)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+    )
+
+
+def test_native_python_payload_copies_portable_library_under_flat_name(
+    tmp_path: Path,
+) -> None:
+    base_prefix = tmp_path / "cpython-3.14-macos-aarch64-none"
+    portable_library = base_prefix / "lib/libpython3.14.dylib"
+    portable_library.parent.mkdir(parents=True)
+    portable_library.write_bytes(b"portable-python")
+    config = {
+        "LDLIBRARY": "libpython3.14.dylib",
+        "PYTHONFRAMEWORK": "",
+        "LIBDIR": "/install/lib",
+    }
+
+    library = _native_python_payload_library(
+        tmp_path / "runtime/python/lib",
+        config.get,
+        platform_name="darwin",
+        base_prefix=str(base_prefix),
+        version=(3, 14),
+    )
+
+    assert library == tmp_path / "runtime/python/lib/libpython3.14.dylib"
+    assert library.read_bytes() == b"portable-python"
+
+
 @pytest.fixture
 def native_python_contract_fixture(tmp_path: Path, macho_executable: Path):
     """Run the actual Python producer block and compile its native host."""
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
     runtime = app / "Contents/Resources/runtime"
-    library_name = str(sysconfig.get_config_var("LDLIBRARY"))
-    library = runtime / "python/lib" / library_name
-    library.parent.mkdir(parents=True)
-    shutil.copyfile(Path(sys.base_prefix) / "lib" / library_name, library)
+    library = _native_python_payload_library(runtime / "python/lib")
+    library_name = library.name
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
     start = builder.index(
         '  if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then'
