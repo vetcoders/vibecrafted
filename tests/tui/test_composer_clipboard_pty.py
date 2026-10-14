@@ -104,7 +104,10 @@ class EditorPTY:
             "with (r/'frame-calls').open('a') as f: f.write(json.dumps(a)+'\\n')\n"
             "if 'list-panes' in a: print((r/'panes.json').read_text())\n"
             "if 'dump-screen' in a: pathlib.Path(a[a.index('--path')+1]).write_bytes((r/'seed').read_bytes())\n"
-            "if 'write-chars' in a: (r/'sent').write_bytes(a[-1].encode())\n",
+            # Reproduce Linux's bounded single argv element on every host.
+            "if 'write-chars' in a:\n"
+            " if len(a[-1].encode()) > 32768: sys.exit(126)\n"
+            " with (r/'sent').open('ab') as out: out.write(a[-1].encode())\n",
         )
         real_editor = shutil.which(editor)
         assert real_editor
@@ -315,6 +318,14 @@ def test_large_yank_reaches_local_clipboard_while_editor_open(
     assert pane.clipboard.read_bytes() == draft
     assert b"\x1b]52;c;" not in pane.output
     pane.finish()
+    if script == "vc-composer.sh":
+        calls = [
+            json.loads(line)
+            for line in (pane.root / "frame-calls").read_text().splitlines()
+        ]
+        writes = [call[-1] for call in calls if "write-chars" in call]
+        assert len(writes) > 1
+        assert all(len(text.encode()) <= 32768 for text in writes)
 
 
 @pytest.mark.parametrize("editor", EDITORS)

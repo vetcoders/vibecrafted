@@ -225,5 +225,26 @@ if [[ -s "$f" ]]; then
     "$PASTE_STACK" push "$f" || true
   fi
   vc-frame action toggle-floating-panes || true
-  vc-frame action write-chars "$(cat -- "$f")"
+  draft="$(cat -- "$f")"
+  if (( ${#draft} <= 8192 )); then
+    vc-frame action write-chars "$draft"
+  else
+    # Linux caps each argv element independently of total ARG_MAX. Deliver
+    # bounded Unicode chunks through the same unexecuted write-chars action.
+    # Preserve the existing shell handback's removal of final LF characters.
+    "${VIBECRAFTED_PYTHON:-python3}" -I - "$f" <<'PY'
+import subprocess
+import sys
+
+with open(sys.argv[1], "rb") as draft:
+    text = draft.read().decode("utf-8", "surrogateescape").rstrip("\n")
+for offset in range(0, len(text), 8192):
+    result = subprocess.run(
+        ["vc-frame", "action", "write-chars", text[offset : offset + 8192]],
+        check=False,
+    )
+    if result.returncode:
+        raise SystemExit(result.returncode if result.returncode > 0 else 1)
+PY
+  fi
 fi
