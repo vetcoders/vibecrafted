@@ -4383,9 +4383,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     light = (REPO_ROOT / "config/vc-terminal/themes/light.toml").read_text(
         encoding="utf-8"
     )
-    primary_shell = (REPO_ROOT / "config/alacritty/launch-primary-shell.zsh").read_text(
-        encoding="utf-8"
-    )
+    primary_shell = REPO_ROOT / "config/alacritty/launch-primary-shell.zsh"
     delegate = (
         REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
     ).read_text(encoding="utf-8")
@@ -4462,8 +4460,35 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
             'exec "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"',
         ],
     }
-    assert "${1##*/}" in primary_shell
-    assert '"$0" "$@"' in primary_shell
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # An interpreter handoff must execute its exact argument vector, even
+        # when its basename is not a VC command. Quiet startup keeps a broken
+        # handoff from opening a real workspace during this private probe.
+        arguments = ["with spaces", "$literal; untouched", 'quoted "value"']
+        handoff = subprocess.run(
+            [
+                "/bin/bash",
+                str(primary_shell),
+                sys.executable,
+                "-I",
+                "-c",
+                "import json, sys; print(json.dumps(sys.argv[1:]))",
+                *arguments,
+            ],
+            cwd=temp_dir,
+            env={
+                "HOME": temp_dir,
+                "PATH": "/usr/bin:/bin",
+                "TERM": "dumb",
+                "VIBECRAFTED_QUIET_START": "1",
+            },
+            input="",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        assert json.loads(handoff.stdout.strip()) == arguments
     terminal_launch = delegate[
         delegate.index("private func openWorkspaceTerminal") : delegate.index(
             "private func terminalIsLive"
