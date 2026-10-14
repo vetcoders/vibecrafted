@@ -1420,6 +1420,38 @@ def test_kimi_interactive_command_is_flags_only_tui_entry() -> None:
         interactive_policy_command("kimi", "/vc-init", "local-native", "accept-edits")
 
 
+def test_kimi_interactive_owner_trusts_only_its_selected_workspace(tmp_path):
+    repo = tmp_path / "selected"
+    _repo(repo)
+    capture = tmp_path / "kimi-env.json"
+    binary = tmp_path / "bin/kimi"
+    binary.parent.mkdir()
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,pathlib,sys\n"
+        "if '--version' in sys.argv: print('2.1.1'); raise SystemExit(0)\n"
+        "if '--help' in sys.argv: print('--session <id> --auto'); raise SystemExit(0)\n"
+        f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{'trust':os.environ.get('KIMI_CODE_TRUST_WORKSPACE'),'cwd':os.getcwd()}}))\n"
+    )
+    binary.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("KIMI_CODE_TRUST_WORKSPACE", None)
+    env.update(
+        VIBECRAFTED_HOME=str(tmp_path / "state"), PATH=f"{binary.parent}:{env['PATH']}"
+    )
+    argv = _interactive_argv(repo)
+    argv[argv.index("claude")] = "kimi"
+    argv[argv.index("read-only")] = "bypass"
+    argv.extend(["--token-budget", "unmetered"])
+    result = subprocess.run(
+        argv, env=env, capture_output=True, text=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(capture.read_text()) == {"trust": "1", "cwd": str(repo)}
+    assert "KIMI_CODE_TRUST_WORKSPACE" not in env
+
+
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

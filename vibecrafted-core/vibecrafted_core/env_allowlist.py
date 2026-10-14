@@ -241,6 +241,21 @@ def env_key_allowed(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in _PREFIX_ALLOW)
 
 
+def provider_workspace_environment(
+    source: Mapping[str, str], provider: str
+) -> dict[str, str]:
+    """Trust the Kimi workspace selected by the admitted launch, process-locally.
+
+    Kimi's --auto controls tool approval, not folder trust. Without this
+    separate provider setting, headless jobs silently omit project MCPs and
+    interactive entries stop at a folder prompt. No global trust store changes.
+    """
+    child = dict(source)
+    if provider == "kimi":
+        child["KIMI_CODE_TRUST_WORKSPACE"] = "1"
+    return child
+
+
 def filter_headless_worker_env(source: Mapping[str, str]) -> dict[str, str]:
     """Copy only allowlisted string entries, then carry the runtime python pin.
 
@@ -250,12 +265,17 @@ def filter_headless_worker_env(source: Mapping[str, str]) -> dict[str, str]:
     the python door replaces it with its guest directory (see
     ``runtime_paths.pin_runtime_python``).
     """
-    return pin_runtime_python(
-        {
-            key: value
-            for key, value in source.items()
-            if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
-        }
+    return provider_workspace_environment(
+        pin_runtime_python(
+            {
+                key: value
+                for key, value in source.items()
+                if isinstance(key, str)
+                and isinstance(value, str)
+                and env_key_allowed(key)
+            }
+        ),
+        str(source.get("VIBECRAFTED_AGENT") or ""),
     )
 
 

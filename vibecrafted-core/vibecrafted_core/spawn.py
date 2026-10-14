@@ -40,6 +40,7 @@ from .effort_overrides import _effort_override_receipt, _with_effort_override
 from .env_allowlist import (
     dispatcher_identity,
     filter_headless_worker_env,
+    provider_workspace_environment,
     visible_color_environment,
 )
 from .events import append_event
@@ -2766,7 +2767,9 @@ def launch_interactive_workspace(
             admission=admission,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
-    child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
+    child_env = provider_workspace_environment(
+        _fresh_child_environment(os.environ.copy(), continuity_policy), provider
+    )
     parent_id, proven_native = disjoint_session_identities(
         parent_session_id=str(
             continuity_policy.parent_provider_session_id
@@ -3802,6 +3805,7 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
         "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
     }
+    child_env = provider_workspace_environment(child_env, provider)
     try:
         # The User-facing child keeps the exact inherited descriptors and TTY.
         child = subprocess.Popen(

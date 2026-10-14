@@ -1027,7 +1027,8 @@ def _fake_kimi(bin_dir: Path, *, outcome: str = "completed") -> None:
             report = Path(os.environ['VIBECRAFTED_REPORT_PATH'])
             run_id = os.environ['VIBECRAFTED_RUN_ID']
             receipt = {{'argv': argv, 'prompt': prompt, 'cwd': os.getcwd(),
-                       'run_id': run_id, 'report': str(report)}}
+                       'run_id': run_id, 'report': str(report),
+                       'workspace_trust': os.environ.get('KIMI_CODE_TRUST_WORKSPACE')}}
             report.with_suffix('.capture.json').write_text(json.dumps(receipt))
             if {outcome!r} != 'missing-report':
                 _, frontmatter, body = report.read_text().split('---', 2)
@@ -1080,6 +1081,7 @@ def test_kimi_marbles_consumes_materialized_prompt_in_two_settled_rounds(
         captured = json.loads(report.with_suffix(".capture.json").read_text())
         materialized = report.with_suffix(".prompt.md").read_text()
         assert captured["prompt"] == materialized
+        assert captured["workspace_trust"] == "1"
         assert prompt in materialized
         assert f"Marbles loop: L{index}/2. Depth target: 4." in materialized
         assert (

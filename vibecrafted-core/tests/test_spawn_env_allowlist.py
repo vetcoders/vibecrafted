@@ -7,7 +7,10 @@ import os
 import sys
 from pathlib import Path
 
-from vibecrafted_core.env_allowlist import filter_headless_worker_env
+from vibecrafted_core.env_allowlist import (
+    filter_headless_worker_env,
+    provider_workspace_environment,
+)
 from vibecrafted_core.spawn import (
     Supervisor,
     _fresh_child_environment,
@@ -19,6 +22,17 @@ _LEAK_SOCKET = "/tmp/dispatcher-bus.sock"
 _LEAK_TOKEN = "dispatcher-bus-token"
 _RUN_ID = "run-allow-1"
 _SESSION_ID = "sess-dispatcher-1"
+
+
+def test_workspace_trust_is_process_local_and_kimi_only():
+    source = {"PATH": "/usr/bin:/bin", "VIBECRAFTED_AGENT": "kimi"}
+    assert filter_headless_worker_env(source)["KIMI_CODE_TRUST_WORKSPACE"] == "1"
+    assert "KIMI_CODE_TRUST_WORKSPACE" not in source
+    for provider in ("codex", "claude", "grok", "junie", ""):
+        child = provider_workspace_environment(source, provider)
+        assert "KIMI_CODE_TRUST_WORKSPACE" not in child
+        headless = filter_headless_worker_env({**source, "VIBECRAFTED_AGENT": provider})
+        assert "KIMI_CODE_TRUST_WORKSPACE" not in headless
 
 
 def _dispatcher_env() -> dict[str, str]:
