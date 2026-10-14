@@ -22,7 +22,7 @@ Enter z karty. Urodził się panel. Talia 3/5. Poprzedni grok jedno `[‹]` wste
 ```
 0         1         2         3         4         5         6         7         8         9         0         1
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
- Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell  ○ voc                                                  Composer · cmd
+ Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell                                                   Voc · Composer · cmd
 SESSIONS 5          ┌ claude · resume · vibecrafted ───────────────────────────────────────────── [‹3/5›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
@@ -35,7 +35,7 @@ SESSIONS 5          ┌ claude · resume · vibecrafted ────────
    · Launchpad      │                                                                                                  │
    ◉ Agents         │                                                                                                  │
    · shell          │                                                                                                  │
-   · voc            │                                                                                                  │
+                    │                                                                                                  │
 05 ○ vibecrafted    │                                                                                                  │
    · grok           │                                                                                                  │
    · Shell          │                                                                                                  │

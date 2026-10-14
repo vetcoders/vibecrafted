@@ -22,7 +22,7 @@ Rytuał z Session Managera, nie jego lista. Tylko interaktywny launch. `←` `�
 ```
 0         1         2         3         4         5         6         7         8         9         0         1
 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
- Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell  ○ voc                                                  Composer · cmd
+ Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell                                                   Voc · Composer · cmd
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
@@ -35,7 +35,7 @@ SESSIONS 5          ┌ grok · vibecrafted ────────────
    · Launchpad      │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
    ◉ Agents         │     │    sciezka  /srv/vetcoders/vibecrafted                                               │     │
    · shell          │     │  Enter = interaktywny panel na tym tabie. Nie mux. Nie headless.                     │     │
-   · voc            │     └─ ↑/↓ wiersz  ·  ←/→ chip  ·  spacja  ·  enter  ·  esc ───────────────────────────────┘     │
+                    │     └─ ↑/↓ wiersz  ·  ←/→ chip  ·  spacja  ·  enter  ·  esc ───────────────────────────────┘     │
 05 ○ vibecrafted-vc_│                                                                                                  │
    · resume-grok    │                                                                                                  │
    · Shell          │                                                                                                  │
