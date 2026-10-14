@@ -2008,6 +2008,7 @@ wchar_t *Py_DecodeLocale(const char *arg, size_t *size) {
 }
 void Py_SetPythonHome(const wchar_t *home) { (void)home; }
 void Py_SetPath(const wchar_t *path) { (void)path; }
+const char *Py_GetVersion(void) { return "3.14.0"; }
 """
 
 

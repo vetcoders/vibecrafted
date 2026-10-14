@@ -19,6 +19,7 @@ extern int Py_BytesMain(int, char **);
 extern wchar_t *Py_DecodeLocale(const char *, size_t *);
 extern void Py_SetPythonHome(const wchar_t *);
 extern void Py_SetPath(const wchar_t *);
+extern const char *Py_GetVersion(void);
 #endif
 
 #ifndef VC_PYTHON_LIB
@@ -51,6 +52,22 @@ static int extract_stdlib_name(char *dest, size_t dest_size, const char *lib_nam
     size_t len = (size_t)(p - start);
     if (len + 1 > dest_size) return 0;
     int n = snprintf(dest, dest_size, "python%.*s", (int)(len - 6), start + 6);
+    return n > 0 && (size_t)n < dest_size;
+}
+
+static int extract_stdlib_from_version(char *dest, size_t dest_size, const char *version_str) {
+    if (!version_str) return 0;
+    const char *p = version_str;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p != '.') return 0;
+    p++;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == 't') p++;
+    size_t len = (size_t)(p - version_str);
+    if (len + 1 > dest_size) return 0;
+    int n = snprintf(dest, dest_size, "python%.*s", (int)len, version_str);
     return n > 0 && (size_t)n < dest_size;
 }
 
@@ -89,8 +106,60 @@ int main(int argc, char **argv) {
         !join(home, sizeof(home), root, "python") ||
         !join(python_lib, sizeof(python_lib), root, "python/lib")) return 78;
 
+#ifdef __APPLE__
+    Dl_info image;
+    char expected_library[PATH_MAX], loaded_library[PATH_MAX];
+    if (!realpath(library, expected_library) ||
+        !dladdr((const void *)Py_BytesMain, &image) || !image.dli_fname ||
+        !realpath(image.dli_fname, loaded_library) ||
+        strcmp(expected_library, loaded_library)) {
+        fprintf(stderr, "vc native host: CPython must load from this generation\n");
+        return 78;
+    }
+    int (*python_main)(int, char **) = Py_BytesMain;
+    wchar_t *(*decode_locale)(const char *, size_t *) = Py_DecodeLocale;
+    void (*set_home)(const wchar_t *) = Py_SetPythonHome;
+    void (*set_path)(const wchar_t *) = Py_SetPath;
+    const char *(*get_version)(void) = Py_GetVersion;
+#else
+    void *handle = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) {
+        fprintf(stderr, "vc native host: pinned CPython library unavailable: %s\n", dlerror());
+        return 78;
+    }
+    int (*python_main)(int, char **) = (int (*)(int, char **))dlsym(handle, "Py_BytesMain");
+    if (!python_main) return 78;
+    /* The stable ABI keeps home programmatic: -I/-E intentionally
+     * ignore PYTHONHOME, but must still find this closed generation's stdlib. */
+    wchar_t *(*decode_locale)(const char *, size_t *) =
+        (wchar_t *(*)(const char *, size_t *))dlsym(handle, "Py_DecodeLocale");
+    void (*set_home)(const wchar_t *) =
+        (void (*)(const wchar_t *))dlsym(handle, "Py_SetPythonHome");
+    void (*set_path)(const wchar_t *) =
+        (void (*)(const wchar_t *))dlsym(handle, "Py_SetPath");
+    const char *(*get_version)(void) =
+        (const char *(*)(void))dlsym(handle, "Py_GetVersion");
+    if (!decode_locale || !set_home || !set_path || !get_version) return 78;
+#endif
+
     char stdlib_name[64];
-    if (!extract_stdlib_name(stdlib_name, sizeof(stdlib_name), VC_PYTHON_LIB)) return 78;
+    char lib_stdlib[64];
+    char ver_stdlib[64];
+    int has_lib_stdlib = extract_stdlib_name(lib_stdlib, sizeof(lib_stdlib), VC_PYTHON_LIB);
+    int has_ver_stdlib = extract_stdlib_from_version(ver_stdlib, sizeof(ver_stdlib), get_version());
+    if (has_lib_stdlib && has_ver_stdlib) {
+        if (strcmp(lib_stdlib, ver_stdlib) != 0) {
+            fprintf(stderr, "vc native host: library version mismatch\n");
+            return 78;
+        }
+        snprintf(stdlib_name, sizeof(stdlib_name), "%s", lib_stdlib);
+    } else if (has_ver_stdlib) {
+        snprintf(stdlib_name, sizeof(stdlib_name), "%s", ver_stdlib);
+    } else if (has_lib_stdlib) {
+        snprintf(stdlib_name, sizeof(stdlib_name), "%s", lib_stdlib);
+    } else {
+        return 78;
+    }
 
     char stdlib[PATH_MAX], dynload[PATH_MAX], site_pkgs[PATH_MAX];
     if (!join(stdlib, sizeof(stdlib), python_lib, stdlib_name) ||
@@ -161,38 +230,7 @@ done_options: ;
     unsetenv("__PYVENV_LAUNCHER__");
     if (setenv("PYTHONNOUSERSITE", "1", 1) || setenv("PYTHONDONTWRITEBYTECODE", "1", 1) ||
         setenv("VIBECRAFTED_RUNTIME_ROOT", root, 1)) return 78;
-#ifdef __APPLE__
-    Dl_info image;
-    char expected_library[PATH_MAX], loaded_library[PATH_MAX];
-    if (!realpath(library, expected_library) ||
-        !dladdr((const void *)Py_BytesMain, &image) || !image.dli_fname ||
-        !realpath(image.dli_fname, loaded_library) ||
-        strcmp(expected_library, loaded_library)) {
-        fprintf(stderr, "vc native host: CPython must load from this generation\n");
-        return 78;
-    }
-    int (*python_main)(int, char **) = Py_BytesMain;
-    wchar_t *(*decode_locale)(const char *, size_t *) = Py_DecodeLocale;
-    void (*set_home)(const wchar_t *) = Py_SetPythonHome;
-    void (*set_path)(const wchar_t *) = Py_SetPath;
-#else
-    void *handle = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
-    if (!handle) {
-        fprintf(stderr, "vc native host: pinned CPython library unavailable: %s\n", dlerror());
-        return 78;
-    }
-    int (*python_main)(int, char **) = (int (*)(int, char **))dlsym(handle, "Py_BytesMain");
-    if (!python_main) return 78;
-    /* The stable ABI keeps home programmatic: -I/-E intentionally
-     * ignore PYTHONHOME, but must still find this closed generation's stdlib. */
-    wchar_t *(*decode_locale)(const char *, size_t *) =
-        (wchar_t *(*)(const char *, size_t *))dlsym(handle, "Py_DecodeLocale");
-    void (*set_home)(const wchar_t *) =
-        (void (*)(const wchar_t *))dlsym(handle, "Py_SetPythonHome");
-    void (*set_path)(const wchar_t *) =
-        (void (*)(const wchar_t *))dlsym(handle, "Py_SetPath");
-    if (!decode_locale || !set_home || !set_path) return 78;
-#endif
+
     wchar_t *python_home = decode_locale(home, NULL);
     if (!python_home) return 71;
     set_home(python_home); /* Retained for the complete interpreter lifetime. */
@@ -204,7 +242,11 @@ done_options: ;
 #else
     /* Internal core callers reuse sys.executable for Python module helpers.
      * Retain that actual interpreter contract within the named host. */
-    if (has_c_or_m) {
+    if (has_c_or_m ||
+        (argc > 1 && (!strcmp(argv[1], "-c") || !strcmp(argv[1], "-m") ||
+                     !strcmp(argv[1], "-u") || !strcmp(argv[1], "-B") ||
+                     !strcmp(argv[1], "-I") || !strcmp(argv[1], "-E") ||
+                     !strcmp(argv[1], "-s") || !strcmp(argv[1], "-S")))) {
         return run_python(python_main, argc, argv);
     }
     char **python_argv = calloc((size_t)argc + 5, sizeof(char *));

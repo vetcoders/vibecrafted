@@ -319,7 +319,13 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
 
     source = root / "vibecrafted-core"
     source.mkdir()
-    (source / "owned_core_mod.py").write_text("MAGIC = 42\n")
+    (source / "owned_core_mod.py").write_text(
+        "MAGIC = 42\n"
+        "def main():\n"
+        "    import sys\n"
+        "    print('PRODUCT_ENTRYPOINT_DISPATCH:' + ','.join(sys.argv[1:]))\n"
+        "    return 0\n"
+    )
 
     python_host = root / "bin/vc-python"
     module.render_native_host(
@@ -534,6 +540,125 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
     assert c_check.returncode == 0
     assert c_check.stdout.strip() == "preserved_c_door"
 
+    # 4b. Named host interpreter forms, flagged scripts/stdin, and product-entrypoint dispatch
+    named_host = root / "bin/vc-named-host"
+    module.render_native_host(named_host, "owned_core_mod:main", library)
+
+    # Normal named product entrypoint control
+    direct_product = subprocess.run(
+        [str(named_host)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert direct_product.returncode == 0, direct_product.stderr
+    assert direct_product.stdout.strip() == "PRODUCT_ENTRYPOINT_DISPATCH:"
+
+    app_args_product = subprocess.run(
+        [str(named_host), "--config", "runtime.toml", "serve"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert app_args_product.returncode == 0, app_args_product.stderr
+    assert (
+        app_args_product.stdout.strip()
+        == "PRODUCT_ENTRYPOINT_DISPATCH:--config,runtime.toml,serve"
+    )
+
+    # Flagged script execution across recognized first options (-B, -I, -E, -u, -s, -S)
+    helper_script = tmp_path / "script_helper.py"
+    helper_script.write_text(
+        "import sys; print('SCRIPT_RUN:' + ','.join(sys.argv[1:]))\n"
+    )
+    for flag in ("-B", "-I", "-E", "-u", "-s", "-S"):
+        script_res = subprocess.run(
+            [str(named_host), flag, str(helper_script), "arg1", "arg2"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert script_res.returncode == 0, f"Flag {flag} failed: {script_res.stderr}"
+        assert script_res.stdout.strip() == "SCRIPT_RUN:arg1,arg2"
+
+    # Flagged stdin execution (-B, -I, -u, -E, -s, -S)
+    for flag in ("-B", "-I", "-u", "-E", "-s", "-S"):
+        stdin_res = subprocess.run(
+            [str(named_host), flag, "-"],
+            input="import sys; print('STDIN_RUN:' + sys.argv[0])\n",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert stdin_res.returncode == 0, (
+            f"Stdin flag {flag} failed: {stdin_res.stderr}"
+        )
+        assert stdin_res.stdout.strip() == "STDIN_RUN:-"
+
+    # Retain parent counterexamples on named host
+    check_named_i = subprocess.run(
+        [
+            str(named_host),
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_named_i.returncode == 0, check_named_i.stderr
+    assert check_named_i.stdout.strip() == "False"
+
+    check_named_we = subprocess.run(
+        [
+            str(named_host),
+            "-W",
+            "ignore",
+            "-E",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_named_we.returncode == 0, check_named_we.stderr
+    assert check_named_we.stdout.strip() == "False"
+
+    check_named_xi = subprocess.run(
+        [
+            str(named_host),
+            "-X",
+            "dev",
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_named_xi.returncode == 0, check_named_xi.stderr
+    assert check_named_xi.stdout.strip() == "False"
+
+    check_named_ord = subprocess.run(
+        [
+            str(named_host),
+            "-c",
+            "-1; __import__('ambient_ISOLATION_canary'); print('loaded')",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_named_ord.returncode == 0, check_named_ord.stderr
+    assert check_named_ord.stdout.strip() == "loaded"
+
     # 5. Foreign Python and screenscribe child isolation
     foreign_pythons = [
         Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
@@ -568,6 +693,22 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
     )
     assert spawned_foreign.returncode == 0, spawned_foreign.stderr
 
+    spawned_foreign_named = subprocess.run(
+        [
+            str(named_host),
+            "-c",
+            (
+                "import subprocess, sys; "
+                f"r = subprocess.run([{str(foreign_python)!r}, '-B', '-c', 'import encodings'], capture_output=True); "
+                "sys.exit(r.returncode)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert spawned_foreign_named.returncode == 0, spawned_foreign_named.stderr
+
     screenscribe_bin = Path("/Users/polyversai/.local/bin/screenscribe")
     if not screenscribe_bin.is_file():
         found = shutil.which("screenscribe")
@@ -597,6 +738,22 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
             check=False,
         )
         assert spawned_ss.returncode == 0, spawned_ss.stderr
+
+        spawned_ss_named = subprocess.run(
+            [
+                str(named_host),
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    f"r = subprocess.run([{str(screenscribe_bin)!r}, '--help'], capture_output=True); "
+                    "sys.exit(r.returncode)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert spawned_ss_named.returncode == 0, spawned_ss_named.stderr
 
     # 6. Fail-closed invalid payload: host refuses when stdlib is missing
     empty_root = tmp_path / "empty_generation"
@@ -729,7 +886,13 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
 
     source = root / "vibecrafted-core"
     source.mkdir()
-    (source / "owned_core_mod.py").write_text("PBS_MAGIC = 314\n")
+    (source / "owned_core_mod.py").write_text(
+        "PBS_MAGIC = 314\n"
+        "def main():\n"
+        "    import sys\n"
+        "    print('PBS_ENTRYPOINT_DISPATCH:' + ','.join(sys.argv[1:]))\n"
+        "    return 0\n"
+    )
 
     python_host = root / "bin/vc-python"
     module.render_native_host(
@@ -849,6 +1012,44 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
     assert check_ord.returncode == 0, check_ord.stderr
     assert check_ord.stdout.strip() == "loaded"
 
+    # 3b. Named host execution in PBS 3.14 closure
+    named_pbs_host = root / "bin/vc-pbs-named"
+    module.render_native_host(named_pbs_host, "owned_core_mod:main", library)
+
+    # Named product entrypoint dispatch
+    pbs_entry = subprocess.run(
+        [str(named_pbs_host), "--mode", "pbs"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert pbs_entry.returncode == 0, pbs_entry.stderr
+    assert pbs_entry.stdout.strip() == "PBS_ENTRYPOINT_DISPATCH:--mode,pbs"
+
+    # Flagged script execution with -B and -I
+    pbs_script = tmp_path / "pbs_script.py"
+    pbs_script.write_text("print('PBS_SCRIPT_OK')\n")
+    for flag in ("-B", "-I"):
+        pbs_script_check = subprocess.run(
+            [str(named_pbs_host), flag, str(pbs_script)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert pbs_script_check.returncode == 0, pbs_script_check.stderr
+        assert pbs_script_check.stdout.strip() == "PBS_SCRIPT_OK"
+
+    # Flagged stdin execution with -I -
+    pbs_stdin_check = subprocess.run(
+        [str(named_pbs_host), "-I", "-"],
+        input="print('PBS_STDIN_OK')\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert pbs_stdin_check.returncode == 0, pbs_stdin_check.stderr
+    assert pbs_stdin_check.stdout.strip() == "PBS_STDIN_OK"
+
     # 4. Foreign uv Python and screenscribe child isolation
     foreign_pythons = [
         Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
@@ -920,6 +1121,98 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
     )
     assert mismatched_check.returncode == 78
     assert "stdlib unavailable in this generation" in mismatched_check.stderr
+
+
+def test_native_host_with_unversioned_framework_library(tmp_path):
+    if sys.platform != "darwin":
+        pytest.skip("framework library geometry verification is macOS only")
+    spec = importlib.util.spec_from_file_location(
+        "native_renderer", ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    configured_library = str(sysconfig.get_config_var("LDLIBRARY"))
+    if sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        library_source = (
+            Path(sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX")) / configured_library
+        )
+    else:
+        library_source = Path(sysconfig.get_config_var("LIBDIR")) / configured_library
+    assert library_source.is_file(), library_source
+
+    root = tmp_path / "unversioned_generation"
+    (root / "bin").mkdir(parents=True)
+    library_root = root / "python/lib"
+    library_root.mkdir(parents=True)
+    unversioned_lib = library_root / "Python"
+
+    shutil.copyfile(library_source, unversioned_lib)
+    subprocess.run(
+        ["install_name_tool", "-id", "@rpath/Python", str(unversioned_lib)],
+        check=True,
+    )
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(unversioned_lib)],
+        check=True,
+    )
+
+    (
+        library_root / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    ).symlink_to(sysconfig.get_path("stdlib"), target_is_directory=True)
+
+    source = root / "vibecrafted-core"
+    source.mkdir()
+    (source / "owned_core_mod.py").write_text(
+        "def main():\n"
+        "    import sys\n"
+        "    print('UNVERSIONED_ENTRYPOINT:' + ','.join(sys.argv[1:]))\n"
+        "    return 0\n"
+    )
+
+    named_host = root / "bin/vc-unversioned-named"
+    module.render_native_host(named_host, "owned_core_mod:main", "Python")
+
+    entry_check = subprocess.run(
+        [str(named_host), "app_arg"], capture_output=True, text=True, check=True
+    )
+    assert entry_check.stdout.strip() == "UNVERSIONED_ENTRYPOINT:app_arg"
+
+    helper = tmp_path / "helper.py"
+    helper.write_text("print('UNVERSIONED_SCRIPT_OK')\n")
+    script_check = subprocess.run(
+        [str(named_host), "-B", str(helper)], capture_output=True, text=True, check=True
+    )
+    assert script_check.stdout.strip() == "UNVERSIONED_SCRIPT_OK"
+
+    c_check = subprocess.run(
+        [str(named_host), "-c", "import sys; print('UNVERSIONED_C_OK')"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert c_check.stdout.strip() == "UNVERSIONED_C_OK"
+
+    # Negative: missing or mismatched stdlib fails closed with exit code 78
+    bad_root = tmp_path / "bad_unversioned"
+    (bad_root / "bin").mkdir(parents=True)
+    bad_lib_dir = bad_root / "python/lib"
+    bad_lib_dir.mkdir(parents=True)
+    shutil.copyfile(unversioned_lib, bad_lib_dir / "Python")
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(bad_lib_dir / "Python")],
+        check=True,
+    )
+    bad_host = bad_root / "bin/vc-bad-unversioned"
+    module.render_native_host(bad_host, "owned_core_mod:main", "Python")
+    bad_check = subprocess.run(
+        [str(bad_host), "-c", "print('bad')"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_check.returncode == 78
+    assert "stdlib unavailable in this generation" in bad_check.stderr
 
 
 def test_fixed_terminal_host_refuses_generation_app_identity(tmp_path):
