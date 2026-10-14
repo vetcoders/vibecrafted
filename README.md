@@ -168,11 +168,16 @@ The `//` is not decoration. It is the mark.
 ## Install
 
 Check the [latest GitHub Release](https://github.com/vetcoders/vibecrafted/releases/latest)
-for the assets it actually carries. The latest public release is `v3.5.0` and
-does not include the 4.x DMG, Runtime Packs, portable archive, or native Windows
-installers. For the current public install path, use the bootstrap on macOS or
-Linux, and WSL2 on Windows. Versioned carrier names below describe the 4.x
-release contract and become usable when those assets are published:
+for the assets it actually carries
+(`gh release view --repo vetcoders/vibecrafted --json tagName,assets`). Tags
+`v4.0.0` through `v4.3.3` were never published as GitHub Releases; the newest
+release before 4.4 is `v3.5.0`, a source tarball without DMG, Runtime Packs,
+portable archive or Windows installers. When the latest release lacks the
+carrier you need, use the bootstrap on macOS or Linux, and WSL2 on Windows.
+The bootstrap installs the version named in
+[`channel/main.json`](https://vibecrafted.io/channel/main.json), which the
+website publishes on its own schedule. Versioned carrier names below describe
+the 4.x release contract and are usable once a release attaches them:
 
 - macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
 - macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
@@ -294,11 +299,12 @@ vibecrafted status                   # today's runs
 **macOS desktop app:** the intended end-user shape is one Developer ID signed
 and notarized `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` carrying matching
 builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete runtime.
-The DMG is an artifact of releases from 4.3.1 on. Check what a release
-actually carries (`gh release view --json assets -q '.assets[].name'`); if it
-lists a DMG, download it and its adjacent `.dmg.sha256`, verify the checksum,
-then open the DMG. The latest published release may not carry one yet — until
-a release with the DMG is published, use the bootstrap above.
+The DMG belongs to the 4.x release contract; no GitHub Release up to `v4.3.3`
+attached one. Check what a release actually carries
+(`gh release view --repo vetcoders/vibecrafted --json assets -q '.assets[].name'`);
+if it lists a DMG, download it and its adjacent `.dmg.sha256`, verify the
+checksum, then open the DMG. Until a release with the DMG is published, use the
+bootstrap above.
 
 The same release also carries
 `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`, its
@@ -311,15 +317,16 @@ same release carries `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
 and its adjacent `.sha256`. It is not a convenience copy of the repository — it
 is an allowlisted projection of one exact commit, carrying a closed
 `source-provenance.json` whose distribution-tree digest names that commit. The
-installer refuses a payload whose provenance does not close:
+installer refuses a payload whose provenance does not close. Pair it with the
+matching Runtime Pack; the source archive is not the native carrier:
 
 ```bash
 tar -xzf Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz
-bash vibecrafted-<version>/install.sh
+bash vibecrafted-<version>/install.sh --runtime-pack-file /absolute/path/to/matching-pack.tar.gz install
 ```
 
-Unlike `curl | bash`, that pins you to a version instead of to whatever a
-branch happens to hold today.
+Unlike `curl | bash`, which installs whatever the website channel names when
+you run it, that pins you to one verified commit.
 
 Every new or restored `workspace_id` enters through the bundled `vc-start`.
 Vibecrafted sources its own XDG/runtime environment and does not overwrite your

@@ -6,18 +6,25 @@ For source-backed cold-machine instructions, use the [Entry book](ENTRY_BOOK.md)
 ## 1. Install
 
 Check the assets actually attached to
-[GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest).
-As verified on 2026-10-05, latest is the legacy `v3.5.0` release; it has no
-4.x DMG, Runtime Pack or Windows MSI/EXE carriers. The versioned carrier
-instructions below describe the pending publication. Each new carrier must
-have an adjacent checksum; Runtime Packs also require detached signatures.
-The POSIX bootstrap below is currently public.
+[GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest)
+(`gh release view --repo vetcoders/vibecrafted --json tagName,assets`).
+Tags `v4.0.0` through `v4.3.3` were never published as releases; the newest
+release before 4.4 is the legacy `v3.5.0`, with no 4.x DMG, Runtime Pack or
+Windows MSI/EXE carriers. The versioned carrier instructions below apply once
+a release attaches those carriers. Each carrier has an adjacent checksum;
+Runtime Packs also carry detached signatures.
 
-**macOS and Linux:**
+**macOS and Linux:** the public POSIX bootstrap.
 
 ```bash
+curl -fsSL https://vibecrafted.io/channel/main.json   # which version you will get
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
+
+The bootstrap installs the version named in that channel manifest, which the
+website publishes separately from GitHub Releases. On 2026-10-14 it named
+`4.1.0`, so the commands in this guide can differ from what you installed;
+`vibecrafted --version` and `vibecrafted help` show what you actually have.
 
 **Windows (native)** — win32-x64 Runtime Pack via `install.ps1` (no WSL
 required). Artifact names look like
@@ -25,8 +32,8 @@ required). Artifact names look like
 MSI/EXE carriers are unsigned; SmartScreen will warn; trust is `.sha256` +
 `.sig`. See [INSTALL.md](INSTALL.md#windows--native-runtime-pack).
 Until those carriers are published, this requires a locally built pack and
-the checkout installer. The public `https://vibecrafted.io/install.ps1`
-still serves the older WSL2-only launcher.
+the checkout installer. `https://vibecrafted.io/install.ps1` serves the same
+native entry script, which also needs a checkout beside it.
 
 **Windows (POSIX alternative)** — install WSL2 once, then use the same
 bootstrap inside it:
@@ -47,8 +54,8 @@ make uninstall  # deterministic reset from the same receipt
 ```
 
 On macOS the intended end-user artifact is one signed and notarized
-`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`, an artifact of releases from
-4.3.1 on, verified against its adjacent `.dmg.sha256`. Until a published
+`Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`, verified against its adjacent
+`.dmg.sha256`. No release up to `v4.3.3` attached one. Until a published
 release carries it, use the bootstrap above (see [INSTALL.md](INSTALL.md)).
 
 Power users can skip the DMG and App entirely. The adjacent
