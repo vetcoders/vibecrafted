@@ -130,7 +130,10 @@ report_start_failure() {
     "$reason" "${VIBECRAFTED_FRAME_HOST_SESSION:-vc-host}" "$log" >&2
 }
 
-# Explicit product argv (vc-terminal -e … vc-start …) keeps its command.
+# Explicit argv (including the admitted Python/env handoff) keeps its command.
+# The caller already supplied an executable vector via vc-terminal -e. Name
+# filtering silently discarded interpreter commands and opened Launchpad while
+# leaving the requested agent unstarted. Forward arguments verbatim, never eval.
 # Top-level VC Terminal with no argv enters the operator workspace via
 # `vc-start resume` (create if missing, return if live). Failure leaves a
 # usable shell. Nested/quiet shells skip the auto-attach.
@@ -143,9 +146,9 @@ if [[ -n "${VIBECRAFTED_TERMINAL_STARTUP_ERROR:-}" ]]; then
   # Keep the diagnosis visible; do not immediately cover it with a Frame attach.
   recovery_shell=true
 fi
-case "${1##*/}" in
-  vc-*|vibecrafted|vibecrafted-*) product_entry="$1" ;;
-esac
+if (( $# > 0 )); then
+  product_entry="$1"
+fi
 
 if [[ -n "$product_entry" ]]; then
   startup_entry_mode="explicit"

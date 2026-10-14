@@ -2039,8 +2039,27 @@ def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
 
 def test_start_opens_an_existing_project_without_creating_it_again(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A live session enters through the terminal without a new create marker."""
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = _commit_fixture_repo(tmp_path / "mlx-batch-runner")
+    socket_dir = str(tmp_path / "frame-sockets")
+    # A live engine name alone cannot authorize entry. Seed the actual WES
+    # owner, just as an earlier successful start would have recorded it.
+    with monkeypatch.context() as seed_env:
+        seed_env.setenv("VIBECRAFTED_HOME", str(tmp_path / "home/.vibecrafted"))
+        identity = wc.resolve_run_workspace_identity(root=project, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=identity.workspace_id,
+            workspace_instance_id=identity.workspace_instance_id,
+            vibecrafted_session_id=identity.vibecrafted_session_id,
+            runtime="vc-frame",
+            runtime_session_id="mlx-batch-runner",
+            socket_dir=socket_dir,
+            state="live",
+        )
     live = tmp_path / "live-sessions.txt"
     live.write_text("mlx-batch-runner\n", encoding="utf-8")
     result, launch = _run_entry(
@@ -2049,6 +2068,7 @@ def test_start_opens_an_existing_project_without_creating_it_again(
         extra_env={
             "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
             "VC_FRAME_LIVE": str(live),
+            "VC_FRAME_SOCKET_DIR": socket_dir,
         },
         expect_launch=True,
     )
@@ -2158,6 +2178,42 @@ def test_real_tty_is_not_rerouted(tmp_path: Path) -> None:
     )
     assert "DIRECT" in result.stdout, result.stdout + result.stderr
     assert "NEEDS" not in result.stdout
+
+
+@pytest.mark.parametrize("with_env_prefix", [False, True])
+def test_primary_shell_preserves_explicit_interpreter_argv(
+    tmp_path: Path, with_env_prefix: bool
+) -> None:
+    capture = tmp_path / "explicit-argv.json"
+    payload = ["private value with spaces", "literal $HOME; $(false)", "--model"]
+    program = (
+        "import json, os, sys; "
+        "open(sys.argv[1], 'w').write(json.dumps("
+        "{'argv': sys.argv[2:], 'marker': os.environ.get('HANDOFF_MARKER')}))"
+    )
+    argv = [sys.executable, "-I", "-c", program, str(capture), *payload]
+    if with_env_prefix:
+        argv = ["/usr/bin/env", "HANDOFF_MARKER=exact", *argv]
+    result = subprocess.run(
+        ["bash", str(PRIMARY_SHELL), *argv],
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "VIBECRAFTED_QUIET_START": "1",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=15,
+    )
+    assert capture.exists(), (
+        f"explicit command was lost: {result.returncode} {result.stderr}"
+    )
+    observed = json.loads(capture.read_text())
+    assert observed["argv"] == payload
+    assert observed["marker"] == ("exact" if with_env_prefix else None)
 
 
 def test_primary_shell_routes_every_product_verb(tmp_path: Path) -> None:
