@@ -27,6 +27,22 @@ DEFAULT_OBSERVE_TIMEOUT_SECONDS = 15.0
 OBSERVE_TIMEOUT_ENV = "VIBECRAFTED_OBSERVE_TIMEOUT_S"
 _WRITER_OK_REASONS = frozenset({"ok", "disabled_for_test"})
 _KNOWN_PROCESS_TRUTH = frozenset({"live", "ghost", "unknown"})
+# Descriptive identity a fallback may echo from the control-plane projection.
+# Deliberately excludes state/status/liveness/health/exit_code (classification
+# belongs to control-core) and prompts, commands, process receipts, labels.
+_FALLBACK_IDENTITY_FIELDS = (
+    "agent",
+    "skill",
+    "mode",
+    "root",
+    "session_id",
+    "runtime_session_id",
+    "agent_session_id",
+    "provider_session_id",
+    "native_identity_status",
+    "workspace_id",
+)
+_FALLBACK_IDENTITY_MAX_CHARS = 1024
 
 
 class ServerObservationError(RuntimeError):
@@ -145,6 +161,42 @@ def _observation_from_control_core(run_id: str) -> dict[str, Any] | None:
     return payload
 
 
+def _descriptive_identity(run: Mapping[str, Any] | None) -> dict[str, str]:
+    """Bounded single-line identity strings from the projection; nothing else."""
+    if not isinstance(run, Mapping):
+        return {}
+    identity: dict[str, str] = {}
+    for key in _FALLBACK_IDENTITY_FIELDS:
+        value = run.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if (
+            not text
+            or text == "unknown"
+            or len(text) > _FALLBACK_IDENTITY_MAX_CHARS
+            or not text.isprintable()
+        ):
+            continue
+        identity[key] = text
+    return identity
+
+
+def _canonical_transcript_reference(resolved: Any) -> str:
+    """The resolver's transcript path, only when it stays inside this home."""
+    transcript = getattr(resolved, "transcript", None)
+    if not isinstance(transcript, Path):
+        return ""
+    home = vibecrafted_home().resolve(strict=False)
+    try:
+        real = transcript.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return ""
+    if not real.is_relative_to(home) or not real.is_file():
+        return ""
+    return str(real)
+
+
 def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
     """Fallback when vc-server is slow or fail-closed.
 
@@ -161,14 +213,28 @@ def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
     from .control_plane import RunNotResolved, lookup_run, resolve_run
 
     run = lookup_run(target)
-    resolved = None
-    if run is None:
-        try:
-            resolved = resolve_run(target)
-        except (RunNotResolved, OSError):
-            resolved = None
+    try:
+        resolved = resolve_run(target)
+    except (RunNotResolved, OSError, ValueError):
+        resolved = None
     if run is None and resolved is None:
         return None
+    # Describe who/where the run is; never what state it is in. Identity comes
+    # from the canonical projection, the transcript only from the resolver.
+    described: dict[str, Any] = {
+        **_descriptive_identity(run),
+        "run_id": target,
+        "source": "local_control_plane_fallback",
+        "identity_source": "local_control_plane_projection",
+        "liveness_note": (
+            "control-core observe unavailable; state and liveness are not "
+            f"classified ({reason})"
+        ),
+    }
+    transcript = _canonical_transcript_reference(resolved)
+    if transcript:
+        described["latest_transcript"] = transcript
+        described["transcript"] = transcript
     return {
         "schema": "vibecrafted.run-observation.v1",
         "run_id": target,
@@ -181,10 +247,7 @@ def _local_observation(run_id: str, *, reason: str) -> dict[str, Any] | None:
             "control_core_observe_unavailable",
             reason,
         ],
-        "run": {
-            "run_id": target,
-            "source": "local_control_plane_fallback",
-        },
+        "run": described,
         "writer_revalidation": reason,
         "source": "local_control_plane_fallback",
     }

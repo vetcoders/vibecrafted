@@ -677,3 +677,115 @@ def test_control_core_fallback_observes_the_home_the_identity_check_uses(
 
     assert payload["source"] == "control_core_compute_view"
     assert (payload.get("run") or {}).get("home") == str(tmp_path / "vc-home-probe")
+
+
+_FALLBACK_SID = "session_89a3be19-5623-4000-9000-123456789abc"
+
+
+def test_observe_fallback_keeps_descriptive_identity_without_classifying(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rust eye unavailable: identity is described, state/liveness stay unknown."""
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    _write_runtime_meta(home, "probe", {"agent": "kimi"})
+    canonical = (
+        home / "control_plane" / "runtime_runs" / "probe" / "transcript.log"
+    ).resolve()
+    _patch_lookup_run(
+        monkeypatch,
+        {
+            "run_id": "probe",
+            "agent": "kimi",
+            "skill": "workflow",
+            "mode": "headless",
+            "root": "/private-fixture",
+            "state": "running",
+            "status": "running",
+            "liveness": "pid_alive",
+            "health": "fresh",
+            "exit_code": 0,
+            "session_id": _FALLBACK_SID,
+            "agent_session_id": _FALLBACK_SID,
+            "provider_session_id": _FALLBACK_SID,
+            "runtime_session_id": "01a129f4-ebf6-7443-b384-11ee95bdce5e",
+            "latest_transcript": "/etc/passwd",
+            "prompt": "SECRET-PROMPT-BODY",
+            "worker_command": "kimi --api-key SECRET-TOKEN",
+            "owner_identity": {"command_digest": "SECRET-DIGEST"},
+            "workspace_display_label": "line\nbreak",
+        },
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert payload["evidence_disagreement"] is True
+    assert "control_core_observe_unavailable" in payload["disagreement_reasons"]
+    assert payload["source"] == "local_control_plane_fallback"
+    run = payload["run"]
+    assert run["run_id"] == "probe"
+    assert run["agent"] == "kimi"
+    assert run["skill"] == "workflow"
+    assert run["root"] == "/private-fixture"
+    assert run["session_id"] == _FALLBACK_SID
+    assert run["agent_session_id"] == _FALLBACK_SID
+    assert run["provider_session_id"] == _FALLBACK_SID
+    assert run["runtime_session_id"] == "01a129f4-ebf6-7443-b384-11ee95bdce5e"
+    assert run["identity_source"] == "local_control_plane_projection"
+    assert "control-core observe unavailable" in run["liveness_note"]
+    # Classification fields are never copied from the projection.
+    for classified in ("state", "status", "liveness", "health", "exit_code"):
+        assert classified not in run
+    # Transcript is a canonical reference under this home, never a projected path.
+    assert run["latest_transcript"] == str(canonical)
+    assert run["transcript"] == str(canonical)
+    rendered = json.dumps(payload)
+    assert "/etc/passwd" not in rendered
+    assert "still working" not in rendered
+    assert "SECRET" not in rendered
+    assert "workspace_display_label" not in rendered
+
+
+def test_observe_fallback_refuses_transcript_outside_control_plane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    run_dir = home / "control_plane" / "runtime_runs" / "probe"
+    run_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.log"
+    outside.write_text("foreign bytes\n", encoding="utf-8")
+    (run_dir / "transcript.log").symlink_to(outside)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "agent": "kimi", "latest_transcript": str(outside)},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    run = payload["run"]
+    assert run["agent"] == "kimi"
+    assert "latest_transcript" not in run
+    assert "transcript" not in run
+    assert str(outside) not in json.dumps(payload)
+    assert payload["process_truth"] == "unknown"
+
+
+def test_observe_fallback_for_unknown_run_keeps_the_error_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    _boom_observe(monkeypatch)
+    _disable_control_observe(monkeypatch)
+    monkeypatch.setattr(control_plane, "lookup_run", lambda _run_id: None)
+
+    with pytest.raises(server_observation.ServerObservationError):
+        server_observation.observe_run("absent-run")
