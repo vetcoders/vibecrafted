@@ -170,6 +170,19 @@ def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
         assert text.count(old) == 1
         text = text.replace(old, replacement, 1)
     wrapper.write_text(text)
+    # The private bundle host is admitted like the fixed one: the generation
+    # carries its admission helper and interpreter. Admission state is keyed
+    # by this private host path, never the installed host's namespace.
+    generation = wrapper.parents[1]
+    helper = generation / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+    if not helper.exists():
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core/terminal_host.py", helper
+        )
+    python = generation / "bin/python3"
+    if not python.exists():
+        python.symlink_to(sys.executable)
     return host if sys.platform == "darwin" else native
 
 
@@ -359,6 +372,7 @@ def seed_runtime_pack(
     for relative in (
         "vibecrafted-core/vibecrafted_core/vc_frame_staging.py",
         "vibecrafted-core/vibecrafted_core/runtime_paths.py",
+        "vibecrafted-core/vibecrafted_core/terminal_host.py",
         "scripts/vc-terminal-product-entry.sh",
         "scripts/vc-frame-product-entry.sh",
         "scripts/lib/runtime-roots.sh",

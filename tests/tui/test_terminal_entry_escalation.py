@@ -3299,6 +3299,16 @@ def _run_terminal_path_entry(
         )
         # The generation is still required by admission, but must never win.
         _write(generation / "libexec/vc-terminal", "#!/bin/bash\nexit 99\n")
+        # The private bundle host passes the same single-host admission.
+        _write(
+            generation / "vibecrafted-core/vibecrafted_core/terminal_host.py",
+            (
+                REPO_ROOT / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+            ).read_text(encoding="utf-8"),
+        )
+        (generation / "bin").mkdir(parents=True, exist_ok=True)
+        if not (generation / "bin/python3").exists():
+            (generation / "bin/python3").symlink_to(sys.executable)
     _write(entry, source)
     _write(home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[window]\n")
     _write(

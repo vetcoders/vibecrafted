@@ -210,17 +210,25 @@ for argument in "$@"; do
       printf 'vc-terminal: --config-file is product-owned: %s\n' "$config" >&2
       exit 2
       ;;
+    --socket | --socket=*)
+      if [[ "$host" == */Contents/MacOS/vc-terminal ]]; then
+        printf 'vc-terminal: the host IPC socket is product-owned\n' >&2
+        exit 2
+      fi
+      value_pending=true
+      ;;
     --option)
       value_pending=true
       option_pending=true
       ;;
     --option=*) shell_options+=(--option "${argument#*=}") ;;
     -o?*) shell_options+=(--option "${argument#-o}") ;;
-    --embed | --socket | --working-directory | --title | -T | -t | --class | -s)
+    --embed | --working-directory | --title | -T | -t | --class | -s)
       value_pending=true
       ;;
   esac
 done
+host_tail=(${1+"$@"})
 if ! $explicit_command; then
   if ! startup_error="$("$root/bin/python3" -B "$root/scripts/vetcoders_install.py" terminal-shell-check \
     "${shell_options[@]}" 2>&1)"; then
@@ -229,11 +237,44 @@ if ! $explicit_command; then
     [[ -f "$primary" ]] || primary="$root/config/alacritty/launch-primary-shell.zsh"
     if [[ -f "$primary" ]]; then
       # Override for this invocation only. Never persist diagnostic argv.
-      exec "$host" --config-file "$config" "$@" -e /bin/bash "$primary"
+      host_tail=(${1+"$@"} -e /bin/bash "$primary")
+    else
+      # Even a damaged generation must leave a readable terminal with a shell.
+      host_tail=(${1+"$@"} -e /bin/zsh -fc
+        'print -u2 -- "Vibecrafted: product shell missing. Open Vibecrafted.app → Repair Runtime; run vc-terminal --doctor. Startup log unavailable: product shell missing."; exec /bin/zsh -dfi')
     fi
-    # Even a damaged generation must leave a readable terminal with a shell.
-    exec "$host" --config-file "$config" "$@" -e /bin/zsh -fc \
-      'print -u2 -- "Vibecrafted: product shell missing. Open Vibecrafted.app → Repair Runtime; run vc-terminal --doctor. Startup log unavailable: product shell missing."; exec /bin/zsh -dfi'
   fi
 fi
-exec "$host" --config-file "$config" "$@"
+
+# One fixed macOS host per user: every further window is a native
+# `msg create-window` request to the admitted host, never a second GUI
+# process. The helper serializes first start under a private flock, proves the
+# host by kernel identity and socket peer, and writes the launch receipt the
+# App consumes. Delivery is not window readiness and never agent start; a
+# refusal is final here, without a duplicate-host fallback. Linux keeps the
+# flat host: no portable proof of host identity is claimed there.
+admission_helper="$root/vibecrafted-core/vibecrafted_core/terminal_host.py"
+launch_receipt="${VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT:-}"
+unset VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT
+if [[ "$host" == */Contents/MacOS/vc-terminal && "$(/usr/bin/uname -s)" == "Darwin" ]]; then
+  if [[ -f "$admission_helper" && ! -L "$admission_helper" && -x "$root/bin/python3" ]]; then
+    admission_args=(admit --wrapper-pid "$$" --host "$host" --config "$config")
+    [[ -z "$launch_receipt" ]] || admission_args+=(--receipt "$launch_receipt")
+    # exec keeps the wrapper as the helper's direct parent: its PID is the
+    # identity the fresh host inherits through the exec below.
+    admission="$(exec "$root/bin/python3" -I -B "$admission_helper" "${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"})" \
+      || exit $?
+    case "$admission" in
+      reused) exit 0 ;;
+      fresh) exec "$host" --config-file "$config" ${host_tail[@]+"${host_tail[@]}"} ;;
+    esac
+    printf 'vc-terminal: unrecognized host admission: %s\n' "$admission" >&2
+    exit 70
+  fi
+  # Without its admission helper a generation cannot prove the single host;
+  # starting an unadmitted GUI would be the duplicate this boundary forbids.
+  printf 'vc-terminal: host admission helper missing: %s; run vc-terminal --doctor.\n' \
+    "$admission_helper" >&2
+  exit 78
+fi
+exec "$host" --config-file "$config" ${host_tail[@]+"${host_tail[@]}"}

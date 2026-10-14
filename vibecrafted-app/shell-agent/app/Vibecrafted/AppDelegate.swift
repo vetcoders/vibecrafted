@@ -857,12 +857,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func checkTerminalRegistration() {
     guard let observation = terminalRegistration else { return }
     let launch = terminalLaunch
-    let application = launch.flatMap { NSRunningApplication(processIdentifier: $0.receipt.processIdentifier) }
+    // The wrapper's receipt names the host: the launcher itself (fresh) or the
+    // single admitted host it delivered a window to (reused). The kernel start
+    // token is revalidated on every tick; registration is never agent proof.
+    let hostState = launch?.hostState
+    let application = hostState?.hostProcessIdentifier.flatMap {
+      NSRunningApplication(processIdentifier: $0)
+    }
     let registered = application?.isTerminated == false
       && application?.executableURL?.resolvingSymlinksInPath()
         == launch?.receipt.specification.terminalHost.resolvingSymlinksInPath()
     let outcome = observation.observe(now: ProcessInfo.processInfo.systemUptime,
-      currentLaunchID: launch?.receipt.launchID, isRunning: launch?.isRunning == true,
+      currentLaunchID: launch?.receipt.launchID,
+      isRunning: hostState?.hostProcessIdentifier != nil,
       isRegistered: registered)
     guard outcome != .waiting else { return }
     terminalRegistrationTimer?.invalidate()
@@ -871,6 +878,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     if outcome == .ready, let application {
       terminalApplication = application
       application.activate(options: [])
+    } else if outcome == .ended, case .ended(let status?) = hostState, status != 0 {
+      // Reported here once; the status poll must not report the same refusal.
+      terminalLaunch = nil
+      showNativeMessage("Terminal window unconfirmed",
+        "The terminal launcher refused or could not confirm the window (status \(status)). "
+          + "No second terminal host was started. Run vc-terminal --doctor, then Open Terminal again.")
     } else if outcome == .timedOut {
       showNativeMessage("Terminal is still starting",
         "The process started, but its macOS application registration was not observed within 10 seconds. "
