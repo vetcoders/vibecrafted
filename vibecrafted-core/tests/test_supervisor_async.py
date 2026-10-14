@@ -1829,3 +1829,244 @@ def test_kimi_provider_session_id_lands_in_meta_before_settlement(
     payload = json.loads(meta.read_text())
     assert payload["provider_session_id"] == session_id
     assert payload["provider_session_source"] == "provider_session_store"
+    # The settlement summary must not erase the adopted native identity from
+    # the legacy aliases (agent_session_id / session_id) or the resume hint.
+    assert handle.agent_session_id == session_id
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["runtime_session_id"] == handle.session_id != session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+    assert "<session_id>" not in payload["resume_command"]
+
+
+def _write_kimi_store_session(provider_home: Path, root: Path, session_id: str) -> None:
+    state = (
+        provider_home
+        / ".kimi-code"
+        / "sessions"
+        / f"wd_{root.name}_00"
+        / session_id
+        / "state.json"
+    )
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "id": session_id,
+                "version": 2,
+                "cwd": str(root),
+                "createdAt": int(time.time() * 1000),
+            }
+        )
+    )
+
+
+def _kimi_store_worker(tmp_path: Path, *, sleep: float) -> Path:
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import time\n"
+        'print(\'{\\"role\\":\\"meta\\",\\"type\\":\\"system.version\\",\\"version\\":\\"9.9.9\\"}\', flush=True)\n'
+        f"time.sleep({sleep})\n"
+    )
+    return worker
+
+
+def test_kimi_store_identity_survives_normal_settlement_in_meta_and_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Normal exit after store adoption keeps one native identity everywhere."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_feedface-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, session_id)
+    worker = _kimi_store_worker(tmp_path, sleep=0.2)
+    meta = tmp_path / "run.meta.json"
+    report = tmp_path / "report.md"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-store-normal",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={"VIBECRAFTED_AGENT": "kimi"},
+            meta_path=meta,
+            report_path=report,
+            transcript_path=tmp_path / "transcript.log",
+            timeout=30,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.agent_session_id == session_id
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == session_id
+    assert payload["provider_session_source"] == "provider_session_store"
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["runtime_session_id"] != session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+    report_text = report.read_text(encoding="utf-8")
+    assert f"session_id: {session_id}" in report_text
+    assert f"provider_session_id: {session_id}" in report_text
+
+
+def test_kimi_store_identity_survives_supervisor_cancellation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cancelling after store adoption settles meta with the same native identity."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_cafebabe-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, session_id)
+    worker = _kimi_store_worker(tmp_path, sleep=3600)
+    meta = tmp_path / "run.meta.json"
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            AsyncSupervisor().run(
+                run_id="kimi-store-cancel",
+                command=[sys.executable, str(worker)],
+                root=root,
+                env={"VIBECRAFTED_AGENT": "kimi"},
+                meta_path=meta,
+                transcript_path=tmp_path / "transcript.log",
+                require_report=False,
+            )
+        )
+        for _ in range(1000):
+            await asyncio.sleep(0.01)
+            try:
+                live = json.loads(meta.read_text())
+            except (OSError, ValueError):
+                continue
+            if live.get("provider_session_id") == session_id:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    payload = json.loads(meta.read_text())
+    assert payload["terminal_reason"] == "supervisor_cancelled"
+    assert payload["provider_session_id"] == session_id
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+
+
+def test_kimi_store_identity_equal_to_parent_session_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A store hit that equals a parent/runtime session never becomes the child's."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    parent_session = "session_0badc0de-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, parent_session)
+    worker = _kimi_store_worker(tmp_path, sleep=0.2)
+    meta = tmp_path / "run.meta.json"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-store-parent",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={
+                "VIBECRAFTED_AGENT": "kimi",
+                "VIBECRAFTED_PARENT_SESSION_ID": parent_session,
+            },
+            meta_path=meta,
+            transcript_path=tmp_path / "transcript.log",
+            timeout=30,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.agent_session_id == ""
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_source"] == "refused"
+    assert payload["provider_session_id"] != parent_session
+    assert payload["agent_session_id"] == ""
+    assert parent_session not in str(payload.get("session_id") or "")
+    assert parent_session not in str(payload.get("resume_command") or "")
+
+
+def test_store_adoption_does_not_replace_declared_launch_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The launch contract's declared child session outranks a store guess."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    declared = "session_11111111-1234-4567-89ab-0123456789ab"
+    store = "session_22222222-1234-4567-89ab-0123456789ab"
+    monkeypatch.setattr(
+        supervisor_async_module, "kimi_session_id_from_store", lambda *a, **k: store
+    )
+    meta = tmp_path / "run.meta.json"
+    meta.write_text(json.dumps({"run_id": "declared-run"}))
+    handle = AsyncRunHandle(
+        run_id="declared-run",
+        command=("inert-fixture",),
+        root=tmp_path,
+        process=None,  # type: ignore[arg-type]
+        started_at=supervisor_async_module._utc_now(),
+        meta_path=meta,
+        agent="kimi",
+        agent_session_id=declared,
+        session_id="01a129f4-ebf6-7443-b384-11ee95bdce5e",
+    )
+
+    AsyncSupervisor()._adopt_provider_session_identity(handle)
+
+    assert handle.agent_session_id == declared
+
+
+def test_terminal_summary_keeps_validated_stream_identity_in_aliases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stream/store identity validated by telemetry is not blanked at close."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / "control_plane").mkdir(parents=True)
+    sid = "session_89a3be19-5623-4000-9000-123456789abc"
+    meta = tmp_path / "run.meta.json"
+    meta.write_text(
+        json.dumps(
+            {"run_id": "summary-run", "agent_session_id": sid, "session_id": sid}
+        )
+    )
+
+    class _Exited:
+        pid = 123456
+        returncode = 0
+
+    handle = AsyncRunHandle(
+        run_id="summary-run",
+        command=("inert-fixture",),
+        root=tmp_path,
+        process=_Exited(),  # type: ignore[arg-type]
+        started_at=supervisor_async_module._utc_now(),
+        meta_path=meta,
+        agent="kimi",
+        session_id="01a129f4-ebf6-7443-b384-11ee95bdce5e",
+        stream_session_id=sid,
+        stream_session_source="provider_session_store",
+        exit_code=0,
+    )
+
+    AsyncSupervisor()._write_meta_summary(handle)
+
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == sid
+    assert payload["agent_session_id"] == sid
+    assert payload["session_id"] == sid
+    assert payload["runtime_session_id"] == handle.session_id

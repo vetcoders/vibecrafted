@@ -104,6 +104,40 @@ def _provider_store_home() -> Path:
     return Path(override).expanduser() if override else Path.home()
 
 
+# Sources whose session id the provider itself revealed for this child.
+_PROVIDER_OBSERVED_SESSION_SOURCES = frozenset(
+    {"provider_stream", "provider_session_store"}
+)
+# AgentStreamParser.resume_command placeholder while its stream has no id.
+_RESUME_SESSION_PLACEHOLDER = "<session_id>"
+
+
+def _with_adopted_session(handle: AsyncRunHandle, resume_command: str) -> str:
+    """Fill the resume placeholder with a validated store-adopted identity.
+
+    kimi names its session only in the trailing resume hint, so the parser's
+    command still carries the placeholder after the store revealed the id.
+    """
+    if (
+        handle.stream_session_source != "provider_session_store"
+        or not handle.agent_session_id
+        or handle.agent_session_id != handle.stream_session_id
+    ):
+        return resume_command
+    return resume_command.replace(_RESUME_SESSION_PLACEHOLDER, handle.agent_session_id)
+
+
+def _read_meta(handle: AsyncRunHandle) -> dict[str, object]:
+    """Best-effort read of the run's meta.json for parent-identity refusal."""
+    if handle.meta_path is None:
+        return {}
+    try:
+        payload = json.loads(handle.meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def transcript_human_path(transcript_path: Path | None) -> Path | None:
     """Sibling human-readable rendering of the raw transcript.
 
@@ -287,7 +321,7 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         )
     else:
         candidate, candidate_source = handle.agent_session_id, "launch_contract"
-    handle.telemetry = build_run_telemetry(
+    telemetry = build_run_telemetry(
         usage=usage,
         model=handle.agent_model,
         reported_cost=handle.cost_usd,
@@ -302,7 +336,17 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         started_at=handle.started_at.isoformat(),
         completed_at=handle.completed_at.isoformat() if handle.completed_at else None,
     )
-    return handle.telemetry
+    # A provider-observed identity that survived parent/runtime refusal is the
+    # child's native session. The legacy aliases must not settle empty beside it.
+    if (
+        not handle.agent_session_id
+        and candidate_source in _PROVIDER_OBSERVED_SESSION_SOURCES
+        and isinstance(telemetry.provider_session_id, str)
+    ):
+        handle.agent_session_id = telemetry.provider_session_id
+        handle.resume_command = _with_adopted_session(handle, handle.resume_command)
+    handle.telemetry = telemetry
+    return telemetry
 
 
 def _workflow_parent_telemetry(handle: AsyncRunHandle, failure) -> RunTelemetry | None:
@@ -1138,10 +1182,15 @@ class AsyncSupervisor:
                 or handle.agent_session_id == fork_meta.get("fork_source_session_id")
             ):
                 handle.exit_code = 1
+            # Add the fork parents; never drop the launch-time parents the
+            # live publisher already refused against.
             handle.parent_sessions = {
-                key: str(fork_meta[key])
-                for key in ("fork_source_session_id", "parent_provider_session_id")
-                if fork_meta.get(key)
+                **handle.parent_sessions,
+                **{
+                    key: str(fork_meta[key])
+                    for key in ("fork_source_session_id", "parent_provider_session_id")
+                    if fork_meta.get(key)
+                },
             }
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
@@ -1515,7 +1564,9 @@ class AsyncSupervisor:
         handle.usage_events = parser.usage_events
         handle.cost_usd = parser.cost_usd
         handle.cost_source = parser.cost_source
-        handle.resume_command = parser.resume_command(handle.root)
+        handle.resume_command = _with_adopted_session(
+            handle, parser.resume_command(handle.root)
+        )
 
     def _adopt_provider_session_identity(self, handle: AsyncRunHandle) -> None:
         """Adopt a session id the provider revealed on disk before its stream does.
@@ -1541,7 +1592,35 @@ class AsyncSupervisor:
             return
         handle.stream_session_id = discovered
         handle.stream_session_source = "provider_session_store"
+        # The store hit is a candidate until it clears the same parent/runtime/
+        # fork refusal as stream identities. Only then does it become the
+        # handle's native identity; a declared launch-contract session wins.
+        validated = self._validated_stream_session_id(handle, _read_meta(handle))
+        if validated and not handle.agent_session_id:
+            handle.agent_session_id = validated
+            handle.resume_command = _with_adopted_session(handle, handle.resume_command)
         self._publish_stream_session_identity(handle)
+
+    def _validated_stream_session_id(
+        self, handle: AsyncRunHandle, payload: Mapping[str, object]
+    ) -> str:
+        """The stream/store candidate when no launch/runtime/fork parent owns it."""
+        parent_fields = dict(handle.parent_sessions)
+        for key in (
+            "runtime_session_id",
+            "vibecrafted_session_id",
+            "parent_provider_session_id",
+            "fork_source_session_id",
+        ):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                parent_fields.setdefault(key, value)
+        resolved, _source = resolve_provider_session_id(
+            handle.stream_session_id,
+            source=handle.stream_session_source,
+            parents=parent_session_ids({}, extra=parent_fields),
+        )
+        return resolved if isinstance(resolved, str) else ""
 
     def _publish_stream_session_identity(self, handle: AsyncRunHandle) -> None:
         """Publish a provider-reported child identity while its run is live.
@@ -1555,29 +1634,15 @@ class AsyncSupervisor:
             return
 
         def _enrich(payload: dict[str, object]) -> dict[str, object] | None:
-            parent_fields = dict(handle.parent_sessions)
-            for key in (
-                "runtime_session_id",
-                "vibecrafted_session_id",
-                "parent_provider_session_id",
-                "fork_source_session_id",
-            ):
-                value = str(payload.get(key) or "").strip()
-                if value:
-                    parent_fields.setdefault(key, value)
-            resolved, source = resolve_provider_session_id(
-                handle.stream_session_id,
-                source=handle.stream_session_source,
-                parents=parent_session_ids({}, extra=parent_fields),
-            )
-            if not isinstance(resolved, str):
+            resolved = self._validated_stream_session_id(handle, payload)
+            if not resolved:
                 return None
             payload.update(
                 {
                     "session_id": resolved,
                     "agent_session_id": resolved,
                     "provider_session_id": resolved,
-                    "provider_session_source": source,
+                    "provider_session_source": handle.stream_session_source,
                 }
             )
             return payload
