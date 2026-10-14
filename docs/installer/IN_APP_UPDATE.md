@@ -176,6 +176,13 @@ workers, sessions, and foreign PATH/MCP ownership are not stopped as a shortcut.
 `applicationWillTerminate` cancels an in-flight pack installer and interrupts
 the coordinator **only when no helper has been admitted**.
 
+Post-install movement of interactive agent conversations is a separate,
+consented operation specified in [Recovery on update](../runtime/RECOVERY_ON_UPDATE.md).
+That contract defines generation separation, a floating Frame offer, native
+resume into **Recovered workspaces**, preservation of independent workers, and
+retirement of successfully moved source sessions after their last client
+disconnects. Installer success alone does not imply those sessions were moved.
+
 Blocking openssl / codesign / stapler / hdiutil / verifier work runs off the
 UI actor through `runProductUpdateBoundProcess` (bounded lifetime, concurrent
 pipe drain, terminate then KILL). Terminal phases do not depend on a spinner
