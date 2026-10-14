@@ -635,6 +635,20 @@ _vetcoders_product_entry_prepare() {
       VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
       return "$entry_status"
     }
+  else
+    # The source engine's panes use the same explicit interpreter pin as an
+    # installed generation. Resolve it through the existing source owner,
+    # before Frame inherits the environment; panes never guess via PATH.
+    VIBECRAFTED_CORE_DIR="$(_vetcoders_owned_core_dir)" || {
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    }
+    export VIBECRAFTED_CORE_DIR
+    VIBECRAFTED_PYTHON="$(_vetcoders_owned_python_bin)" || {
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    }
+    export VIBECRAFTED_PYTHON
   fi
   _vetcoders_pin_vc_frame_config_dir || {
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1

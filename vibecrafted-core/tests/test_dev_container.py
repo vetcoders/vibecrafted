@@ -935,7 +935,7 @@ def test_recovery_command_runs_without_compose_env_and_unblocks_upgrade(
 def test_manual_dev_up_defaults_to_no_host_sync(
     tmp_path: Path, requested, expected
 ) -> None:
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repo with 'quotes' and $literal"
     repo.mkdir()
     tools = tmp_path / "bin"
     tools.mkdir()
@@ -965,3 +965,24 @@ def test_manual_dev_up_defaults_to_no_host_sync(
     assert sent["skip_sync"] == expected
     assert sent["workspace"] == str(repo.resolve())
     assert sent["argv"][-3:] == ["up", "-d", "--build"]
+    for label, tail in (
+        ("Enter shell:", ["exec", "dev", "zsh"]),
+        ("Stop:", ["down"]),
+        ("Wipe history:", ["down", "-v"]),
+    ):
+        command = next(
+            line.strip().removeprefix(label).strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith(label)
+        )
+        copied = subprocess.run(
+            ["bash", "-c", command],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert copied.returncode == 0, copied.stderr
+        sent = json.loads(capture.read_text())
+        assert sent["workspace"] == str(repo.resolve())
+        assert sent["argv"][-len(tail) :] == tail

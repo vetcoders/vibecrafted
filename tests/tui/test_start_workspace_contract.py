@@ -195,6 +195,8 @@ def record(extra=None):
         "ZELLIJ_SESSION_NAME": os.environ.get("ZELLIJ_SESSION_NAME"),
         "VC_FRAME_PANE_ID": os.environ.get("VC_FRAME_PANE_ID"),
         "VC_FRAME_SOCKET_DIR": os.environ.get("VC_FRAME_SOCKET_DIR"),
+        "python_pin": os.environ.get("VIBECRAFTED_PYTHON"),
+        "core_dir": os.environ.get("VIBECRAFTED_CORE_DIR"),
         "workspace_identity": {key: os.environ.get(key) for key in (
             "VIBECRAFTED_WORKSPACE_ID", "VIBECRAFTED_SESSION_ID",
             "VIBECRAFTED_WORKSPACE_INSTANCE_ID", "VIBECRAFTED_BUILD_ID",
@@ -739,6 +741,67 @@ class Scene:
             for line in self.terminal_log.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+
+
+def test_source_start_pins_python_for_launchpad_and_agents(tmp_path: Path) -> None:
+    scene = Scene(tmp_path, project="source-project", git=True)
+    # Bind the private engine double to the test interpreter; its env-python
+    # shebang must not select a different host framework under the exec fence.
+    for relative in ("bin/vc-frame", "libexec/vc-frame"):
+        frame = scene.generation / relative
+        body = frame.read_text()
+        frame.write_text(f"#!{sys.executable}\n" + body.split("\n", 1)[1])
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        owned_terminal=True,
+        tty=True,
+        extra_env={
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+        fence_children=True,
+        allowed_children=(
+            scene.generation / "bin/vc-frame",
+            SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame/pane-python",
+        ),
+    )
+    assert _rc(result) == 0, result.stderr
+    created = _creates(scene.calls())
+    assert created
+    for call in created:
+        pin = call.get("python_pin")
+        assert pin and Path(pin).is_absolute() and os.access(pin, os.X_OK)
+        launcher = _write(
+            tmp_path / "pane-launcher.py",
+            f"#!{sys.executable}\n"
+            "import json, sys, vibecrafted_core\n"
+            "print(json.dumps({'argv': sys.argv[1:], 'core': vibecrafted_core.__file__}))\n",
+        )
+        command = [
+            "bash",
+            str(SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame/pane-python"),
+            str(launcher),
+            "launcher",
+        ]
+        command = private_child_command(
+            command, allowed=(Path(pin), launcher), fixture_root=tmp_path
+        )
+        pane = subprocess.run(
+            command,
+            env=scene.env(
+                {"VIBECRAFTED_PYTHON": pin, "VIBECRAFTED_CORE_DIR": call["core_dir"]}
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert pane.returncode == 0, pane.stderr
+        payload = json.loads(pane.stdout.strip())
+        assert payload["argv"] == ["launcher"]
+        assert Path(payload["core"]).resolve().is_relative_to(SOURCE_CORE_DIR)
 
 
 @pytest.mark.parametrize(

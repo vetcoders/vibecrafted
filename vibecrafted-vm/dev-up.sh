@@ -48,11 +48,16 @@ echo "[dev-up] building + starting (first build compiles the toolchain; grab a c
 VC_WORKSPACE_DIR="$repo" VC_DEV_SKIP_SYNC="${VC_DEV_SKIP_SYNC:-1}" \
   "$DOCKER" compose -p "$project" -f "$recipe/compose.dev.yaml" up -d --build
 
+# Compose interpolates the required workspace for every verb, including exec
+# and down. Keep each copyable command self-contained and preserve shell data.
+printf -v workspace_assignment 'VC_WORKSPACE_DIR=%q' "$repo"
+printf -v compose_command '%q compose -p %q -f %q' "$DOCKER" "$project" "$recipe/compose.dev.yaml"
+
 cat <<EOF
 
 [dev-up] up. Session history persists in the '${project}_*' volumes.
 
-  Enter shell:   $DOCKER compose -p $project -f $recipe/compose.dev.yaml exec dev zsh
-  Stop:          $DOCKER compose -p $project -f $recipe/compose.dev.yaml down
-  Wipe history:  $DOCKER compose -p $project -f $recipe/compose.dev.yaml down -v
+  Enter shell:   $workspace_assignment $compose_command exec dev zsh
+  Stop:          $workspace_assignment $compose_command down
+  Wipe history:  $workspace_assignment $compose_command down -v
 EOF
