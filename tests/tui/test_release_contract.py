@@ -16,8 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 
 # Pinned to the native Windows entry point selected for v4.3.1 on 2026-10-01.
-# The public website still serves the older WSL-only copy; release acceptance
-# must separately settle that deployment drift. See
+# On 2026-10-14 https://vibecrafted.io/install.ps1 served these exact bytes;
+# release acceptance still re-checks the live copy. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
 INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb1ec30c"
@@ -748,6 +748,12 @@ def test_public_install_surfaces_name_all_release_carriers() -> None:
             f"{relative} must name the portable channel asset"
         )
         assert "vc-frame/releases/latest/download/install.sh" not in text
+        # The website publishes the bootstrap channel separately from GitHub
+        # Releases, so a reader needs the manifest that names what
+        # `curl | bash` will install before trusting a version on this page.
+        assert "https://vibecrafted.io/channel/main.json" in text, (
+            f"{relative} must name the bootstrap channel manifest"
+        )
 
 
 @pytest.mark.parametrize("doctor_step", [0, 1], ids=["ubuntu", "debian"])
@@ -1317,6 +1323,26 @@ def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
         assert f'${donor}Revision = "{sha}"' in windows
         assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
         assert f"repository: vetcoders/vc-{donor}" in workflow
+
+
+def test_changelog_names_only_the_pinned_donor_revisions() -> None:
+    # The Frame pin kept moving after the 4.4.0 entry was written, and the
+    # entry kept naming the first one. Release notes for the version being cut
+    # may only name full revisions that the builders actually pin.
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    section = re.search(
+        rf"^## \[{re.escape(version)}\][^\n]*\n(?P<body>.*?)(?=^## \[|\Z)",
+        changelog,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"CHANGELOG.md has no entry for {version}"
+    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    pinned = {component["revision"] for component in pins["components"].values()}
+    named = set(re.findall(r"\b[0-9a-f]{40}\b", section.group("body")))
+    assert named <= pinned, (
+        f"CHANGELOG {version} names unpinned revisions: {sorted(named - pinned)}"
+    )
 
 
 @pytest.mark.parametrize("mechanism", ["api", "apple-id", "incomplete"])
