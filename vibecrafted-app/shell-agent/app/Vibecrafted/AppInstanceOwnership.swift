@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Process-wide user App instance ownership for one bundle identifier.
 ///
@@ -12,6 +13,9 @@ import Foundation
 struct AppInstancePeer: Equatable {
   var pid: Int32
   var bundleURL: URL
+  var executableURL: URL? = nil
+  var signedMainExecutableURL: URL? = nil
+  var launchDate: Date? = nil
 }
 
 enum AppBundleRole: Int, Comparable {
@@ -27,6 +31,7 @@ enum AppBundleRole: Int, Comparable {
 enum AppInstanceDecision: Equatable {
   case becomeOwner
   case activateExisting(pid: Int32, bundleURL: URL)
+  case refuseOwnership
 }
 
 struct AppInstanceContext: Equatable {
@@ -36,6 +41,8 @@ struct AppInstanceContext: Equatable {
   var peers: [AppInstancePeer]
   var lockOwnerPid: Int32?
   var livePids: Set<Int32>
+  var selfExecutableURL: URL? = nil
+  var selfSignedMainExecutableURL: URL? = nil
 }
 
 enum AppInstanceOwnership {
@@ -44,6 +51,51 @@ enum AppInstanceOwnership {
 
   static func isSpecialLaunch(arguments: [String]) -> Bool {
     arguments.contains(where: { specialLaunchFlags.contains($0) })
+  }
+
+  /// A shared bundle identifier is not a process role. Only the executable
+  /// identified by the reported bundle's secured signature metadata is Main.
+  static func isMainHost(_ peer: AppInstancePeer) -> Bool {
+    guard peer.pid > 0,
+      peer.bundleURL.isFileURL,
+      let executable = peer.executableURL, executable.isFileURL,
+      let main = peer.signedMainExecutableURL, main.isFileURL,
+      peer.bundleURL.query == nil, peer.bundleURL.fragment == nil,
+      executable.query == nil, executable.fragment == nil,
+      main.query == nil, main.fragment == nil,
+      executable.host == nil || executable.host == "localhost",
+      main.host == nil || main.host == "localhost",
+      peer.bundleURL.host == nil || peer.bundleURL.host == "localhost"
+    else { return false }
+    let directory = peer.bundleURL.standardizedFileURL
+      .appendingPathComponent("Contents/MacOS", isDirectory: true)
+    return main.standardizedFileURL.deletingLastPathComponent().path == directory.path
+      && executable.standardizedFileURL.path == main.standardizedFileURL.path
+  }
+
+  /// Role evidence, not a replacement for installer/notary admission. Validate
+  /// the signature's critical metadata without walking the entire Runtime Pack.
+  static func signedMainExecutableURL(bundleURL: URL, bundleIdentifier: String) -> URL? {
+    var code: SecStaticCode?
+    guard bundleURL.isFileURL, !bundleIdentifier.isEmpty,
+      SecStaticCodeCreateWithPath(bundleURL as CFURL, [], &code) == errSecSuccess,
+      let code,
+      SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSBasicValidateOnly), nil)
+        == errSecSuccess
+    else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(code, [], &information) == errSecSuccess,
+      let info = information as? [String: Any],
+      info[kSecCodeInfoIdentifier as String] as? String == bundleIdentifier,
+      let plist = info[kSecCodeInfoPList as String] as? [String: Any],
+      plist["CFBundleIdentifier"] as? String == bundleIdentifier,
+      let name = plist["CFBundleExecutable"] as? String,
+      !name.isEmpty, name != ".", name != "..", !name.contains("/"),
+      let main = info[kSecCodeInfoMainExecutable as String] as? URL,
+      main.standardizedFileURL == bundleURL.standardizedFileURL
+        .appendingPathComponent("Contents/MacOS", isDirectory: true).appendingPathComponent(name)
+    else { return nil }
+    return main
   }
 
   static func classifyBundleURL(_ url: URL) -> AppBundleRole {
@@ -77,14 +129,18 @@ enum AppInstanceOwnership {
       return .becomeOwner
     }
 
+    let selfPeer = AppInstancePeer(
+      pid: context.selfPid, bundleURL: context.selfBundleURL,
+      executableURL: context.selfExecutableURL,
+      signedMainExecutableURL: context.selfSignedMainExecutableURL)
+    guard isMainHost(selfPeer) else { return .refuseOwnership }
     let livePeers = context.peers.filter { peer in
-      peer.pid != context.selfPid && context.livePids.contains(peer.pid)
+      peer.pid != context.selfPid && context.livePids.contains(peer.pid) && isMainHost(peer)
     }
-    let lockOwnerIsLive = context.lockOwnerPid.map { context.livePids.contains($0) } ?? false
-    let lockPid = lockOwnerIsLive ? context.lockOwnerPid : nil
+    let lockPid = context.lockOwnerPid
 
     var candidates = livePeers
-    candidates.append(AppInstancePeer(pid: context.selfPid, bundleURL: context.selfBundleURL))
+    candidates.append(selfPeer)
 
     let winner = candidates.min { lhs, rhs in
       let leftRole = classifyBundleURL(lhs.bundleURL)

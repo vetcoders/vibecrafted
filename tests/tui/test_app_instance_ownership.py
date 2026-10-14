@@ -70,3 +70,55 @@ def test_app_instance_ownership_swift_behavior(tmp_path: Path) -> None:
         [str(binary)], capture_output=True, text=True, timeout=30, check=True
     )
     assert "AppInstanceOwnershipTests passed" in result.stdout
+
+
+def test_native_instance_boundaries_typecheck_without_app_build(tmp_path: Path) -> None:
+    """Check the actual adapters against AppKit/Security without executing them."""
+    if os.uname().sysname != "Darwin":
+        pytest.skip("macOS native boundary")
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is unavailable")
+    delegate = (APP / "AppDelegate.swift").read_text(encoding="utf-8")
+    boundary = delegate.split("  private func claimUserAppInstanceOrHandoff()", 1)[1]
+    boundary = boundary.split("  // MARK: - Main Menu", 1)[0]
+    adapter = tmp_path / "InstanceBoundary.swift"
+    adapter.write_text(
+        "import AppKit\nimport Darwin\n"
+        "func lifecycleLog(_ event: String) {}\n"
+        "@MainActor final class InstanceBoundary {\n"
+        "  private func claimUserAppInstanceOrHandoff()" + boundary + "\n}\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            swiftc,
+            "-swift-version",
+            "6",
+            "-typecheck",
+            str(APP / "AppInstanceOwnership.swift"),
+            str(adapter),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    wrapper = (ROOT / "scripts/install-app.sh").read_text(encoding="utf-8")
+    inline = wrapper.split("<<'MAIN_QUIT_SWIFT'\n", 1)[1].split(
+        "\nMAIN_QUIT_SWIFT\n", 1
+    )[0]
+    main = tmp_path / "main.swift"
+    main.write_text(
+        (APP / "AppInstanceOwnership.swift").read_text(encoding="utf-8")
+        + "\n"
+        + inline,
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [swiftc, "-swift-version", "6", "-typecheck", str(main)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )

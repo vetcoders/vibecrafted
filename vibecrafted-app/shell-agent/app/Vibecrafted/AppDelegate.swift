@@ -1594,19 +1594,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let identifier = Bundle.main.bundleIdentifier ?? AppInstanceOwnership.productBundleIdentifier
     let selfPid = Int32(getpid())
     let selfURL = Bundle.main.bundleURL
+    let selfPeer = mainInstancePeer(NSRunningApplication.current, identifier: identifier)
     let peers = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
       .compactMap { app -> AppInstancePeer? in
-        guard app.processIdentifier != selfPid, let url = app.bundleURL else { return nil }
-        return AppInstancePeer(pid: app.processIdentifier, bundleURL: url)
+        guard app.processIdentifier != selfPid else { return nil }
+        return mainInstancePeer(app, identifier: identifier)
       }
     let lockURL = AppInstanceOwnership.lockFileURL(
       bundleIdentifier: identifier, home: FileManager.default.homeDirectoryForCurrentUser)
     let parsed = (try? String(contentsOf: lockURL, encoding: .utf8))
       .flatMap(AppInstanceOwnership.parseLockRecord)
-    var live = Set(peers.map(\.pid))
-    live.insert(selfPid)
-    if let pid = parsed?.pid, kill(pid_t(pid), 0) == 0 {
-      live.insert(pid)
+    let lockOwner = (peers + [selfPeer].compactMap { $0 }).first { peer in
+      peer.pid == parsed?.pid && peer.bundleURL.standardizedFileURL.path == parsed?.path
     }
     let decision = AppInstanceOwnership.decide(
       AppInstanceContext(
@@ -1614,16 +1613,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         selfBundleURL: selfURL,
         arguments: ProcessInfo.processInfo.arguments,
         peers: peers,
-        lockOwnerPid: parsed?.pid,
-        livePids: live))
+        lockOwnerPid: lockOwner?.pid,
+        livePids: Set(peers.map(\.pid)).union([selfPid]),
+        selfExecutableURL: selfPeer?.executableURL,
+        selfSignedMainExecutableURL: selfPeer?.signedMainExecutableURL))
     switch decision {
+    case .refuseOwnership:
+      lifecycleLog("instance refused Main executable evidence pid=\(selfPid) path=\(selfURL.path)")
+      exit(EXIT_FAILURE)
     case .becomeOwner:
       persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
       lifecycleLog("instance owner pid=\(selfPid) path=\(selfURL.path)")
       return true
     case .activateExisting(let pid, let url):
-      lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
-      if let other = NSRunningApplication(processIdentifier: pid) {
+      if let selected = peers.first(where: { $0.pid == pid }),
+        let other = NSRunningApplication(processIdentifier: pid),
+        mainInstancePeer(other, identifier: identifier) == selected
+      {
+        lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
         other.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         exit(EXIT_SUCCESS)
       }
@@ -1631,6 +1638,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       lifecycleLog("instance owner after stale peer pid=\(selfPid) path=\(selfURL.path)")
       return true
     }
+  }
+
+  private func mainInstancePeer(_ app: NSRunningApplication, identifier: String) -> AppInstancePeer? {
+    guard !app.isTerminated, app.bundleIdentifier == identifier,
+      let url = app.bundleURL, let executable = app.executableURL,
+      let launchDate = app.launchDate,
+      let main = AppInstanceOwnership.signedMainExecutableURL(
+        bundleURL: url, bundleIdentifier: identifier)
+    else { return nil }
+    let peer = AppInstancePeer(
+      pid: app.processIdentifier, bundleURL: url, executableURL: executable,
+      signedMainExecutableURL: main, launchDate: launchDate)
+    return AppInstanceOwnership.isMainHost(peer) ? peer : nil
   }
 
   /// Best-effort owner record. The installer owns Application Support layout;
