@@ -43,7 +43,10 @@ echo "[dev-up] repo:     $repo"
 echo "[dev-up] project:  $project"
 echo "[dev-up] building + starting (first build compiles the toolchain; grab a coffee)…"
 
-VC_WORKSPACE_DIR="$repo" "$DOCKER" compose -p "$project" -f "$recipe/compose.dev.yaml" up -d --build
+# The bind mount is the host checkout: Linux uv must not create/replace its
+# host Python environment. VC_DEV_SKIP_SYNC=0 is an explicit caller opt-in.
+VC_WORKSPACE_DIR="$repo" VC_DEV_SKIP_SYNC="${VC_DEV_SKIP_SYNC:-1}" \
+  "$DOCKER" compose -p "$project" -f "$recipe/compose.dev.yaml" up -d --build
 
 cat <<EOF
 

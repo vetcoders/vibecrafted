@@ -141,16 +141,20 @@ _vetcoders_has_owned_vc_terminal_entry() {
   # Once accepted, retain the boundary only in this shell. Do not export it to
   # a provider or another agent generation: descendants have their own cwd and
   # surface contract and must be admitted independently.
+  # Both bash and zsh retain $$ in (...) descendants. Subshell depth changes
+  # even on macOS bash 3.2, which has no BASHPID; siblings cannot inherit each
+  # other's cache, so the copied parent depth must never admit a child.
+  local shell_identity="${BASHPID:-$$}:${BASH_SUBSHELL:-${ZSH_SUBSHELL:-0}}"
   local front_door=""
   front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
   [[ -n "$front_door" ]] || return 1
   [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" &&
-    "${_VETCODERS_OWNED_TERMINAL_ENTRY_SHELL:-}" == "$$" &&
+    "${_VETCODERS_OWNED_TERMINAL_ENTRY_SHELL:-}" == "$shell_identity" &&
     "${_VETCODERS_OWNED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] && return 0
   [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" &&
     "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
   _VETCODERS_OWNED_TERMINAL_ENTRY=1
-  _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL="$$"
+  _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL="$shell_identity"
   _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER="$front_door"
   # `set -a` must not turn a same-shell cache into descendant admission.
   if [[ -n "${BASH_VERSION:-}" ]]; then

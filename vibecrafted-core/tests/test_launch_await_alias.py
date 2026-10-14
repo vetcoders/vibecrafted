@@ -91,11 +91,18 @@ def test_dispatch_plan_keeps_plan_route(monkeypatch):
     monkeypatch.setattr(
         dispatch_cli,
         "diagnose_file",
-        lambda path: calls.append(path) or SimpleNamespace(ok=False),
+        lambda path, **kwargs: (
+            calls.append((path, kwargs)) or SimpleNamespace(ok=False)
+        ),
     )
     monkeypatch.setattr(dispatch_cli, "_print_doctor", lambda *a, **k: None)
     assert cli.main(["dispatch", "plan.toml", "--doctor"]) == 1
-    assert str(calls[0]) == "plan.toml"
+    assert str(calls[0][0]) == "plan.toml"
+    assert calls[0][1] == {
+        "check_quotas": True,
+        "ignore_usage_quota_warnings": False,
+        "quota_enforce": True,
+    }
 
 
 def test_invented_dispatch_verb_remains_refused(capsys):
@@ -258,11 +265,18 @@ def test_agent_named_plan_file_remains_a_plan(monkeypatch, tmp_path):
     monkeypatch.setattr(
         dispatch_cli,
         "diagnose_file",
-        lambda path: calls.append(path) or SimpleNamespace(ok=False),
+        lambda path, **kwargs: (
+            calls.append((path, kwargs)) or SimpleNamespace(ok=False)
+        ),
     )
     monkeypatch.setattr(dispatch_cli, "_print_doctor", lambda *a, **k: None)
     assert dispatch_cli.main(["codex", "--doctor"]) == 1
-    assert str(calls[0]) == "codex"
+    assert str(calls[0][0]) == "codex"
+    assert calls[0][1] == {
+        "check_quotas": True,
+        "ignore_usage_quota_warnings": False,
+        "quota_enforce": True,
+    }
 
 
 @pytest.mark.parametrize(

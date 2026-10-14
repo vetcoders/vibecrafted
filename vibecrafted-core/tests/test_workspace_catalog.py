@@ -1341,6 +1341,44 @@ def test_live_session_owner_refuses_ambiguous_same_root_and_unreadable_current(
         wc.runtime_session_owner_root("same", "/socket", runtime_state="live")
 
 
+def test_live_seat_refuses_selected_sibling_workspace_at_same_root(
+    home: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    owner = wc.resolve_run_workspace_identity(root=root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=owner.workspace_id,
+        vibecrafted_session_id=owner.vibecrafted_session_id,
+        workspace_instance_id=owner.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="owner-seat",
+        socket_dir="/socket",
+        state="live",
+    )
+    sibling = wc.create_workspace(root=root, display_label="sibling", select=True)
+    assert sibling.workspace_id != owner.workspace_id
+    before = wc.read_catalog().to_payload()
+    with pytest.raises(wc.WorkspaceCatalogError, match="belongs to another workspace"):
+        wc.resolve_run_workspace_identity(
+            root=root,
+            env={},
+            runtime_session_id="owner-seat",
+            socket_dir="/socket",
+            runtime_state="live",
+        )
+    assert wc.read_catalog().to_payload() == before
+    admitted = wc.resolve_run_workspace_identity(
+        root=root,
+        env=owner.to_env(),
+        runtime_session_id="owner-seat",
+        socket_dir="/socket",
+        runtime_state="live",
+    )
+    assert admitted.workspace_id == owner.workspace_id
+    assert admitted.vibecrafted_session_id == owner.vibecrafted_session_id
+
+
 def test_live_session_owner_preserves_foreign_root_and_no_identity_refusal(
     home: Path, tmp_path: Path
 ) -> None:

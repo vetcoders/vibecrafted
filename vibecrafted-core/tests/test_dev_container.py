@@ -929,3 +929,39 @@ def test_recovery_command_runs_without_compose_env_and_unblocks_upgrade(
         root, env=engine.env, log=lambda _line: None
     )
     assert target.recipe_digest == dev_container.recipe_digest()
+
+
+@pytest.mark.parametrize("requested,expected", [(None, "1"), ("0", "0"), ("1", "1")])
+def test_manual_dev_up_defaults_to_no_host_sync(
+    tmp_path: Path, requested, expected
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    capture = tmp_path / "docker-env.json"
+    docker = tools / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"open({str(capture)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], "
+        "'skip_sync': os.environ.get('VC_DEV_SKIP_SYNC'), "
+        "'workspace': os.environ.get('VC_WORKSPACE_DIR')}))\n"
+    )
+    docker.chmod(0o755)
+    env = {"PATH": f"{tools}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    if requested is not None:
+        env["VC_DEV_SKIP_SYNC"] = requested
+    script = Path(__file__).resolve().parents[2] / "vibecrafted-vm/dev-up.sh"
+    result = subprocess.run(
+        ["bash", str(script), str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    sent = json.loads(capture.read_text())
+    assert sent["skip_sync"] == expected
+    assert sent["workspace"] == str(repo.resolve())
+    assert sent["argv"][-3:] == ["up", "-d", "--build"]

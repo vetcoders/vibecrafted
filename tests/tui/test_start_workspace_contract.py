@@ -3999,6 +3999,32 @@ def test_all_export_terminal_receipt_cache_is_same_shell_only(
     assert "EXPORTED=[1]" in result.stdout
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_owned_terminal_receipt_cache_does_not_admit_subshell(
+    tmp_path: Path, shell: str
+) -> None:
+    scene = Scene(tmp_path)
+    result = _run(
+        scene,
+        "_vetcoders_has_owned_vc_terminal_entry; "
+        "printf 'PARENT=[%s]\\n' \"$?\"; "
+        "( _vetcoders_has_owned_vc_terminal_entry; "
+        "printf 'CHILD=[%s]\\n' \"$?\" ); "
+        "_vetcoders_has_owned_vc_terminal_entry; "
+        "printf 'PARENT_AGAIN=[%s]\\n' \"$?\"",
+        shell=shell,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                scene.generation / "bin/vibecrafted"
+            ),
+        },
+    )
+    assert "PARENT=[0]" in result.stdout
+    assert "CHILD=[1]" in result.stdout
+    assert "PARENT_AGAIN=[0]" in result.stdout
+
+
 def _run_with_owned_terminal_ancestor(
     scene: Scene, invocation: str, *, host: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
