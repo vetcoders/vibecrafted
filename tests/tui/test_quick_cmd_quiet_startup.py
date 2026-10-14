@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1011,6 +1012,208 @@ def test_pinned_pane_stays_when_a_helper_subshell_exits(tmp_path: Path) -> None:
         "ran one",
         "frame action list-panes --json --state",
         "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def _install_interactive_profile(tmp_path: Path) -> Path:
+    product = tmp_path / ".config" / "vibecrafted" / "vc-terminal"
+    product.mkdir(parents=True, exist_ok=True)
+    target = product / "interactive.zsh"
+    target.write_text(PROFILE.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
+def test_quick_cmd_untouched_product_preference_does_not_source_user_zshrc(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe untouched\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists(), (
+        "User ~/.zshrc must not be sourced under default product profile"
+    )
+    assert events == [
+        "ran untouched",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_sources_user_zshrc_exactly_once(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sentinel_hit\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe personal\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel.exists(), (
+        "User ~/.zshrc must be sourced when quick_cmd_profile='personal'"
+    )
+    hits = sentinel.read_text(encoding="utf-8").splitlines()
+    assert hits == ["sentinel_hit"]
+    assert len(hits) == 1
+    assert events == [
+        "ran personal",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_pinned_pane_survives_and_keeps_single_load(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sentinel_hit\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe one\nprobe two\nexit\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel.exists()
+    hits = sentinel.read_text(encoding="utf-8").splitlines()
+    assert hits == ["sentinel_hit"]
+    assert len(hits) == 1
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_unrelated_pane_survives(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+
+    panes = [
+        {"id": "terminal_18", "is_pinned": False, "is_plugin": False},
+        {"id": "terminal_99", "is_pinned": False, "is_plugin": False},
+    ]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe self\n",
+        panes=panes,
+        pane_id="terminal_18",
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "frame action close-pane --pane-id terminal_18" in events
+    assert "frame action close-pane --pane-id terminal_99" not in events
+    assert events.count("frame action close-pane --pane-id terminal_18") == 1
+
+
+def test_quick_cmd_malformed_preference_handled_honestly_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "unknown_flavor"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe fallback\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists(), (
+        "User ~/.zshrc must not be sourced on malformed preference"
+    )
+    assert "invalid terminal config" in result.stderr
+    assert events == [
+        "ran fallback",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_malformed_toml_handled_honestly_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe fallback\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_PYTHON": sys.executable},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+    assert "invalid TOML in server config" in result.stderr
+    assert events == [
+        "ran fallback",
         "frame action list-panes --json --state",
         "frame action close-pane --pane-id terminal_18",
     ]

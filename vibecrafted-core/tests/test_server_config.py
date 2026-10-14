@@ -9,10 +9,12 @@ from vibecrafted_core.server_config import (
     HousekeepingConfig,
     ServerConfig,
     ServerConfigError,
+    TerminalConfig,
     copilot_provider_env_lines,
     load_copilot_provider_config,
     load_housekeeping_config,
     load_server_config,
+    load_terminal_config,
     load_tool_destinations,
     seed_server_config,
 )
@@ -442,3 +444,81 @@ def test_copilot_provider_env_lines_let_explicit_export_win(
 
 def test_copilot_provider_env_lines_empty_when_unconfigured() -> None:
     assert copilot_provider_env_lines(CopilotProviderConfig()) == []
+
+
+def test_terminal_config_defaults_when_file_or_table_is_absent(
+    tmp_path: Path,
+) -> None:
+    assert (
+        load_terminal_config(tmp_path / "missing.toml").quick_cmd_profile == "product"
+    )
+    present = tmp_path / "config.toml"
+    present.write_text("[server]\nport = 3025\n", encoding="utf-8")
+    assert load_terminal_config(present).quick_cmd_profile == "product"
+
+
+def test_terminal_config_loads_explicit_profiles(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8")
+    assert load_terminal_config(path) == TerminalConfig(quick_cmd_profile="personal")
+
+    path.write_text('[terminal]\nquick_cmd_profile = "product"\n', encoding="utf-8")
+    assert load_terminal_config(path) == TerminalConfig(quick_cmd_profile="product")
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        (
+            '[terminal]\nquick_cmd_profile = "invalid"\n',
+            r"unsupported terminal\.quick_cmd_profile",
+        ),
+        (
+            "[terminal]\nquick_cmd_profile = 123\n",
+            r"terminal\.quick_cmd_profile must be a string",
+        ),
+        (
+            '[terminal]\nquick_cmd_profile = "personal"\nextra = 1\n',
+            r"unsupported \[terminal\] key",
+        ),
+        ('terminal = "not-a-table"\n', r"\[terminal\] must be a TOML table"),
+    ],
+)
+def test_terminal_config_rejects_invalid_values(
+    tmp_path: Path, body: str, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ServerConfigError, match=message):
+        load_terminal_config(path)
+
+
+def test_terminal_config_cli_prints_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vibecrafted_core.server_config import _main_cli
+
+    path = tmp_path / "vibecrafted" / "config.toml"
+    path.parent.mkdir()
+    path.write_text('[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    rc = _main_cli(["quick-cmd-profile"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "personal"
+
+
+def test_terminal_config_cli_reports_error_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vibecrafted_core.server_config import _main_cli
+
+    path = tmp_path / "vibecrafted" / "config.toml"
+    path.parent.mkdir()
+    path.write_text('[terminal]\nquick_cmd_profile = "bad"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    rc = _main_cli(["quick-cmd-profile"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid terminal config" in captured.err

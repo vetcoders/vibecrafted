@@ -38,6 +38,89 @@ printf '%s\n' \
   'This is one shot ephemeral shell unless you PIN ● it. Type command and forget.' \
   'You can open a real shell by pressing [+] in the tab bar anytime.'
 
+# Resolve the owned runtime interpreter (Python >= 3.11 with tomllib) to read
+# the operator's persistent configuration via the canonical config owner.
+# Host python3 (e.g. macOS 3.9.6) lacks tomllib and is rejected.
+_vc_quick_resolve_python() {
+  local candidate
+  for candidate in \
+    "${VIBECRAFTED_PYTHON:-}" \
+    "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/bin/python3}" \
+    "${VIBECRAFTED_RUNTIME_BIN:+${VIBECRAFTED_RUNTIME_BIN}/python3}" \
+    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/bin/python3}" \
+    "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin/python3}" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)/.venv/bin/python3" \
+    python3.14 python3.13 python3.12 python3.11 python3; do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_vc_quick_python_core_path() {
+  if [[ -n "${VIBECRAFTED_CORE_PYTHONPATH:-}" ]]; then
+    printf '%s\n' "$VIBECRAFTED_CORE_PYTHONPATH"
+    return 0
+  fi
+  local script_dir candidate
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  for candidate in \
+    "$(cd "$script_dir/../../.." 2>/dev/null && pwd)" \
+    "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/vibecrafted-core}" \
+    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/vibecrafted-core}"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -d "$candidate/vibecrafted_core" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Quick cmd profile selection: default is "product". An explicit preference
+# in ~/.config/vibecrafted/config.toml under [terminal] quick_cmd_profile='personal'
+# loads the user's ~/.zshrc via personal-shell once before hooks become active.
+# Unknown or malformed settings are reported honestly to stderr and fall back safely.
+_vc_quick_profile_preference="product"
+if _py="$(_vc_quick_resolve_python 2>/dev/null)"; then
+  _core_dir="$(_vc_quick_python_core_path 2>/dev/null || true)"
+  _pref_err=""
+  if command -v mktemp >/dev/null 2>&1; then
+    _pref_err="$(mktemp 2>/dev/null || true)"
+  fi
+  _pref_out=""
+  _pref_rc=0
+  if [[ -n "$_core_dir" ]]; then
+    if [[ -n "$_pref_err" ]]; then
+      _pref_out="$(PYTHONPATH="${_core_dir}${PYTHONPATH:+:$PYTHONPATH}" "$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
+    else
+      _pref_out="$(PYTHONPATH="${_core_dir}${PYTHONPATH:+:$PYTHONPATH}" "$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
+    fi
+  else
+    if [[ -n "$_pref_err" ]]; then
+      _pref_out="$("$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
+    else
+      _pref_out="$("$_py" -m vibecrafted_core.server_config quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
+    fi
+  fi
+  if (( _pref_rc == 0 )) && [[ -n "$_pref_out" ]]; then
+    _vc_quick_profile_preference="$_pref_out"
+  elif (( _pref_rc != 0 )) && [[ -n "$_pref_err" && -s "$_pref_err" ]]; then
+    cat "$_pref_err" >&2
+  fi
+  if [[ -n "$_pref_err" && -f "$_pref_err" ]]; then
+    rm -f "$_pref_err"
+  fi
+  unset _py _core_dir _pref_err _pref_out _pref_rc
+fi
+export _VC_QUICK_CMD_PROFILE="${_vc_quick_profile_preference}"
+
 # The Quick lane ZDOTDIR is product state, regenerated on every launch so an
 # updated runtime never leaves a stale hook behind.
 _zdot="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/quick-cmd"
@@ -50,6 +133,14 @@ cat > "${_zdot}/.zshrc" <<'ZSHRC'
 # Atuin/Starship/zoxide init for this pane.
 _vc_quick_profile="$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"
 [[ ! -r "${_vc_quick_profile}" ]] || source "${_vc_quick_profile}"
+
+# Load personal home profile if selected via [terminal] quick_cmd_profile='personal'.
+# Loaded exactly once before Quick cmd hooks and prompt become active.
+if [[ "${_VC_QUICK_CMD_PROFILE:-product}" == "personal" ]] && [[ -z "${_VC_TERMINAL_PERSONAL_SHELL:-}" ]]; then
+  if (( $+functions[personal-shell] )); then
+    personal-shell
+  fi
+fi
 
 # Quick cmd identity prompt; the profile's offline fallback is for full panes.
 PROMPT='❯_ '
