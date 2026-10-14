@@ -777,9 +777,7 @@ fn handle_key(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(InputOutcome::Quit);
     }
-    if app.focus == LaunchFocus::Browse
-        && app.refresh.projection != refresh::ProjectionLoadState::Ready
-    {
+    if app.refresh.projection != refresh::ProjectionLoadState::Ready {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(InputOutcome::Quit),
             KeyCode::Char('r') => {
@@ -787,7 +785,7 @@ fn handle_key(
                 app.request_full_refresh();
                 return Ok(InputOutcome::Handled);
             }
-            _ => {}
+            _ => return Ok(InputOutcome::Handled),
         }
     }
     if let Some(outcome) = handle_home_landing_key(app, key)? {
@@ -1198,7 +1196,9 @@ fn apply_mouse(
     mouse: MouseEvent,
     area: ratatui::layout::Rect,
 ) -> anyhow::Result<InputOutcome> {
-    if app.focus != LaunchFocus::Browse {
+    if app.refresh.projection != refresh::ProjectionLoadState::Ready
+        || app.focus != LaunchFocus::Browse
+    {
         return Ok(InputOutcome::Handled);
     }
     let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
@@ -2118,6 +2118,36 @@ mod tests {
 
     fn dispatch_area() -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(0, 0, 120, 40)
+    }
+
+    #[test]
+    fn unready_projection_does_not_operate_hidden_controls() {
+        for projection in [
+            refresh::ProjectionLoadState::Loading,
+            refresh::ProjectionLoadState::Unavailable("private fixture".into()),
+        ] {
+            for focus in [LaunchFocus::Browse, LaunchFocus::EditPrompt] {
+                let mut app = sample_app();
+                app.refresh.projection = projection.clone();
+                app.focus = focus;
+                let prompt = app.launch_prompt.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                for code in [KeyCode::Char('j'), KeyCode::Char('a'), KeyCode::Enter] {
+                    handle_key(&mut app, key(code), &tx).unwrap();
+                }
+                apply_mouse(
+                    &mut app,
+                    mouse(MouseEventKind::ScrollDown, 10, 10),
+                    dispatch_area(),
+                )
+                .unwrap();
+                assert_eq!(app.selected, 0);
+                assert_eq!(app.active_tab, AppTab::Monitor.index());
+                assert_eq!(app.focus, focus);
+                assert_eq!(app.launch_prompt, prompt);
+                assert!(rx.try_recv().is_err(), "hidden controls cannot launch work");
+            }
+        }
     }
 
     #[test]

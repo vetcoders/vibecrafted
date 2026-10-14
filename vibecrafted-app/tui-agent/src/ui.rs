@@ -22,7 +22,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         let (title, detail) = match &app.refresh.projection {
             crate::refresh::ProjectionLoadState::Loading => (
                 "Loading workspace state…",
-                "You can keep using the console or press q to close it.".to_string(),
+                "Press r to retry or q to close. Controls become available when loading finishes."
+                    .to_string(),
             ),
             crate::refresh::ProjectionLoadState::Unavailable(error) => (
                 "Workspace state unavailable",
