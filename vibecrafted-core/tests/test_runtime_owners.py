@@ -273,6 +273,655 @@ def main():
     assert relocated_probe.stdout.strip() == str(relocated_binary)
 
 
+def test_native_host_isolates_environment_from_foreign_children_and_preserves_semantics(
+    tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "native_renderer", ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / "generation"
+    (root / "bin").mkdir(parents=True)
+
+    configured_library = str(sysconfig.get_config_var("LDLIBRARY"))
+    if sys.platform == "darwin" and sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        library_source = (
+            Path(sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX")) / configured_library
+        )
+    else:
+        library_source = Path(sysconfig.get_config_var("LIBDIR")) / configured_library
+    assert library_source.is_file(), library_source
+    library = library_source.name
+
+    if sys.platform == "darwin":
+        library_root = root / "python/lib"
+        library_root.mkdir(parents=True)
+        shutil.copyfile(library_source, library_root / library)
+        (
+            library_root / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        ).symlink_to(sysconfig.get_path("stdlib"), target_is_directory=True)
+        subprocess.run(
+            [
+                "install_name_tool",
+                "-id",
+                f"@rpath/{library}",
+                str(library_root / library),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(library_root / library)],
+            check=True,
+        )
+    else:
+        (root / "python").symlink_to(Path(sys.base_prefix), target_is_directory=True)
+
+    source = root / "vibecrafted-core"
+    source.mkdir()
+    (source / "owned_core_mod.py").write_text("MAGIC = 42\n")
+
+    python_host = root / "bin/vc-python"
+    module.render_native_host(
+        python_host, "owned_core_mod:main", library, python_only=True
+    )
+
+    # 1. Native ordinary core import passes
+    core_check = subprocess.run(
+        [
+            str(python_host),
+            "-c",
+            "import owned_core_mod; assert owned_core_mod.MAGIC == 42",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert core_check.returncode == 0, core_check.stderr
+
+    # 2. Native -I stdlib and identity, required stdlib modules pass from selected generation
+    stdlib_check = subprocess.run(
+        [
+            str(python_host),
+            "-I",
+            "-c",
+            (
+                "import sys, encodings, binascii, ssl, sqlite3, datetime; "
+                f"assert sys.executable == {str(python_host)!r}"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert stdlib_check.returncode == 0, stdlib_check.stderr
+
+    # 3. Hostile cwd and hostile PYTHONPATH negative under isolated mode (-I)
+    hostile_dir = tmp_path / "hostile"
+    hostile_dir.mkdir()
+    (hostile_dir / "hostile_payload.py").write_text(
+        "raise RuntimeError('hostile code executed')\n"
+    )
+
+    hostile_cwd_check = subprocess.run(
+        [str(python_host), "-I", "-c", "import hostile_payload"],
+        cwd=hostile_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert hostile_cwd_check.returncode != 0
+    assert (
+        "ModuleNotFoundError: No module named 'hostile_payload'"
+        in hostile_cwd_check.stderr
+    )
+
+    hostile_env_check = subprocess.run(
+        [str(python_host), "-I", "-c", "import hostile_payload"],
+        env={**os.environ, "PYTHONPATH": str(hostile_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert hostile_env_check.returncode != 0
+    assert (
+        "ModuleNotFoundError: No module named 'hostile_payload'"
+        in hostile_env_check.stderr
+    )
+
+    # 3b. Actual native option handling and parent counterexamples with ambient canary
+    ambient_dir = tmp_path / "ambient"
+    ambient_dir.mkdir()
+    (ambient_dir / "ambient_ISOLATION_canary.py").write_text("IS_LOADED = True\n")
+    ambient_env = {**os.environ, "PYTHONPATH": str(ambient_dir)}
+
+    # Counterexample 1: -I direct find_spec => False (control PASS)
+    check_i = subprocess.run(
+        [
+            str(python_host),
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_i.returncode == 0, check_i.stderr
+    assert check_i.stdout.strip() == "False"
+
+    # Counterexample 2: -W ignore -E -c find_spec => False (MUST False)
+    check_we = subprocess.run(
+        [
+            str(python_host),
+            "-W",
+            "ignore",
+            "-E",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_we.returncode == 0, check_we.stderr
+    assert check_we.stdout.strip() == "False"
+
+    # Counterexample 3: -X dev -I -c find_spec => False (MUST False)
+    check_xi = subprocess.run(
+        [
+            str(python_host),
+            "-X",
+            "dev",
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_xi.returncode == 0, check_xi.stderr
+    assert check_xi.stdout.strip() == "False"
+
+    # Permutations: combined flags and attached option values
+    for flag_group in (
+        ["-Wignore", "-E"],
+        ["-Xdev", "-I"],
+        ["-EI"],
+        ["-IE"],
+    ):
+        check_comb = subprocess.run(
+            [
+                str(python_host),
+                *flag_group,
+                "-c",
+                "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+            ],
+            env=ambient_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert check_comb.returncode == 0, check_comb.stderr
+        assert check_comb.stdout.strip() == "False"
+
+    # Counterexample 4: ordinary -c code beginning `-1; __import__('ambient_ISOLATION_canary'); print('loaded')` => loaded
+    check_ordinary = subprocess.run(
+        [
+            str(python_host),
+            "-c",
+            "-1; __import__('ambient_ISOLATION_canary'); print('loaded')",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_ordinary.returncode == 0, check_ordinary.stderr
+    assert check_ordinary.stdout.strip() == "loaded"
+
+    # Ordinary -c with non-isolated options (-u, -B)
+    check_ub = subprocess.run(
+        [
+            str(python_host),
+            "-u",
+            "-B",
+            "-c",
+            "-1; __import__('ambient_ISOLATION_canary'); print('loaded')",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_ub.returncode == 0, check_ub.stderr
+    assert check_ub.stdout.strip() == "loaded"
+
+    # Delimiter -- stops option scanning
+    check_delim = subprocess.run(
+        [
+            str(python_host),
+            "-I",
+            "--",
+            "-c",
+            "import sys; print('ignored')",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_delim.returncode != 0
+
+    # 4. Owned module doors -m and -c preserved
+    m_check = subprocess.run(
+        [str(python_host), "-m", "timeit", "-n", "1", "-r", "1", "1 + 1"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert m_check.returncode == 0, m_check.stderr
+
+    c_check = subprocess.run(
+        [str(python_host), "-c", "print('preserved_c_door')"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert c_check.returncode == 0
+    assert c_check.stdout.strip() == "preserved_c_door"
+
+    # 5. Foreign Python and screenscribe child isolation
+    foreign_pythons = [
+        Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
+    ]
+    foreign_python = next((p for p in foreign_pythons if p.is_file()), None)
+    if foreign_python is None:
+        foreign_venv = tmp_path / "foreign_venv"
+        subprocess.run([sys.executable, "-m", "venv", str(foreign_venv)], check=True)
+        foreign_python = foreign_venv / "bin/python3"
+
+    direct_foreign = subprocess.run(
+        [str(foreign_python), "-B", "-c", "import encodings"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert direct_foreign.returncode == 0, direct_foreign.stderr
+
+    spawned_foreign = subprocess.run(
+        [
+            str(python_host),
+            "-c",
+            (
+                "import subprocess, sys; "
+                f"r = subprocess.run([{str(foreign_python)!r}, '-B', '-c', 'import encodings'], capture_output=True); "
+                "sys.exit(r.returncode)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert spawned_foreign.returncode == 0, spawned_foreign.stderr
+
+    screenscribe_bin = Path("/Users/polyversai/.local/bin/screenscribe")
+    if not screenscribe_bin.is_file():
+        found = shutil.which("screenscribe")
+        if found:
+            screenscribe_bin = Path(found)
+    if screenscribe_bin.is_file():
+        direct_ss = subprocess.run(
+            [str(screenscribe_bin), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert direct_ss.returncode == 0, direct_ss.stderr
+
+        spawned_ss = subprocess.run(
+            [
+                str(python_host),
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    f"r = subprocess.run([{str(screenscribe_bin)!r}, '--help'], capture_output=True); "
+                    "sys.exit(r.returncode)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert spawned_ss.returncode == 0, spawned_ss.stderr
+
+    # 6. Fail-closed invalid payload: host refuses when stdlib is missing
+    empty_root = tmp_path / "empty_generation"
+    (empty_root / "bin").mkdir(parents=True)
+    empty_lib = empty_root / "python/lib"
+    empty_lib.mkdir(parents=True)
+    shutil.copyfile(library_source, empty_lib / library)
+    if sys.platform == "darwin":
+        subprocess.run(
+            [
+                "install_name_tool",
+                "-id",
+                f"@rpath/{library}",
+                str(empty_lib / library),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(empty_lib / library)], check=True
+        )
+    bad_host = empty_root / "bin/vc-bad-host"
+    module.render_native_host(bad_host, "any:main", library, python_only=True)
+    bad_check = subprocess.run(
+        [str(bad_host), "--version"], capture_output=True, text=True, check=False
+    )
+    assert bad_check.returncode == 78
+    assert "stdlib unavailable in this generation" in bad_check.stderr
+
+    # 6b. Deterministic stdlib selection: ignores bogus python3.bad and fails closed when mismatched
+    bogus_dir = library_root / "python3.bad"
+    bogus_dir.mkdir()
+    try:
+        check_det = subprocess.run(
+            [str(python_host), "-c", "import sys; print('stdlib_ok')"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert check_det.returncode == 0, check_det.stderr
+        assert check_det.stdout.strip() == "stdlib_ok"
+    finally:
+        bogus_dir.rmdir()
+
+    mismatched_root = tmp_path / "mismatched_generation"
+    (mismatched_root / "bin").mkdir(parents=True)
+    mismatched_lib = mismatched_root / "python/lib"
+    mismatched_lib.mkdir(parents=True)
+    shutil.copyfile(library_source, mismatched_lib / library)
+    (mismatched_lib / "python3.bad").mkdir()
+    (mismatched_lib / "python3.99").mkdir()
+    if sys.platform == "darwin":
+        subprocess.run(
+            [
+                "install_name_tool",
+                "-id",
+                f"@rpath/{library}",
+                str(mismatched_lib / library),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(mismatched_lib / library)],
+            check=True,
+        )
+    mismatched_host = mismatched_root / "bin/vc-mismatched"
+    module.render_native_host(mismatched_host, "any:main", library, python_only=True)
+    mismatched_check = subprocess.run(
+        [str(mismatched_host), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mismatched_check.returncode == 78
+    assert "stdlib unavailable in this generation" in mismatched_check.stderr
+
+
+def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
+    if sys.platform != "darwin":
+        pytest.skip("pinned PBS 3.14 fixture verification is macOS only")
+    spec = importlib.util.spec_from_file_location(
+        "native_renderer", ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Discover pinned PBS 3.14 in read-only releases
+    pbs_lib = None
+    pbs_stdlib = None
+    candidates = [
+        Path.home() / ".local/share/vibecrafted/releases",
+        Path("/Users/polyversai/.local/share/vibecrafted/releases"),
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            for release in sorted(candidate.glob("*/python"), reverse=True):
+                candidate_lib = release / "lib/libpython3.14.dylib"
+                candidate_stdlib = release / "lib/python3.14"
+                if candidate_lib.is_file() and candidate_stdlib.is_dir():
+                    pbs_lib = candidate_lib
+                    pbs_stdlib = candidate_stdlib
+                    break
+            if pbs_lib:
+                break
+    if not pbs_lib:
+        pytest.skip("pinned PBS 3.14 not available on this host")
+
+    root = tmp_path / "pbs314_generation"
+    (root / "bin").mkdir(parents=True)
+    library_root = root / "python/lib"
+    library_root.mkdir(parents=True)
+    library = "libpython3.14.dylib"
+
+    # Sealed product closure: private copied fixture with NO symlinks
+    shutil.copyfile(pbs_lib, library_root / library)
+    shutil.copytree(pbs_stdlib, library_root / "python3.14")
+
+    subprocess.run(
+        [
+            "install_name_tool",
+            "-id",
+            f"@rpath/{library}",
+            str(library_root / library),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(library_root / library)],
+        check=True,
+    )
+
+    source = root / "vibecrafted-core"
+    source.mkdir()
+    (source / "owned_core_mod.py").write_text("PBS_MAGIC = 314\n")
+
+    python_host = root / "bin/vc-python"
+    module.render_native_host(
+        python_host, "owned_core_mod:main", library, python_only=True
+    )
+
+    # 1. Version and identity check
+    ver_check = subprocess.run(
+        [str(python_host), "--version"], capture_output=True, text=True, check=True
+    )
+    assert ver_check.stdout.startswith("Python 3.14.")
+
+    # 2. Ordinary core + ssl, sqlite, binascii, encodings, datetime imports
+    core_check = subprocess.run(
+        [
+            str(python_host),
+            "-c",
+            (
+                "import owned_core_mod, sys, encodings, binascii, ssl, sqlite3, datetime; "
+                "assert owned_core_mod.PBS_MAGIC == 314; "
+                f"assert sys.executable == {str(python_host)!r}"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert core_check.returncode == 0, core_check.stderr
+
+    # 3. Parent counterexamples and flag permutations with ambient hostile canary
+    ambient_dir = tmp_path / "ambient"
+    ambient_dir.mkdir()
+    (ambient_dir / "ambient_ISOLATION_canary.py").write_text("IS_LOADED = True\n")
+    ambient_env = {**os.environ, "PYTHONPATH": str(ambient_dir)}
+
+    # -I direct find_spec => False
+    check_i = subprocess.run(
+        [
+            str(python_host),
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_i.returncode == 0, check_i.stderr
+    assert check_i.stdout.strip() == "False"
+
+    # -W ignore -E -c find_spec => False
+    check_we = subprocess.run(
+        [
+            str(python_host),
+            "-W",
+            "ignore",
+            "-E",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_we.returncode == 0, check_we.stderr
+    assert check_we.stdout.strip() == "False"
+
+    # -X dev -I -c find_spec => False
+    check_xi = subprocess.run(
+        [
+            str(python_host),
+            "-X",
+            "dev",
+            "-I",
+            "-c",
+            "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_xi.returncode == 0, check_xi.stderr
+    assert check_xi.stdout.strip() == "False"
+
+    # Permutations: -Wignore, -Xdev, -EI, -IE
+    for flag_group in (["-Wignore", "-E"], ["-Xdev", "-I"], ["-EI"], ["-IE"]):
+        check_comb = subprocess.run(
+            [
+                str(python_host),
+                *flag_group,
+                "-c",
+                "import importlib.util; print(bool(importlib.util.find_spec('ambient_ISOLATION_canary')))",
+            ],
+            env=ambient_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert check_comb.returncode == 0, check_comb.stderr
+        assert check_comb.stdout.strip() == "False"
+
+    # Ordinary -c code beginning `-1; __import__('ambient_ISOLATION_canary'); print('loaded')` => loaded
+    check_ord = subprocess.run(
+        [
+            str(python_host),
+            "-c",
+            "-1; __import__('ambient_ISOLATION_canary'); print('loaded')",
+        ],
+        env=ambient_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check_ord.returncode == 0, check_ord.stderr
+    assert check_ord.stdout.strip() == "loaded"
+
+    # 4. Foreign uv Python and screenscribe child isolation
+    foreign_pythons = [
+        Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
+    ]
+    foreign_python = next((p for p in foreign_pythons if p.is_file()), None)
+    if foreign_python:
+        spawned_foreign = subprocess.run(
+            [
+                str(python_host),
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    f"r = subprocess.run([{str(foreign_python)!r}, '-B', '-c', 'import encodings'], capture_output=True); "
+                    "sys.exit(r.returncode)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert spawned_foreign.returncode == 0, spawned_foreign.stderr
+
+    screenscribe_bin = Path("/Users/polyversai/.local/bin/screenscribe")
+    if screenscribe_bin.is_file():
+        spawned_ss = subprocess.run(
+            [
+                str(python_host),
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    f"r = subprocess.run([{str(screenscribe_bin)!r}, '--help'], capture_output=True); "
+                    "sys.exit(r.returncode)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert spawned_ss.returncode == 0, spawned_ss.stderr
+
+    # 5. Mismatched stdlib negative in PBS 3.14 geometry
+    mismatched_root = tmp_path / "mismatched_pbs314"
+    (mismatched_root / "bin").mkdir(parents=True)
+    mismatched_lib = mismatched_root / "python/lib"
+    mismatched_lib.mkdir(parents=True)
+    shutil.copyfile(pbs_lib, mismatched_lib / library)
+    (mismatched_lib / "python3.bad").mkdir()
+    (mismatched_lib / "python3.12").mkdir()
+    subprocess.run(
+        [
+            "install_name_tool",
+            "-id",
+            f"@rpath/{library}",
+            str(mismatched_lib / library),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(mismatched_lib / library)],
+        check=True,
+    )
+    mismatched_host = mismatched_root / "bin/vc-mismatched"
+    module.render_native_host(mismatched_host, "any:main", library, python_only=True)
+    mismatched_check = subprocess.run(
+        [str(mismatched_host), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mismatched_check.returncode == 78
+    assert "stdlib unavailable in this generation" in mismatched_check.stderr
+
+
 def test_fixed_terminal_host_refuses_generation_app_identity(tmp_path):
     spec = importlib.util.spec_from_file_location(
         "installer_runtime_owners", ROOT / "scripts/vetcoders_install.py"

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <wchar.h>
 #ifdef __APPLE__
@@ -17,6 +18,7 @@
 extern int Py_BytesMain(int, char **);
 extern wchar_t *Py_DecodeLocale(const char *, size_t *);
 extern void Py_SetPythonHome(const wchar_t *);
+extern void Py_SetPath(const wchar_t *);
 #endif
 
 #ifndef VC_PYTHON_LIB
@@ -29,6 +31,27 @@ extern void Py_SetPythonHome(const wchar_t *);
 static int join(char *buffer, size_t size, const char *root, const char *suffix) {
     int n = snprintf(buffer, size, "%s/%s", root, suffix);
     return n >= 0 && (size_t)n < size;
+}
+
+static int extract_stdlib_name(char *dest, size_t dest_size, const char *lib_name) {
+    const char *p = strstr(lib_name, "python");
+    if (!p) {
+        p = strstr(lib_name, "Python");
+    }
+    if (!p) return 0;
+    const char *start = p;
+    p += 6; /* skip "python" or "Python" */
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p != '.') return 0;
+    p++;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == 't') p++;
+    size_t len = (size_t)(p - start);
+    if (len + 1 > dest_size) return 0;
+    int n = snprintf(dest, dest_size, "python%.*s", (int)(len - 6), start + 6);
+    return n > 0 && (size_t)n < dest_size;
 }
 
 static int run_python(int (*python_main)(int, char **), int argc, char **argv) {
@@ -61,14 +84,82 @@ int main(int argc, char **argv) {
     slash = strrchr(root, '/');
     if (!slash) return 78;
     *slash = '\0';
-    char library[PATH_MAX], home[PATH_MAX], imports[PATH_MAX * 3];
+    char library[PATH_MAX], home[PATH_MAX], python_lib[PATH_MAX];
     if (!join(library, sizeof(library), root, "python/lib/" VC_PYTHON_LIB) ||
-        !join(home, sizeof(home), root, "python")) return 78;
-    int n = snprintf(imports, sizeof(imports), "%s/vibecrafted-core:%s/vibecrafted-mcp:%s/python-site", root, root, root);
-    if (n < 0 || (size_t)n >= sizeof(imports)) return 78;
+        !join(home, sizeof(home), root, "python") ||
+        !join(python_lib, sizeof(python_lib), root, "python/lib")) return 78;
+
+    char stdlib_name[64];
+    if (!extract_stdlib_name(stdlib_name, sizeof(stdlib_name), VC_PYTHON_LIB)) return 78;
+
+    char stdlib[PATH_MAX], dynload[PATH_MAX], site_pkgs[PATH_MAX];
+    if (!join(stdlib, sizeof(stdlib), python_lib, stdlib_name) ||
+        !join(dynload, sizeof(dynload), stdlib, "lib-dynload") ||
+        !join(site_pkgs, sizeof(site_pkgs), stdlib, "site-packages")) return 78;
+
+    struct stat st;
+    if (stat(stdlib, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "vc native host: stdlib unavailable in this generation\n");
+        return 78;
+    }
+
+    int isolated = 0;
+#ifndef VC_PYTHON_ONLY
+    int has_c_or_m = 0;
+#endif
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = argv[i];
+        if (arg[0] != '-') break;
+        if (arg[1] == '\0') break; /* "-" reads from stdin, terminates options */
+        if (strcmp(arg, "--") == 0) break; /* "--" terminates options */
+        if (arg[1] == '-') {
+            if (strncmp(arg, "--check-hash-based-pycs=", 24) == 0) {
+                continue;
+            } else if (strcmp(arg, "--check-hash-based-pycs") == 0) {
+                if (i + 1 < argc) i++;
+                continue;
+            }
+            continue;
+        }
+        const char *p = arg + 1;
+        while (*p) {
+            char opt = *p;
+            if (opt == 'I' || opt == 'E') {
+                isolated = 1;
+                p++;
+            } else if (opt == 'c' || opt == 'm') {
+#ifndef VC_PYTHON_ONLY
+                has_c_or_m = 1;
+#endif
+                goto done_options;
+            } else if (opt == 'W' || opt == 'X') {
+                p++;
+                if (*p == '\0') {
+                    if (i + 1 < argc) i++;
+                }
+                break;
+            } else {
+                p++;
+            }
+        }
+    }
+done_options: ;
+
+    char search_path[PATH_MAX * 10];
+    const char *env_pythonpath = getenv("PYTHONPATH");
+    int n;
+    if (!isolated && env_pythonpath && env_pythonpath[0]) {
+        n = snprintf(search_path, sizeof(search_path),
+                     "%s/vibecrafted-core:%s/vibecrafted-mcp:%s/python-site:%s:%s:%s:%s",
+                     root, root, root, stdlib, dynload, site_pkgs, env_pythonpath);
+    } else {
+        n = snprintf(search_path, sizeof(search_path),
+                     "%s/vibecrafted-core:%s/vibecrafted-mcp:%s/python-site:%s:%s:%s",
+                     root, root, root, stdlib, dynload, site_pkgs);
+    }
+    if (n < 0 || (size_t)n >= sizeof(search_path)) return 78;
     unsetenv("__PYVENV_LAUNCHER__");
-    if (setenv("PYTHONHOME", home, 1) || setenv("PYTHONPATH", imports, 1) ||
-        setenv("PYTHONNOUSERSITE", "1", 1) || setenv("PYTHONDONTWRITEBYTECODE", "1", 1) ||
+    if (setenv("PYTHONNOUSERSITE", "1", 1) || setenv("PYTHONDONTWRITEBYTECODE", "1", 1) ||
         setenv("VIBECRAFTED_RUNTIME_ROOT", root, 1)) return 78;
 #ifdef __APPLE__
     Dl_info image;
@@ -83,6 +174,7 @@ int main(int argc, char **argv) {
     int (*python_main)(int, char **) = Py_BytesMain;
     wchar_t *(*decode_locale)(const char *, size_t *) = Py_DecodeLocale;
     void (*set_home)(const wchar_t *) = Py_SetPythonHome;
+    void (*set_path)(const wchar_t *) = Py_SetPath;
 #else
     void *handle = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
@@ -97,20 +189,22 @@ int main(int argc, char **argv) {
         (wchar_t *(*)(const char *, size_t *))dlsym(handle, "Py_DecodeLocale");
     void (*set_home)(const wchar_t *) =
         (void (*)(const wchar_t *))dlsym(handle, "Py_SetPythonHome");
-    if (!decode_locale || !set_home) return 78;
+    void (*set_path)(const wchar_t *) =
+        (void (*)(const wchar_t *))dlsym(handle, "Py_SetPath");
+    if (!decode_locale || !set_home || !set_path) return 78;
 #endif
     wchar_t *python_home = decode_locale(home, NULL);
     if (!python_home) return 71;
     set_home(python_home); /* Retained for the complete interpreter lifetime. */
+    wchar_t *python_path = decode_locale(search_path, NULL);
+    if (!python_path) return 71;
+    set_path(python_path);
 #ifdef VC_PYTHON_ONLY
     return run_python(python_main, argc, argv);
 #else
     /* Internal core callers reuse sys.executable for Python module helpers.
      * Retain that actual interpreter contract within the named host. */
-    if (argc > 1 && (!strcmp(argv[1], "-c") || !strcmp(argv[1], "-m") ||
-                    !strcmp(argv[1], "-u") || !strcmp(argv[1], "-B") ||
-                    !strcmp(argv[1], "-I") || !strcmp(argv[1], "-E") ||
-                    !strcmp(argv[1], "-s") || !strcmp(argv[1], "-S"))) {
+    if (has_c_or_m) {
         return run_python(python_main, argc, argv);
     }
     char **python_argv = calloc((size_t)argc + 5, sizeof(char *));

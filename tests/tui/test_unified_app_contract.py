@@ -2007,6 +2007,7 @@ wchar_t *Py_DecodeLocale(const char *arg, size_t *size) {
   (void)arg; (void)size; return NULL;
 }
 void Py_SetPythonHome(const wchar_t *home) { (void)home; }
+void Py_SetPath(const wchar_t *path) { (void)path; }
 """
 
 
