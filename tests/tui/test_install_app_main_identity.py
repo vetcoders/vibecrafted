@@ -419,7 +419,29 @@ def test_legitimate_main_is_gracefully_quit(
     _helper_args(events)
 
 
-@pytest.mark.parametrize("missing", ["bundle", "identifier", "executable", "start"])
+@pytest.mark.parametrize("with_main", [False, True])
+def test_verified_terminal_without_launch_date_is_excluded(
+    tmp_path: Path, fence: None, harness: Harness, with_main: bool
+) -> None:
+    destination = _destination(tmp_path)
+    terminal = {**_peer(destination, 14649, "vc-terminal"), "start": None}
+    peers = [terminal]
+    if with_main:
+        peers.append(_peer(destination, 57391))
+    result, events, _ = _run(tmp_path, harness, peers)
+    assert result.returncode == 0, result.stderr
+    terminations = [event for event in events if event[0] == "terminate"]
+    assert terminations == ([["terminate", "57391"]] if with_main else [])
+    assert not any(event[:2] == ["ps", "14649"] for event in events)
+    args = _helper_args(events)
+    if with_main:
+        assert args[args.index("--wait-pid") + 1] == "57391"
+        assert args[args.index("--wait-start") + 1] == "Tue Oct 13 23:26:58 2026"
+    else:
+        assert "--wait-pid" not in args
+
+
+@pytest.mark.parametrize("missing", ["bundle", "identifier", "executable"])
 @pytest.mark.parametrize("role", ["Vibecrafted", "vc-terminal"])
 def test_missing_running_identity_refuses_before_quit(
     tmp_path: Path, fence: None, harness: Harness, missing: str, role: str
@@ -427,6 +449,62 @@ def test_missing_running_identity_refuses_before_quit(
     peer = _peer(_destination(tmp_path), 57391, role)
     del peer[missing]
     result, events, _ = _run(tmp_path, harness, [peer])
+    _assert_refused(result, events)
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_selected_main_without_launch_date_still_refuses(
+    tmp_path: Path, fence: None, harness: Harness, missing: bool
+) -> None:
+    destination = _destination(tmp_path)
+    main = _peer(destination, 57391)
+    if missing:
+        del main["start"]
+    else:
+        main["start"] = None
+    terminal = {**_peer(destination, 14649, "vc-terminal"), "start": None}
+    result, events, _ = _run(tmp_path, harness, [terminal, main])
+    _assert_refused(result, events)
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "missing-signature",
+        "foreign-signature",
+        "malformed-signature",
+        "foreign-executable",
+        "nonfile-executable",
+        "malformed-file-executable",
+        "foreign-identifier",
+        "invalid-pid",
+    ],
+)
+def test_terminal_without_launch_date_still_requires_provenance(
+    tmp_path: Path, fence: None, harness: Harness, evidence: str
+) -> None:
+    destination = _destination(tmp_path)
+    terminal = {**_peer(destination, 14649, "vc-terminal"), "start": None}
+    signatures = None
+    if evidence == "missing-signature":
+        signatures = {}
+    elif evidence == "foreign-signature":
+        signatures = {destination: str(tmp_path / "foreign/Vibecrafted")}
+    elif evidence == "malformed-signature":
+        signatures = {destination: "https://example.invalid/Vibecrafted"}
+    elif evidence == "foreign-executable":
+        terminal["executable"] = str(tmp_path / "foreign/vc-terminal")
+    elif evidence == "nonfile-executable":
+        terminal["executable"] = "https://example.invalid/vc-terminal"
+    elif evidence == "malformed-file-executable":
+        terminal["executable"] = (
+            f"file://{destination}/Contents/MacOS/vc-terminal?role=Terminal"
+        )
+    elif evidence == "foreign-identifier":
+        terminal["identifier"] = "io.foreign.vibecrafted"
+    else:
+        terminal["pid"] = 0
+    result, events, _ = _run(tmp_path, harness, [terminal], signatures=signatures)
     _assert_refused(result, events)
 
 

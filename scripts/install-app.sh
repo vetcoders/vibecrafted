@@ -61,16 +61,22 @@ func installMainPeer(
   guard app.bundleIdentifier == identifier, app.processIdentifier > 0,
     let executable = app.executableURL, executable.isFileURL,
     executable.query == nil, executable.fragment == nil,
-    let launchDate = app.launchDate,
     let main = AppInstanceOwnership.signedMainExecutableURL(
       bundleURL: bundle, bundleIdentifier: identifier)
-  else { throw MainQuitFailure.unsafe("missing destination executable/start/signature evidence") }
-  let peer = AppInstancePeer(
+  else { throw MainQuitFailure.unsafe("missing destination executable/signature evidence") }
+  var peer = AppInstancePeer(
     pid: app.processIdentifier, bundleURL: bundle, executableURL: executable,
-    signedMainExecutableURL: main, launchDate: launchDate)
-  if AppInstanceOwnership.isMainHost(peer) { return peer }
+    signedMainExecutableURL: main)
+  if AppInstanceOwnership.isMainHost(peer) {
+    guard let launchDate = app.launchDate else {
+      throw MainQuitFailure.unsafe("missing destination Main start evidence")
+    }
+    peer.launchDate = launchDate
+    return peer
+  }
   // Known executable evidence inside the destination admits helper exclusion;
-  // foreign or malformed evidence cannot silently turn into "no Main".
+  // it is never a quit target, so it needs no launchDate. Foreign or malformed
+  // evidence cannot silently turn into "no Main".
   guard executable.host == nil || executable.host == "localhost",
     executable.standardizedFileURL.deletingLastPathComponent()
       == main.standardizedFileURL.deletingLastPathComponent()
