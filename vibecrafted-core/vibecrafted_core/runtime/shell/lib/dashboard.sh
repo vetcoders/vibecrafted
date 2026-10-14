@@ -518,6 +518,10 @@ _vetcoders_start_is_owned_terminal_child() {
   _vetcoders_start_has_owned_terminal_host
 }
 
+_vetcoders_start_is_ssh_caller() {
+  [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]]
+}
+
 _vetcoders_start_has_owned_terminal_host() {
   local owner="" python_bin=""
   owner="$(_vetcoders_vc_frame_owner_root)" || return 1
@@ -586,6 +590,9 @@ _vetcoders_start_open_terminal_if_needed() {
   # Both plain start and deliberate start resume obey the same host rule.
   # General declaration verbs keep their independent surface policy.
   ! _vetcoders_start_is_owned_terminal_child || return 0
+  if _vetcoders_start_is_ssh_caller; then
+    return 0
+  fi
   local front_door=""
   front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
   if [[ -z "$front_door" ]]; then
@@ -1646,6 +1653,19 @@ _vetcoders_start_enter_lobby() {
   host="$_vetcoders_start_operator_session"
   printf 'vc-start: opening Operator Frame; choose a project when ready.\n' >&2
   if ! _vetcoders_start_is_owned_terminal_child; then
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+      if _vetcoders_in_vc_frame; then
+        _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
+        return $?
+      fi
+      _vetcoders_product_entry_prepare "$root" || return $?
+      _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+      return $?
+    fi
     _vetcoders_start_open_terminal_if_needed strict "$root"
     return $?
   fi
@@ -1946,6 +1966,18 @@ _vetcoders_start_new_host() (
     [[ "$role" == host ]] || return 4
   fi
   if _vetcoders_in_vc_frame || ! _vetcoders_start_is_owned_terminal_child; then
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+      if _vetcoders_in_vc_frame; then
+        _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
+        return $?
+      fi
+      _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+      return $?
+    fi
     # Inside-host requests need another terminal even with a TTY. Reuse the
     # canonical PTY supplier, which clears inherited Frame markers.
     front_door="$(_vetcoders_product_front_door vc-start)" || return 4
@@ -2020,8 +2052,15 @@ _vetcoders_start_entry() {
 
   if [[ "${_vetcoders_start_mode:-start}" == "resume" ]]; then
     # Deliberate re-entry: the declaration family's own escalation and owner.
-    _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
-    [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+    else
+      _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
+      [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+    fi
     _vetcoders_product_entry_prepare "$root" || return $?
     if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
       _vetcoders_product_entry_probe_print
@@ -2074,7 +2113,12 @@ _vetcoders_start_entry() {
 
   # Foreign terminals, including Frame frontends of unknown host provenance,
   # create here and enter only in the owned terminal child. No foreign switch.
-  if ! _vetcoders_start_is_owned_terminal_child; then
+  if _vetcoders_start_is_ssh_caller; then
+    if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+      printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+      return 1
+    fi
+  elif ! _vetcoders_start_is_owned_terminal_child; then
     if [[ "$state" == dead ]]; then
       vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
       _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?

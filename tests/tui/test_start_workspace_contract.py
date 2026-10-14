@@ -4374,3 +4374,223 @@ def test_foreign_start_handoff_crosses_real_terminal_and_primary_shell(
         "frame": None,
     }
     assert not _attaches(scene.calls()) and not _switches(scene.calls())
+
+
+def test_ssh_start_fresh_workspace_attaches_in_caller_tty_without_terminal_gui(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert scene.workspaces() == ["mlx-batch-runner"]
+    attaches = _attaches(scene.calls())
+    assert len(attaches) == 1, scene.calls()
+    assert attaches[0]["attached"] == "mlx-batch-runner"
+    assert scene.terminal_launches(wait=0) == []
+    assert not _switches(scene.calls())
+
+
+def test_ssh_start_existing_live_workspace_attaches_without_second_create(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("mlx-batch-runner",),
+        clients=("mlx-batch-runner",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CLIENT": "10.0.0.1 50000 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert not _creates(scene.calls())
+    attaches = _attaches(scene.calls())
+    assert len(attaches) == 1, scene.calls()
+    assert attaches[0]["attached"] == "mlx-batch-runner"
+    assert scene.terminal_launches(wait=0) == []
+    assert not _switches(scene.calls())
+
+
+def test_ssh_start_repeated_invocation_reuses_session_without_second_create(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    first = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(first) == 0, first.stdout + first.stderr
+    initial_creates = len(_creates(scene.calls()))
+    assert initial_creates > 0
+    assert len(_attaches(scene.calls())) == 1
+    assert scene.terminal_launches(wait=0) == []
+
+    second = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(second) == 0, second.stdout + second.stderr
+    assert len(_creates(scene.calls())) == initial_creates
+    assert len(_attaches(scene.calls())) == 2
+    assert scene.terminal_launches(wait=0) == []
+
+
+def test_ssh_start_remote_in_frame_switches_client_without_terminal(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("mlx-batch-runner", "other-place"),
+        clients=("mlx-batch-runner", "other-place"),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VC_FRAME": "1",
+            "VC_FRAME_SESSION_NAME": "other-place",
+            "VC_FRAME_PANE_ID": "3",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert [
+        call["switched"] for call in _switches(scene.calls()) if call.get("switched")
+    ] == [["other-place", "mlx-batch-runner"]]
+    assert scene.terminal_launches(wait=0) == []
+    assert not _attaches(scene.calls())
+
+
+def test_ssh_start_without_tty_refuses_without_gui_fallback(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=False,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+    )
+    assert _rc(result) != 0, result.stdout + result.stderr
+    assert "terminal (TTY)" in (result.stdout + result.stderr) or "TTY" in (
+        result.stdout + result.stderr
+    )
+    assert scene.terminal_launches(wait=0) == []
+    assert not _attaches(scene.calls())
+
+
+def test_local_external_tty_still_escalates_to_company_terminal(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, project="mlx-batch-runner")
+    result = _run(
+        scene,
+        "vc-start",
+        tty=True,
+        owned_terminal=False,
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert len(scene.terminal_launches(wait=0.5)) == 1
+    assert not _attaches(scene.calls())
+
+
+def test_ssh_start_source_pane_retains_canonical_owned_python_pin(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(tmp_path, project="source-project", git=True)
+    for relative in ("bin/vc-frame", "libexec/vc-frame"):
+        frame = scene.generation / relative
+        body = frame.read_text()
+        frame.write_text(f"#!{sys.executable}\n" + body.split("\n", 1)[1])
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        tty=True,
+        extra_env={
+            "SSH_CONNECTION": "10.0.0.1 50000 10.0.0.2 22",
+            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+            "VIBECRAFTED_VC_FRAME_BIN": str(scene.generation / "bin/vc-frame"),
+        },
+        fence_children=True,
+        allowed_children=(
+            scene.generation / "bin/vc-frame",
+            SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame/pane-python",
+        ),
+    )
+    assert _rc(result) == 0, result.stderr
+    created = _creates(scene.calls())
+    assert created
+    pin = created[0].get("python_pin")
+    assert pin and Path(pin).is_absolute() and os.access(pin, os.X_OK)
+    launcher = _write(
+        tmp_path / "pane-launcher.py",
+        f"#!{sys.executable}\n"
+        "import json, sys, vibecrafted_core\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'core': vibecrafted_core.__file__}))\n",
+    )
+    command = [
+        "bash",
+        str(SOURCE_CORE_DIR / "vibecrafted_core/config/vc-frame/pane-python"),
+        str(launcher),
+        "launcher",
+    ]
+    command = private_child_command(
+        command, allowed=(Path(pin), launcher), fixture_root=tmp_path
+    )
+    pane = subprocess.run(
+        command,
+        env=scene.env(
+            {"VIBECRAFTED_PYTHON": pin, "VIBECRAFTED_CORE_DIR": created[0]["core_dir"]}
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert pane.returncode == 0, pane.stderr
+    payload = json.loads(pane.stdout.strip())
+    assert payload["argv"] == ["launcher"]
+    assert Path(payload["core"]).resolve().is_relative_to(SOURCE_CORE_DIR)
