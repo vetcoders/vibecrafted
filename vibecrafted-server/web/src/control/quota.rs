@@ -6,7 +6,9 @@
 //! accounting engine. `?refresh=preflight&agents=a,b` asks the server-owned
 //! collector to refresh exactly those providers' authoritative sources (the
 //! only moment the network may be touched); anything without such a source
-//! stays a visible `unknown`, never a guess from token totals.
+//! stays a visible `unknown`, never a guess from token totals. The collector's
+//! outcome rides on the response as `refresh`, so an explicit ask is never
+//! answered silently.
 //!
 //! Every card carries a `state` — `ok`, `low`, `exhausted`, `stale`,
 //! `unknown`, `absent`, `malformed` — with source, age and `scope`
@@ -23,6 +25,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use control_core::ControlPlane;
+use control_core::usage_collect::CollectOutcome;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,6 +53,12 @@ struct QuotaDashboard {
     schema: &'static str,
     generated_at: String,
     agents: Vec<QuotaAgent>,
+    /// Present only on an explicit refresh request: exactly what the
+    /// server-owned collector did, per provider. An explicit ask is never
+    /// answered silently — a failed or skipped refresh is as visible as a
+    /// successful one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh: Option<CollectOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,7 +117,10 @@ struct Provider {
     /// `<home>/telemetry/<id>/quota.json`. Present for the two engines that
     /// predate the shared projection; it is a source path, not a privilege.
     native: Option<&'static str>,
-    parse: fn(&Value) -> QuotaFields,
+    /// Parses the snapshot found in this provider's own slot. The slot id —
+    /// never the file's self-declared fields — decides pool scope, because
+    /// admission blocks on pools.
+    parse: fn(&'static str, &Value) -> QuotaFields,
 }
 
 /// All supported providers, one table, one reader. Alphabetical on purpose.
@@ -167,12 +179,25 @@ pub async fn quota(
     Extension(plane): Extension<ControlPlane>,
     Query(query): Query<QuotaQuery>,
 ) -> Response {
-    if wants_refresh(&query) {
+    let refresh = if wants_refresh(&query) {
         let targets = refresh_targets(&query);
         let refresher = plane.clone();
         // Blocking one-shot of the server-owned collector; never on the runtime.
-        let _ = tokio::task::spawn_blocking(move || refresher.refresh_quota(&targets)).await;
-    }
+        // The outcome rides on the board, so a preflight can tell "no source"
+        // apart from "the refresh never ran or failed".
+        Some(
+            tokio::task::spawn_blocking(move || refresher.refresh_quota(&targets))
+                .await
+                .unwrap_or_else(|error| CollectOutcome {
+                    mode: "quota".to_string(),
+                    started: false,
+                    reason: format!("collector task failed: {error}"),
+                    agents: Vec::new(),
+                }),
+        )
+    } else {
+        None
+    };
     let home = plane.home();
     let mut agents = PROVIDERS
         .iter()
@@ -240,6 +265,7 @@ pub async fn quota(
         schema: SCHEMA,
         generated_at: Utc::now().to_rfc3339(),
         agents,
+        refresh,
     };
     no_store(Json(body).into_response())
 }
@@ -254,7 +280,7 @@ fn wants_refresh(query: &QuotaQuery) -> bool {
 /// Providers to refresh: the explicit `agents` list, else the `agent` filter,
 /// else every provider (an operator asked for a full refresh).
 fn refresh_targets(query: &QuotaQuery) -> Vec<String> {
-    let listed = query
+    let mut listed = query
         .agents
         .as_deref()
         .into_iter()
@@ -263,6 +289,10 @@ fn refresh_targets(query: &QuotaQuery) -> Vec<String> {
         .map(|name| name.trim().to_ascii_lowercase())
         .filter(|name| !name.is_empty() && name != "all")
         .collect::<Vec<_>>();
+    // A filter and an explicit list can name the same provider. Normalize
+    // before collection so that one selected source is probed only once.
+    listed.sort();
+    listed.dedup();
     if listed.is_empty() {
         PROVIDERS.iter().map(|p| p.id.to_string()).collect()
     } else {
@@ -322,7 +352,7 @@ fn project(
     name: &'static str,
     env_name: &str,
     candidates: &[(PathBuf, String)],
-    parse: fn(&Value) -> QuotaFields,
+    parse: fn(&'static str, &Value) -> QuotaFields,
 ) -> QuotaAgent {
     match load_source(env_name, candidates) {
         Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
@@ -352,13 +382,19 @@ fn project(
             },
         },
         Source::Json { label, value } => {
-            let mut fields = parse(&value);
-            let observed_ts = fields.observed_ts.or_else(|| json_ts(&value)).or_else(|| {
-                value
-                    .get("generated_at")
-                    .and_then(Value::as_str)
-                    .and_then(iso_to_ts)
-            });
+            let mut fields = parse(id, &value);
+            // AGY rewrites snapshot time when it re-reads an old conversation.
+            // Only the matching status event can establish its observation age.
+            let observed_ts = if id == "agy" {
+                fields.observed_ts
+            } else {
+                fields.observed_ts.or_else(|| json_ts(&value)).or_else(|| {
+                    value
+                        .get("generated_at")
+                        .and_then(Value::as_str)
+                        .and_then(iso_to_ts)
+                })
+            };
             let age_s = observed_ts.map(age_secs);
             let stale = age_s.is_some_and(|age| age > STALE_SECS);
             let state = observation_state(fields.status, stale, observed_ts.is_some());
@@ -537,7 +573,7 @@ fn absent(
     }
 }
 
-fn parse_agy(value: &Value) -> QuotaFields {
+fn parse_agy(id: &'static str, value: &Value) -> QuotaFields {
     let quota_status = value
         .pointer("/quota/status")
         .and_then(Value::as_str)
@@ -593,23 +629,23 @@ fn parse_agy(value: &Value) -> QuotaFields {
         cost_usd,
         bars: Vec::new(),
         account: text_field(value, "account"),
-        pool: Some("google".to_string()),
+        pool: default_pool_for(id),
         provenance: Some("agy-transcript".to_string()),
-        // An exhaustion is evidenced by the provider's 429 — that moment, not
-        // the time the snapshot was rewritten, is how old the evidence is.
-        observed_ts: if status == "blocked" {
-            value
-                .pointer("/quota/last_429_ts")
-                .and_then(Value::as_u64)
-                .map(|millis| millis / 1000)
-        } else {
-            None
-        },
+        // Success and exhaustion use their actual status-event times. Missing
+        // or zero event evidence never becomes fresh through snapshot rewrite.
+        observed_ts: match status {
+            "blocked" => value.pointer("/quota/last_429_ts"),
+            "ok" => value.pointer("/quota/last_success_ts"),
+            _ => None,
+        }
+        .and_then(Value::as_u64)
+        .map(|millis| millis / 1000)
+        .filter(|seconds| *seconds > 0),
         scope_model: model_for_scope,
     }
 }
 
-fn parse_kimi(value: &Value) -> QuotaFields {
+fn parse_kimi(id: &'static str, value: &Value) -> QuotaFields {
     let kind = value
         .get("kind")
         .and_then(Value::as_str)
@@ -640,7 +676,7 @@ fn parse_kimi(value: &Value) -> QuotaFields {
             cost_usd: None,
             bars,
             account: text_field(value, "account"),
-            pool: Some("moonshot".to_string()),
+            pool: default_pool_for(id),
             provenance: Some("kimi-probe".to_string()),
             ..QuotaFields::default()
         };
@@ -681,14 +717,13 @@ fn parse_kimi(value: &Value) -> QuotaFields {
         cost_usd: None,
         bars,
         account: text_field(value, "account"),
-        pool: Some("moonshot".to_string()),
+        pool: default_pool_for(id),
         provenance: Some("kimi-probe".to_string()),
         ..QuotaFields::default()
     }
 }
 
-fn parse_fleet(value: &Value) -> QuotaFields {
-    let agent = value.get("agent").and_then(Value::as_str).unwrap_or("");
+fn parse_fleet(id: &'static str, value: &Value) -> QuotaFields {
     let status_val = value.get("status").and_then(Value::as_str).unwrap_or("");
     let reason = value.get("reason").and_then(Value::as_str);
     let quota_obj = value.get("quota").and_then(Value::as_object);
@@ -724,7 +759,10 @@ fn parse_fleet(value: &Value) -> QuotaFields {
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && *n >= 0.0);
 
-    let pool = default_pool_for(agent);
+    // The pool is this slot's canonical pool. A fleet file's own `agent`
+    // field is provider self-description, not scope authority: a snapshot
+    // sitting in the wrong slot must not redefine which pool it speaks for.
+    let pool = default_pool_for(id);
 
     if status_val == "unavailable" {
         let msg = reason.unwrap_or("usage lives in Cursor cloud");
@@ -824,17 +862,13 @@ fn parse_fleet(value: &Value) -> QuotaFields {
 }
 
 fn default_pool_for(id: &str) -> Option<String> {
-    Some(match id {
-        "agy" => "google".to_string(),
-        "claude" => "anthropic".to_string(),
-        "codex" => "openai".to_string(),
-        "copilot" => "github".to_string(),
-        "cursor" => "cursor".to_string(),
-        "grok" => "xai".to_string(),
-        "junie" => "jetbrains".to_string(),
-        "kimi" => "moonshot".to_string(),
-        _ => id.to_string(),
-    })
+    // One owner of the launcher→pool vocabulary (control-core); the usage
+    // report filter and the UI picker seeds speak the same names.
+    Some(
+        control_core::usage::provider_pool(id)
+            .unwrap_or(id)
+            .to_string(),
+    )
 }
 
 fn iso_to_ts(iso: &str) -> Option<u64> {

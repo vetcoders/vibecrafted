@@ -6,11 +6,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{StatusCode, header};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
@@ -86,13 +84,20 @@ fn test_app(home: &std::path::Path) -> axum::Router {
 }
 
 async fn get(home: &std::path::Path, uri: &str) -> (StatusCode, String, Value) {
-    let response = test_app(home)
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("private listener");
+    let addr = listener.local_addr().expect("private address");
+    let app = test_app(home);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("private HTTP");
+    });
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("private client")
+        .get(format!("http://{addr}{uri}"))
+        .send()
         .await
         .expect("response");
     let status = response.status();
@@ -102,14 +107,10 @@ async fn get(home: &std::path::Path, uri: &str) -> (StatusCode, String, Value) {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let bytes = to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body");
-    (
-        status,
-        cache,
-        serde_json::from_slice(&bytes).expect("JSON response"),
-    )
+    let body = response.json().await.expect("JSON response");
+    server.abort();
+    let _ = server.await;
+    (status, cache, body)
 }
 
 #[tokio::test]
@@ -189,4 +190,65 @@ async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
             assert_eq!(filtered["totals"]["runs"], dimension["runs"], "{uri}");
         }
     }
+}
+
+#[tokio::test]
+async fn usage_api_provider_filter_roundtrips_seeded_pool_names() {
+    // The UI seeds the provider picker with pool names (google, anthropic,
+    // openai, github, anysphere, xai, jetbrains, moonshot). Every seed must be
+    // a working filter against rows that carry launcher vocabulary, or the
+    // picker offers options that silently select nothing.
+    let home = TestHome::new(); // pre-seeded: codex VC run ("run-usd")
+    fs::create_dir_all(home.0.join("control_plane/runtime_runs/run-claude")).expect("run dir");
+    fs::write(
+        home.0.join("control_plane/runtime_runs/run-claude/meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "run-claude",
+            "agent": "claude",
+            "agent_model": "claude-opus-5-5",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                      "events": 1, "tokens_input": 3, "tokens_cached_input": 0,
+                      "tokens_cache_write": 0, "tokens_output": 2, "tokens_total": 5},
+            "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+        }))
+        .expect("json"),
+    )
+    .expect("meta");
+
+    let (status, _, anthropic) = get(&home.0, "/api/usage?window=all&provider=anthropic").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        anthropic["totals"]["runs"], 1,
+        "anthropic selects claude rows"
+    );
+    assert_eq!(anthropic["runs"][0]["run_id"], "run-claude");
+
+    let (_, _, openai) = get(&home.0, "/api/usage?window=all&provider=openai").await;
+    assert_eq!(openai["totals"]["runs"], 1, "openai selects codex rows");
+    assert_eq!(openai["runs"][0]["run_id"], "run-usd");
+
+    let (_, _, launcher) = get(&home.0, "/api/usage?window=all&provider=codex").await;
+    assert_eq!(launcher["totals"]["runs"], 1, "launcher names keep working");
+
+    for seed in [
+        "google",
+        "anthropic",
+        "openai",
+        "github",
+        "anysphere",
+        "xai",
+        "jetbrains",
+        "moonshot",
+    ] {
+        let (status, _, _) = get(&home.0, &format!("/api/usage?window=all&provider={seed}")).await;
+        assert_eq!(status, StatusCode::OK, "seeded picker value {seed}");
+    }
+    let (_, _, anysphere) = get(&home.0, "/api/usage?window=all&provider=anysphere").await;
+    assert_eq!(
+        anysphere["totals"]["runs"], 0,
+        "a pool with no rows is honestly empty, not an error"
+    );
 }

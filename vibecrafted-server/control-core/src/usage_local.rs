@@ -9,9 +9,10 @@
 //! * `archive/<agent>.jsonl` — day/model aggregates, last-wins per key.
 //!
 //! This module only *reads* them. It never invents a measurement: a local
-//! session is `observed` — not `completed`, no exit code — and a provider with
+//! session is `observed` — not `completed`, no exit code — a provider with
 //! no token ledger (agy: estimated transcripts) is reported as `unavailable`
-//! in [`LocalSource`], never as zero.
+//! in [`LocalSource`], never as zero, and a session whose rows carry no token
+//! bucket keeps every token field `unknown` instead of posing as a measured 0.
 //!
 //! A local session that a Vibecrafted run already accounts for is not counted
 //! again: the VC row (origin `vc`) wins and the match is counted in
@@ -194,8 +195,24 @@ fn read_scan_cache(path: &Path) -> Option<Map<String, Value>> {
     value.get("files")?.as_object().cloned()
 }
 
+const TOKEN_KEYS: [&str; 4] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+];
+
 fn bucket(row: &Value, key: &str) -> u64 {
     row.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A row measures tokens only when it carries at least one token bucket. A
+/// session the scanner saw without any bucket is real activity with an
+/// unmeasured size — reported as unknown, never as a known zero.
+fn measures_tokens(row: &Value) -> bool {
+    TOKEN_KEYS
+        .iter()
+        .any(|key| row.get(key).and_then(Value::as_u64).is_some())
 }
 
 fn read_scan_entries(
@@ -227,9 +244,11 @@ fn read_scan_entries(
             continue;
         }
         let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
+        let mut measured = false;
         let mut by_model: BTreeMap<String, u64> = BTreeMap::new();
         let mut last_day: Option<String> = None;
         for row in days {
+            measured |= measures_tokens(row);
             let (row_input, row_output) =
                 (bucket(row, "input_tokens"), bucket(row, "output_tokens"));
             let (row_read, row_write) = (
@@ -258,6 +277,7 @@ fn read_scan_entries(
             .saturating_add(output)
             .saturating_add(cache_read)
             .saturating_add(cache_write);
+        let tokens = measured.then_some([input, cache_read, cache_write, output, total]);
         let Some(recorded) = recorded_at(record, last_day.as_deref()) else {
             continue;
         };
@@ -279,7 +299,7 @@ fn read_scan_entries(
             format!("local-{agent}-{}", slug(path_key, record_id)),
             recorded,
             model,
-            [input, cache_read, cache_write, output, total],
+            tokens,
             "local_scan",
             session,
         );
@@ -371,6 +391,16 @@ fn read_archive(
             bucket(&row, "cache_read_tokens"),
             bucket(&row, "cache_creation_tokens"),
         );
+        let tokens = measures_tokens(&row).then_some([
+            input,
+            read,
+            write,
+            output,
+            input
+                .saturating_add(output)
+                .saturating_add(read)
+                .saturating_add(write),
+        ]);
         let run = local_run(
             agent,
             format!("archive-{agent}-{day}-{}", slug(&model, "")),
@@ -380,16 +410,7 @@ fn read_archive(
             } else {
                 json!(model)
             },
-            [
-                input,
-                read,
-                write,
-                output,
-                input
-                    .saturating_add(output)
-                    .saturating_add(read)
-                    .saturating_add(write),
-            ],
+            tokens,
             "local_archive",
             unknown("archive day aggregation has no session id"),
         );
@@ -406,16 +427,37 @@ fn read_archive(
     }
 }
 
-/// `tokens` is `[input, cache_read, cache_write, output, total]`.
+/// `tokens` is `[input, cache_read, cache_write, output, total]`, or `None`
+/// when the projection carried no token measurement at all: the fields then
+/// stay `unknown` instead of posing as a measured zero.
 fn local_run(
     agent: &str,
     run_id: String,
     recorded: DateTime<Utc>,
     model: Value,
-    tokens: [u64; 5],
+    tokens: Option<[u64; 5]>,
     source: &str,
     session: Value,
 ) -> UsageRun {
+    let unmeasured = || unknown("local projection carried no token measurement");
+    let (events, input, cache_read, cache_write, output, total) = match tokens {
+        Some([input, cache_read, cache_write, output, total]) => (
+            1,
+            json!(input),
+            json!(cache_read),
+            json!(cache_write),
+            json!(output),
+            json!(total),
+        ),
+        None => (
+            0,
+            unmeasured(),
+            unmeasured(),
+            unmeasured(),
+            unmeasured(),
+            unmeasured(),
+        ),
+    };
     UsageRun {
         run_id,
         provider: json!(agent),
@@ -429,12 +471,12 @@ fn local_run(
             schema: "vibecrafted.usage.v1".to_string(),
             unit: "tokens".to_string(),
             source: source.to_string(),
-            events: 1,
-            tokens_input: json!(tokens[0]),
-            tokens_cached_input: json!(tokens[1]),
-            tokens_cache_write: json!(tokens[2]),
-            tokens_output: json!(tokens[3]),
-            tokens_total: json!(tokens[4]),
+            events,
+            tokens_input: input,
+            tokens_cached_input: cache_read,
+            tokens_cache_write: cache_write,
+            tokens_output: output,
+            tokens_total: total,
             semantics: BTreeMap::new(),
         },
         cost: UsageCost {

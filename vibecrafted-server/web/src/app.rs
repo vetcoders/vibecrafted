@@ -1122,10 +1122,21 @@ fn quota_dashboard_script() -> &'static str {
     article.append(meta);
     return article;
   };
+  // An explicit ask is never answered silently: the collector's outcome rides
+  // on the response as `refresh`, and a failed, skipped or partial refresh is
+  // as visible as a successful one.
+  const refreshText = (refresh) => {
+    if (!refresh) return '';
+    if (!refresh.started) return 'refresh not started' + (refresh.reason ? ': ' + refresh.reason : '');
+    const bits = (refresh.agents || []).map((item) => item.agent + ': ' + item.status + (item.detail ? ' (' + item.detail + ')' : ''));
+    if (!bits.length) return 'refresh: ' + (refresh.reason || 'no provider answered');
+    return 'refresh: ' + bits.join(' · ');
+  };
   const render = (payload) => {
     host.replaceChildren();
     for (const agent of payload.agents || []) host.append(card(agent));
-    status.textContent = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
+    const stamp = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
+    status.textContent = [stamp, refreshText(payload.refresh)].filter(Boolean).join(' · ');
   };
   const load = async () => {
     try {

@@ -148,3 +148,117 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
     assert len(evidence["ids"]) == 8
     assert evidence["states"][0] == "stale"
     assert "148h ago" in evidence["meta"]
+
+
+@pytest.mark.parametrize(
+    "refresh, expected",
+    [
+        pytest.param(
+            {
+                "mode": "quota",
+                "started": True,
+                "reason": "",
+                "agents": [
+                    {
+                        "agent": "cursor",
+                        "status": "unavailable",
+                        "detail": "provider offers no authoritative quota source",
+                    }
+                ],
+            },
+            ["cursor", "unavailable"],
+            id="unsupported",
+        ),
+        pytest.param(
+            {
+                "mode": "quota",
+                "started": False,
+                "reason": "no supported provider requested",
+                "agents": [],
+            },
+            ["refresh not started", "no supported provider requested"],
+            id="skipped",
+        ),
+        pytest.param(
+            {
+                "mode": "quota",
+                "started": True,
+                "reason": "collector failed or timed out",
+                "agents": [
+                    {
+                        "agent": "cursor",
+                        "status": "timeout",
+                        "detail": "collector did not finish",
+                    }
+                ],
+            },
+            ["cursor", "timeout"],
+            id="failed",
+        ),
+        pytest.param(
+            {
+                "mode": "quota",
+                "started": False,
+                "reason": "collector task failed: private failure",
+                "agents": [],
+            },
+            ["refresh not started", "collector task failed: private failure"],
+            id="task-failed",
+        ),
+    ],
+)
+def test_quota_board_script_shows_the_refresh_outcome(refresh, expected):
+    """An explicit quota ask must be answered visibly: the server rides the
+    collector outcome on the response as `refresh`; the board may not swallow it."""
+    node = shutil.which("node")
+    if not node:
+        pytest.fail("Node is required for actual quota board script acceptance")
+    source = APP.read_text()
+    start = source.index("fn quota_dashboard_script()")
+    script = source[start:].split('r#"', 1)[1].split('"#', 1)[0]
+    harness = r"""
+const vm=require('vm');
+const nodes=new Map();
+class Element {
+ constructor(id='') {this.id=id;this.children=[];this.events={};this.value='';this.style={setProperty(){}};this.dataset={};this.textContent='';}
+ append(...children){this.children.push(...children);}
+ appendChild(child){this.children.push(child);}
+ replaceChildren(){this.children=[];}
+ setAttribute(){}
+ addEventListener(name,fn){this.events[name]=fn;}
+ querySelectorAll(){return [];}
+}
+function byId(id){if(!nodes.has(id))nodes.set(id,new Element(id));return nodes.get(id);}
+global.document={getElementById:byId,querySelector:(sel)=>sel==='[data-quota-board]'?byId('board'):null,createElement:()=>new Element()};
+global.setInterval=()=>0;
+const plain={generated_at:'2026-10-13T00:00:00Z',agents:[{id:'kimi',name:'Kimi',status:'ok',state:'ok',bars:[],scope:{}}]};
+const refreshed={generated_at:'2026-10-13T00:00:10Z',agents:plain.agents,refresh:OUTCOME};
+const fetched=[];
+global.fetch=async url=>{fetched.push(url);return {ok:true,json:async()=>url.includes('refresh=')?refreshed:plain};};
+vm.runInThisContext(SCRIPT);
+setImmediate(async()=>{
+ byId('quota-refresh').events.click();
+ setImmediate(()=>{setImmediate(()=>{
+  const text=byId('quota-status').textContent;
+  if(!fetched.some(u=>u.includes('refresh=')))throw Error('no refresh request issued');
+  for(const expected of EXPECTED)if(!text.includes(expected))throw Error('refresh outcome swallowed: '+text);
+  console.log(JSON.stringify({status:text,fetched}));
+ });});
+});
+"""
+    result = subprocess.run(
+        [
+            node,
+            "-e",
+            harness.replace("SCRIPT", json.dumps(script))
+            .replace("OUTCOME", json.dumps(refresh))
+            .replace("EXPECTED", json.dumps(expected)),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(result.stdout)
+    assert all(part in evidence["status"] for part in expected)
