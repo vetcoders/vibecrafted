@@ -8,7 +8,7 @@ operator creates the tap and fills the SHA-256 / DMG coordinates.
 
 | File                       | Homebrew kind | Installs                                    | When it can go live                            |
 | -------------------------- | ------------- | ------------------------------------------- | ---------------------------------------------- |
-| `Formula/vibecrafted.rb`   | formula       | command deck from the tagged source archive | after annotated tag `v3.7.1` exists on GitHub  |
+| `Formula/vibecrafted.rb`   | formula       | command deck from the tagged source archive | after the GitHub Release for its tag is public |
 | `Casks/vibecrafted-app.rb` | cask          | `Vibecrafted.app` from the signed DMG       | after `make publish-release` attaches that DMG |
 
 The names are deliberately different. Homebrew will not host a formula and
@@ -35,8 +35,8 @@ cp packaging/homebrew/Formula/vibecrafted.rb homebrew-tap/Formula/
 cp packaging/homebrew/Casks/vibecrafted-app.rb homebrew-tap/Casks/
 # optional: copy this README into the tap root
 
-# 3. After v3.7.1 is tagged (formula) / the DMG is published (cask):
-shasum -a 256 /tmp/v3.7.1.tar.gz
+# 3. After the release for v<VERSION> is public (formula) / attaches the DMG (cask):
+shasum -a 256 /tmp/v<VERSION>.tar.gz
 # paste the digest into Formula/vibecrafted.rb
 # paste version, YYYYMMDD, sha8, and DMG sha256 into Casks/vibecrafted-app.rb
 
@@ -56,7 +56,7 @@ brew install --cask vibecrafted-app   # desktop app, after the DMG exists
 
 ## Operator: refresh after a release
 
-1. Cut 3.7.1 with a DMG using [docs/RELEASE_CHECKLIST.md](../../docs/RELEASE_CHECKLIST.md).
+1. Cut the release named in `VERSION` with a DMG using [docs/RELEASE_CHECKLIST.md](../../docs/RELEASE_CHECKLIST.md).
 2. Download the source archive and the DMG.
 3. `shasum -a 256` both.
 4. Update `version` / `sha256` / cask CSV fields in the **tap** repo.
@@ -74,3 +74,7 @@ is BUSL-1.1, the CLI is not prefix-pure, and the DMG is still unpublished.
 - Do not mark the formula `keg_only` unless a real name clash appears.
 - Do not run `brew create` against `https://vibecrafted.io/install.sh`.
   Piped bootstrap is not a Homebrew install.
+- The formula stages the tagged source tree into `libexec`; it is not a
+  Runtime Pack install. Before publishing the tap, run `vibecrafted doctor`
+  from the formula on a clean machine. If the command deck needs a staged
+  runtime generation, bind the formula to the signed Runtime Pack instead.

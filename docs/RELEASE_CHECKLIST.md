@@ -222,3 +222,58 @@ Finally verify the public release asset set, HTTPS install/landing paths,
 canonical metadata, sitemap/robots and first-run behavior from public downloads.
 A local notarized DMG is artifact evidence; publication and installed runtime
 each need their own receipt.
+
+## 6. Website bootstrap channel — a second publisher
+
+`https://vibecrafted.io` is not published from this repository. The site,
+`install.sh`, `install.ps1`, `channel/main.json`, `SHA256SUMS`,
+`vibecrafted-signing.pub` and the `vibecrafted-v<version>.tar.gz` archive come
+from `VetCoders/vibecrafted-io` (`make site-release`, which rsyncs the built
+site to the Caddy host). Its `scripts/sync-docs.sh` mirrors this repository's
+`docs/public/` into the site at build time. Here, `docs/index.html` is only a
+redirect stub, `docs/CNAME` is historical, and `.github/workflows/static.yml`
+is disabled; none of them serve the domain.
+
+`make publish-release` does not update the website. A GitHub Release can
+therefore be newer than what `curl -fsSL https://vibecrafted.io/install.sh | bash`
+installs. On 2026-10-14 the website channel named `4.1.0`, and its `install.sh`
+was byte-identical to the one at tag `v4.1.0`.
+
+This tree's `install.sh` accepts a channel only when:
+
+- `channel/main.json` binds top-level `archive_url` and `runtime_pack_url`;
+  otherwise it stops with
+  `Channel manifest must bind archive_url and runtime_pack_url`;
+- the archive at `archive_url` carries a closed `source-provenance.json`
+  (the portable tarball, or `scripts/distribution_manifest.py archive`
+  output); a plain `tar` of a checkout is refused;
+- `runtime_pack_url` has adjacent `.sha256` and `.sig` files;
+- `SHA256SUMS` and `vibecrafted-signing.pub` sit beside `archive_url`.
+  Without them the archive's checksum and signature checks are skipped with a
+  warning.
+
+The bootstrap reads one `runtime_pack_url` for every host; it does not select a
+per-platform pack. Bind only a pack that installs on every platform the channel
+advertises, or leave the website on its previous coherent channel.
+
+As measured on 2026-10-14, the site publisher meets none of the first two
+conditions: `scripts/sync_site_release_assets.py` writes no `runtime_pack_url`,
+and its `bundle-build` archive has no `source-provenance.json`. Do not run
+`make site-release` against this tree until that publisher emits the contract
+above; the result would be a bootstrap that refuses every install.
+
+Before any website publication, record the live identity:
+
+```bash
+curl -fsSL https://vibecrafted.io/channel/main.json
+curl -fsSL https://vibecrafted.io/install.sh | shasum -a 256
+curl -fsSL https://vibecrafted.io/SHA256SUMS
+```
+
+A docs-only website refresh that keeps the current signed channel is a
+separate Founder button: build `vibecrafted-io` without `SITE_RELEASE_MODE`
+from a sibling checkout at the published commit, then deploy. That content
+build still copies install assets from `vibecrafted-io/framework/` whenever
+`framework/VERSION` exists, so confirm it names the live channel version
+first. Re-run the three probes afterwards; the channel identity must not
+change.
