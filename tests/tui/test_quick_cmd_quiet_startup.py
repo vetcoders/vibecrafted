@@ -1384,3 +1384,114 @@ def test_quick_cmd_installed_owner_python_absent_refuses_host_fallback(
         "ran absent_python",
         "frame action close-pane --pane-id terminal_18",
     ]
+
+
+def test_quick_cmd_stale_core_override_preserves_installed_generation_and_neutralizes_ambient_python(
+    tmp_path: Path,
+) -> None:
+    """Parent Case 1: Healthy selected runtime + ambient VIBECRAFTED_CORE_DIR
+    pointing to foreign directory outside generation + hostile VIBECRAFTED_PYTHON.
+    The wrapper must bind the generation's owned core and interpreter, executing
+    zero ambient python calls, and honestly load personal profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+
+    # Hostile ambient python
+    hostile = tmp_path / "ambient-python"
+    marker = tmp_path / "ambient-python-invoked.log"
+    hostile.write_text(
+        f'#!/bin/sh\nprintf "hit\\n" >> "{marker}"\nprintf "personal\\n"\n',
+        encoding="utf-8",
+    )
+    hostile.chmod(0o755)
+
+    # Stale foreign core directory
+    alternate = tmp_path / "foreign-core"
+    alternate.mkdir()
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal-loaded.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "loaded\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe owner_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "VIBECRAFTED_CORE_DIR": str(alternate),
+            "VIBECRAFTED_PYTHON": str(hostile),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "Ambient hostile python must never be executed"
+    assert personal_sentinel.exists(), (
+        "Personal profile must be loaded via generation's owned python"
+    )
+    assert events == [
+        "ran owner_check",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_missing_selected_runtime_core_refuses_fallback_to_source_core(
+    tmp_path: Path,
+) -> None:
+    """Parent Case 2: Selected runtime core.sh absent.
+    The wrapper must report the selected owner missing to stderr, refuse to fall
+    through to source core.sh or execute ambient python, and fall safe to product profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    (gen / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh").unlink()
+
+    # Hostile ambient python
+    hostile = tmp_path / "ambient-python"
+    marker = tmp_path / "ambient-python-invoked.log"
+    hostile.write_text(
+        f'#!/bin/sh\nprintf "hit\\n" >> "{marker}"\nprintf "personal\\n"\n',
+        encoding="utf-8",
+    )
+    hostile.chmod(0o755)
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal-loaded.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "loaded\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe owner_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "VIBECRAFTED_PYTHON": str(hostile),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "Ambient hostile python must never be executed"
+    assert not personal_sentinel.exists(), (
+        "Personal profile must not be loaded when selected core is missing"
+    )
+    assert "selected runtime core is missing" in result.stderr
+    assert events == [
+        "ran owner_check",
+        "frame action close-pane --pane-id terminal_18",
+    ]

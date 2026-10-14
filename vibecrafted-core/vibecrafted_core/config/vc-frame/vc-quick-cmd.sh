@@ -42,20 +42,50 @@ printf '%s\n' \
 # interpreter resolution. Sourcing core.sh establishes _vetcoders_owned_core_dir
 # and _vetcoders_owned_python_bin with installed-generation failclosed policy.
 _vc_quick_core_sh=""
-_vc_quick_tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-for _c in \
-  "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh}" \
-  "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh}" \
-  "${VIBECRAFTED_CORE_DIR:+${VIBECRAFTED_CORE_DIR}/vibecrafted_core/runtime/shell/lib/core.sh}" \
-  "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../runtime/shell/lib" 2>/dev/null && pwd)/core.sh" \
-  "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../shell/lib" 2>/dev/null && pwd)/core.sh" \
-  "${_vc_quick_tools_home}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"; do
-  if [[ -n "$_c" && -r "$_c" ]]; then
-    _vc_quick_core_sh="$_c"
-    break
+_vc_quick_is_installed_gen=0
+if [[ -n "${VIBECRAFTED_RUNTIME_ROOT:-}" ]]; then
+  _vc_quick_selected_root="${VIBECRAFTED_RUNTIME_ROOT%/}"
+  if [[ "$(basename "$(dirname "$_vc_quick_selected_root")")" == "releases" || -f "$_vc_quick_selected_root/runtime-manifest.json" ]]; then
+    _vc_quick_is_installed_gen=1
   fi
-done
-unset _vc_quick_tools_home
+  _vc_quick_expected_core_sh="${_vc_quick_selected_root}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"
+  if [[ -r "$_vc_quick_expected_core_sh" ]]; then
+    _vc_quick_core_sh="$_vc_quick_expected_core_sh"
+    if (( _vc_quick_is_installed_gen )); then
+      # Bind physical core directory to the selected installed generation. Stale
+      # or foreign ambient VIBECRAFTED_CORE_DIR must not redirect import authority.
+      export VIBECRAFTED_CORE_DIR="${_vc_quick_selected_root}/vibecrafted-core"
+      # Ensure conflicting ambient VIBECRAFTED_PYTHON does not outrank the owned
+      # generation interpreter or expand authority.
+      if [[ -x "${_vc_quick_selected_root}/bin/python3" ]]; then
+        export VIBECRAFTED_PYTHON="${_vc_quick_selected_root}/bin/python3"
+      else
+        unset VIBECRAFTED_PYTHON
+      fi
+    fi
+  elif (( _vc_quick_is_installed_gen )); then
+    printf 'vc-quick-cmd: selected runtime core is missing: %s\n' "$_vc_quick_expected_core_sh" >&2
+    unset VIBECRAFTED_PYTHON
+  fi
+  unset _vc_quick_selected_root _vc_quick_expected_core_sh
+fi
+
+if [[ -z "$_vc_quick_core_sh" ]] && (( ! _vc_quick_is_installed_gen )); then
+  _vc_quick_tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
+  for _c in \
+    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh}" \
+    "${VIBECRAFTED_CORE_DIR:+${VIBECRAFTED_CORE_DIR}/vibecrafted_core/runtime/shell/lib/core.sh}" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../runtime/shell/lib" 2>/dev/null && pwd)/core.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../shell/lib" 2>/dev/null && pwd)/core.sh" \
+    "${_vc_quick_tools_home}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"; do
+    if [[ -n "$_c" && -r "$_c" ]]; then
+      _vc_quick_core_sh="$_c"
+      break
+    fi
+  done
+  unset _vc_quick_tools_home
+fi
+unset _vc_quick_is_installed_gen
 
 # Quick cmd profile selection: default is "product". An explicit preference
 # in ~/.config/vibecrafted/config.toml under [terminal] quick_cmd_profile='personal'
@@ -71,6 +101,9 @@ _vc_quick_owned_py=""
 if [[ -n "$_vc_quick_core_sh" ]] && source "$_vc_quick_core_sh" 2>/dev/null; then
   _py="$(_vetcoders_owned_python_bin 2>/dev/null || true)"
   _core_dir="$(_vetcoders_owned_core_dir 2>/dev/null || true)"
+  if [[ ! -d "${_core_dir:-}/vibecrafted_core" && -n "${_vetcoders_loaded_core_dir:-}" && -d "${_vetcoders_loaded_core_dir}/vibecrafted_core" ]]; then
+    _core_dir="$_vetcoders_loaded_core_dir"
+  fi
   if [[ -n "$_py" && -x "$_py" ]]; then
     _vc_quick_owned_py="$_py"
   fi
@@ -102,8 +135,9 @@ unset _vc_quick_core_sh _c
 
 if [[ -n "${_vc_quick_owned_py:-}" ]]; then
   export _VC_QUICK_PYTHON="${_vc_quick_owned_py}"
+  export VIBECRAFTED_PYTHON="${_vc_quick_owned_py}"
 else
-  unset _VC_QUICK_PYTHON
+  unset _VC_QUICK_PYTHON VIBECRAFTED_PYTHON
 fi
 unset _vc_quick_owned_py
 
