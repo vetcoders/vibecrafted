@@ -648,3 +648,210 @@ def test_cleanup20_preserves_historical_receipts_and_does_not_repeat_install(
     assert not (state / "vibecrafted-product-update/install-app-latest.json").exists()
     assert len(list((state / "vibecrafted-product-update/transactions").iterdir())) == 1
     assert not any(event[0] == "terminate" for event in events)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "released",
+        "receipt-drift",
+        "journal-drift",
+        "publication-drift",
+        "source-drift",
+        "lock-replaced",
+        "wrong-transaction",
+        "wrong-owner",
+        "wrong-capture",
+        "not-relaunched",
+        "other-refusal",
+        "malformed-resolver",
+        "deadline",
+        "settle-refuses",
+    ],
+)
+def test_settlement_only_recovery_of_startup_service_lease(
+    tmp_path: Path, fence: None, harness: Harness, scenario: str
+) -> None:
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+
+    from vibecrafted_core import server_supervisor as supervisor
+
+    budget = "0.2" if scenario == "deadline" else "5"
+    private_harness = replace(
+        harness,
+        wrapper=harness.wrapper.replace(
+            "deadline = time.monotonic() + 60",
+            f"deadline = time.monotonic() + {budget}",
+        ),
+    )
+    wrapper, environment, allowed = _private_wrapper(tmp_path, private_harness)
+    source = wrapper.parents[1] / "dist/Vibecrafted.app"
+    destination = Path(environment["INSTALL_APP_DESTINATION"])
+    runtime = tmp_path / "runtime"
+    generation = runtime / "releases/9.0.0"
+    environment["VIBECRAFTED_RUNTIME_HOME"] = str(runtime)
+    environment["MAIN_FAKE_CENSUS"] = json.dumps([[], [], []])
+    environment["MAIN_FAKE_SIGNATURE"] = json.dumps({})
+    environment["RACE_SCENARIO"] = scenario
+    marker = tmp_path / "resolver-held"
+    environment["RACE_MARKER"] = str(marker)
+    product = {"schema": "io.vetcoders.vibecrafted.product.v1", "git_sha": "a" * 40}
+    for app in (source, destination):
+        (app / "Contents/Resources").mkdir(parents=True, exist_ok=True)
+        (app / "Contents/Resources/product-manifest.json").write_text(
+            json.dumps(product)
+        )
+    generation.mkdir(parents=True)
+    (generation / "runtime-manifest.json").write_text(
+        json.dumps({"source_revision": "a" * 40, "version": "9.0.0"})
+    )
+    (runtime / "tools").mkdir()
+    (runtime / "tools/vibecrafted-current").symlink_to(generation)
+    pointer = {
+        "schema": "vibecrafted.active-runtime.v1",
+        "version": "9.0.0",
+        "runtime_root": str(generation),
+        "app_root": str(destination),
+    }
+    (runtime / "active.json").write_text(json.dumps(pointer))
+    (runtime / "install-receipt.json").write_text(
+        json.dumps({**pointer, "schema": "vibecrafted.runtime-install.v1"})
+    )
+    python = _executable(
+        generation / "bin/python3",
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+    )
+    verifier = destination / "Contents/Resources/runtime/scripts/vetcoders_install.py"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text(
+        "import fcntl,json,os,sys\nfrom pathlib import Path\n"
+        "runtime=Path(sys.argv[sys.argv.index('--runtime-home')+1])\n"
+        "if os.environ['RACE_SCENARIO']=='malformed-resolver':\n"
+        "    print('{broken'); raise SystemExit(2)\n"
+        "fd=os.open(runtime/'tools/.vibecrafted-install.lock',os.O_RDONLY)\n"
+        "try:\n"
+        "    fcntl.flock(fd,fcntl.LOCK_SH|fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    Path(os.environ['RACE_MARKER']).write_text('held')\n"
+        "    print(json.dumps({'schema':'vibecrafted.runtime-resolution.v1',"
+        "'status':'unusable','reason':'runtime installation is in progress','runtime':None}))\n"
+        "    raise SystemExit(2)\n"
+        "print(json.dumps({'schema':'vibecrafted.runtime-resolution.v1','status':'ready',"
+        "'reason':'','runtime':{'root':str(runtime/'releases/9.0.0'),"
+        "'app_root':os.environ['INSTALL_APP_DESTINATION']}}))\n"
+    )
+    codesign = _executable(
+        tmp_path / "private-codesign",
+        "#!/bin/sh\n"
+        'if [ "$1" = --display ]; then\n'
+        "printf 'Identifier=io.vetcoders.vibecrafted\\nTeamIdentifier=TEAM\\nCDHash=aaaa\\n'\n"
+        "fi\n",
+    )
+    wrapper.write_text(
+        wrapper.read_text().replace('"/usr/bin/codesign"', json.dumps(str(codesign)))
+    )
+    helper_python = wrapper.parent / "vc-app-update.py"
+    helper_python.write_text(
+        f"#!{sys.executable}\n"
+        "import fcntl,json,os,sys\nfrom pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "def arg(name): return args[args.index(name)+1]\n"
+        "mode=arg('--mode')\n"
+        "with open(os.environ['MAIN_TEST_LOG'],'a') as out:\n"
+        "    out.write(json.dumps(['helper',*args])+'\\n')\n"
+        "if mode=='settle':\n"
+        "    assert not any(x in args for x in ('--complete','--relaunch','--resume'))\n"
+        "    fd=os.open(Path(os.environ['VIBECRAFTED_RUNTIME_HOME'])/'tools/.vibecrafted-install.lock',os.O_RDONLY)\n"
+        "    try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+        "    except BlockingIOError: pass\n"
+        "    else: raise SystemExit('shared runtime lease was not retained through settlement')\n"
+        "    if os.environ['RACE_SCENARIO']=='settle-refuses': raise SystemExit(20)\n"
+        "    Path(arg('--receipt')+'.settlement.json').write_text(json.dumps({'status':'disposed'}))\n"
+        "    raise SystemExit(0)\n"
+        "assert '--complete' in args and '--relaunch' in args\n"
+        "base={'transaction':arg('--transaction'),'destination':arg('--destination'),"
+        "'source':arg('--source'),'source_identity':'cdhash:aaaa','identifier':'io.vetcoders.vibecrafted',"
+        "'team_id':'TEAM','mode':'replace','operation':'replace','journal':arg('--journal'),"
+        "'receipt':arg('--receipt'),'candidate_identity':'cdhash:aaaa',"
+        "'parent':str(Path(arg('--destination')).parent),"
+        "'capture':str(Path(arg('--destination')).parent/('.vc-update-capture-'+arg('--transaction')))}\n"
+        "for option,schema,extra in ("
+        "('--receipt','io.vetcoders.vibecrafted.app-replacement.v1',{'replaced':True,'relaunched':True,'detail':'replaced'}),"
+        "('--admission','io.vetcoders.vibecrafted.app-replacement-admission.v1',{'status':'ready'}),"
+        "('--journal','io.vetcoders.vibecrafted.app-update-journal.v1',{'phase':'relaunched'})):\n"
+        "    value={**base,'schema':schema,**extra}\n"
+        "    if option=='--journal' and os.environ['RACE_SCENARIO']=='wrong-transaction': value['transaction']='foreign'\n"
+        "    if option=='--receipt' and os.environ['RACE_SCENARIO']=='not-relaunched': value['relaunched']=False\n"
+        "    if option=='--journal' and os.environ['RACE_SCENARIO']=='wrong-owner': value['team_id']='FOREIGN'\n"
+        "    if option=='--journal' and os.environ['RACE_SCENARIO']=='wrong-capture': value['capture']='foreign'\n"
+        "    Path(arg(option)).write_text(json.dumps(value))\n"
+        "reason='runtime installation is in progress'\n"
+        "if os.environ['RACE_SCENARIO']=='other-refusal': reason='runtime identity versions disagree'\n"
+        "print('capture settlement incomplete (retry with the same transaction): canonical destination verifier refused: '+"
+        "json.dumps({'schema':'vibecrafted.runtime-resolution.v1','status':'unusable','reason':reason,'runtime':None}),file=sys.stderr)\n"
+        "raise SystemExit(20)\n"
+    )
+    paths = supervisor.SupervisorPaths.create(
+        home=tmp_path / "state", runtime_home=runtime, operator_home=tmp_path / "home"
+    )
+    command = _child(["/bin/bash", str(wrapper)], allowed=(*allowed, codesign, python))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with supervisor._ToolsInstallMutationLease(paths):
+            future = pool.submit(
+                subprocess.run,
+                command,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            deadline = time.monotonic() + 10
+            while not marker.exists() and not future.done():
+                assert time.monotonic() < deadline, "canonical resolver was not reached"
+                time.sleep(0.01)
+            if scenario == "deadline":
+                result = future.result(timeout=10)
+            else:
+                drift = {
+                    "receipt-drift": "receipt.json",
+                    "journal-drift": "journal.json",
+                }.get(scenario)
+                if drift:
+                    target = next((tmp_path / "state").rglob(drift))
+                    target.write_bytes(target.read_bytes() + b" ")
+                if scenario == "publication-drift":
+                    target = runtime / "active.json"
+                    target.write_bytes(target.read_bytes() + b" ")
+                if scenario == "source-drift":
+                    target = source / "Contents/Resources/product-manifest.json"
+                    target.write_bytes(target.read_bytes() + b" ")
+                if scenario == "lock-replaced":
+                    target = runtime / "tools/.vibecrafted-install.lock"
+                    target.unlink()
+                    target.write_text("")
+        result = future.result(timeout=10)
+    events = _logs(Path(environment["MAIN_TEST_LOG"]))
+    calls = [event[1:] for event in events if event[0] == "helper"]
+    assert len([args for args in calls if "--complete" in args]) == 1
+    settlements = [args for args in calls if args[args.index("--mode") + 1] == "settle"]
+    if scenario == "released":
+        assert result.returncode == 0, result.stderr
+        assert len(settlements) == 1
+        assert (
+            settlements[0][settlements[0].index("--transaction") + 1]
+            == calls[0][calls[0].index("--transaction") + 1]
+        )
+        assert (
+            tmp_path / "state/vibecrafted-product-update/install-app-latest.json"
+        ).is_file()
+    else:
+        assert result.returncode == 20, result.stderr
+        assert len(settlements) == (1 if scenario == "settle-refuses" else 0)
+        assert not (
+            tmp_path / "state/vibecrafted-product-update/install-app-latest.json"
+        ).exists()
+    stderr = next((tmp_path / "state").rglob("complete.stderr"))
+    assert "canonical destination verifier refused:" in stderr.read_text()
