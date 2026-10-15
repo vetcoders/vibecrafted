@@ -20,6 +20,7 @@ silently aging the page.
 
 from __future__ import annotations
 
+import importlib
 import re
 import sys
 from pathlib import Path
@@ -31,10 +32,9 @@ DECK = REPO / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
 sys.path.insert(0, str(REPO / "vibecrafted-core"))
 sys.path.insert(0, str(REPO))
 
-from vibecrafted_core.workflows.registry import (
-    SHIP_STAGES,
-    WORKFLOW_DEFINITIONS,
-)
+_registry = importlib.import_module("vibecrafted_core.workflows.registry")
+SHIP_STAGES = _registry.SHIP_STAGES
+WORKFLOW_DEFINITIONS = _registry.WORKFLOW_DEFINITIONS
 
 GEN_START = "<!-- gen:pipeline -->"
 GEN_END = "<!-- /gen:pipeline -->"

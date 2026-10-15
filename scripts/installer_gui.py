@@ -42,18 +42,19 @@ try:
 except ModuleNotFoundError:  # depends on entrypoint
     _installer_brand = importlib.import_module("scripts.installer_brand")
 
-from vibecrafted_core.control_plane import sync_state
-from vibecrafted_core.runtime_paths import (
-    read_version_file,
-    vibecrafted_home,
-    vibecrafted_runtime_bin,
-    vibecrafted_tools_home,
-    xdg_config_home,
-)
-from vibecrafted_core.workflow import (
-    launch_workflow,
-    normalize_launch_spec,
-)
+_control_plane = importlib.import_module("vibecrafted_core.control_plane")
+sync_state = _control_plane.sync_state
+
+_runtime_paths = importlib.import_module("vibecrafted_core.runtime_paths")
+read_version_file = _runtime_paths.read_version_file
+vibecrafted_home = _runtime_paths.vibecrafted_home
+vibecrafted_runtime_bin = _runtime_paths.vibecrafted_runtime_bin
+vibecrafted_tools_home = _runtime_paths.vibecrafted_tools_home
+xdg_config_home = _runtime_paths.xdg_config_home
+
+_workflow = importlib.import_module("vibecrafted_core.workflow")
+launch_workflow = _workflow.launch_workflow
+normalize_launch_spec = _workflow.normalize_launch_spec
 
 PRODUCT_LINE = _installer_brand.PRODUCT_LINE
 TAGLINE = _installer_brand.TAGLINE

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import glob
 import http.client
+import importlib
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from pathlib import Path
 _TELEMETRY_ROOT = Path(__file__).resolve().parents[1]
 if str(_TELEMETRY_ROOT) not in sys.path:
     sys.path.insert(0, str(_TELEMETRY_ROOT))
-import usage_archive
+usage_archive = importlib.import_module("usage_archive")
 
 # Day buckets in the kimi scan sidecar. Bump when the wire parser changes.
 KIMI_PARSER = 1

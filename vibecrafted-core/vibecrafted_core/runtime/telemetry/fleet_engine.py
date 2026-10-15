@@ -40,6 +40,7 @@ session id, new path) is not counted twice.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -55,7 +56,7 @@ from pathlib import Path
 _ENGINE_DIR = Path(__file__).resolve().parent
 if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
-import usage_archive
+usage_archive = importlib.import_module("usage_archive")
 
 TAIL_BYTES = 400 * 1024
 # Codex usage is cumulative and usually sits near EOF. A fixed 400 KB window

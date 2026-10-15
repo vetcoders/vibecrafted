@@ -7,7 +7,21 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core import ship
-from vibecrafted_core.lifecycle_control import lifecycle_control_main
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
+from vibecrafted_core.lifecycle_control import (
+    approve_transition,
+    await_stage,
+    interrupt_workflow,
+    lifecycle_control_main,
+)
+from vibecrafted_core.lifecycle_fleet import (
+    dispatch_recorded_children,
+    dispatcher_fleet_launch,
+    mission_cuts,
+    record_write_stage_fleet,
+    stage_dispatch_run_id,
+    stage_fleet_progress,
+)
 from vibecrafted_core.lifecycle_runner import (
     LifecycleRunner,
     LifecycleRunSpec,
@@ -16,6 +30,12 @@ from vibecrafted_core.lifecycle_runner import (
 
 from .lifecycle_schema_assertions import (
     assert_lifecycle_state_matches_packaged_schema,
+)
+from .test_lifecycle_fleet import (
+    _plan,
+    _report_writer,
+    _seed_repo,
+    _write_stage,
 )
 
 
@@ -488,28 +508,6 @@ def test_await_stage_reports_delivery_and_death(
 # over a REAL dispatch receipt ledger — only the provider transport is faked,
 # at the lowest boundary (CellLauncher).
 # --------------------------------------------------------------------------
-
-from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
-from vibecrafted_core.lifecycle_control import (
-    approve_transition,
-    await_stage,
-    interrupt_workflow,
-)
-from vibecrafted_core.lifecycle_fleet import (
-    dispatch_recorded_children,
-    dispatcher_fleet_launch,
-    mission_cuts,
-    record_write_stage_fleet,
-    stage_dispatch_run_id,
-    stage_fleet_progress,
-)
-
-from .test_lifecycle_fleet import (
-    _plan,
-    _report_writer,
-    _seed_repo,
-    _write_stage,
-)
 
 _FLEET_PARENT = "life-fleet-gate"
 _FLEET_STAGE = "implement"
