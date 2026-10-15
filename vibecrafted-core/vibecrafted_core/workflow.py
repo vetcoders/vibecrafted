@@ -54,6 +54,8 @@ from .effort_overrides import (
 from .env_allowlist import (
     dispatcher_identity,
     filter_headless_worker_env,
+    managed_provider_environment,
+    provider_identity_shell_prelude,
     visible_color_shell_prelude,
 )
 from .events import append_event
@@ -413,9 +415,18 @@ def _write_command_script(
     export_lines = "".join(
         f"export {key}={shlex.quote(value)}\n" for key, value in (exports or {}).items()
     )
+    # Frame executes this script with its long-lived daemon environment, not
+    # Popen's map. Only managed provider scripts cross this identity boundary;
+    # ordinary command scripts retain their current provider's tool context.
+    identity_prelude = (
+        provider_identity_shell_prelude()
+        if (exports or {}).get("VIBECRAFTED_AGENT")
+        else ""
+    )
     path.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        f"{identity_prelude}"
         f"{export_lines}"
         f"{visible_color_shell_prelude() if visible else ''}"
         f"exec {shlex.join(command)}\n",
@@ -3552,11 +3563,11 @@ def launch_workflow(
         merged_env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
 
     # Headless Popen replaces the child environment. Frame does not use this
-    # map: its generated in-pane scripts apply the visible color policy.
+    # map: generated provider scripts clear parent identity and apply color policy.
     launch_env = (
         filter_headless_worker_env(merged_env)
         if spec.runtime == "headless"
-        else merged_env
+        else managed_provider_environment(merged_env)
     )
 
     append_event(

@@ -40,6 +40,7 @@ from .effort_overrides import _effort_override_receipt, _with_effort_override
 from .env_allowlist import (
     dispatcher_identity,
     filter_headless_worker_env,
+    managed_provider_environment,
     provider_workspace_environment,
     visible_color_environment,
 )
@@ -1087,7 +1088,9 @@ def _fresh_child_environment(
         for name in tuple(child):
             if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
                 child.pop(name, None)
-    return visible_color_environment(_scrub_runtime_bootstrap(child))
+    return visible_color_environment(
+        _scrub_runtime_bootstrap(managed_provider_environment(child))
+    )
 
 
 def continuity_policy_capabilities(
