@@ -1,9 +1,10 @@
 """One native vc-terminal host per user: admission, reuse and launch receipts.
 
-Only ``scripts/vc-terminal-product-entry.sh`` runs this file, as an isolated
+The product terminal entry and dashboard shell run this file as an isolated
 stdlib-only script (``python3 -I -B <generation>/vibecrafted-core/...``)::
 
     terminal_host.py admit --wrapper-pid PID --host HOST --config FILE [--receipt PATH] -- ARGV...
+    terminal_host.py owns-fixed-host              (read-only ancestry proof)
     terminal_host.py spawn ENV_FILE -- COMMAND...   (per-window exec shim)
 
 It prints exactly one decision line and exits 0:
@@ -104,6 +105,7 @@ class ProcessIdentity:
     uid: int
     start: str
     executable: str
+    ppid: int
 
 
 def _libsystem() -> ctypes.CDLL:
@@ -129,6 +131,7 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         return None
     raw = info.raw
     found_pid = int.from_bytes(raw[12:16], "little")
+    ppid = int.from_bytes(raw[16:20], "little")
     uid = int.from_bytes(raw[20:24], "little")
     start_sec = int.from_bytes(raw[120:128], "little")
     start_usec = int.from_bytes(raw[128:136], "little")
@@ -141,6 +144,7 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         uid=uid,
         start=f"{start_sec}.{start_usec:06d}",
         executable=os.fsdecode(path.raw[:length]),
+        ppid=ppid,
     )
 
 
@@ -291,10 +295,18 @@ def live_code_hash(pid: int) -> str | None:
     return cdhash.raw.hex()
 
 
+def generation_terminal_candidates() -> tuple[str, str]:
+    """Generation-local host classes rooted only at this physical helper."""
+    generation = Path(os.path.realpath(__file__)).parents[2]
+    return (
+        str(generation / "libexec/vc-terminal"),
+        str(generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"),
+    )
+
+
 def generation_terminal() -> str:
     """The selected generation's terminal bytes, next to this physical helper."""
-    generation = Path(os.path.realpath(__file__)).parents[2]
-    path = generation / "libexec/vc-terminal"
+    path = Path(generation_terminal_candidates()[0])
     try:
         info = os.lstat(path)
     except OSError:
@@ -334,6 +346,72 @@ def admitted_code_identity(host: str) -> CodeIdentity:
     if production_policy(host):
         require_paired_developer_id(host, identity)
     return identity
+
+
+def owns_fixed_terminal_ancestor(start_pid: int | None = None) -> bool:
+    """Whether one bounded ancestor is the current paired fixed macOS host.
+
+    Same-user ancestry and the fixed path are only candidates. Ownership also
+    requires the existing selected-generation static pair, the kernel's live
+    CDHash, and a stable process/static re-read. The check is read-only and
+    never falls back to caller environment or an arbitrary host path.
+    """
+    # Linux retains the generation-local /proc ancestry fallback in the shell;
+    # this helper claims no portable fixed-host authority there.
+    if sys.platform != "darwin":
+        return False
+    generation_local = frozenset(generation_terminal_candidates())
+    pid = os.getppid() if start_pid is None else start_pid
+    seen: set[int] = set()
+    for _ in range(32):
+        if pid <= 1:
+            return False
+        if pid in seen:
+            raise Refusal(EX_TEMPFAIL, "fixed terminal host ancestry contains a cycle")
+        seen.add(pid)
+        identity = process_identity(pid)
+        if identity is None:
+            raise Refusal(
+                EX_TEMPFAIL, f"fixed terminal host ancestry is unreadable at pid {pid}"
+            )
+        # The nearest recognized host class owns the decision. Generation-local
+        # candidates delegate their physical validation to the existing shell
+        # fallback; an outer fixed app must not override that nearer boundary.
+        if identity.executable in generation_local:
+            return False
+        if identity.executable == FIXED_HOST:
+            if identity.uid != os.getuid():
+                raise Refusal(
+                    EX_TEMPFAIL, f"fixed terminal host {pid} belongs to another user"
+                )
+            before = admitted_code_identity(FIXED_HOST)
+            live = live_code_hash(pid)
+            again = process_identity(pid)
+            after = admitted_code_identity(FIXED_HOST)
+            if (before.cdhash, before.team) != (after.cdhash, after.team):
+                raise Refusal(
+                    EX_TEMPFAIL,
+                    "fixed terminal host code changed during ancestry admission",
+                )
+            if (
+                again is None
+                or again.start != identity.start
+                or again.uid != identity.uid
+                or again.executable != FIXED_HOST
+            ):
+                raise Refusal(
+                    EX_TEMPFAIL, "fixed terminal host identity changed during admission"
+                )
+            if live != after.cdhash:
+                raise Refusal(
+                    EX_TEMPFAIL,
+                    f"fixed terminal host {pid} does not run the admitted code",
+                )
+            return True
+        pid = identity.ppid
+    if pid <= 1:
+        return False
+    raise Refusal(EX_TEMPFAIL, "fixed terminal host ancestry exceeded depth limit")
 
 
 def _private_directory(path: Path, *, create: bool) -> Path:
@@ -860,10 +938,14 @@ def main(argv: list[str]) -> int:
             return EX_USAGE
         return spawn(argv[1], argv[3:])
     try:
+        if argv[:1] == ["owns-fixed-host"]:
+            if len(argv) != 1:
+                raise Refusal(EX_USAGE, "usage: owns-fixed-host")
+            return 0 if owns_fixed_terminal_ancestor() else 1
         if len(argv) < 4 or argv[0] != "admit":
             raise Refusal(
                 EX_USAGE,
-                "usage: admit --wrapper-pid PID --host HOST --config FILE [--receipt PATH] -- ARGV...",
+                "usage: admit --wrapper-pid PID --host HOST --config FILE [--receipt PATH] -- ARGV...; owns-fixed-host; spawn ENV_FILE -- COMMAND...",
             )
         options: dict[str, str] = {}
         index = 1

@@ -9,6 +9,7 @@ never a cleanup candidate.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import subprocess
@@ -21,12 +22,11 @@ from pathlib import Path
 _CORE = Path(__file__).resolve().parents[1] / "vibecrafted-core"
 if str(_CORE) not in sys.path:
     sys.path.insert(0, str(_CORE))
-from vibecrafted_core.cache_lifecycle import (
-    CacheDeferred,
-    accepted_owner,
-    capacity,
-    clean_cache,
-)
+_cache_lifecycle = importlib.import_module("vibecrafted_core.cache_lifecycle")
+CacheDeferred = _cache_lifecycle.CacheDeferred
+accepted_owner = _cache_lifecycle.accepted_owner
+capacity = _cache_lifecycle.capacity
+clean_cache = _cache_lifecycle.clean_cache
 
 CONFIRM_TOKEN = "DELETE-REGENERABLE-VIBECRAFTED-STATE"
 TRANSIENT_ROOTS = ("tmp", "logs", "install-transactions", "recovery")

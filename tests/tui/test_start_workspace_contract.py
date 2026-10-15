@@ -4109,6 +4109,75 @@ def test_owned_terminal_receipt_cache_does_not_admit_subshell(
     assert "PARENT_AGAIN=[0]" in result.stdout
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("probe_exit", "expected_exit", "expected_calls"),
+    [(1, 0, 2), (75, 75, 1), (78, 78, 1)],
+)
+def test_fixed_host_probe_only_falls_through_when_no_ancestor_exists(
+    tmp_path: Path,
+    shell: str,
+    probe_exit: int,
+    expected_exit: int,
+    expected_calls: int,
+) -> None:
+    owner = tmp_path / "generation"
+    helper = owner / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("fixed-host admission fixture\n")
+    log = tmp_path / "python-calls.log"
+    python = _write(
+        tmp_path / "python-wrapper",
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$PROBE_LOG"
+if [ "$1" = "-I" ] && [ "$2" = "-B" ] && [ "$4" = "owns-fixed-host" ]; then
+  exit "$PROBE_EXIT"
+fi
+if [ "$1" = "-" ]; then
+  cat >/dev/null
+  exit 0
+fi
+exit 99
+""",
+    )
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{REPO_ROOT}"',
+            f'_vetcoders_vc_frame_owner_root() {{ printf "%s\\n" "{owner}"; }}',
+            f'_vetcoders_internal_python() {{ printf "%s\\n" "{python}"; }}',
+            "_vetcoders_start_has_owned_terminal_host",
+            "rc=$?",
+            'printf "RC=[%s]\\n" "$rc"',
+            'exit "$rc"',
+        ]
+    )
+    env = os.environ.copy()
+    _strip_identity_env(env)
+    env.update(
+        {
+            "PROBE_EXIT": str(probe_exit),
+            "PROBE_LOG": str(log),
+        }
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == expected_exit, result.stdout + result.stderr
+    assert f"RC=[{expected_exit}]" in result.stdout
+    calls = log.read_text().splitlines()
+    assert len(calls) == expected_calls
+    assert calls[0] == f"-I -B {helper} owns-fixed-host"
+    if probe_exit == 1:
+        assert calls[1] == f"- {owner}"
+
+
 def _run_with_owned_terminal_ancestor(
     scene: Scene, invocation: str, *, host: Path | None = None
 ) -> subprocess.CompletedProcess[str]:

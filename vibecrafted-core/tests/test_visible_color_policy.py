@@ -35,6 +35,31 @@ def _color(env):
     return {key: env[key] for key in POLLUTED if key in env}
 
 
+def _seed_claude_parent_usage(tmp_path, repo, monkeypatch):
+    """Admit the inert fork through the real parent-history boundary."""
+    config = tmp_path / "claude-config"
+    source = config / "projects" / "fixture" / "explicit-parent.jsonl"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "fixture-parent-event",
+                "sessionId": "explicit-parent",
+                "cwd": str(repo),
+                "version": "2.1.231",
+                "message": {
+                    "id": "fixture-parent-message",
+                    "content": [{"type": "text", "text": "fixture history"}],
+                    "usage": {"input_tokens": 3, "output_tokens": 2},
+                },
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+
 @pytest.mark.parametrize(
     "provider,entry",
     [
@@ -102,6 +127,8 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
         if entry == "resume"
         else {}
     )
+    if provider == "claude" and entry == "fork":
+        _seed_claude_parent_usage(tmp_path, repo, monkeypatch)
     result = spawn.launch_interactive_workspace(
         provider,
         "color task",

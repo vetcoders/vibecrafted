@@ -210,6 +210,15 @@ it does not turn project sessions into guests. Project layouts carry neither
 `frame_host` nor `workspace_surface`. The retained physical `vc-host` name does
 not define the role. `--new-host` explicitly creates an additional Operator
 Frame session for a generation transition while existing sessions remain intact.
+For the fixed macOS product-host path, the one-shot handoff back into that exact
+session is accepted only when bounded process ancestry passes the same
+selected-generation static pair and live-code proof used by native host
+admission. A shell receipt or same-user process is not substitute authority.
+Generation-local developer and Linux hosts retain their physical ancestry
+contract. If any created-host handoff cannot be proven, start exits before
+creating another session or window, leaves the reported host intact, and prints
+an explicit `vc-frame attach <host>` recovery command. It never allocates a
+suffixed replacement for a rejected handoff.
 
 Projects are displayed from 01 with their separate tabs. Cmd-Up/Down changes
 the client's session; Cmd-Left/Right changes only that session's tabs. The active

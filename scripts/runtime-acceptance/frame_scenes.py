@@ -20,6 +20,7 @@ Scenes:
 
 import argparse
 import fcntl
+import importlib
 import json
 import os
 import pty
@@ -34,8 +35,7 @@ import time
 
 def ensure_pyte():
     try:
-        import pyte  # noqa
-
+        importlib.import_module("pyte")
         return
     except ImportError:
         pass
@@ -54,7 +54,7 @@ def ensure_pyte():
 
 
 ensure_pyte()
-import pyte
+pyte = importlib.import_module("pyte")
 
 COLS, ROWS = 200, 50
 CLOSE = "✕"  # regular close mark
@@ -194,8 +194,8 @@ def main():
         run(bin_, sock, "attach", s, "--create-background")
     for _ in range(20):
         ls = run(bin_, sock, "list-sessions", "--no-formatting").stdout
-        live = [l for l in ls.splitlines() if "EXITED" not in l]
-        if sum(1 for l in live if "accept-" in l) >= 2:
+        live = [line for line in ls.splitlines() if "EXITED" not in line]
+        if sum(1 for line in live if "accept-" in line) >= 2:
             break
         time.sleep(0.5)
 

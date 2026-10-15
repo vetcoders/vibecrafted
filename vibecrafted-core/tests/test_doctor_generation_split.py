@@ -30,7 +30,10 @@ def _findings(
 ):
     if isinstance(resolver, Path):
         active = resolver
-        resolver = lambda: active
+
+        def resolver():
+            return active
+
     return doctor._vc_frame_generation_split_findings(
         which=which,
         runner=_ps_runner(ps_output, rc),
