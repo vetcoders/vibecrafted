@@ -1247,7 +1247,27 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
     assert assigned.resolve() != candidate.resolve()
     assert Path(environment["VIBECRAFTED_HOME"]).resolve() in assigned.resolve().parents
     command = receipt["worker_command"]
-    assert command[:3] == [sys.executable, "-m", "vibecrafted_core.workflow_runtime"]
+    assert command[1:3] == ["-m", "vibecrafted_core.workflow_runtime"]
+    source_bin = launcher.parent
+    entrypoint_line = launcher.read_text(encoding="utf-8").splitlines()[0]
+    assert entrypoint_line.startswith("#!")
+    entrypoint_interpreter = Path(entrypoint_line[2:])
+
+    def is_source_interpreter(candidate: Path) -> bool:
+        return (
+            candidate.is_absolute()
+            and candidate.parent == source_bin
+            and os.path.samefile(candidate, sys.executable)
+        )
+
+    assert is_source_interpreter(Path(command[0]))
+    assert is_source_interpreter(entrypoint_interpreter)
+    foreign_bin = tmp_path / "foreign-venv/bin"
+    foreign_bin.mkdir(parents=True)
+    foreign_python = foreign_bin / "python"
+    foreign_python.symlink_to(Path(sys.executable).resolve())
+    assert os.path.samefile(foreign_python, sys.executable)
+    assert not is_source_interpreter(foreign_python)
     parent = json.loads(Path(receipt["meta"]).read_text())
     assert len(parent["children"]) == 1
     assert parent["reception"]["verdict"] == "blocked"
