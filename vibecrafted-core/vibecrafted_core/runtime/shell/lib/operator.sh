@@ -141,6 +141,7 @@ _vetcoders_enter_admitted_interactive() {
     command=(/usr/bin/env "PYTHONPATH=$import_root" "${command[@]}")
   fi
   _vetcoders_contract_root="$("${command[@]}" --root-only)" || return 1
+  _vetcoders_interactive_run_id="$("${command[@]}" --run-id-only)" || return 1
   if _vetcoders_needs_vc_terminal_entry; then
     # Fork from a resolved live host is a panel in that host. Opening a
     # second terminal here starts a CLI client that the frame warden can

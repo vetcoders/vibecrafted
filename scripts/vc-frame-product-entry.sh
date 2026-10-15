@@ -99,6 +99,12 @@ unset VIBECRAFTED_PREFER_REPO_VC_FRAME VIBECRAFTED_PREFER_REPO_SPAWN
 pin_product_shell
 pin_darwin_socket_dir
 
+# A new Frame server hosts independent providers. Its launcher's native
+# session/tool identity must not become every future pane's ambient context.
+# Exact parity with env_allowlist.INHERITED_PROVIDER_IDENTITY_KEYS is tested;
+# retain auth, config, messaging buses, harness flags and ordinary shell state.
+unset CODEX_THREAD_ID CODEX_SESSION_ID CODEX_TOOL_CALL_ID CLAUDE_CODE_SESSION_ID GROK_SESSION_ID
+
 if [[ $# -eq 0 ]]; then
   # Preserve the framework Launchpad/Operator surface through this generation.
   if [[ ! -x "$root/bin/vc-start" ]]; then

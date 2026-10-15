@@ -656,6 +656,10 @@ _vetcoders_resume_agent() {
   _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
   case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
   resume_declared_root="$_vetcoders_contract_root"
+  # The shared admission helper in operator.sh sets the exact child ID.
+  # An ambient Frame/parent run is unrelated.
+  # shellcheck disable=SC2154
+  local VIBECRAFTED_RUN_ID="$_vetcoders_interactive_run_id"
 
   # `--runtime plain`: the caller's terminal IS the Agent TTY (the Agents
   # launcher opens exactly one Frame tab for this command). Resolving an
@@ -681,7 +685,7 @@ _vetcoders_resume_agent() {
     _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$resume_declared_root" resume || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
       _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" "$tool" || return 1
-      printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
+      printf 'Resume accepted; provider starting: run_id=%s target=%s\n' "$VIBECRAFTED_RUN_ID" "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
       [[ -z "$resume_declared_root" ]] || printf '  root:    %s\n' "$resume_declared_root"
       if [[ -n "$_vetcoders_contract_session" ]]; then

@@ -1,6 +1,7 @@
 """Allowlist for the environment a headless worker may inherit.
 
-Interactive sessions keep the dispatcher environment with visible color policy.
+Interactive births keep the dispatcher environment apart from native parent
+identity, with visible color policy.
 Headless workers keep their independent no-color intent and allowlist.
 Copying ``os.environ`` wholesale leaked the parent Claude bus
 (``CLAUDE_CODE_MESSAGING_SOCKET`` / ``CLAUDE_CODE_MESSAGING_TOKEN``) into a
@@ -21,6 +22,37 @@ import os
 from collections.abc import Mapping
 
 from .runtime_paths import pin_runtime_python
+
+# Native process identity belongs to one provider birth, never its parent.
+# Keep this exact list aligned with vc-frame-product-entry.sh, whose native
+# bootstrap intentionally does not require a Python interpreter. Credentials,
+# config homes, messaging buses and harness flags are separate contracts.
+INHERITED_PROVIDER_IDENTITY_KEYS: tuple[str, ...] = (
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "GROK_SESSION_ID",
+)
+
+
+def managed_provider_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Copy a new managed provider's env without inherited native identity.
+
+    Call only at provider birth. Ordinary tools inside an existing provider
+    must retain its own identity, including calls to AICX current. Admitted
+    resume/fork targets travel through canonical arguments and receipts.
+    """
+    child = dict(source)
+    for key in INHERITED_PROVIDER_IDENTITY_KEYS:
+        child.pop(key, None)
+    return child
+
+
+def provider_identity_shell_prelude() -> str:
+    """Clear an old Frame server's identity before a provider script's exports."""
+    return "unset " + " ".join(INHERITED_PROVIDER_IDENTITY_KEYS) + "\n"
+
 
 # Process basics a provider CLI needs before it can read HOME or speak HTTPS.
 _PROCESS_ALLOW: frozenset[str] = frozenset(

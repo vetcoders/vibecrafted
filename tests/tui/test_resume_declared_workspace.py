@@ -899,6 +899,15 @@ def test_stale_marker_with_a_terminal_enters_the_declared_workspace(
     )
     attach_at = next(i for i, a in enumerate(order) if a[:1] == ["attach"])
     assert created_at < tab_at < attach_at, order
+    # Frame ACK admits a command; this fixture never starts a provider.
+    admitted = _tab_admission(calls[tab_at])
+    assert (
+        f"Resume accepted; provider starting: run_id={admitted['run_id']}"
+        in result.stdout
+    )
+    assert f"launch accepted: run_id={admitted['run_id']}" in result.stdout
+    assert "Resume launched" not in result.stdout
+    assert "provider started:" not in result.stdout
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
 
