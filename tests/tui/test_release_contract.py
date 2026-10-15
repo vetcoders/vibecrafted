@@ -1286,8 +1286,8 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
 @pytest.mark.parametrize(
     ("donor", "revision"),
     [
-        ("terminal", "cfa2c367ed36ba9179a05fff32ab1221060cb04e"),
-        ("frame", "959bf18442e70db1f484cea20fa2794bd40155d0"),
+        ("terminal", "38ef2f918383ca4dde797d22869b619097c81d05"),
+        ("frame", "0b91c4f0806356b5c92e46c82bf0fdf0310c0222"),
     ],
 )
 def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(

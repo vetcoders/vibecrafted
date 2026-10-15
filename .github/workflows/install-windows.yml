@@ -412,8 +412,32 @@ jobs:
           $env:Path = "$bin;$env:Path"
           & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
           if ($LASTEXITCODE -ne 0) {
+            $doctorExit = $LASTEXITCODE
             Get-Content -LiteralPath $doctorLog
-            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+            # A runtime-receipt failure is attributable only from the receipt
+            # itself: record which publication/recovery markers it still carries
+            # (names, truthiness, bounded value) next to the other install logs.
+            $receiptFile = Join-Path $env:LOCALAPPDATA "Vibecrafted\install-receipt.json"
+            $attribution = Join-Path $logDir "receipt-attribution.txt"
+            if (Test-Path -LiteralPath $receiptFile) {
+              $receiptDoc = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json
+              $markers = @("install_pending", "install_phase", "config_transaction", "config_pending",
+                "config_conflicts", "uninstall_pending", "rescue_pending", "candidate_conflicts",
+                "retirement_registration_residuals", "retirement_last_result")
+              $rows = foreach ($marker in $markers) {
+                $property = $receiptDoc.PSObject.Properties[$marker]
+                if ($null -eq $property) { "$marker=<absent>"; continue }
+                $json = ConvertTo-Json -InputObject $property.Value -Depth 4 -Compress
+                if ($json.Length -gt 600) { $json = $json.Substring(0, 600) + "..." }
+                "$marker=$json"
+              }
+              $rows += "receipt_last_write_utc=" + (Get-Item -LiteralPath $receiptFile).LastWriteTimeUtc.ToString("o")
+              $rows | Set-Content -LiteralPath $attribution -Encoding utf8
+            } else {
+              "install-receipt.json missing at $receiptFile" | Set-Content -LiteralPath $attribution -Encoding utf8
+            }
+            Get-Content -LiteralPath $attribution
+            throw "vibecrafted doctor failed with exit $doctorExit"
           }
           $doctorText = Get-Content -LiteralPath $doctorLog -Raw
           $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })
@@ -709,8 +733,32 @@ jobs:
           $env:Path = "$bin;$env:Path"
           & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
           if ($LASTEXITCODE -ne 0) {
+            $doctorExit = $LASTEXITCODE
             Get-Content -LiteralPath $doctorLog
-            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+            # A runtime-receipt failure is attributable only from the receipt
+            # itself: record which publication/recovery markers it still carries
+            # (names, truthiness, bounded value) next to the other install logs.
+            $receiptFile = Join-Path $env:LOCALAPPDATA "Vibecrafted\install-receipt.json"
+            $attribution = Join-Path $logDir "receipt-attribution.txt"
+            if (Test-Path -LiteralPath $receiptFile) {
+              $receiptDoc = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json
+              $markers = @("install_pending", "install_phase", "config_transaction", "config_pending",
+                "config_conflicts", "uninstall_pending", "rescue_pending", "candidate_conflicts",
+                "retirement_registration_residuals", "retirement_last_result")
+              $rows = foreach ($marker in $markers) {
+                $property = $receiptDoc.PSObject.Properties[$marker]
+                if ($null -eq $property) { "$marker=<absent>"; continue }
+                $json = ConvertTo-Json -InputObject $property.Value -Depth 4 -Compress
+                if ($json.Length -gt 600) { $json = $json.Substring(0, 600) + "..." }
+                "$marker=$json"
+              }
+              $rows += "receipt_last_write_utc=" + (Get-Item -LiteralPath $receiptFile).LastWriteTimeUtc.ToString("o")
+              $rows | Set-Content -LiteralPath $attribution -Encoding utf8
+            } else {
+              "install-receipt.json missing at $receiptFile" | Set-Content -LiteralPath $attribution -Encoding utf8
+            }
+            Get-Content -LiteralPath $attribution
+            throw "vibecrafted doctor failed with exit $doctorExit"
           }
           $doctorText = Get-Content -LiteralPath $doctorLog -Raw
           $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })
