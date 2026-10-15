@@ -11,6 +11,7 @@ import json
 import plistlib
 import re
 import shutil
+import subprocess
 import sys
 import sysconfig
 from collections.abc import Callable
@@ -135,6 +136,30 @@ def private_child_command(
     return ["/usr/bin/sandbox-exec", "-p", profile, *command]
 
 
+def sign_private_terminal_pair(*paths: Path) -> None:
+    """One identical private ad-hoc signature for byte-identical terminal fixtures.
+
+    Admission pairs the bundle host with the generation's own terminal by
+    verified code identity; recording scripts carry no signature of their own.
+    """
+    for path in paths:
+        assert not path.resolve().is_relative_to(Path("/Applications"))
+        subprocess.run(
+            [
+                "/usr/bin/codesign",
+                "--force",
+                "-s",
+                "-",
+                "-i",
+                "io.vetcoders.vibecrafted.vc-terminal-fixture",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+
 def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
     """Bind only a copied wrapper to a private Main bundle, retaining its checks.
 
@@ -148,6 +173,8 @@ def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
     host.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(native, host)
     host.chmod(0o755)
+    if sys.platform == "darwin":
+        sign_private_terminal_pair(native, host)
     (bundle / "Contents/Info.plist").write_bytes(
         plistlib.dumps(
             {

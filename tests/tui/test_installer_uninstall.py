@@ -546,11 +546,44 @@ def test_runtime_install_selects_platform_host_over_legacy_helper_override(
     assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert (generation / "libexec/vc-terminal").is_file()
     path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
-    assert "VIBECRAFTED_TERMINAL_HOST=" in path_wrapper
-    assert str(expected_host) in path_wrapper
-    if sys.platform == "darwin":
-        assert str(generation / "libexec/vc-terminal") not in path_wrapper
+    assert str(helper) not in path_wrapper
     assert str(generation / "bin/vc-terminal") in path_wrapper
+    if sys.platform == "darwin":
+        assert f"VIBECRAFTED_TERMINAL_HOST={expected_host}" in path_wrapper
+        assert str(generation / "libexec/vc-terminal") not in path_wrapper
+    else:
+        # The flat platform host is chosen by the generation entry itself.
+        assert "VIBECRAFTED_TERMINAL_HOST=" not in path_wrapper
+
+    # Run the public wrapper into a private sink at the generation entry: the
+    # exact argv and host export it forwards, never the legacy helper.
+    from _runtime_pack_fixture import private_child_command
+
+    entry = generation / "bin/vc-terminal"
+    capture = tmp_path / "public-wrapper-forwarded.txt"
+    entry.unlink()
+    entry.write_text(
+        "#!/bin/sh\n"
+        "{ printf '%s\\n' \"${VIBECRAFTED_TERMINAL_HOST-<unset>}\"; "
+        f"printf '%s\\n' \"$@\"; }} > '{capture}'\n"
+    )
+    entry.chmod(0o755)
+    argv = ["--title", "a b", "-e", "/private/record-only"]
+    forwarded = subprocess.run(
+        private_child_command(
+            [str(launcher_home / "vc-terminal"), *argv],
+            allowed=(launcher_home / "vc-terminal", entry),
+            fixture_root=tmp_path,
+        ),
+        env={"PATH": "/usr/bin:/bin", "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert forwarded.returncode == 0, forwarded.stderr
+    exported = str(expected_host) if sys.platform == "darwin" else "<unset>"
+    assert capture.read_text(encoding="utf-8").splitlines() == [exported, *argv]
 
 
 def test_runtime_install_selects_platform_host_without_app_root(
@@ -597,7 +630,12 @@ def test_runtime_install_selects_platform_host_without_app_root(
     assert (generation_host.parents[1] / "Info.plist").is_file()
     assert (generation_host.parents[1] / "Resources/Vibecrafted.icns").is_file()
     launcher = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
-    assert f"VIBECRAFTED_TERMINAL_HOST={installer._FIXED_TERMINAL_HOST}" in launcher
+    assert str(generation / "bin/vc-terminal") in launcher
+    if sys.platform == "darwin":
+        assert f"VIBECRAFTED_TERMINAL_HOST={installer._FIXED_TERMINAL_HOST}" in launcher
+    else:
+        # No paired Main off Darwin: the generation entry selects its flat host.
+        assert "VIBECRAFTED_TERMINAL_HOST=" not in launcher
 
     (generation_host.parents[1] / "Resources/Vibecrafted.icns").unlink()
     assert not installer._is_product_bundle_terminal_host(generation_host)

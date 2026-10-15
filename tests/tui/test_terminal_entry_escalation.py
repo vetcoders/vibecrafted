@@ -3297,8 +3297,6 @@ def _run_terminal_path_entry(
                 }
             ).decode(),
         )
-        # The generation is still required by admission, but must never win.
-        _write(generation / "libexec/vc-terminal", "#!/bin/bash\nexit 99\n")
         # The private bundle host passes the same single-host admission.
         _write(
             generation / "vibecrafted-core/vibecrafted_core/terminal_host.py",
@@ -3323,11 +3321,35 @@ def _run_terminal_path_entry(
         "  'runtime_bin': os.environ.get('VIBECRAFTED_RUNTIME_BIN'),\n"
         "  'root': os.environ.get('VIBECRAFTED_ROOT'),\n"
         "  'host': os.environ.get('VIBECRAFTED_TERMINAL_HOST'),\n"
+        "  'self': sys.argv[0],\n"
         "  'argv': sys.argv[1:],\n"
         "  'pythonpath': os.environ.get('PYTHONPATH'),\n"
         "  'pythonhome': os.environ.get('PYTHONHOME'),\n"
         "}))\n",
     )
+    if sys.platform == "darwin":
+        # Admission pairs the bundle host with the generation's own terminal by
+        # verified code identity: identical recording bytes, one ad-hoc
+        # signature. The executed path (`self`) still proves the bundle won.
+        paired = _write(
+            generation / "libexec/vc-terminal", host.read_text(encoding="utf-8")
+        )
+        for path in (paired, host):
+            assert not path.resolve().is_relative_to(Path("/Applications"))
+            subprocess.run(
+                [
+                    "/usr/bin/codesign",
+                    "--force",
+                    "-s",
+                    "-",
+                    "-i",
+                    "io.vetcoders.vibecrafted.vc-terminal-fixture",
+                    str(path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
     env = os.environ.copy()
     for name in (
         "VIBECRAFTED_RUNTIME_HOME",
@@ -3388,6 +3410,7 @@ def test_terminal_path_entry_records_private_host_and_exact_argv(
         else generation / "libexec/vc-terminal"
     )
     assert receipt["host"] == str(host)
+    assert receipt["self"] == str(host)
     assert receipt["root"] == receipt["runtime_root"] == str(generation)
     assert receipt["argv"] == [
         "--config-file",

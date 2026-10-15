@@ -4530,6 +4530,9 @@ def test_local_external_tty_still_escalates_to_company_terminal(
         "vc-start",
         tty=True,
         owned_terminal=False,
+        # The local control must stay local even when pytest itself runs over
+        # SSH: an inherited SSH_* marker would select the caller-TTY route.
+        extra_env={"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""},
     )
     assert _rc(result) == 0, result.stdout + result.stderr
     assert len(scene.terminal_launches(wait=0.5)) == 1

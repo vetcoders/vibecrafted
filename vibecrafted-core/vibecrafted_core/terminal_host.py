@@ -25,6 +25,18 @@ macOS proof only: kernel PID/UID/start token and executable path come from
 libproc, socket peers from ``LOCAL_PEERPID``/``LOCAL_PEERCRED``. Linux has no
 equivalent proof here and is refused (the wrapper keeps the flat host there).
 
+Code identity: before any decision the host bytes must carry a valid static
+signature (Security.framework, strict) whose CodeDirectory hash and Team equal
+the selected generation's own ``libexec/vc-terminal``, located from this
+helper's physical path, never from caller environment. The fixed
+``/Applications`` host additionally needs a Team (no ad-hoc code) shared with
+its main app, as the installer pairs them. Any other host path is a private
+ad-hoc control: exact pairing still holds, a Team may be absent. A reused
+host must still run, per the kernel (``csops``), that exact admitted code: a
+path or inode is not loaded code identity. The static pair decides only as
+read under the admission lock, and is read again after delivery: a receipt
+never names code that is no longer the current admitted pair.
+
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
 
@@ -69,6 +81,15 @@ ENV_FILE_MAX_AGE_SECONDS = 120.0
 # <sys/un.h>: SOL_LOCAL, LOCAL_PEERCRED, LOCAL_PEERPID. <sys/proc_info.h>.
 _SOL_LOCAL, _LOCAL_PEERCRED, _LOCAL_PEERPID = 0, 0x001, 0x002
 _PROC_PIDTBSDINFO, _BSDINFO_SIZE, _PATH_MAX = 3, 136, 4096
+
+FIXED_HOST = "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+# <sys/codesign.h> csops operations and flags; CS_CDHASH_LEN.
+_CS_OPS_STATUS, _CS_OPS_CDHASH, _CS_VALID, _CS_ADHOC, _CDHASH_LEN = 0, 5, 0x1, 0x2, 20
+# <Security/CSCommon.h>, <Security/SecStaticCode.h>, <Security/SecCode.h>.
+_SEC_CHECK_ALL_ARCHITECTURES, _SEC_BASIC_VALIDATE_ONLY = 1 << 0, (1 << 1) | (1 << 2)
+_SEC_STRICT_VALIDATE, _SEC_NO_NETWORK_ACCESS = 1 << 4, 1 << 29
+_SEC_SIGNING_INFORMATION = 1 << 1
+_CF_UTF8, _CF_NUMBER_SINT32 = 0x08000100, 3
 
 
 class Refusal(Exception):
@@ -121,6 +142,198 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         start=f"{start_sec}.{start_usec:06d}",
         executable=os.fsdecode(path.raw[:length]),
     )
+
+
+@dataclass(frozen=True)
+class CodeIdentity:
+    cdhash: str
+    team: str | None
+    adhoc: bool
+
+
+class _SecurityAPI:
+    def __init__(self) -> None:
+        frameworks = "/System/Library/Frameworks"
+        cf = ctypes.CDLL(f"{frameworks}/CoreFoundation.framework/CoreFoundation")
+        sec = ctypes.CDLL(f"{frameworks}/Security.framework/Security")
+        ptr, out = ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
+        for name, restype, argtypes in (
+            (
+                "CFURLCreateFromFileSystemRepresentation",
+                ptr,
+                [ptr, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool],
+            ),
+            ("CFDictionaryGetValue", ptr, [ptr, ptr]),
+            ("CFGetTypeID", ctypes.c_ulong, [ptr]),
+            ("CFDataGetTypeID", ctypes.c_ulong, []),
+            ("CFStringGetTypeID", ctypes.c_ulong, []),
+            ("CFNumberGetTypeID", ctypes.c_ulong, []),
+            ("CFDataGetLength", ctypes.c_long, [ptr]),
+            ("CFDataGetBytePtr", ptr, [ptr]),
+            (
+                "CFStringGetCString",
+                ctypes.c_bool,
+                [ptr, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32],
+            ),
+            ("CFNumberGetValue", ctypes.c_bool, [ptr, ctypes.c_long, ptr]),
+            ("CFRelease", None, [ptr]),
+        ):
+            function = getattr(cf, name)
+            function.restype, function.argtypes = restype, argtypes
+        for name, argtypes in (
+            ("SecStaticCodeCreateWithPath", [ptr, ctypes.c_uint32, out]),
+            ("SecStaticCodeCheckValidity", [ptr, ctypes.c_uint32, ptr]),
+            ("SecCodeCopySigningInformation", [ptr, ctypes.c_uint32, out]),
+        ):
+            function = getattr(sec, name)
+            function.restype, function.argtypes = ctypes.c_int32, argtypes
+        self.cf, self.sec = cf, sec
+
+    def value(self, info: int, key: str, type_id: int) -> int | None:
+        found = self.cf.CFDictionaryGetValue(
+            info, ctypes.c_void_p.in_dll(self.sec, key).value
+        )
+        if not found or self.cf.CFGetTypeID(found) != type_id:
+            return None
+        return found
+
+    def data(self, info: int, key: str) -> bytes | None:
+        found = self.value(info, key, self.cf.CFDataGetTypeID())
+        if found is None:
+            return None
+        length = self.cf.CFDataGetLength(found)
+        return ctypes.string_at(self.cf.CFDataGetBytePtr(found), length)
+
+    def string(self, info: int, key: str) -> str | None:
+        found = self.value(info, key, self.cf.CFStringGetTypeID())
+        buffer = ctypes.create_string_buffer(256)
+        if found is None or not self.cf.CFStringGetCString(
+            found, buffer, 256, _CF_UTF8
+        ):
+            return None
+        return buffer.value.decode()
+
+    def number(self, info: int, key: str) -> int | None:
+        found = self.value(info, key, self.cf.CFNumberGetTypeID())
+        number = ctypes.c_uint32()
+        if found is None or not self.cf.CFNumberGetValue(
+            found, _CF_NUMBER_SINT32, ctypes.byref(number)
+        ):
+            return None
+        return number.value
+
+
+def static_code_identity(path: str, *, basic: bool = False) -> CodeIdentity:
+    """Verified CodeDirectory hash/Team of one file, like ``codesign --verify --strict``.
+
+    ``basic`` checks only a bundle's signature metadata (kSecCSBasicValidateOnly,
+    as the App's signed-role check) without hashing the whole Runtime Pack.
+    """
+    if sys.platform != "darwin":
+        raise Refusal(EX_UNAVAILABLE, "terminal code identity is only proven on macOS")
+    api = _SecurityAPI()
+    raw = os.fsencode(path)
+    url = api.cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), False)
+    if not url:
+        raise Refusal(EX_CONFIG, f"terminal code path unreadable: {path}")
+    code, info = ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        status = api.sec.SecStaticCodeCreateWithPath(url, 0, ctypes.byref(code))
+        if status != 0 or not code.value:
+            raise Refusal(
+                EX_CONFIG, f"terminal code unsigned or malformed ({status}): {path}"
+            )
+        flags = (
+            _SEC_BASIC_VALIDATE_ONLY
+            if basic
+            else _SEC_STRICT_VALIDATE | _SEC_CHECK_ALL_ARCHITECTURES
+        )
+        status = api.sec.SecStaticCodeCheckValidity(
+            code, flags | _SEC_NO_NETWORK_ACCESS, None
+        )
+        if status != 0:
+            raise Refusal(
+                EX_CONFIG, f"terminal code signature invalid ({status}): {path}"
+            )
+        status = api.sec.SecCodeCopySigningInformation(
+            code, _SEC_SIGNING_INFORMATION, ctypes.byref(info)
+        )
+        if status != 0 or not info.value:
+            raise Refusal(
+                EX_CONFIG,
+                f"terminal code signing information unreadable ({status}): {path}",
+            )
+        cdhash = api.data(info.value, "kSecCodeInfoUnique")
+        team = api.string(info.value, "kSecCodeInfoTeamIdentifier")
+        code_flags = api.number(info.value, "kSecCodeInfoFlags")
+    finally:
+        for owned in (info.value, code.value, url):
+            if owned:
+                api.cf.CFRelease(owned)
+    if cdhash is None or len(cdhash) != _CDHASH_LEN or code_flags is None:
+        raise Refusal(EX_CONFIG, f"terminal code identity incomplete: {path}")
+    return CodeIdentity(cdhash.hex(), team or None, bool(code_flags & _CS_ADHOC))
+
+
+def live_code_hash(pid: int) -> str | None:
+    """Kernel CDHash of the code one live PID actually runs, if still CS_VALID."""
+    lib = _libsystem()
+    lib.csops.restype = ctypes.c_int
+    lib.csops.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t]
+    status = ctypes.c_uint32()
+    if lib.csops(pid, _CS_OPS_STATUS, ctypes.byref(status), 4) != 0:
+        return None
+    if not status.value & _CS_VALID:
+        return None
+    cdhash = ctypes.create_string_buffer(_CDHASH_LEN)
+    if lib.csops(pid, _CS_OPS_CDHASH, cdhash, _CDHASH_LEN) != 0:
+        return None
+    return cdhash.raw.hex()
+
+
+def generation_terminal() -> str:
+    """The selected generation's terminal bytes, next to this physical helper."""
+    generation = Path(os.path.realpath(__file__)).parents[2]
+    path = generation / "libexec/vc-terminal"
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise Refusal(
+            EX_CONFIG, f"selected generation terminal missing: {path}"
+        ) from None
+    if not stat.S_ISREG(info.st_mode):
+        raise Refusal(EX_CONFIG, f"selected generation terminal is not a file: {path}")
+    return str(path)
+
+
+def production_policy(host: str) -> bool:
+    """Only the fixed app path is the product; the path, not caller env, decides."""
+    return host == FIXED_HOST
+
+
+def require_paired_developer_id(host: str, identity: CodeIdentity) -> None:
+    if identity.team is None or identity.adhoc:
+        raise Refusal(
+            EX_CONFIG,
+            f"fixed terminal host is not Developer ID signed (ad-hoc or no Team): {host}",
+        )
+    bundle = static_code_identity(str(Path(host).parents[2]), basic=True)
+    if bundle.team != identity.team:
+        raise Refusal(EX_CONFIG, "main app and terminal signing owners differ")
+
+
+def admitted_code_identity(host: str) -> CodeIdentity:
+    """Static host code paired with the selected generation under its policy."""
+    expected = static_code_identity(generation_terminal())
+    identity = static_code_identity(host)
+    if (identity.cdhash, identity.team) != (expected.cdhash, expected.team):
+        raise Refusal(
+            EX_CONFIG,
+            f"terminal host code {identity.cdhash} differs from selected generation terminal {expected.cdhash}",
+        )
+    if production_policy(host):
+        require_paired_developer_id(host, identity)
+    return identity
 
 
 def _private_directory(path: Path, *, create: bool) -> Path:
@@ -255,7 +468,7 @@ def peer_identity(path: str) -> tuple[int, int]:
     return pid, uid
 
 
-def host_state(record: dict, host: str) -> str:
+def host_state(record: dict, host: str, code: CodeIdentity) -> str:
     """``live``, ``starting`` or ``stale`` for one record; refuses replaced hosts."""
     pid = record.get("pid")
     if not isinstance(pid, int):
@@ -279,6 +492,20 @@ def host_state(record: dict, host: str) -> str:
         raise Refusal(
             EX_TEMPFAIL,
             f"terminal host {pid} predates the installed host; quit Vibecrafted Terminal to load it",
+        )
+    if record.get("code_cdhash") != code.cdhash:
+        raise Refusal(
+            EX_TEMPFAIL,
+            f"terminal host {pid} was not admitted for the installed host code; quit Vibecrafted Terminal to load it",
+        )
+    live = live_code_hash(pid)
+    again = process_identity(pid)
+    if again is None or again.start != record.get("start"):
+        return "stale"
+    if live != code.cdhash:
+        raise Refusal(
+            EX_TEMPFAIL,
+            f"terminal host {pid} runs code {live or 'without a valid signature'}, not installed {code.cdhash}; quit Vibecrafted Terminal to load it",
         )
     sock = record.get("socket")
     if not isinstance(sock, str):
@@ -510,12 +737,17 @@ def admit(
         )
     if not os.path.isabs(host) or os.path.realpath(host) != host:
         raise Refusal(EX_CONFIG, f"host path is not canonical: {host}")
+    # Fail closed before touching state; this read is not proof for later.
+    admitted_code_identity(host)
     directory = state_directory(environ, host)
     lock = acquire_lock(directory)
     try:
+        # The bytes may be republished while this waited on the lock: decide
+        # only on the strict static pair read while the lock is held.
+        code = admitted_code_identity(host)
         record = read_record(directory)
         deadline = time.monotonic() + STARTUP_WAIT_SECONDS
-        state = host_state(record, host) if record else "stale"
+        state = host_state(record, host, code) if record else "stale"
         while state == "starting":
             if time.monotonic() >= deadline:
                 raise Refusal(
@@ -523,7 +755,7 @@ def admit(
                     f"terminal host {record['pid']} is still starting; window unconfirmed",
                 )
             time.sleep(0.05)
-            state = host_state(record, host)
+            state = host_state(record, host, code)
         if state == "live":
             assert record is not None
             env_file = write_env_file(directory, environ)
@@ -545,9 +777,22 @@ def admit(
                 env_file.unlink(missing_ok=True)
                 raise
             # The write went to the recorded socket; the receipt may only name
-            # the host when the same kernel identity still owns that socket.
+            # the host when the same kernel identity still owns that socket and
+            # the current static pair is still the admitted code it runs.
             # A change here is unconfirmed and is never retried.
-            if host_state(record, host) != "live":
+            try:
+                current = admitted_code_identity(host)
+            except Refusal as refusal:
+                raise Refusal(
+                    EX_TEMPFAIL,
+                    f"create-window written but host code is no longer admitted ({refusal}); window unconfirmed",
+                ) from None
+            if (current.cdhash, current.team) != (code.cdhash, code.team):
+                raise Refusal(
+                    EX_TEMPFAIL,
+                    f"create-window written but host code changed from {code.cdhash} to {current.cdhash}; window unconfirmed",
+                )
+            if host_state(record, host, current) != "live":
                 raise Refusal(
                     EX_TEMPFAIL,
                     f"create-window written but host {record['pid']} identity changed; window unconfirmed",
@@ -561,6 +806,8 @@ def admit(
                         "host_start": record["start"],
                         "executable": host,
                         "delivery": "create_window_request_written",
+                        "code_cdhash": current.cdhash,
+                        "code_proof": "kernel_live_cdhash",
                         "agent_start_proven": False,
                     },
                 )
@@ -581,6 +828,8 @@ def admit(
             "uid": os.getuid(),
             "executable": host,
             "executable_file": _file_identity(host),
+            "code_cdhash": code.cdhash,
+            "code_team": code.team,
             "wrapper_executable": wrapper.executable,
             "socket": str(sock),
         }
@@ -593,6 +842,8 @@ def admit(
                     "host_start": wrapper.start,
                     "executable": host,
                     "delivery": "host_exec_pending",
+                    "code_cdhash": code.cdhash,
+                    "code_proof": "static_generation_pair",
                     "agent_start_proven": False,
                 },
             )

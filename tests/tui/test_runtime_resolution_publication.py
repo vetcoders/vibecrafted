@@ -1810,6 +1810,14 @@ def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
         f"#!{sys.executable}\nimport json, sys\n"
         "print(json.dumps({'argv': sys.argv[1:], 'host': sys.argv[0]}))\n"
     )
+    if sys.platform == "darwin":
+        from _runtime_pack_fixture import sign_private_terminal_pair
+
+        # Keep the private pair: identical recorder bytes, one ad-hoc signature.
+        # `captured["host"] == str(host)` below still proves the bundle path ran.
+        paired = generation / "libexec/vc-terminal"
+        paired.write_text(host.read_text())
+        sign_private_terminal_pair(paired, host)
     monkeypatch.setenv("HOME", str(home))
     legacy = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     _bundle_capture_host(legacy, sys.executable)
@@ -1987,12 +1995,24 @@ def test_terminal_wrapper_invalid_spec_uses_product_shell_without_writing_config
     primary = terminal / "launch-primary-shell.zsh"
     shutil.copy2(REPO_ROOT / "config/alacritty/launch-primary-shell.zsh", primary)
     generation, wrapper, native = _terminal_wrapper_generation(tmp_path)
-    (generation / "bin/python3").symlink_to(sys.executable)
+    door = generation / "bin/python3"
+    if door.is_symlink():
+        # The private terminal binder already owns this generation's door.
+        assert door.readlink() == Path(sys.executable)
+    else:
+        door.symlink_to(sys.executable)
     (generation / "scripts").symlink_to(REPO_ROOT / "scripts")
     native.write_text(
         f"#!{sys.executable}\nimport json, os, sys\n"
         "print(json.dumps({'argv': sys.argv[1:], 'error': os.environ.get('VIBECRAFTED_TERMINAL_STARTUP_ERROR')}))\n"
     )
+    if sys.platform == "darwin":
+        from _runtime_pack_fixture import sign_private_terminal_pair
+
+        # `native` is the bound bundle host: re-pair its rewritten recorder.
+        paired = generation / "libexec/vc-terminal"
+        paired.write_text(native.read_text())
+        sign_private_terminal_pair(paired, native)
     monkeypatch.setenv("HOME", str(home))
     before = _snapshot(home)
     for _ in range(2):
