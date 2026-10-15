@@ -2,7 +2,7 @@
 
 The operator-facing launch path is the `vibecrafted` command deck (or the
 `vc-<launcher>` helper). Agents: `claude · codex · agy · junie · grok ·
-cursor · kimi · copilot`. The full flag surface, not just `--prompt`:
+cursor · kimi · copilot · omp`. The full flag surface, not just `--prompt`:
 
 ```bash
 vibecrafted <launcher> <agent> \

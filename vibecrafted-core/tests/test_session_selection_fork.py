@@ -434,6 +434,7 @@ def test_two_native_task_forks_preserve_source_and_private_input(
             native_resume_argv(agent, session),
             "probe_confirmed",
             "test",
+            workflow.resolve_execution_controls(agent),
         ),
     )
     real_run = subprocess.run

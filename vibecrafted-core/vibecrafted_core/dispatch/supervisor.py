@@ -239,6 +239,7 @@ def workflow_cell_launcher(
                 "runtime": "headless",
                 "model": cut.model,
                 "effort": cut.effort,
+                "permissions": cut.permissions,
                 "runtime_class": runtime_class,
             },
             base_dir,

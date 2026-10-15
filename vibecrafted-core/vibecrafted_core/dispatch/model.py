@@ -173,6 +173,10 @@ class Cut:
     model_source: str = "provider_default"
     effort: str = ""
     effort_source: str = "provider_default"
+    # Plan-declared permission word (``bypass|auto|accept-edits|read-only``) for
+    # this cut's worker; empty = the admission chain (dispatch flag > durable
+    # config > fleet default ``auto``, Founder decision 13716da4a2b8af7049ea1565).
+    permissions: str = ""
     source_text: str | None = None
     source_digest: str = ""
     prompt: str = ""

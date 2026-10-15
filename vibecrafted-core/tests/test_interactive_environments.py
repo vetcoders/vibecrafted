@@ -8,8 +8,10 @@ real engine and provider runs are recorded in the worker report.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -985,3 +987,97 @@ def test_owner_liveness_uses_the_qualified_owner_receipt(
     assert spawn._interactive_run_owner_alive("init-owner-reused") is False
     assert spawn._interactive_run_owner_alive("init-owner-terminal") is False
     assert spawn._interactive_run_owner_alive("init-missing") is False
+
+
+def test_interactive_kimi_opt_in_reaches_native_child_with_admitted_controls(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "project"
+    _repo(repo)
+    config_root = tmp_path / "config"
+    (config_root / "vibecrafted").mkdir(parents=True)
+    config = config_root / "vibecrafted" / "config.toml"
+    config.write_text('permissions = "read-only"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setenv("HOME", str(tmp_path / "private-home"))
+    command = interactive_workspace_command(
+        "kimi",
+        "/vc-init",
+        "local-native",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+    )
+    admission = _admission(command)
+    controls = admission["execution_controls"]
+    assert controls["permissions_requested"] == "bypass"
+    assert controls["permissions_source"] == "dispatch"
+    config.write_text('permissions = "auto"\n')
+    capture = tmp_path / "native-argv.json"
+    executable = tmp_path / "inert-kimi"
+    executable.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"with open({str(capture)!r}, 'w') as f: json.dump(sys.argv[1:], f)\n"
+        "print('private native child completed')\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.setattr(
+        spawn,
+        "_resolve_agent_command",
+        lambda provider, argv, env: [str(executable), *argv[1:]],
+    )
+    status = launch_interactive_workspace(
+        "kimi",
+        "/vc-init",
+        "local-native",
+        _flag(command, "--permissions"),
+        repo,
+        token_budget="unmetered",
+        admission=admission,
+    )
+    assert status == 0
+    native_argv = json.loads(capture.read_text())
+    assert "--auto" in native_argv  # Kimi's native Never Ask mode is bypass.
+    assert "-p" not in native_argv
+    meta = json.loads(
+        (
+            home / "control_plane" / "runtime_runs" / admission["run_id"] / "meta.json"
+        ).read_text()
+    )
+    assert meta["status"] == "completed"
+    assert meta["execution_controls"] == controls
+
+
+def test_interactive_cli_omission_honors_durable_readonly(
+    tmp_path: Path,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "project"
+    _repo(repo)
+    config_root = tmp_path / "config"
+    (config_root / "vibecrafted").mkdir(parents=True)
+    (config_root / "vibecrafted" / "config.toml").write_text(
+        'permissions = "read-only"\n'
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("/vc-init"))
+    status = spawn.main(
+        [
+            "interactive-command",
+            "codex",
+            "--root",
+            str(repo),
+            "--token-budget",
+            "unmetered",
+        ]
+    )
+    assert status == 0
+    command = shlex.split(capsys.readouterr().out.strip())
+    admission = _admission(command)
+    assert _flag(command, "--permissions") == "read-only"
+    controls = admission["execution_controls"]
+    assert controls["permissions_requested"] == ""
+    assert controls["permissions_source"] == "config:global"
+    assert controls["provider_flags"][-2:] == ["--sandbox", "read-only"]

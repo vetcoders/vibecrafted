@@ -267,7 +267,8 @@ spawn_write_meta() {
     --run-id "$run_id" \
     --loop-nr "$loop_nr" \
     --skill-code "$skill_code" \
-    --framework-version "$framework_version"
+    --framework-version "$framework_version" \
+    --execution-controls "${SPAWN_EXECUTION_CONTROLS:-}"
 
   spawn_mirror_meta_to_runtime_runs "$meta_path"
   spawn_sync_control_plane

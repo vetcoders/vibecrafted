@@ -170,7 +170,7 @@ from vibecrafted_core.workspace_catalog import (
     resolve_operator_place_session,
 )
 
-AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot")
+AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot", "omp")
 LAUNCH_MODES = ("init", "resume", "partner", "operator")
 PURPOSES = ("Quick script", "Think with me", "Fix and verify")
 PURPOSE_PROMPTS = (

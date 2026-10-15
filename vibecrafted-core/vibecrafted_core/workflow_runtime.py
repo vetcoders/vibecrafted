@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .effort_overrides import _with_effort_override
+from .execution_controls import ExecutionControls
 from .marbles_reception import SCHEMA as RECEPTION_SCHEMA
 from .marbles_reception import read_evidence, readonly_command, receive, tree_receipt
 from .model_overrides import _with_model_override
@@ -536,21 +537,31 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot", "omp"})
 
 
-def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
+def native_resume_argv(
+    agent: str, agent_session_id: str, controls: ExecutionControls | None = None
+) -> list[str]:
     """Build a provider-native resume argv without shell interpretation.
 
     Only adapters verified by the runtime contract live here.  In particular,
     a generic ``session_id`` is never accepted as provider identity and
     unsupported agents never fall back to a fresh-session command.
+
+    Permission flags come from the shared decision (``controls`` when the
+    caller holds the resumed run's admitted policy, otherwise the durable
+    config / fleet-default chain in ``_headless_policy_flags``) — never an
+    embedded bypass literal. Resume retains the admitted policy instead of
+    silently reverting (Founder decision 13716da4a2b8af7049ea1565).
     """
+    from .spawn import _headless_policy_flags
 
     normalized_agent = str(agent or "").strip().lower()
     native_id = str(agent_session_id or "").strip()
     if not native_id:
         raise ValueError("missing_agent_session_id")
+    flags, _permissions = _headless_policy_flags(normalized_agent, controls)
     if normalized_agent == "claude":
         return [
             "claude",
@@ -560,7 +571,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            *flags,
         ]
     if normalized_agent == "codex":
         return [
@@ -568,7 +579,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "exec",
             "resume",
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *flags,
             native_id,
             "-",
         ]
@@ -579,8 +590,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             native_id,
             "--cwd",
             ".",
-            "--permission-mode",
-            "bypassPermissions",
+            *flags,
             "--no-alt-screen",
             "--output-format",
             "streaming-json",
@@ -591,10 +601,13 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
         # agy 1.2.1 probe 2026-09-11: `--conversation <id>` composes with the
         # private `--print=` + stream-json stdin lane and keeps the same
         # conversation_id (context preserved). Prompt never rides argv.
-        command = _stdin_command("agy")
+        command = _stdin_command("agy", controls)
         return [command[0], "--conversation", native_id, *command[1:]]
     if normalized_agent == "copilot":
-        command = _stdin_command("copilot")
+        command = _stdin_command("copilot", controls)
+        return [command[0], "--resume", native_id, *command[1:]]
+    if normalized_agent == "omp":
+        command = _stdin_command("omp", controls)
         return [command[0], "--resume", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
@@ -1838,7 +1851,20 @@ async def run_marbles(
             # A receiver never edits the candidate. Check the full content
             # fingerprint on both sides of READ, not just HEAD or clean status.
             try:
-                command = native_resume_argv(agent, result.agent_session_id)
+                from .execution_controls import resolve_execution_controls
+
+                # The reception resume must keep the fresh receiver's admitted
+                # policy: codex's receiver guard (readonly_command) requires the
+                # bypass opt-in; without it the default auto argv drops
+                # --dangerously-bypass-approvals-and-sandbox and the run blocks
+                # on receiver_codex_inner_sandbox_not_disabled.
+                command = native_resume_argv(
+                    agent,
+                    result.agent_session_id,
+                    controls=resolve_execution_controls("codex", permissions="bypass")
+                    if agent == "codex"
+                    else None,
+                )
                 receiver_mode = "native_resume"
             except ValueError:
                 command = None

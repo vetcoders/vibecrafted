@@ -164,7 +164,8 @@ def _write_finished_lane_meta(
                 "--output-format",
                 "stream-json",
                 "--verbose",
-                "--dangerously-skip-permissions",
+                "--permission-mode",
+                "auto",
             ],
         ),
         (
@@ -174,7 +175,7 @@ def _write_finished_lane_meta(
                 "exec",
                 "resume",
                 "--json",
-                "--dangerously-bypass-approvals-and-sandbox",
+                "--approve-for-me",
                 "native-123",
                 "-",
             ],
@@ -188,7 +189,7 @@ def _write_finished_lane_meta(
                 "--cwd",
                 ".",
                 "--permission-mode",
-                "bypassPermissions",
+                "auto",
                 "--no-alt-screen",
                 "--output-format",
                 "streaming-json",
@@ -202,7 +203,6 @@ def _write_finished_lane_meta(
                 "agy",
                 "--conversation",
                 "native-123",
-                "--dangerously-skip-permissions",
                 "--add-dir",
                 ".",
                 "--print-timeout",
@@ -228,7 +228,7 @@ def test_native_resume_argv_is_provider_specific_and_shell_free(
 
 @pytest.mark.parametrize("agent", ["gemini", "junie", "swarm"])
 def test_native_resume_argv_fails_closed_for_unverified_agents(agent: str) -> None:
-    with pytest.raises(ValueError, match="native_resume_unsupported"):
+    with pytest.raises(ValueError, match="unsupported"):
         workflow_runtime.native_resume_argv(agent, "native-123")
 
 
@@ -368,22 +368,22 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     assert agy_transcript.splitlines()[:8] == [
         "--model",
         "agy-yaml",
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",
         "30m",
         "--print=",
+        "--input-format",
     ]
     assert synthesis_transcript.splitlines()[:8] == [
         "--model",
         "agy-synth",
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",
         "30m",
         "--print=",
+        "--input-format",
     ]
     children = {child["agent"]: child for child in meta["children"]}
     assert children["codex"]["model_requested"] == "gpt-yaml"
@@ -439,12 +439,12 @@ def test_research_runtime_applies_model_request_per_child_runner(
     assert agy_transcript.splitlines()[:8] == [
         "--model",
         "frontier",
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",
         "30m",
         "--print=",
+        "--input-format",
     ]
 
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
@@ -578,7 +578,7 @@ def test_research_synthesis_codex_exec_resume_preserves_prompt_and_report_contra
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'expected="exec resume --json '
-        '--dangerously-bypass-approvals-and-sandbox codex-session -"\n'
+        '--approve-for-me codex-session -"\n'
         'if [[ "$*" != "$expected" ]]; then\n'
         '  printf "unexpected argv: %s\\n" "$*" >&2\n'
         "  exit 64\n"
@@ -624,7 +624,7 @@ def test_research_synthesis_codex_exec_resume_preserves_prompt_and_report_contra
         "exec",
         "resume",
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--approve-for-me",
         "codex-session",
         "-",
     ]
@@ -1053,6 +1053,13 @@ def test_kimi_marbles_consumes_materialized_prompt_in_two_settled_rounds(
 ) -> None:
     _runtime_env(monkeypatch, tmp_path, "marb-kimi")
     _fake_kimi(tmp_path / "bin")
+    # kimi headless auto is refused (interactive-only); the supervised marbles
+    # loop opts into bypass through the durable config cell.
+    kimi_config = tmp_path / "xdg" / "vibecrafted"
+    kimi_config.mkdir(parents=True)
+    (kimi_config / "config.toml").write_text(
+        '[agents.kimi]\npermissions = "bypass"\n', encoding="utf-8"
+    )
     monkeypatch.setenv("VIBECRAFTED_EFFORT_REQUESTED", "high")
     root = tmp_path / "assigned tree"
     root.mkdir()
@@ -1126,6 +1133,13 @@ def test_kimi_marbles_requires_report_and_terminal_success(
     _git_repo(root)
     home = _runtime_env(monkeypatch, tmp_path, "marb-kimi-failure")
     _fake_kimi(tmp_path / "bin", outcome=outcome)
+    # kimi headless auto is refused (interactive-only); opt into bypass through
+    # the durable config cell.
+    kimi_config = tmp_path / "xdg" / "vibecrafted"
+    kimi_config.mkdir(parents=True)
+    (kimi_config / "config.toml").write_text(
+        '[agents.kimi]\npermissions = "bypass"\n', encoding="utf-8"
+    )
     rc = workflow_runtime.main(
         [
             "marbles",
@@ -1210,6 +1224,13 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
         XDG_CONFIG_HOME=str(tmp_path / "xdg"),
     )
     Path(environment["HOME"]).mkdir()
+    # Reaching reception requires an admitted Kimi worker; headless auto
+    # intentionally refuses, so opt into bypass through durable provider config.
+    kimi_config = Path(environment["XDG_CONFIG_HOME"]) / "vibecrafted"
+    kimi_config.mkdir(parents=True)
+    (kimi_config / "config.toml").write_text(
+        '[agents.kimi]\npermissions = "bypass"\n', encoding="utf-8"
+    )
     result = subprocess.run(
         [
             str(launcher),
@@ -1247,7 +1268,10 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
     assert assigned.resolve() != candidate.resolve()
     assert Path(environment["VIBECRAFTED_HOME"]).resolve() in assigned.resolve().parents
     command = receipt["worker_command"]
-    assert command[:3] == [sys.executable, "-m", "vibecrafted_core.workflow_runtime"]
+    # The public launcher may select the same virtualenv interpreter through
+    # its python/python3 alias; interpreter identity, not spelling, matters.
+    assert Path(command[0]).samefile(sys.executable)
+    assert command[1:3] == ["-m", "vibecrafted_core.workflow_runtime"]
     parent = json.loads(Path(receipt["meta"]).read_text())
     assert len(parent["children"]) == 1
     assert parent["reception"]["verdict"] == "blocked"

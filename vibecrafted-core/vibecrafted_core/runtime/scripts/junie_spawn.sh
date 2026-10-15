@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: junie_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Portable JetBrains Junie spawn wrapper.
 Defaults to headless. Pass --runtime terminal for a visible vc-frame worker pane.
@@ -16,6 +17,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 model="${JUNIE_MODEL:-}"
 root=""
 plan_file=""
@@ -34,6 +37,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
+      ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
       ;;
     --model)
       shift
@@ -76,6 +89,7 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions junie "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths junie "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_junie_prompt.md"
@@ -132,7 +146,7 @@ timeout_flag=""
 last_message_extract="if [[ -s $qtranscript ]]; then cp $qtranscript $qlast_message 2>/dev/null || rm -f $qlast_message; [[ -s $qlast_message ]] || rm -f $qlast_message; fi;"
 salvage_success_report="if [[ \$pipeline_status -eq 0 && ! -s $qreport && -s $qlast_message ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-junie}\"; printf 'skill: %s\n' \"\${SPAWN_SKILL_CODE:-unknown}\"; printf 'model: %s\n' \"\${SPAWN_MODEL:-unknown}\"; printf 'status: completed\n'; printf 'session_id: %s\n' \"\${SPAWN_SESSION_ID:-pending}\"; printf 'repo_path: %s\n' \"\${SPAWN_ROOT:-unknown}\"; printf 'tokens_input: 0\n'; printf 'tokens_output: 0\n'; printf 'tokens_total: 0\n'; printf 'cost_usd: unknown\n'; printf '%s\n\n' '---'; cat $qlast_message; } > $qreport || pipeline_status=\$?; fi;"
 salvage_failure_report="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-junie}\"; printf 'skill: %s\n' \"\${SPAWN_SKILL_CODE:-unknown}\"; printf 'model: %s\n' \"\${SPAWN_MODEL:-unknown}\"; printf 'status: failed\n'; printf 'session_id: %s\n' \"\${SPAWN_SESSION_ID:-pending}\"; printf 'repo_path: %s\n' \"\${SPAWN_ROOT:-unknown}\"; printf 'tokens_input: 0\n'; printf 'tokens_output: 0\n'; printf 'tokens_total: 0\n'; printf 'cost_usd: unknown\n'; printf '%s\n\n' '---'; if [[ -s $qlast_message ]]; then cat $qlast_message; else printf '%s\n' 'Junie failed before writing a standalone report file, and no final message was captured.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message path checked:'; printf '%s\n' $qlast_message; fi; } > $qreport; fi;"
-junie_invocation="junie --project=$qroot --task=\"\$(cat $qruntime)\" --skip-update-check --use-local-cache --input-format=text --output-format=json-stream $model_flag $review_flag $timeout_flag 2>&1 | tee -a $qtranscript"
+junie_invocation="junie $SPAWN_PERMISSION_FLAGS --project=$qroot --task=\"\$(cat $qruntime)\" --skip-update-check --use-local-cache --input-format=text --output-format=json-stream $model_flag $review_flag $timeout_flag 2>&1 | tee -a $qtranscript"
 launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; pipeline_status=0; for junie_attempt in 1 2; do $junie_invocation; pipeline_status=\$?; [[ \$pipeline_status -eq 0 ]] && break; if [[ \$junie_attempt -eq 1 ]] && grep -Fq \"Failed to build 'issue.md.junie_standalone'\" $qtranscript; then printf '%s\n' 'vibecrafted: transient Junie issue-template failure; retrying once' | tee -a $qtranscript; sleep \"\${JUNIE_ISSUE_RETRY_DELAY_SECONDS:-2}\"; continue; fi; break; done; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${junie_success_hook}${success_hook_extra:+

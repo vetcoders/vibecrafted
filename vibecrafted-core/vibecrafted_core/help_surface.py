@@ -26,6 +26,7 @@ _FLEET_AGENT_ORDER = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
 AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"

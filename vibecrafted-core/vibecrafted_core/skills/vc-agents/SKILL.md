@@ -195,7 +195,7 @@ rule — tiers per `vc-delegate` → Native Delegation Policy).
 
 ## Runbook — current launcher grammar
 
-Agents: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+Agents: `claude · codex · agy · junie · grok · cursor · kimi · copilot · omp`.
 Full grammar, composed-prompt idioms (plan-from-file with a text prefix,
 injecting a live CLI's `--help` into the mission), the Claude-session env
 scrub, and companion verbs (`await`/`observe`/`stop`/`usage`) live in

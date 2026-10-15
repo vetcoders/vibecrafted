@@ -36,6 +36,7 @@ MODEL_ENV_VARS = (
     "KIMI_MODEL",
     "COPILOT_MODEL",
     "CURSOR_MODEL",
+    "OMP_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 COST_PATTERNS = (
@@ -376,8 +377,10 @@ class AgentStreamParser:
         self.cost_usd: float | None = None
         self.cost_source: str | None = None
         # Final assistant answer of a stream that reports one (agy
-        # `result.response`; kimi's last assistant `content`).
+        # `result.response`; kimi content; omp authoritative message_end).
         self.final_response: str = ""
+        self._omp_text_buffer = ""
+        self._omp_text_streamed = False
         self._tool_burst: list[_ToolNote] = []
         self._tool_partial = ""
 
@@ -446,6 +449,8 @@ class AgentStreamParser:
             return f"cd {root_text} && agy --conversation {session}"
         if self.agent == "kimi":
             return f"cd {root_text} && kimi -S {session}"
+        if self.agent == "omp":
+            return f"cd {root_text} && omp --resume {session}"
         if self.agent == "copilot":
             return f"cd {root_text} && copilot --resume {session}"
         if self.agent == "junie":
@@ -624,6 +629,8 @@ class AgentStreamParser:
             return self._format_agy_event(event)
         if self.agent == "kimi":
             return self._format_kimi_event(event)
+        if self.agent == "omp":
+            return self._format_omp_event(event)
         if self.agent == "copilot":
             return self._format_copilot_event(event)
         if self.agent in {"claude", "agy", "cursor"}:
@@ -640,6 +647,111 @@ class AgentStreamParser:
             return self._format_junie_event(event)
         if self.agent == "grok":
             return self._format_grok_event(event)
+        return ""
+
+    def _format_omp_event(self, event: dict[str, Any]) -> str:
+        """Render one omp ``--mode json`` event (session/message/tool/turn).
+
+        omp 18.11.0 print mode (``omp -p --mode json``, prompt on stdin or
+        argv) speaks NDJSON keyed by ``type``. ``session`` opens the stream
+        and carries the native session id (``id``) — the stream's only
+        identity carrier, so the banner adopts it for resume
+        (``omp --resume <id>``). Assistant ``message_start`` provides the
+        ``provider``/``model`` but only partial usage. ``message_end`` owns
+        authoritative per-message usage and final content, including error
+        finalization. ``message_update`` carries printable incremental deltas,
+        not usage snapshots or done/error payloads. ``turn_end`` and
+        ``agent_end`` repeat completed messages and must not account them again.
+        ``tool_execution_*`` carry ``toolName``/``args``/``result`` with
+        ``isError`` on end.
+        """
+        event_type = str(event.get("type") or "")
+        if event_type == "session":
+            return self._session_banner(str(event.get("id") or ""))
+        if event_type in {"message_start", "message_end"}:
+            message = event.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                return ""
+            provider = str(message.get("provider") or "")
+            model = str(message.get("model") or "")
+            if model:
+                self.model_id = f"{provider}/{model}" if provider else model
+            if event_type == "message_start":
+                self._omp_text_buffer = ""
+                self._omp_text_streamed = False
+                return ""
+            # OMP dispatches directly here, not through nested telemetry.
+            # Account only this completed assistant message, never its copies
+            # in turn_end/agent_end or any in-progress message_update.
+            usage = message.get("usage")
+            if isinstance(usage, dict):
+                self._record_usage(
+                    {
+                        "input_tokens": usage.get("input"),
+                        "cached_input_tokens": usage.get("cacheRead"),
+                        "cache_creation_input_tokens": usage.get("cacheWrite"),
+                        "output_tokens": usage.get("output"),
+                    }
+                )
+                cost = usage.get("cost")
+                if isinstance(cost, dict):
+                    total = cost.get("total")
+                    if isinstance(total, (int, float)):
+                        self.cost_usd = (self.cost_usd or 0.0) + float(total)
+                        self.cost_source = "provider_reported"
+            content = message.get("content")
+            text = ""
+            if isinstance(content, list):
+                text = "\n".join(
+                    str(block.get("text") or "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                self.final_response = text
+            rendered = "" if self._omp_text_streamed else self._emit(text)
+            self._omp_text_streamed = False
+            if message.get("stopReason") in {"error", "aborted"}:
+                error = str(message.get("errorMessage") or "").strip()
+                if error:
+                    rendered += self._emit(
+                        f"\n\x1b[31m[{stamp()} error] {error}\x1b[0m\n"
+                    )
+            return rendered
+        if event_type == "message_update":
+            sub = event.get("assistantMessageEvent")
+            if not isinstance(sub, dict):
+                return ""
+            sub_type = str(sub.get("type") or "")
+            if sub_type == "thinking_delta":
+                text = str(sub.get("delta") or "")
+                return self._emit(f"\x1b[2m{text}\x1b[0m") if text else ""
+            if sub_type == "text_start":
+                self._omp_text_buffer = ""
+                return ""
+            if sub_type == "text_delta":
+                text = str(sub.get("delta") or "")
+                if not text:
+                    return ""
+                self._omp_text_buffer += text
+                self._omp_text_streamed = True
+                return self._emit(text)
+            if sub_type == "text_end":
+                content = str(sub.get("content") or "") or self._omp_text_buffer
+                if content:
+                    self.final_response = content
+                return ""
+            return ""
+        if event_type == "tool_execution_start":
+            self._note_tool(
+                _stringish(event.get("toolName")) or "?",
+                _command_text(event.get("args")),
+            )
+            return ""
+        if event_type == "tool_execution_end":
+            if event.get("isError"):
+                name = _stringish(event.get("toolName")) or "tool"
+                return self._emit(f"\n\x1b[31m[{stamp()} error] {name} failed\x1b[0m\n")
+            return ""
         return ""
 
     def _format_copilot_event(self, event: dict[str, Any]) -> str:
@@ -1158,8 +1270,8 @@ def filter_stream(
     while the pane only sees AgentStreamParser output. Optional
     ``last_message_file`` receives the stream's final assistant answer when
     the agent reports one (agy ``result.response``; kimi's last assistant
-    ``content``); it is left absent otherwise so callers can fall back to the
-    transcript.
+    ``content``; omp ``message_end`` text); it is left absent otherwise so
+    callers can fall back to the transcript.
     """
     import sys as _sys
 
@@ -1214,7 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         required=True,
-        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi, copilot",
+        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi, copilot, omp",
     )
     parser.add_argument(
         "--raw-file",

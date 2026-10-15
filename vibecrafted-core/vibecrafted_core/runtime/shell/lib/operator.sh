@@ -58,7 +58,7 @@ _vetcoders_init_command_text() {
   local tool="$1"
   local init_prompt="$2"
   local policy_runtime="${3:-local-native}"
-  local permissions="${4:-bypass}"
+  local permissions="${4:-}"
   local token_budget="${5:-unmetered}"
   local operator_policy="${6:-none}"
   local continuity="${7:-fresh}"
@@ -84,7 +84,9 @@ _vetcoders_init_command_text() {
   import_root="${python_spec#*$'\t'}"
   local root_arg="${_vetcoders_contract_repo:-${_vetcoders_contract_root:-$PWD}}"
   [[ -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" ]] || root_arg="${_vetcoders_contract_root:-}"
-  local -a command=("$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --operator "$operator_policy" "${continuity_args[@]}" --root "$root_arg")
+  # Omission belongs to the durable resolver, not an explicit shell default.
+  local -a command=("$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --token-budget "$token_budget" --operator "$operator_policy" "${continuity_args[@]}" --root "$root_arg")
+  [[ -z "$permissions" ]] || command+=(--permissions "$permissions")
   if [[ -n "$import_root" ]]; then
     printf '%s' "$init_prompt" | VIBECRAFTED_INTERACTIVE_IMPORT_ROOT="$import_root" \
       PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${command[@]}"
@@ -115,7 +117,7 @@ _vetcoders_operator_runtime() {
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 _vetcoders_partner_runtime() {
@@ -125,7 +127,7 @@ _vetcoders_partner_runtime() {
 _vetcoders_partner_command_text() {
   local tool="$1"
   local partner_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 

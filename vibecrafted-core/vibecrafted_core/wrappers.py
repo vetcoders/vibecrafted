@@ -20,7 +20,7 @@ from .help_surface import AGENT_SELECTOR
 from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor, interactive_launch_interpreter
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot", "omp"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 SKILL_PREFIX = {
     "agents": "agnt",
