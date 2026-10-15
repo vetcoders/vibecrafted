@@ -365,3 +365,53 @@ def test_resolve_site_dist_returns_none_when_absent(
     controller = installer_gui.InstallController(str(tmp_path))
 
     assert controller.site_dist_dir is None
+
+
+def test_selected_runtime_pack_replaces_the_source_install_step(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A bootstrap-selected verified pack must reach the pack installer, not be
+    dropped for a source install (PR 112 review)."""
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME", raising=False)
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir(parents=True)
+    for name in ("vetcoders_install.py", "install-runtime-pack.sh"):
+        (scripts_dir / name).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    steps = installer_gui.build_install_steps(
+        str(tmp_path),
+        with_shell=True,
+        runtime_pack="/p/Pack.tar.gz",
+        expected_source_revision="abc123",
+    )
+
+    (install,) = [step for step in steps if step.label == "Install Vibecrafted"]
+    assert install.command == [
+        "bash",
+        str(scripts_dir / "install-runtime-pack.sh"),
+        "--pack",
+        "/p/Pack.tar.gz",
+        "--expected-source-revision",
+        "abc123",
+    ]
+    assert "--mirror" not in install.command
+
+
+def test_selected_runtime_pack_missing_installer_is_a_refusal(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    try:
+        installer_gui.build_install_steps(
+            str(tmp_path), with_shell=True, runtime_pack="/p/Pack.tar.gz"
+        )
+    except FileNotFoundError as exc:
+        assert "Runtime Pack installer" in str(exc)
+    else:
+        raise AssertionError("a selected pack must never fall back to a source install")
+
+
+def test_gui_cli_accepts_the_selected_pack() -> None:
+    args = installer_gui.parse_args(
+        ["--runtime-pack", "/p/Pack.tar.gz", "--expected-source-revision", "abc123"]
+    )
+    assert args.runtime_pack == "/p/Pack.tar.gz"
+    assert args.expected_source_revision == "abc123"

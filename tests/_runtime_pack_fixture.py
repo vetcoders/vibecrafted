@@ -27,6 +27,7 @@ def private_child_command(
     *,
     allowed: tuple[Path, ...] = (),
     fixture_root: Path | None = None,
+    same_sandbox_signals: bool = False,
 ) -> list[str]:
     """Fence only a disposable fixture child, including its absolute execs.
 
@@ -34,6 +35,8 @@ def private_child_command(
     Non-Darwin preserves the original argv; no portable fence is claimed.
     The literals are read-only tools, the test interpreter and explicit private
     witnesses. GUI/service executables and outgoing network are never admitted.
+    Signals are hard-denied unless ``same_sandbox_signals`` opts a lifecycle
+    test in: the child may then signal only its own fenced descendants.
     """
     # Parent-authorized preservation of the existing portable subprocess seam.
     # This branch provides no Linux OS fence and is not verified by this worker.
@@ -128,8 +131,10 @@ def private_child_command(
             + r")|libexec/(vc-frame|vc-terminal)|(config/alacritty|vc-terminal)/launch-primary-shell[.]zsh)$"
         )
         literals += f" (regex {json.dumps(pattern)})"
+    signals = "(allow signal (target same-sandbox))" if same_sandbox_signals else ""
     profile = (
         "(version 1)(allow default)(deny network*)(deny signal)(deny mach-lookup)"
+        f"{signals}"
         '(deny file-read* file-write* (subpath "/Applications"))'
         f"(deny process-exec)(allow process-exec {literals})"
     )
