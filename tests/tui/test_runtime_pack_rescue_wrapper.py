@@ -133,8 +133,16 @@ def _sign_payload_archive(
 def _wrapper_env(
     public_key: Path, extra: dict[str, str] | None = None
 ) -> dict[str, str]:
+    # The non-rescue wrapper extracts its hidden payload under TMPDIR and then
+    # executes the pack interpreter there. The private-child fence only admits
+    # that interpreter beneath the fixture root, so the extract must live there
+    # too; a global TMPDIR (hosted macOS) sits outside it and is refused.
+    fixture_root = installer._FIXED_TERMINAL_HOST.parents[4].resolve()
+    wrapper_tmp = fixture_root / "wrapper-tmp"
+    wrapper_tmp.mkdir(exist_ok=True)
     env = {
         **os.environ,
+        "TMPDIR": str(wrapper_tmp),
         "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
     }
     if extra:
@@ -1320,7 +1328,11 @@ def test_public_bootstrap_install_reports_selected_owner(tmp_path, roots):
     (payload / "scripts/vetcoders_install.py").write_text("# old owner\n")
     _seal_runtime_pack_for_admission(payload)
     archive, key = _sign_payload_archive(tmp_path / "signed", payload)
-    source = Path(installer.__file__).resolve()
+    # The repository owner is bound to the fixed /Applications host, which the
+    # private-child fence refuses by design. Use the seeded owner with its
+    # sibling modules, already bound to this fixture's private host.
+    owner = seed_runtime_pack(tmp_path / "bootstrap-owner", version="9.9.9+a")
+    source = owner / "scripts/vetcoders_install.py"
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     original = archive.read_bytes()
     result = _run_wrapper(

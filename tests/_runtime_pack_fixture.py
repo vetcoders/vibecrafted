@@ -130,6 +130,9 @@ def private_child_command(
         literals += f" (regex {json.dumps(pattern)})"
     profile = (
         "(version 1)(allow default)(deny network*)(deny signal)(deny mach-lookup)"
+        # A wrapper must still stop and reap its own descendants on SIGINT or
+        # SIGTERM; same-sandbox targets only, so no outside process is signalled.
+        "(allow signal (target same-sandbox))"
         '(deny file-read* file-write* (subpath "/Applications"))'
         f"(deny process-exec)(allow process-exec {literals})"
     )
