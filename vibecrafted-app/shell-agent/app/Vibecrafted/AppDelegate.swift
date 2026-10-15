@@ -190,6 +190,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var serverStatusWindow: NSWindow?
   private var serverStatusHosting: NSHostingView<ServerStatusView>?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
+  /// Cancel keeps the verified installation, without asking again this launch.
+  private var startupCarrierChoiceOffered = false
   /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
   /// names a loopback origin. Tabs never own this process; closing a tab does
   /// not stop it, and workers are not in this process group.
@@ -442,7 +444,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         self.renderServerStatus()
         return
       }
-      self.reconcileControlPlaneEye(install: install, environment: environment)
+      self.reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+        guard let self, self.eyeReconcileProcess == nil, let current = self.canonicalInstall,
+          shouldOfferRuntimeCarrier(
+            resolution: .ready(current.root.lastPathComponent),
+            signedSourceRevision: self.signedCarrierRevisions?.source,
+            alreadyOffered: self.startupCarrierChoiceOffered)
+        else { return }
+        let serviceFailure: String?
+        if case .failure(let failure) = result { serviceFailure = failure.message }
+        else { serviceFailure = nil }
+        self.offerRuntimePackReinstall(
+          configuration: "This App and the verified installed runtime come from different builds.",
+          serviceFailure: serviceFailure, startup: true)
+      }
       self.inspectConfigurationAtLaunch()
       self.ensureFrameWebClient(install: install, environment: environment)
       self.refreshServerStatus()
@@ -1954,6 +1969,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   private func presentHealthyRepairResult(note: String) {
     let identity = currentProductUpdateIdentity()
+    if let installed = identity.packGeneration,
+      shouldOfferRuntimeCarrier(
+        resolution: .ready(installed), signedSourceRevision: signedCarrierRevisions?.source) {
+      offerRuntimePackReinstall(configuration: note)
+      return
+    }
     runtimeAdvisory = (identity.packGeneration == identity.appGeneration
       ? "Runtime already current. " : "Configuration is current. ") + note
     applyRuntimePackMenuState()
@@ -2115,7 +2136,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// so replacing a runtime stays something the Founder asks for, with the
   /// generation that would be written named before the fact.
   private func offerRuntimePackReinstall(
-    configuration: String, serviceFailure: String? = nil, explicitRepublish: Bool = false
+    configuration: String, serviceFailure: String? = nil, explicitRepublish: Bool = false,
+    startup: Bool = false
   ) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
@@ -2129,13 +2151,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       self.updateDeckPresentation()
       self.presentRuntimePackReinstall(
         resolution: resolution, configuration: configuration,
-        serviceFailure: serviceFailure, explicitRepublish: explicitRepublish)
+        serviceFailure: serviceFailure, explicitRepublish: explicitRepublish, startup: startup)
     }
   }
 
   private func presentRuntimePackReinstall(
     resolution: RuntimeContract, configuration: String,
-    serviceFailure: String?, explicitRepublish: Bool
+    serviceFailure: String?, explicitRepublish: Bool, startup: Bool = false
   ) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
@@ -2153,6 +2175,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .unusable(let reason):
       presentationResolution = .unusable(reason)
       canUpgrade = false
+    }
+    if startup {
+      // The forced resolver may have observed a different generation since
+      // startup. Recheck before presenting, then latch only an actual choice.
+      guard shouldOfferRuntimeCarrier(
+        resolution: presentationResolution, signedSourceRevision: signedCarrierRevisions?.source,
+        alreadyOffered: startupCarrierChoiceOffered)
+      else { return }
+      startupCarrierChoiceOffered = true
     }
     let presentation = runtimeReinstallPresentation(
       resolution: presentationResolution, carrierGeneration: identity.appGeneration,

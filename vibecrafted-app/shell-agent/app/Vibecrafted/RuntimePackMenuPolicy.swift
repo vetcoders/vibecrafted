@@ -101,6 +101,19 @@ func runtimeIdentityBlob(
   return lines.joined(separator: "\n")
 }
 
+/// A verified installation may be usable without matching this signed App.
+/// Offer its carrier explicitly, without treating a hash as an ordering proof.
+/// Startup passes its presentation latch; an explicit repair can ask again.
+func shouldOfferRuntimeCarrier(
+  resolution: RuntimeResolution<String>, signedSourceRevision: String?,
+  alreadyOffered: Bool = false
+) -> Bool {
+  guard !alreadyOffered, case .ready(let generation) = resolution,
+    !generation.isEmpty, let source = signedSourceRevision, !source.isEmpty
+  else { return false }
+  return !runtimePackMatchesCarrier(generation: generation, signedSourceRevision: source)
+}
+
 /// Only a strictly newer release can trigger an upgrade offer. Different hashes
 /// of the same version have no ordering proof here; explicit republish remains
 /// available and the installer retains the authoritative downgrade tripwire.
