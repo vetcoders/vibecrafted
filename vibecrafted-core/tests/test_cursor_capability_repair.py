@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 from vibecrafted_core import spawn
 from vibecrafted_core.continuity import capabilities as continuity
+from vibecrafted_core.execution_controls import resolve_execution_controls
 
 OLD_HELP = textwrap.dedent(
     """\
@@ -123,9 +125,14 @@ def test_modern_cli_exposes_force_trust_yolo_not_best_of_n(
     )
     assert flags == ("--force", "--trust")
 
-    stdin = spawn._stdin_command("cursor")
+    # --force is the explicit bypass lane; the auto fleet default trusts the
+    # workspace but never force-allows commands.
+    bypass = resolve_execution_controls("cursor", permissions="bypass")
+    stdin = spawn._stdin_command("cursor", bypass)
     assert stdin[:4] == ["cursor-agent", "-p", "--output-format", "stream-json"]
     assert "--force" in stdin and "--trust" in stdin
+    auto = spawn._stdin_command("cursor")
+    assert "--trust" in auto and "--force" not in auto
 
 
 def test_old_cli_missing_trust_fails_closed_no_silent_downgrade(
@@ -212,16 +219,50 @@ def test_best_of_n_never_invented(
     assert "--best-of-n" in continuity.capability_for("cursor").forbidden_flags
 
 
+def test_resolver_cli_refuses_old_binary_without_silent_downgrade(
+    tmp_path: Path,
+) -> None:
+    """The wrapper's resolver exits 2 with the refusal when --trust is missing."""
+    _write_fake_cursor(tmp_path, version="2025.09.17-25b418f", help_text=OLD_HELP)
+    core = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vibecrafted_core.permission_flags",
+            "cursor",
+            "--mode",
+            "headless",
+            "--permissions",
+            "bypass",
+            "--shell-env",
+        ],
+        env={
+            "PATH": f"{tmp_path}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path / "home"),
+            "VIBECRAFTED_HOME": str(tmp_path / "vh"),
+            "PYTHONPATH": str(core),
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert done.returncode == 2
+    assert "no silent downgrade" in done.stderr
+    assert "SPAWN_PERMISSION_FLAGS" not in done.stdout
+
+
 def test_failure_exit_and_receipt_paths_preserved_in_spawn_wrapper() -> None:
     """Public shell launch path keeps prompt-file stdin + nonzero salvage."""
     repo = Path(__file__).resolve().parents[2]
     wrapper = repo / "vibecrafted-core/vibecrafted_core/runtime/scripts/cursor_spawn.sh"
     body = wrapper.read_text(encoding="utf-8")
-    assert "probe_cursor_cli_surface" in body
-    assert "require_cursor_flags" in body
-    assert "no silent downgrade" in body
-    # Capability probe must precede spawn_write_meta (no launching ghost).
-    assert body.index("surface = probe_cursor_cli_surface") < body.index(
+    # The probe lives in vibecrafted_core.permission_flags (spawn_resolve_permissions);
+    # it must still run before spawn_write_meta (no launching ghost).
+    assert "spawn_resolve_permissions cursor" in body
+    assert body.index("spawn_resolve_permissions cursor") < body.index(
         'spawn_write_meta "$SPAWN_META"'
     )
     assert "cursor-agent --help 2>&1 || true" not in body
@@ -230,7 +271,7 @@ def test_failure_exit_and_receipt_paths_preserved_in_spawn_wrapper() -> None:
     assert "status: failed" in body
     assert "$qtranscript" in body
     # Launch argv uses probed permission flags; must not invent --best-of-n.
-    assert "cursor-agent -p --output-format stream-json $cursor_perm_flags" in body
+    assert "cursor-agent -p --output-format stream-json $SPAWN_PERMISSION_FLAGS" in body
     assert "--best-of-n" not in body.split("launch_cmd=")[1].split("\n")[0]
 
 
