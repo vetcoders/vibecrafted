@@ -2544,6 +2544,8 @@ class _ClaudeTranscriptUsage:
         env: dict[str, str],
         run_id: str = "",
         run_root: str = "",
+        resume: bool = False,
+        fork_parent_session_id: str = "",
     ) -> None:
         configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
         base = (
@@ -2570,23 +2572,55 @@ class _ClaudeTranscriptUsage:
         self.seen_message_ids: set[str] = set()
         self.totals = {field: 0 for field in self._FIELDS}
         self.foreign_workspace_events = 0
-        self._reject_existing_source()
+        self.baseline_size = 0
+        self.baseline_digest = ""
+        self.validated_source_state: tuple[int, int, int] | None = None
+        self.inherited_events: dict[str, str] = {}
+        self.fork_parent_session_id = fork_parent_session_id
+        self.confirmed_session_id = ""
+        if resume and fork_parent_session_id:
+            raise ValueError("resume and fork usage boundaries are mutually exclusive")
+        if fork_parent_session_id:
+            if fork_parent_session_id == provider_session_id:
+                raise ValueError("fork child must differ from parent session")
+            parent = self._source_path(fork_parent_session_id)
+            if parent is None:
+                raise ValueError("fork parent usage source is missing")
+            for event in self._history(parent, fork_parent_session_id):
+                if isinstance(event.get("message"), dict) and isinstance(
+                    event["message"].get("usage"), dict
+                ):
+                    key = event.get("uuid")
+                    if not isinstance(key, str) or not key:
+                        raise ValueError("fork history has no attributable event UUID")
+                    self.inherited_events[key] = self._inherited_digest(event)
+        if resume:
+            if not self._bind_path():
+                raise ValueError("resume usage source is missing")
+            assert self.path is not None
+            data = self.path.read_bytes()
+            for event in self._history(self.path, provider_session_id, data=data):
+                message = event.get("message")
+                if isinstance(message, dict) and isinstance(message.get("id"), str):
+                    self.seen_message_ids.add(message["id"])
+            # Historical message IDs prevent replay, but are not this run's usage.
+            self.historical_message_ids = self.seen_message_ids
+            self.seen_message_ids = set()
+            self.offset = self.baseline_size = len(data)
+            self.baseline_digest = hashlib.sha256(data).hexdigest()
+        else:
+            self.historical_message_ids: set[str] = set()
+            self._reject_existing_source()
 
     def _matching_paths(self) -> list[Path]:
         if not self.projects_root.is_dir():
             return []
         return list(self.projects_root.rglob(f"{self.provider_session_id}.jsonl"))
 
-    def _reject_existing_source(self) -> None:
-        if self._matching_paths():
-            raise ValueError(
-                "provider session usage source already exists; refusing stale or reused session identity"
-            )
-
-    def _bind_path(self) -> bool:
-        matches = self._matching_paths()
+    def _source_path(self, session_id: str) -> Path | None:
+        matches = list(self.projects_root.rglob(f"{session_id}.jsonl"))
         if not matches:
-            return False
+            return None
         if len(matches) != 1:
             raise RuntimeError("multiple provider usage sources claim one session id")
         candidate = matches[0]
@@ -2595,9 +2629,51 @@ class _ClaudeTranscriptUsage:
         resolved = candidate.resolve(strict=True)
         if not resolved.is_relative_to(self.projects_root):
             raise RuntimeError("provider usage source escaped provider projects root")
-        stat = resolved.stat()
         if not resolved.is_file():
             raise RuntimeError("provider usage source is not a regular file")
+        return resolved
+
+    @staticmethod
+    def _history(
+        path: Path, session_id: str, *, data: bytes | None = None
+    ) -> list[dict[str, Any]]:
+        data = path.read_bytes() if data is None else data
+        if data and not data.endswith(b"\n"):
+            raise ValueError(
+                "continuation usage source has an incomplete JSONL boundary"
+            )
+        events = []
+        for line in data.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise TypeError("continuation history must contain JSON objects")
+            if event.get("sessionId") not in (None, session_id):
+                raise ValueError("continuation history belongs to a foreign session")
+            events.append(event)
+        return events
+
+    @staticmethod
+    def _inherited_digest(event: dict[str, Any]) -> str:
+        # Claude rewrites sessionId/slug/parentUuid and may recompute historical
+        # usage. UUID + immutable message content/version/cwd prove inheritance.
+        message = {
+            key: value for key, value in event["message"].items() if key != "usage"
+        }
+        payload = {key: event.get(key) for key in ("uuid", "type", "version", "cwd")}
+        payload["message"] = message
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def _reject_existing_source(self) -> None:
+        if self._matching_paths():
+            raise ValueError(
+                "provider session usage source already exists; refusing stale or reused session identity"
+            )
+
+    def _bind_path(self) -> bool:
+        resolved = self._source_path(self.provider_session_id)
+        if resolved is None:
+            return False
+        stat = resolved.stat()
         self.path = resolved
         self.identity = (stat.st_dev, stat.st_ino)
         return True
@@ -2606,22 +2682,44 @@ class _ClaudeTranscriptUsage:
         if self.path is None and not self._bind_path():
             return self.as_dict()
         assert self.path is not None
+        if self.path.is_symlink():
+            raise RuntimeError("provider usage source must not be a symlink")
         stat = self.path.stat()
         if self.identity != (stat.st_dev, stat.st_ino):
             raise RuntimeError("provider usage source identity changed during the run")
         if stat.st_size < self.offset:
             raise RuntimeError("provider usage source was truncated during the run")
-        with self.path.open("r", encoding="utf-8") as handle:
+        with self.path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if self.identity != (opened.st_dev, opened.st_ino):
+                raise RuntimeError(
+                    "provider usage source identity changed during the run"
+                )
+            if (
+                self.baseline_digest
+                and self.validated_source_state
+                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                and hashlib.sha256(handle.read(self.baseline_size)).hexdigest()
+                != self.baseline_digest
+            ):
+                raise RuntimeError(
+                    "provider usage source history changed during the run"
+                )
+            self.validated_source_state = (
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            )
             handle.seek(self.offset)
             while True:
                 line_start = handle.tell()
                 line = handle.readline()
                 if not line:
                     break
-                if not line.endswith("\n"):
+                if not line.endswith(b"\n"):
                     handle.seek(line_start)
                     break
-                self._consume_line(line)
+                self._consume_line(line.decode("utf-8"))
             self.offset = handle.tell()
         return self.as_dict()
 
@@ -2634,6 +2732,20 @@ class _ClaudeTranscriptUsage:
             raise TypeError("provider usage event must be a JSON object")
         message = event.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
+            return
+        inherited = self.inherited_events.get(event.get("uuid"))
+        if inherited is not None:
+            if event.get("sessionId") not in (
+                self.provider_session_id,
+                self.fork_parent_session_id,
+            ):
+                raise RuntimeError(
+                    "provider inherited event belongs to a foreign session"
+                )
+            if self._inherited_digest(event) != inherited:
+                raise RuntimeError("provider fork inherited event content changed")
+            if event.get("sessionId") == self.provider_session_id:
+                self.confirmed_session_id = self.provider_session_id
             return
         if event.get("sessionId") != self.provider_session_id:
             raise RuntimeError("provider usage event belongs to a foreign session")
@@ -2651,7 +2763,10 @@ class _ClaudeTranscriptUsage:
         message_id = message.get("id")
         if not isinstance(message_id, str) or not message_id:
             raise RuntimeError("provider usage event has no attributable message id")
-        if message_id in self.seen_message_ids:
+        if (
+            message_id in self.seen_message_ids
+            or message_id in self.historical_message_ids
+        ):
             return
         usage = message["usage"]
         values: dict[str, int] = {}
@@ -2660,9 +2775,33 @@ class _ClaudeTranscriptUsage:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RuntimeError(f"provider usage field {field_name} is invalid")
             values[field_name] = value
+        self.confirmed_session_id = self.provider_session_id
         self.seen_message_ids.add(message_id)
         for field_name, value in values.items():
             self.totals[field_name] += value
+
+    def confirm_fork_receipt(self, receipt: dict[str, Any]) -> bool:
+        if (
+            not receipt.get("native_fork")
+            or not self.confirmed_session_id
+            or receipt.get("native_identity_status") == "confirmed"
+        ):
+            return False
+        child_id = self.confirmed_session_id
+        receipt.update(
+            provider_session_id=child_id,
+            agent_session_id=child_id,
+            native_child_session_id=child_id,
+            native_identity_status="confirmed",
+            native_identity_source="provider-session-usage-event",
+        )
+        print(
+            f"Native fork confirmed: run_id={self.run_id} "
+            f"source_session_id={self.fork_parent_session_id} agent_session_id={child_id}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return True
 
     def _cwd_is_own(self, event_cwd: str) -> bool:
         """Count cwd inside effective_root or this run's control-plane directory."""
@@ -2899,6 +3038,8 @@ def launch_interactive_workspace(
                 provider_version=capability.provider_version,
                 env=child_env,
                 run_id=launch.run_id,
+                resume=bool(native_session),
+                fork_parent_session_id=(parent_id if native_fork else ""),
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -3044,6 +3185,11 @@ def launch_interactive_workspace(
             "warning": operator_policy.warning,
         },
     }
+    print(
+        f"provider started: run_id={launch.run_id} provider={provider} pid={child.pid}",
+        file=sys.stderr,
+        flush=True,
+    )
     received_signal: list[int] = []
     previous_handlers: dict[int, Any] = {}
 
@@ -3115,6 +3261,10 @@ def launch_interactive_workspace(
         while True:
             current_returncode = child.poll()
             measured_usage = usage_reader.poll()
+            if isinstance(
+                usage_reader, _ClaudeTranscriptUsage
+            ) and usage_reader.confirm_fork_receipt(receipt):
+                _write_meta(launch.meta_path, receipt)
             if measured_usage != receipt["measured_usage"]:
                 receipt["measured_usage"] = measured_usage
                 receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
@@ -3566,7 +3716,17 @@ def _launch_supervised_interactive_workspace(
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     continuity_policy = continuity_material.policy
     base_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    child_session_id = str(uuid.uuid4())
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
+    native_session = proven_native if provider == "claude" else ""
+    native_fork = provider == "claude" and continuity_policy.mode == "bare-fork"
+    child_session_id = native_session or str(uuid.uuid4())
     child_command = interactive_policy_command(
         provider,
         f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
@@ -3575,6 +3735,13 @@ def _launch_supervised_interactive_workspace(
         provider_session_id=child_session_id,
         continuity_policy=continuity_policy,
     )
+    if native_session:
+        if "--session-id" in child_command:
+            index = child_command.index("--session-id")
+            del child_command[index : index + 2]
+        child_command[1:1] = ["--resume", native_session]
+    if native_fork and admission.get("skill") == "fork":
+        child_command.pop()
     child_command = _with_model_override(
         provider, child_command, str(admission.get("model_effective") or "")
     )
@@ -3609,6 +3776,10 @@ def _launch_supervised_interactive_workspace(
                 provider_version=child_capability.provider_version,
                 env=base_env,
                 run_id=launch.run_id,
+                resume=bool(native_session),
+                fork_parent_session_id=(
+                    continuity_policy.parent_provider_session_id if native_fork else ""
+                ),
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -3648,14 +3819,6 @@ def _launch_supervised_interactive_workspace(
         "state": "reserved",
         "protocol": "operator-protocol-jsonl-v1",
     }
-    parent_id, proven_native = disjoint_session_identities(
-        parent_session_id=str(
-            continuity_policy.parent_provider_session_id
-            or admission.get("parent_session_id")
-            or ""
-        ),
-        native_child_session_id=str(admission.get("agent_session_id") or ""),
-    )
     child_receipt = {
         **launch.receipt,
         **admission,
@@ -3672,6 +3835,15 @@ def _launch_supervised_interactive_workspace(
         "native_identity_status": "proven" if proven_native else "unknown",
         "provider_session_requested": child_session_id,
     }
+    if native_fork:
+        child_receipt.update(
+            native_fork=True,
+            fork_source_session_id=continuity_policy.parent_provider_session_id,
+            native_identity_status="pending",
+            provider_session_id="",
+            agent_session_id="",
+            native_child_session_id="",
+        )
     operator_receipt = {
         **launch.receipt,
         "created_at": now_iso,
@@ -3812,6 +3984,11 @@ def _launch_supervised_interactive_workspace(
             child_resolved,
             cwd=launch.effective_root,
             env=child_env,
+        )
+        print(
+            f"provider started: run_id={launch.run_id} provider={provider} pid={child.pid}",
+            file=sys.stderr,
+            flush=True,
         )
     except (OSError, ValueError) as exc:
         operator_code = _stop_owned_process(operator_child)
@@ -3990,6 +4167,10 @@ def _launch_supervised_interactive_workspace(
         while True:
             current_returncode = child.poll()
             measured_usage = usage_reader.poll()
+            if isinstance(
+                usage_reader, _ClaudeTranscriptUsage
+            ) and usage_reader.confirm_fork_receipt(child_receipt):
+                _write_meta(launch.meta_path, child_receipt)
             if measured_usage != child_receipt["measured_usage"]:
                 child_receipt["measured_usage"] = measured_usage
                 child_receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
@@ -4102,6 +4283,14 @@ def _launch_supervised_interactive_workspace(
         terminal_reason = (
             f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
         )
+    elif (
+        provider_returncode == 0
+        and native_fork
+        and child_receipt.get("native_identity_status") != "confirmed"
+    ):
+        status = "failed"
+        terminal_reason = "native_fork_identity_unconfirmed"
+        shell_status = 1
     elif provider_returncode == 0:
         status = "completed"
         terminal_reason = "provider_exit_zero"
@@ -6629,6 +6818,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     handoff.add_argument("--command", dest="launch_command", required=True)
     handoff.add_argument("--root-only", action="store_true")
+    handoff.add_argument("--run-id-only", action="store_true")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -6650,6 +6840,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = _build_parser().parse_args(launch_args)
         if args.root_only:
             print(selected.root)
+            return 0
+        if args.run_id_only:
+            admission = json.loads(
+                Path(selected.admission_file).read_text(encoding="utf-8")
+            )
+            run_id = str(admission.get("run_id") or "")
+            if not run_id:
+                raise ValueError("admitted interactive command has no run id")
+            print(run_id)
             return 0
         # Re-enter the canonical owner in this interpreter. The command's
         # executable/environment prefix is descriptive, never executable input.
