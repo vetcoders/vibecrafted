@@ -19,7 +19,10 @@ from vibecrafted_core.workflow_runtime import native_resume_argv
 
 def test_headless_command_reads_private_stdin_and_enforces_policy() -> None:
     prompt = "private prompt only on stdin"
-    command = _stdin_command("copilot")
+    # Auto is the fleet default and headless Copilot cannot answer permission
+    # prompts, so the never-ask lane is an explicit bypass opt-in.
+    bypass = resolve_execution_controls("copilot", permissions="bypass")
+    command = _stdin_command("copilot", bypass)
     assert command == [
         "copilot",
         "--allow-all",
@@ -41,12 +44,13 @@ def test_headless_command_reads_private_stdin_and_enforces_policy() -> None:
 
 
 def test_model_effort_and_native_resume_use_copilot_flags() -> None:
-    base = _stdin_command("copilot")
+    bypass = resolve_execution_controls("copilot", permissions="bypass")
+    base = _stdin_command("copilot", bypass)
     modeled = _with_model_override("copilot", base, "gpt-5.4")
     assert modeled[1:3] == ["--model", "gpt-5.4"]
     effort = _with_effort_override("copilot", modeled, "high")
     assert effort[1:3] == ["--reasoning-effort", "high"]
-    resumed = native_resume_argv("copilot", "native-session-id")
+    resumed = native_resume_argv("copilot", "native-session-id", bypass)
     assert resumed[:3] == ["copilot", "--resume", "native-session-id"]
     assert "--allow-all" in resumed
     assert "-p" not in resumed

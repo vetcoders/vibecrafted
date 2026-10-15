@@ -3,15 +3,18 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from vibecrafted_core import (
     control_plane,
     process_control,
@@ -39,6 +42,7 @@ def _dispatcher(
     delay: float = 0.15,
     home: Path | None = None,
     heartbeat_lines: int = 0,
+    gate: Path | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     home = home or tmp_path / "home"
@@ -46,15 +50,25 @@ def _dispatcher(
     report = tmp_path / f"{run_id}.md"
     transcript = tmp_path / f"{run_id}.log"
     meta.parent.mkdir(parents=True, exist_ok=True)
+    # ``gate`` replaces the fixed sleep with a release the test grants once it
+    # has proof of its precondition; the cap only bounds a test that never does.
+    hold = (
+        f"time.sleep({delay!r})\n"
+        if gate is None
+        else (
+            f"_g = Path({str(gate)!r}); _t = time.monotonic() + 120\n"
+            "while not _g.exists() and time.monotonic() < _t: time.sleep(0.05)\n"
+        )
+    )
     worker = (
-        "import os,time; from pathlib import Path; "
-        f"time.sleep({delay!r}); "
-        f"[(print('pulse-' + str(i) + '-' + ('x' * 1024), flush=True)) for i in range({heartbeat_lines})]; "
-        "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
-        "'---\\nrun_id: "
+        "import os,time; from pathlib import Path\n"
+        + hold
+        + f"[(print('pulse-' + str(i) + '-' + ('x' * 1024), flush=True)) for i in range({heartbeat_lines})]; "
+        + "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
+        + "'---\\nrun_id: "
         + run_id
         + "\\nagent: python\\nskill: test\\nstatus: completed\\nclaim_status: completed\\nfinalized: true\\nclaim: uds-test\\n---\\nbody\\n', encoding='utf-8'); "
-        "print('done')"
+        + "print('done')"
     )
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
@@ -652,6 +666,130 @@ def _collect_cli(
     return int(proc.returncode if proc.returncode is not None else 1), payload, stderr
 
 
+def _count_lsof_socket_rows(output: str, pid: int, socket_path: Path) -> int:
+    """Count ``lsof -F pfn`` unix-socket fds of ``pid`` named exactly ``socket_path``.
+
+    A listener and every connection it accepted carry the bound path as their
+    name (macOS prints the bare path, Linux appends `` type=STREAM``); the
+    connecting side prints ``->0x...`` / a bare ``type=STREAM`` and is not
+    counted. Rows of any other pid, any other path, and anything malformed
+    count as zero.
+    """
+    current: int | None = None
+    rows = 0
+    for line in output.splitlines():
+        if not line:
+            continue
+        field, value = line[0], line[1:]
+        if field == "p":
+            current = int(value) if value.isdigit() else None
+        elif (
+            field == "n"
+            and current == pid
+            and value.removesuffix(" type=STREAM") == str(socket_path)
+        ):
+            rows += 1
+    return rows
+
+
+def _wait_for_connections(
+    pid: int,
+    socket_path: Path,
+    *,
+    expected: int,
+    timeout: float = 90.0,
+    lsof_timeout: float = 10.0,
+    process: subprocess.Popen[str] | None = None,
+) -> None:
+    """Block until ``pid`` holds the listener plus ``expected`` accepted connections.
+
+    Evidence is ``lsof -F pfn`` of that exact pid, bounded per call. Without
+    lsof the precondition cannot be proven, so this fails instead of falling
+    back to a timing guess (hosted macOS and ubuntu runners ship lsof).
+    """
+    lsof = shutil.which("lsof")
+    assert lsof is not None, "lsof is required to prove the connection precondition"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert process is None or process.poll() is None, "dispatcher exited early"
+        try:
+            listing = subprocess.run(
+                [lsof, "-nP", "-a", "-U", "-p", str(pid), "-F", "pfn"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=lsof_timeout,
+            ).stdout
+        except subprocess.TimeoutExpired:
+            listing = ""
+        if _count_lsof_socket_rows(listing, pid, socket_path) >= expected + 1:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"pid {pid} never reached {expected} accepted connections")
+
+
+_MACOS_LSOF = "p42\nf0\nn->0x1\nf3\nn{path}\nf4\nn->0x2\nf6\nn{path}\nf7\nn{path}\n"
+_LINUX_LSOF = (
+    "p42\nf3\nn{path} type=STREAM\nf4\nntype=STREAM\nf6\nn{path} type=STREAM\n"
+    "f7\nn{path} type=STREAM\n"
+)
+
+
+def test_lsof_parser_counts_only_exact_pid_and_path() -> None:
+    path = Path("/tmp/vc/run.sock")
+    for template in (_MACOS_LSOF, _LINUX_LSOF):
+        listing = template.format(path=path)
+        assert _count_lsof_socket_rows(listing, 42, path) == 3
+        # Wrong pid, wrong path (incl. a longer path sharing the prefix) never count.
+        assert _count_lsof_socket_rows(listing, 43, path) == 0
+        assert _count_lsof_socket_rows(listing, 42, Path("/tmp/vc/other.sock")) == 0
+        assert _count_lsof_socket_rows(listing, 42, Path("/tmp/vc/run.soc")) == 0
+    # Listener-only, truncated, empty and malformed output cannot reach expected+1.
+    listener_only = "p42\nf3\nn/tmp/vc/run.sock\n"
+    assert _count_lsof_socket_rows(listener_only, 42, path) == 1
+    for garbage in (
+        "",
+        "\n",
+        "n/tmp/vc/run.sock\n",
+        "pxyz\nn/tmp/vc/run.sock\n",
+        "\x00\xff",
+    ):
+        assert _count_lsof_socket_rows(garbage, 42, path) == 0
+    # A second process's rows after the target pid do not leak into its count.
+    mixed = "p42\nf3\nn/tmp/vc/run.sock\np99\nf3\nn/tmp/vc/run.sock\n"
+    assert _count_lsof_socket_rows(mixed, 42, path) == 1
+
+
+def test_wait_for_connections_needs_real_accepted_sockets() -> None:
+    # AF_UNIX paths are length-capped; pytest's tmp_path is too long for them.
+    with tempfile.TemporaryDirectory(prefix="vc-") as short:
+        _exercise_wait_for_connections(Path(short) / "s.sock")
+
+
+def _exercise_wait_for_connections(path: Path) -> None:
+    listener = socket.socket(socket.AF_UNIX)
+    clients: list[socket.socket] = []
+    accepted: list[socket.socket] = []
+    try:
+        listener.bind(str(path))
+        listener.listen()
+        # Listener only: the gate must not release.
+        with pytest.raises(AssertionError, match="never reached"):
+            _wait_for_connections(os.getpid(), path, expected=2, timeout=1.0)
+        for _ in range(2):
+            client = socket.socket(socket.AF_UNIX)
+            client.connect(str(path))
+            clients.append(client)
+            accepted.append(listener.accept()[0])
+        _wait_for_connections(os.getpid(), path, expected=2, timeout=10.0)
+        # A different pid with the right path is not evidence.
+        with pytest.raises(AssertionError, match="never reached"):
+            _wait_for_connections(os.getppid(), path, expected=2, timeout=1.0)
+    finally:
+        for sock in (*clients, *accepted, listener):
+            sock.close()
+
+
 def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -662,24 +800,33 @@ def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     socket_path = run_signal_socket_path(run_id)
     payloads: list[dict[str, object]] = []
     # Arm all twenty clients before the dispatcher exists: the launch-grace
-    # re-arm holds them until the socket binds, so every client is connected
-    # before the worker exits instead of racing the post-terminal teardown
-    # grace (twenty cold CLI boots can outlast it on a loaded host).
+    # re-arm holds them until the socket binds. The worker is then held on a
+    # gate that is released only once the dispatcher demonstrably has all twenty
+    # connections: twenty cold CLI boots can outlast any fixed worker delay on a
+    # loaded host, and a client that connects after teardown honestly reports
+    # signal_kind "missing" (durable terminal), which is not a fanout member.
     clients = [
-        _spawn_cli_await(home, run_id, config_home=config_home) for _ in range(20)
+        _spawn_cli_await(home, run_id, config_home=config_home, hard_cap="90")
+        for _ in range(20)
     ]
-    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=4.0, home=home)
+    gate = tmp_path / "release-worker"
+    process, _meta, _report = _dispatcher(
+        tmp_path, run_id, delay=0.0, home=home, gate=gate
+    )
     try:
         _wait_for(socket_path)
+        _wait_for_connections(process.pid, socket_path, expected=20, process=process)
+        gate.write_text("go\n", encoding="utf-8")
         for client in clients:
-            rc, payload, err = _collect_cli(client)
+            rc, payload, err = _collect_cli(client, timeout=90)
             assert rc == 0, (payload, err)
             payloads.append(payload)
         stdout, stderr = process.communicate(timeout=5)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
+        for owned in (process, *clients):
+            if owned.poll() is None:
+                owned.kill()
+                owned.communicate(timeout=10)
 
     assert process.returncode == 0, (stdout, stderr)
     assert len(payloads) == 20

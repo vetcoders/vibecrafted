@@ -152,11 +152,11 @@ def test_implement_help_is_ship_write_and_distinct_from_justdo(tmp_path: Path) -
         "and marbles built in." in output
     )
     assert (
-        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in output
     )
     assert (
-        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in output
     )
     assert "Not the same skill as justdo." in output

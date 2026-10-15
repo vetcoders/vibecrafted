@@ -981,7 +981,7 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
         "--runtime",
         "local-native",
         "--permissions",
-        "bypass",
+        "auto",
         "--token-budget",
         "unmetered",
         "--operator",

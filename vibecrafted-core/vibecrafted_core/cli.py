@@ -341,8 +341,9 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         metavar="bypass|auto|accept-edits|read-only",
         help=(
             "permission policy enforced by the agent's own CLI "
-            "(default: bypass; junie: auto); refused before launch when the "
-            "installed CLI cannot enforce it"
+            "(default: durable per-agent, then global config, else auto; bypass "
+            "only when selected); refused before launch when the installed CLI "
+            "cannot enforce it"
         ),
     )
     run.add_argument(

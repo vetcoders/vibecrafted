@@ -1372,6 +1372,18 @@ def resolve_provider_policy(
             False,
             reason=f"junie {permissions} is interactive-only",
         )
+    if provider == "omp" and mode == "interactive":
+        # OMP is a headless worker (print/NDJSON lane). No interactive argv or
+        # resume builder exists, so advertising an interactive cell would be a
+        # receipted lie that fails later with "unsupported provider".
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="omp is a headless-only worker: no interactive launch or resume lane",
+        )
     if (
         provider == "kimi"
         and mode == "headless"

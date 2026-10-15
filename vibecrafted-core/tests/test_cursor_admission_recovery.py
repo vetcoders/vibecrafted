@@ -9,6 +9,8 @@ same hole. Only a successful bounded --help may establish flags.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -148,20 +150,80 @@ def test_surface_cache_invalidates_when_binary_content_changes(
     assert fake.exists()
 
 
-def test_shell_spawn_uses_canonical_python_probe_not_error_text_parser() -> None:
+def _resolve_permissions_cli(
+    tmp_path: Path, *, permissions: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the exact resolver cursor_spawn.sh calls, against the fake binary on PATH."""
+    core = Path(__file__).resolve().parents[1]
+    env = {
+        "PATH": f"{tmp_path}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(tmp_path / "home"),
+        "VIBECRAFTED_HOME": str(tmp_path / "vh"),
+        "PYTHONPATH": str(core),
+    }
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vibecrafted_core.permission_flags",
+            "cursor",
+            "--mode",
+            "headless",
+            "--permissions",
+            permissions,
+            "--shell-env",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        cwd=tmp_path,
+        check=False,
+    )
+
+
+def test_shell_spawn_resolves_flags_through_canonical_probe_before_launch_meta() -> (
+    None
+):
+    """cursor_spawn.sh no longer probes inline: spawn_resolve_permissions owns it.
+
+    The probe moved into ``vibecrafted_core.permission_flags`` (auto-first
+    controls). The wrapper must still resolve before any launch side effect and
+    must not re-grow an error-text parser.
+    """
     repo = Path(__file__).resolve().parents[2]
     body = (
         repo / "vibecrafted-core/vibecrafted_core/runtime/scripts/cursor_spawn.sh"
     ).read_text(encoding="utf-8")
-    assert "probe_cursor_cli_surface" in body
-    assert "require_cursor_flags" in body
-    # Must not swallow nonzero help or parse error prose as flag evidence.
-    assert "cursor-agent --help 2>&1 || true" not in body
-    assert "cursor-agent --version 2>/dev/null | head -n1 || true" not in body
-    assert body.index("surface = probe_cursor_cli_surface") < body.index(
+    assert "spawn_resolve_permissions cursor" in body
+    assert body.index("spawn_resolve_permissions cursor") < body.index(
         'spawn_write_meta "$SPAWN_META"'
     )
-    assert "VIBECRAFTED_CURSOR_PROBE_TIMEOUT" in body
+    assert "cursor-agent --help 2>&1 || true" not in body
+    assert "cursor-agent --version 2>/dev/null | head -n1 || true" not in body
+    assert "$SPAWN_PERMISSION_FLAGS" in body
+
+
+def test_resolver_confirms_bypass_flags_from_successful_help(tmp_path: Path) -> None:
+    _write_fake_cursor(tmp_path, version="2026.08.25", help_text=MODERN_HELP)
+    done = _resolve_permissions_cli(tmp_path, permissions="bypass")
+    assert done.returncode == 0, done.stderr
+    assert "SPAWN_PERMISSION_FLAGS=" in done.stdout
+    assert "--force --trust" in done.stdout
+
+
+def test_resolver_refuses_bypass_when_help_fails_with_flag_prose(
+    tmp_path: Path,
+) -> None:
+    _write_fake_cursor(
+        tmp_path,
+        version="broken-help",
+        help_text="error: --force --trust unavailable",
+        help_rc=2,
+    )
+    done = _resolve_permissions_cli(tmp_path, permissions="bypass")
+    assert done.returncode == 2
+    assert "SPAWN_PERMISSION_FLAGS" not in done.stdout
 
 
 def test_fake_cli_nonzero_help_fails_closed(

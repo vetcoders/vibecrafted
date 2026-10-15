@@ -29,6 +29,24 @@ def _dry_run_launcher(tmp_path: Path, agent: str) -> Path:
     env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
     env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
     env["VIBECRAFTED_TEST_MODE"] = "1"
+    if agent == "cursor":
+        # Permission flags are resolved through the canonical probe of the
+        # selected cursor-agent, even for a dry run (fail closed, never the
+        # declared contract unverified). Give it the surface a modern install has.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "cursor-agent"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  --version) printf '%s\\n' '2026.08.25' ;;\n"
+            "  --help|-h) printf '%s\\n' '--print' '--output-format' '--force'"
+            " '--trust' '--resume [chatId]' '--mode' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
 
     result = subprocess.run(
         [

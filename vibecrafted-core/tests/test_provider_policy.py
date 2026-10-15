@@ -1330,9 +1330,15 @@ def test_every_runtime_permission_provider_mode_cell_is_explicit() -> None:
 def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     provider: str,
 ) -> None:
-    assert resolve_provider_policy(
+    interactive = resolve_provider_policy(
         provider, "local-worktrees", "bypass", "interactive"
-    ).supported
+    )
+    if provider == "omp":
+        # Headless-only worker: no interactive argv/resume builder exists.
+        assert not interactive.supported
+        assert "headless-only" in interactive.reason
+    else:
+        assert interactive.supported
     assert not resolve_provider_policy(
         provider, "local-worktrees", "bypass", "headless"
     ).supported
@@ -1354,6 +1360,20 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
             provider, "cloud-soon", "bypass", "interactive"
         ).reason
     )
+
+
+@pytest.mark.parametrize("permissions", PERMISSION_POLICIES)
+def test_omp_never_advertises_an_interactive_cell_it_cannot_launch(
+    permissions: str,
+) -> None:
+    """No omp interactive cell is supported, and the refusal is the honest policy
+    reason at the decision point rather than a late "unsupported provider"."""
+    for runtime in RUNTIME_POLICIES:
+        cell = resolve_provider_policy("omp", runtime, permissions, "interactive")
+        assert not cell.supported
+    assert resolve_provider_policy("omp", "local-native", "auto", "headless").supported
+    with pytest.raises(ValueError, match="headless-only worker"):
+        interactive_policy_command("omp", "hi", "local-native", "auto")
 
 
 def test_accept_edits_is_native_or_unsupported_never_approximated() -> None:

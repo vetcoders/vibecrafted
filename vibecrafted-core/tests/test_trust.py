@@ -113,7 +113,7 @@ def test_core_command_deck_exposes_trust_and_guard_launchers(capsys) -> None:
     # Agent alternation mirrors the vc-trust SKILL.md invocation canon
     # (cursor joined the fleet with full parity in 8373c26f).
     assert (
-        "vibecrafted trust <claude|codex|agy|junie|grok|cursor|kimi|copilot>"
+        "vibecrafted trust <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp>"
         in trust_out
     )
     assert "version 1.0.0 · READ" in trust_out
@@ -2391,7 +2391,7 @@ def test_launch_workflow_authorized_remediation_records_receipt(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     monkeypatch.setattr(
         workflow,
