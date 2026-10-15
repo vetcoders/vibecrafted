@@ -1772,8 +1772,8 @@
   },
   {
    "aliases": [],
-   "cadence": "read",
-   "can_modify_code": false,
+   "cadence": "write",
+   "can_modify_code": true,
    "default_agent": "claude",
    "execution_target": "single_agent",
    "input_policy": "optional_with_default",
