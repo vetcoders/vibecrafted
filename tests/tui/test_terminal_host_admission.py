@@ -642,6 +642,253 @@ def test_fixed_host_policy_has_no_environment_switch(fx: Fixture, monkeypatch) -
     ]
 
 
+def test_fixed_host_ancestor_uses_paired_static_and_live_code_identity(
+    monkeypatch,
+) -> None:
+    module = _helper_module()
+    code = module.CodeIdentity("ab" * 20, "TEAMFIXTURE", False)
+    identities = {
+        40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+        41: module.ProcessIdentity(41, os.getuid(), "5.000000", module.FIXED_HOST, 1),
+    }
+    reads: list[str] = []
+
+    monkeypatch.setattr(module, "process_identity", identities.get)
+    monkeypatch.setattr(module, "live_code_hash", lambda pid: code.cdhash)
+
+    def paired(path: str):
+        reads.append(path)
+        return code
+
+    monkeypatch.setattr(module, "admitted_code_identity", paired)
+    assert module.owns_fixed_terminal_ancestor(40)
+    assert reads == [module.FIXED_HOST, module.FIXED_HOST]
+
+
+def test_process_identity_includes_kernel_parent() -> None:
+    module = _helper_module()
+    identity = module.process_identity(os.getpid())
+    assert identity is not None
+    assert identity.uid == os.getuid()
+    assert identity.ppid == os.getppid()
+
+
+def test_fixed_host_ancestor_refuses_wrong_uid_live_code_or_static_pair(
+    monkeypatch,
+) -> None:
+    module = _helper_module()
+    code = module.CodeIdentity("ab" * 20, "TEAMFIXTURE", False)
+    valid = module.ProcessIdentity(41, os.getuid(), "5.000000", module.FIXED_HOST, 1)
+
+    monkeypatch.setattr(module, "process_identity", lambda _pid: valid)
+    monkeypatch.setattr(module, "admitted_code_identity", lambda _path: code)
+    monkeypatch.setattr(module, "live_code_hash", lambda _pid: "cd" * 20)
+    with pytest.raises(module.Refusal, match="does not run the admitted code"):
+        module.owns_fixed_terminal_ancestor(41)
+
+    wrong_uid = module.ProcessIdentity(
+        41, os.getuid() + 1, "5.000000", module.FIXED_HOST, 1
+    )
+    monkeypatch.setattr(module, "process_identity", lambda _pid: wrong_uid)
+    with pytest.raises(module.Refusal, match="belongs to another user"):
+        module.owns_fixed_terminal_ancestor(41)
+
+    monkeypatch.setattr(module, "process_identity", lambda _pid: valid)
+
+    def refused_pair(_path: str):
+        raise module.Refusal(module.EX_CONFIG, "selected generation pair differs")
+
+    monkeypatch.setattr(module, "admitted_code_identity", refused_pair)
+    with pytest.raises(module.Refusal, match="selected generation pair differs"):
+        module.owns_fixed_terminal_ancestor(41)
+
+    identities = iter(
+        [
+            module.CodeIdentity("ab" * 20, "TEAMFIXTURE", False),
+            module.CodeIdentity("cd" * 20, "TEAMFIXTURE", False),
+        ]
+    )
+    monkeypatch.setattr(
+        module, "admitted_code_identity", lambda _path: next(identities)
+    )
+    monkeypatch.setattr(module, "live_code_hash", lambda _pid: "ab" * 20)
+    with pytest.raises(module.Refusal, match="code changed during ancestry admission"):
+        module.owns_fixed_terminal_ancestor(41)
+
+    identities = iter(
+        [
+            valid,
+            module.ProcessIdentity(41, os.getuid(), "6.000000", module.FIXED_HOST, 1),
+        ]
+    )
+    monkeypatch.setattr(module, "process_identity", lambda _pid: next(identities))
+    monkeypatch.setattr(module, "admitted_code_identity", lambda _path: code)
+    with pytest.raises(module.Refusal, match="identity changed during admission"):
+        module.owns_fixed_terminal_ancestor(41)
+
+
+def test_foreign_ancestor_is_not_promoted_to_fixed_host_ownership(monkeypatch) -> None:
+    module = _helper_module()
+    identities = {
+        40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+        41: module.ProcessIdentity(41, os.getuid(), "5.000000", "/foreign/host", 1),
+    }
+    monkeypatch.setattr(module, "process_identity", identities.get)
+    monkeypatch.setattr(
+        module,
+        "admitted_code_identity",
+        lambda _path: pytest.fail("foreign paths must not reach code admission"),
+    )
+    assert not module.owns_fixed_terminal_ancestor(40)
+
+
+def _selected_generation_terminal_paths(module) -> tuple[str, str]:
+    generation = Path(os.path.realpath(module.__file__)).parents[2]
+    return (
+        str(generation / "libexec/vc-terminal"),
+        str(generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"),
+    )
+
+
+def test_generation_terminal_candidates_use_only_physical_helper_root(
+    monkeypatch,
+) -> None:
+    module = _helper_module()
+    for name in (
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_TERMINAL_HOST",
+        "VIBECRAFTED_ROOT",
+    ):
+        monkeypatch.setenv(name, f"/foreign/{name}")
+    assert (
+        module.generation_terminal_candidates()
+        == _selected_generation_terminal_paths(module)
+    )
+
+
+@pytest.mark.parametrize("local_index", [0, 1])
+def test_nearest_generation_local_precedes_outer_invalid_fixed(
+    monkeypatch, local_index: int
+) -> None:
+    module = _helper_module()
+    local = _selected_generation_terminal_paths(module)[local_index]
+    identities = {
+        40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+        41: module.ProcessIdentity(41, os.getuid(), "5.000000", local, 42),
+        42: module.ProcessIdentity(42, os.getuid(), "6.000000", module.FIXED_HOST, 1),
+    }
+    monkeypatch.setattr(module, "process_identity", identities.get)
+    monkeypatch.setattr(
+        module,
+        "admitted_code_identity",
+        lambda _path: (_ for _ in ()).throw(
+            module.Refusal(module.EX_CONFIG, "outer fixed host is invalid")
+        ),
+    )
+    assert not module.owns_fixed_terminal_ancestor(40)
+
+
+def test_nearest_invalid_fixed_refuses_before_outer_generation_local(
+    monkeypatch,
+) -> None:
+    module = _helper_module()
+    local = _selected_generation_terminal_paths(module)[0]
+    identities = {
+        40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+        41: module.ProcessIdentity(41, os.getuid(), "5.000000", module.FIXED_HOST, 42),
+        42: module.ProcessIdentity(42, os.getuid(), "6.000000", local, 1),
+    }
+    reads: list[int] = []
+
+    def process(pid: int):
+        reads.append(pid)
+        return identities.get(pid)
+
+    monkeypatch.setattr(module, "process_identity", process)
+    monkeypatch.setattr(
+        module,
+        "admitted_code_identity",
+        lambda _path: (_ for _ in ()).throw(
+            module.Refusal(module.EX_CONFIG, "near fixed host is invalid")
+        ),
+    )
+    with pytest.raises(module.Refusal, match="near fixed host is invalid"):
+        module.owns_fixed_terminal_ancestor(40)
+    assert reads == [40, 41]
+
+
+def test_nearest_generation_local_precedes_outer_depth_exhaustion(monkeypatch) -> None:
+    module = _helper_module()
+    local = _selected_generation_terminal_paths(module)[0]
+    identities = {
+        40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+        41: module.ProcessIdentity(41, os.getuid(), "5.000000", local, 42),
+        **{
+            pid: module.ProcessIdentity(
+                pid, os.getuid(), f"{pid}.000000", f"/foreign/{pid}", pid + 1
+            )
+            for pid in range(42, 80)
+        },
+    }
+    reads: list[int] = []
+
+    def process(pid: int):
+        reads.append(pid)
+        return identities.get(pid)
+
+    monkeypatch.setattr(module, "process_identity", process)
+    assert not module.owns_fixed_terminal_ancestor(40)
+    assert reads == [40, 41]
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "cycle", "depth"])
+def test_inconclusive_fixed_host_ancestry_is_refused(monkeypatch, failure: str) -> None:
+    module = _helper_module()
+    if failure == "unreadable":
+        identities = {}
+    elif failure == "cycle":
+        identities = {
+            40: module.ProcessIdentity(40, os.getuid(), "4.000000", "/bin/zsh", 41),
+            41: module.ProcessIdentity(41, os.getuid(), "5.000000", "/bin/sh", 40),
+        }
+    else:
+        identities = {
+            pid: module.ProcessIdentity(
+                pid, os.getuid(), f"{pid}.000000", f"/foreign/{pid}", pid + 1
+            )
+            for pid in range(40, 73)
+        }
+    monkeypatch.setattr(module, "process_identity", identities.get)
+    with pytest.raises(module.Refusal) as refusal:
+        module.owns_fixed_terminal_ancestor(40)
+    assert refusal.value.code == module.EX_TEMPFAIL
+    assert failure in str(refusal.value)
+
+
+def test_non_darwin_fixed_host_probe_allows_legacy_fallback(monkeypatch) -> None:
+    module = _helper_module()
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        module,
+        "process_identity",
+        lambda _pid: pytest.fail("non-Darwin must not run the macOS identity probe"),
+    )
+    assert not module.owns_fixed_terminal_ancestor(40)
+
+
+def test_fixed_host_ancestry_cli_refuses_extra_args_and_unknown_origin(
+    monkeypatch, capsys
+) -> None:
+    module = _helper_module()
+    monkeypatch.setattr(module, "owns_fixed_terminal_ancestor", lambda: False)
+    assert module.main(["owns-fixed-host"]) == 1
+    assert capsys.readouterr() == ("", "")
+    assert module.main(["owns-fixed-host", "ambient-host"]) == module.EX_USAGE
+    assert "usage: owns-fixed-host" in capsys.readouterr().err
+    monkeypatch.setattr(module, "owns_fixed_terminal_ancestor", lambda: True)
+    assert module.main(["owns-fixed-host"]) == 0
+
+
 def test_reused_pid_with_foreign_start_token_is_stale(fx: Fixture) -> None:
     inert = subprocess.Popen(["/bin/sleep", "30"])
     fx.processes.append(inert)

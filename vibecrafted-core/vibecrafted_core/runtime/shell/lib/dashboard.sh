@@ -523,9 +523,25 @@ _vetcoders_start_is_ssh_caller() {
 }
 
 _vetcoders_start_has_owned_terminal_host() {
-  local owner="" python_bin=""
+  local owner="" python_bin="" admission_helper="" admission_rc=0
   owner="$(_vetcoders_vc_frame_owner_root)" || return 1
   python_bin="$(_vetcoders_internal_python)" || return 1
+  admission_helper="$owner/vibecrafted-core/vibecrafted_core/terminal_host.py"
+  # The fixed macOS app host is mutable across upgrades and is not a
+  # generation-local path. Reuse its existing paired static/live-code
+  # authority; caller environment and a same-user path never establish it.
+  if [[ -f "$admission_helper" && ! -L "$admission_helper" ]]; then
+    if "$python_bin" -I -B "$admission_helper" owns-fixed-host >/dev/null 2>&1; then
+      return 0
+    else
+      admission_rc=$?
+    fi
+    # Exit 1 means no fixed host occurs in ancestry. Explicit identity,
+    # signature, UID and race refusals are final; legacy ancestry must not
+    # override the fixed-host authority.
+    ((admission_rc == 1)) || return "$admission_rc"
+  fi
+  # Retain the flat/developer and legacy generation-local ancestry contract.
   "$python_bin" - "$owner" <<'PY_TERMINAL_ORIGIN'
 import os
 from pathlib import Path
@@ -1872,7 +1888,7 @@ PY_HOST_GENERATION
 _vetcoders_start_new_host() (
   local root="${1:-}" active="" owner="" generation="" short="" base="vc-host" host="" rc=0 index=1
   local vc_frame_bin="" role="" front_door="" existing="" sessions=""
-  local created_here=0 role_rc=0 role_attempts=0 role_deadline=0
+  local created_handoff=0 created_here=0 role_rc=0 role_attempts=0 role_deadline=0
   local entry_args=(--new-host)
   if ! _vetcoders_start_is_lobby "$root"; then
     entry_args+=(--repo "$root")
@@ -1885,8 +1901,19 @@ _vetcoders_start_new_host() (
     # an absolute executable path alone does not defeat inherited old roots.
     _vetcoders_start_pin_host_root "$active"
   fi
+  if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]]; then
+    _vetcoders_start_validate_workspace_name "$VIBECRAFTED_START_CREATED_HOST" "host name" || return 2
+    if ! _vetcoders_start_is_owned_terminal_child; then
+      printf 'vc-start: created-host handoff was not admitted; host %s remains intact and no replacement was created.\n' \
+        "$VIBECRAFTED_START_CREATED_HOST" >&2
+      printf 'After verifying the active terminal host, enter it explicitly with: vc-frame attach %s\n' \
+        "$(_vetcoders_shell_quote "$VIBECRAFTED_START_CREATED_HOST")" >&2
+      return 4
+    fi
+    created_handoff=1
+  fi
   if [[ "$active" != "$owner" ]]; then
-    if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+    if ((created_handoff)); then
       printf 'vc-start: active generation changed while opening host %s; it remains intact. Retry --new-host explicitly.\n' "$VIBECRAFTED_START_CREATED_HOST" >&2
       return 4
     fi
@@ -1900,10 +1927,9 @@ _vetcoders_start_new_host() (
   _vetcoders_pin_vc_frame_config_dir || return 4
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
   # Only an owned terminal child may consume the exact created host.
-  if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+  if ((created_handoff)); then
     host="$VIBECRAFTED_START_CREATED_HOST"
     unset VIBECRAFTED_START_CREATED_HOST
-    _vetcoders_start_validate_workspace_name "$host" "host name" || return 2
     _vetcoders_start_read_inventory_state "$host"
     [[ "$_vetcoders_start_inventory_state" == live ]] || return 4
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -1964,6 +1990,17 @@ _vetcoders_start_new_host() (
   else
     role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || return 4
     [[ "$role" == host ]] || return 4
+  fi
+  if ((created_handoff)); then
+    if ! _vetcoders_start_is_owned_terminal_child; then
+      printf 'vc-start: created-host handoff lost terminal ownership; host %s remains detached and no replacement was created.\n' \
+        "$host" >&2
+      printf 'After verifying the active terminal host, enter it explicitly with: vc-frame attach %s\n' \
+        "$(_vetcoders_shell_quote "$host")" >&2
+      return 4
+    fi
+    _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+    return $?
   fi
   if _vetcoders_in_vc_frame || ! _vetcoders_start_is_owned_terminal_child; then
     if _vetcoders_start_is_ssh_caller; then
