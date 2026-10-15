@@ -352,7 +352,6 @@ def _agy_argv(*prefix: str) -> list[str]:
     return [
         "agy",
         *prefix,
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",
@@ -444,7 +443,7 @@ def test_agy_model_metacharacters_reach_fake_cli_as_one_value(
     assert capture.read_text(encoding="utf-8").splitlines()[:3] == [
         "--model",
         requested,
-        "--dangerously-skip-permissions",
+        "--add-dir",
     ]
     assert not shell_payload_marker.exists()
     assert not command_substitution_marker.exists()

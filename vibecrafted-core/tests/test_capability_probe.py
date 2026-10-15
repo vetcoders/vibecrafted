@@ -26,6 +26,7 @@ ALL_AGENTS = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 VERDICTS = {
     continuity.SUPPORTED,

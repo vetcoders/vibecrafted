@@ -9,8 +9,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 ENGINE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -321,6 +324,512 @@ def test_copilot_shutdown_is_not_double_counted_and_cache_is_not_added() -> None
     assert native["cacheReadTokens"] == 4762112
     assert engine.copilot_processed(native) == 4924749 + 23611
     assert engine.cache_semantics("copilot") == "subset_of_input"
+
+
+def test_omp_sums_per_event_assistant_usage_with_separate_cache_buckets(
+    tmp_path: Path, capsys
+) -> None:
+    engine = _engine()
+    store = tmp_path / "store"
+    quota = tmp_path / "quota"
+    session = (
+        store
+        / "agent"
+        / "sessions"
+        / "--repo-slug--"
+        / "2026-10-14T19-39-23-385Z_01a13bed-3379-7342-ac6b-95b7c6bfe626.jsonl"
+    )
+    events = [
+        {
+            "type": "session",
+            "version": 3,
+            "id": "01a13bed-3379-7342-ac6b-95b7c6bfe626",
+            "timestamp": "2026-10-14T19:39:23.385Z",
+            "cwd": "/repo",
+        },
+        {
+            "type": "message",
+            "id": "a",
+            "timestamp": "2026-10-14T19:55:09.117Z",
+            "message": {
+                "role": "assistant",
+                "provider": "kimi-code",
+                "model": "k3",
+                "usage": {
+                    "input": 100,
+                    "output": 10,
+                    "cacheRead": 40,
+                    "cacheWrite": 5,
+                    "totalTokens": 155,
+                    "cost": {"total": 0.01},
+                },
+            },
+        },
+        {
+            "type": "message",
+            "id": "b",
+            "timestamp": "2026-10-14T20:00:00.000Z",
+            "message": {"role": "user", "content": "hi"},
+        },
+        {
+            "type": "message",
+            "id": "c",
+            "timestamp": "2026-10-15T01:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "provider": "kimi-code",
+                "model": "k3",
+                "usage": {
+                    "input": 7,
+                    "output": 3,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 10,
+                },
+            },
+        },
+    ]
+    _write(session, "\n".join(json.dumps(event) for event in events) + "\n")
+    # Lock sidecars next to transcripts are not usage files.
+    _write(session.with_suffix(session.suffix + ".lock.os"), "")
+    before = session.read_bytes()
+
+    code = engine.main(
+        "omp", ["sessions", "--store", str(store), "--quota-dir", str(quota)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "processed_total 165" in out
+    assert "cache_semantics separate_buckets" in out
+    assert "sessions 1" in out
+    saved = json.loads((quota / "quota.json").read_text(encoding="utf-8"))
+    assert saved["metrics"]["fleet_processed_total"] == 165
+    assert saved["cache_semantics"] == "separate_buckets"
+    assert saved["last_session"]["id"] == "01a13bed-3379-7342-ac6b-95b7c6bfe626"
+    archive = quota.parent / "archive" / "omp.jsonl"
+    text = archive.read_text(encoding="utf-8")
+    assert "kimi-code/k3" in text
+    assert '"day":"2026-10-14"' in text
+    assert '"day":"2026-10-15"' in text
+    assert session.read_bytes() == before
+
+
+def _omp_event(total: int) -> str:
+    return (
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "2026-10-15T01:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "provider": "fixture",
+                    "model": "fixture-model",
+                    "content": "synthetic \u0142 usage",
+                    "usage": {
+                        "input": total - 3,
+                        "output": 3,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": total,
+                    },
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+
+def _private_omp_environment(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    for key in ("OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "product"))
+    for kind in ("DATA", "STATE", "CACHE", "CONFIG"):
+        monkeypatch.setenv(f"XDG_{kind}_HOME", str(tmp_path / f"xdg-{kind.lower()}"))
+    return home
+
+
+def test_omp_default_profile_reads_only_native_sessions(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    session = home / ".omp" / "agent" / "sessions" / "default.jsonl"
+    _write(session, _omp_event(10))
+    _write(
+        home / ".omp" / "profiles" / "work" / "agent" / "sessions" / "other.jsonl",
+        _omp_event(900),
+    )
+    private_config = home / ".omp" / "agent" / "auth.json"
+    _write(private_config, '{"private_fixture":true}\n')
+    original_open = Path.open
+
+    def deny_private_config(path, *args, **kwargs):
+        assert path != private_config, "telemetry must not read native credentials"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_private_config)
+    engine = _engine()
+    assert engine.default_store("omp") == session.parent.parent
+    assert engine.main("omp", ["once"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["metrics"]["processed_total"] == 10
+    assert session.read_text(encoding="utf-8") == _omp_event(10)
+    assert (tmp_path / "product" / "telemetry" / "omp" / "quota.json").is_file()
+
+
+def test_omp_named_profile_overrides_legacy_profile_and_agent_dir(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    selected = (
+        home / ".omp" / "profiles" / "work" / "agent" / "sessions" / "selected.jsonl"
+    )
+    legacy = (
+        home / ".omp" / "profiles" / "legacy" / "agent" / "sessions" / "legacy.jsonl"
+    )
+    custom = tmp_path / "custom-agent"
+    _write(selected, _omp_event(17))
+    _write(legacy, _omp_event(700))
+    _write(custom / "sessions" / "custom.jsonl", _omp_event(800))
+    _write(home / ".omp" / "agent" / "sessions" / "default.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", " work ")
+    monkeypatch.setenv("PI_PROFILE", "legacy")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(custom))
+    engine = _engine()
+    assert engine.default_store("omp") == selected.parent.parent
+    assert engine.main("omp", ["sessions"]) == 0
+    assert "processed_total 17" in capsys.readouterr().out
+    saved = json.loads(
+        (tmp_path / "product" / "telemetry" / "omp" / "quota.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved["metrics"]["fleet_processed_total"] == 17
+    assert saved["metrics"]["session_count"] == 1
+
+
+def test_omp_legacy_profile_uses_custom_config_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    selected = (
+        home
+        / ".omp-private"
+        / "profiles"
+        / "legacy"
+        / "agent"
+        / "sessions"
+        / "selected.jsonl"
+    )
+    _write(selected, _omp_event(23))
+    _write(home / ".omp" / "agent" / "sessions" / "default.jsonl", _omp_event(900))
+    monkeypatch.setenv("PI_CONFIG_DIR", ".omp-private")
+    monkeypatch.setenv("PI_PROFILE", "legacy")
+    engine = _engine()
+    assert engine.default_store("omp") == selected.parent.parent
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 23
+
+
+@pytest.mark.parametrize("default_profile", ["", "default", "   "])
+def test_omp_explicit_default_drops_inherited_legacy_profile_directory(
+    tmp_path: Path, monkeypatch, capsys, default_profile: str
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    default = home / ".omp" / "agent"
+    inherited = home / ".omp" / "profiles" / "legacy" / "agent"
+    _write(default / "sessions" / "default.jsonl", _omp_event(29))
+    _write(inherited / "sessions" / "legacy.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", default_profile)
+    monkeypatch.setenv("PI_PROFILE", "legacy")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(inherited))
+    engine = _engine()
+    assert engine.default_store("omp") == default
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 29
+
+
+def test_omp_explicit_agent_directory_is_not_a_config_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    custom = tmp_path / "private-agent"
+    _write(custom / "sessions" / "selected.jsonl", _omp_event(31))
+    _write(custom / "agent" / "sessions" / "wrong-geometry.jsonl", _omp_event(800))
+    _write(home / ".omp" / "agent" / "sessions" / "default.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", "default")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(custom))
+    engine = _engine()
+    assert engine.default_store("omp") == custom
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 31
+
+
+def test_omp_explicit_store_ignores_native_selection_and_keeps_config_root_geometry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _private_omp_environment(tmp_path, monkeypatch)
+    store = tmp_path / "manual-store"
+    _write(store / "agent" / "sessions" / "selected.jsonl", _omp_event(37))
+    _write(store / "sessions" / "wrong-geometry.jsonl", _omp_event(800))
+    custom = tmp_path / "other-agent"
+    _write(custom / "sessions" / "custom.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", "../invalid")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(custom))
+    assert _engine().main("omp", ["once", "--store", str(store)]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 37
+
+
+def test_omp_invalid_native_profile_refuses_instead_of_scanning_default(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    _write(home / ".omp" / "agent" / "sessions" / "private.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", "../invalid")
+    with pytest.raises(SystemExit) as error:
+        _engine().main("omp", ["once"])
+    assert error.value.code == 2
+    assert "Invalid OMP profile" in capsys.readouterr().err
+    assert not (tmp_path / "product").exists()
+
+
+@pytest.mark.skipif(
+    os.sys.platform not in {"darwin", "linux"}, reason="native XDG platforms"
+)
+def test_omp_xdg_selected_profile_requires_its_own_migrated_directory(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    native = home / ".omp" / "profiles" / "work" / "agent" / "sessions" / "native.jsonl"
+    xdg_root = tmp_path / "xdg-data" / "omp"
+    _write(native, _omp_event(41))
+    _write(xdg_root / "sessions" / "default.jsonl", _omp_event(900))
+    monkeypatch.setenv("OMP_PROFILE", "work")
+    engine = _engine()
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 41
+    selected = xdg_root / "profiles" / "work" / "sessions" / "migrated.jsonl"
+    _write(selected, _omp_event(43))
+    assert engine.default_store("omp") == selected.parent.parent
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 43
+
+
+@pytest.mark.skipif(
+    os.sys.platform not in {"darwin", "linux"}, reason="native XDG platforms"
+)
+def test_omp_xdg_default_flattens_agent_prefix_but_not_explicit_agent_dir(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    data = tmp_path / "xdg-data" / "omp"
+    _write(data / "sessions" / "migrated.jsonl", _omp_event(47))
+    _write(home / ".omp" / "agent" / "sessions" / "unmigrated.jsonl", _omp_event(900))
+    engine = _engine()
+    assert engine.default_store("omp") == data
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 47
+    custom = tmp_path / "private-agent"
+    _write(custom / "sessions" / "custom.jsonl", _omp_event(53))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(custom))
+    assert engine.default_store("omp") == custom
+    assert engine.main("omp", ["once"]) == 0
+    assert json.loads(capsys.readouterr().out)["metrics"]["processed_total"] == 53
+
+
+@pytest.mark.parametrize("split", ["inside_json", "inside_utf8", "before_newline"])
+def test_omp_partial_tail_completion_matches_clean_scan_without_duplicates(
+    tmp_path: Path, split: str
+) -> None:
+    engine = _engine()
+    session = tmp_path / "session.jsonl"
+    complete = _omp_event(10).encode("utf-8")
+    cut = {
+        "inside_json": len(complete) // 2,
+        "inside_utf8": complete.index("\u0142".encode("utf-8")) + 1,
+        "before_newline": len(complete) - 1,
+    }[split]
+    session.write_bytes(complete[:cut])
+    partial, cache, scanned = engine.scan_file("omp", session, None)
+    assert scanned and partial["processed_total"] == 0
+    assert cache["offset"] == 0
+    with session.open("ab") as handle:
+        handle.write(complete[cut:])
+    resumed, cache, scanned = engine.scan_file("omp", session, cache)
+    clean, clean_cache, _ = engine.scan_file("omp", session, None)
+    assert scanned
+    assert resumed["processed_total"] == clean["processed_total"] == 10
+    assert cache["offset"] == len(complete)
+    assert cache["days"] == clean_cache["days"]
+    unchanged, cache, scanned = engine.scan_file("omp", session, cache)
+    assert not scanned and unchanged["processed_total"] == 10
+    with session.open("ab") as handle:
+        handle.write(
+            b'{"type":"message","message":{"role":"user","content":"no usage"}}\n'
+        )
+    further, cache, scanned = engine.scan_file("omp", session, cache)
+    assert scanned and further["processed_total"] == 10
+
+
+def test_omp_partial_tail_retains_complete_prefix_only(tmp_path: Path) -> None:
+    engine = _engine()
+    session = tmp_path / "session.jsonl"
+    prefix = _omp_event(13).encode("utf-8")
+    tail = _omp_event(17).encode("utf-8")
+    cut = len(tail) // 2
+    session.write_bytes(prefix + tail[:cut])
+    first, cache, _ = engine.scan_file("omp", session, None)
+    assert first["processed_total"] == 13
+    assert cache["offset"] == len(prefix)
+    with session.open("ab") as handle:
+        handle.write(tail[cut:])
+    resumed, cache, _ = engine.scan_file("omp", session, cache)
+    clean, clean_cache, _ = engine.scan_file("omp", session, None)
+    assert resumed["processed_total"] == clean["processed_total"] == 30
+    assert cache["days"] == clean_cache["days"]
+    assert engine.scan_file("omp", session, cache)[0]["processed_total"] == 30
+
+
+def test_omp_old_eof_cache_is_rebuilt_even_for_unchanged_file(tmp_path: Path) -> None:
+    engine = _engine()
+    session = tmp_path / "session.jsonl"
+    _write(session, _omp_event(10))
+    record, cache, _ = engine.scan_file("omp", session, None)
+    cache.pop("complete_lines")
+    cache["native"] = dict.fromkeys(engine.OMP_KEYS, 0)
+    cache["record"] = {**record, "native": cache["native"], "processed_total": 0}
+    cache["days"] = []
+    repaired, cache, scanned = engine.scan_file("omp", session, cache)
+    assert scanned and repaired["processed_total"] == 10
+    assert cache["complete_lines"] is True
+
+
+def test_omp_backend_refuses_daemon_without_dispatch_or_projection(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _private_omp_environment(tmp_path, monkeypatch)
+    engine = _engine()
+
+    def forbidden_daemon(*args, **kwargs):
+        pytest.fail("OMP must not dispatch a resident collector")
+
+    monkeypatch.setattr(engine, "_daemon", forbidden_daemon)
+    with pytest.raises(SystemExit) as error:
+        engine.main("omp", ["daemon"])
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert engine.run("omp", "daemon", tmp_path / "store", tmp_path / "quota") == 2
+    assert "bounded collection only" in capsys.readouterr().err
+    assert not (tmp_path / "quota").exists()
+    assert not (tmp_path / "product").exists()
+
+
+def test_legacy_backend_daemon_dispatch_is_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine = _engine()
+    calls = []
+
+    def inert_daemon(*args):
+        calls.append(args)
+        return 51
+
+    monkeypatch.setattr(engine, "_daemon", inert_daemon)
+    store, quota = tmp_path / "store", tmp_path / "quota"
+    assert (
+        engine.main(
+            "codex", ["daemon", "--store", str(store), "--quota-dir", str(quota)]
+        )
+        == 51
+    )
+    assert calls == [("codex", store, quota, 30)]
+
+
+@pytest.mark.parametrize("mode", ["line", "once", "sessions", "archive"])
+def test_omp_bounded_modes_remain_available(
+    tmp_path: Path, monkeypatch, capsys, mode: str
+) -> None:
+    home = _private_omp_environment(tmp_path, monkeypatch)
+    session = home / ".omp" / "agent" / "sessions" / "session.jsonl"
+    _write(session, _omp_event(10))
+    assert _engine().main("omp", [mode]) == 0
+    assert capsys.readouterr().out
+    saved = json.loads(
+        (tmp_path / "product" / "telemetry" / "omp" / "quota.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved["metrics"]["processed_total"] == 10
+    assert saved["quota"]["status"] == "ok"
+    assert "limit" not in saved["quota"]
+
+
+@pytest.mark.parametrize("owner", ["canonical", "mirror"])
+def test_deck_omp_daemon_refusal_preserves_legacy_and_bounded_dispatch(
+    tmp_path: Path, owner: str
+) -> None:
+    package = ENGINE_PATH.parents[2]
+    launcher = (
+        package / "deck" / "vibecrafted"
+        if owner == "canonical"
+        else package.parents[1] / "scripts" / "vibecrafted"
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(tmp_path / "product"),
+        "VC_FRAME_SOCKET_DIR": str(tmp_path / "sockets"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
+        "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+    }
+    script = """
+source "$1" telemetry help >/dev/null
+_telemetry_run_engine() { printf 'DISPATCH:%s:%s\\n' "$1" "$2"; }
+cmd_telemetry omp daemon
+"""
+    refused = subprocess.run(
+        ["/bin/bash", "-c", script, "vibecrafted", str(launcher)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "unknown omp mode: daemon" in refused.stderr
+    assert "DISPATCH:" not in refused.stdout
+    assert "telemetry omp line|once|sessions|archive" in refused.stderr
+    admitted = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            script.rsplit("cmd_telemetry omp daemon", 1)[0]
+            + "cmd_telemetry codex daemon\n"
+            + 'for mode in line once sessions archive; do cmd_telemetry omp "$mode"; done\n',
+            "vibecrafted",
+            str(launcher),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert admitted.returncode == 0, admitted.stderr
+    assert admitted.stdout.splitlines() == [
+        "DISPATCH:codex:daemon",
+        "DISPATCH:omp:line",
+        "DISPATCH:omp:once",
+        "DISPATCH:omp:sessions",
+        "DISPATCH:omp:archive",
+    ]
 
 
 def test_cursor_is_unavailable_without_invented_zeros(tmp_path: Path) -> None:

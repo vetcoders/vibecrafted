@@ -248,6 +248,84 @@ def test_diamond_dag_overlaps_siblings_and_waits_for_join(
     assert receipts.cut("c")["target_path"].endswith("/c/target")
 
 
+def test_typed_cut_permissions_reach_the_provider_and_run_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restrictive typed cut must not inherit the durable bypass opt-in.
+
+    Only the provider executable is inert: parsing, supervisor preparation,
+    workflow admission, worker launch, and persisted metadata are production.
+    """
+    home = tmp_path / ".vibecrafted"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    argv_path = tmp_path / "claude-argv.txt"
+    provider = fake_bin / "claude"
+    provider.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > {shlex.quote(str(argv_path))}\n'
+        "cat > /dev/null\n"
+        'printf "observed repository" > "$VIBECRAFTED_REPORT_PATH"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_GUARD", "0")
+    monkeypatch.setenv("VIBECRAFTED_REAPER", "0")
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    config_dir = tmp_path / "xdg" / "vibecrafted"
+    config_dir.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_dir.parent))
+    (config_dir / "config.toml").write_text(
+        'permissions = "bypass"\n', encoding="utf-8"
+    )
+    repo = tmp_path / "repo"
+    _repo(repo)
+    dispatch = _dispatch(
+        repo,
+        """[[cuts]]
+id = "restricted"
+agent = "claude"
+workflow = "implement"
+permissions = "read-only"
+mode = "read"
+observational = true
+prompt = "Observe the repository without modifying it."
+""",
+    )
+    run_id = "typed-cut-permissions"
+
+    run_dispatch(
+        dispatch,
+        artifacts_dir=tmp_path / "artifacts",
+        run_id=run_id,
+        manage_worktrees=True,
+    )
+
+    receipt = DispatchReceiptStore(run_id, dispatch.cuts, create=False).cut(
+        "restricted"
+    )
+    assert receipt["provider_run_id"]
+    argv = argv_path.read_text(encoding="utf-8").splitlines()
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in argv
+    meta = json.loads(
+        (
+            home
+            / "control_plane"
+            / "runtime_runs"
+            / receipt["provider_run_id"]
+            / "meta.json"
+        ).read_text(encoding="utf-8")
+    )
+    controls = meta["execution_controls"]
+    assert controls["permissions_requested"] == "read-only"
+    assert controls["permissions_effective"] == "read-only"
+    assert controls["permissions_source"] == "dispatch"
+
+
 def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -933,7 +1011,7 @@ def test_legacy_dispatch_identity_recovers_real_writer_safe_spec_only_when_bound
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: ["sh", "-c", "exit 0"],
+        lambda _agent, **_kwargs: ["sh", "-c", "exit 0"],
     )
     monkeypatch.setattr(
         workflow,

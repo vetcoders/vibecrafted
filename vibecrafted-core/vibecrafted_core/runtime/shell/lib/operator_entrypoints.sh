@@ -52,7 +52,7 @@ _vetcoders_skill_init() {
   local _vetcoders_interactive_skill=init
   init_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),
@@ -137,7 +137,7 @@ _vetcoders_skill_operator() {
   local _vetcoders_interactive_skill=operator
   operator_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),
@@ -183,7 +183,7 @@ _vetcoders_skill_partner() {
   local _vetcoders_interactive_skill=partner
   partner_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_partner_command_text "$tool" "$partner_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),

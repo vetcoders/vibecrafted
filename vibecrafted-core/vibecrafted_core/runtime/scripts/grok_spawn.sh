@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: grok_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Portable Grok spawn wrapper.
 Defaults to headless. Pass --runtime terminal for a visible vc-frame worker pane.
@@ -16,6 +17,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 model="${GROK_MODEL:-}"
 root=""
 plan_file=""
@@ -34,6 +37,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
+      ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
       ;;
     --model)
       shift
@@ -76,6 +89,7 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions grok "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths grok "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_grok_prompt.md"
@@ -136,7 +150,7 @@ filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.."
 qfilter_py="$(spawn_shell_quote "$(spawn_python_bin)")"
 qfilter_core="$(spawn_shell_quote "$filter_core")"
 qfilter_cmd="PYTHONPATH=$qfilter_core $qfilter_py -m vibecrafted_core.agent_stream --agent grok"
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; grok --cwd $qroot --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --prompt-file $qruntime $model_flag 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; grok --cwd $qroot $SPAWN_PERMISSION_FLAGS --no-alt-screen --output-format streaming-json --prompt-file $qruntime $model_flag 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${grok_success_hook}${success_hook_extra:+
 $success_hook_extra}"

@@ -296,6 +296,26 @@ _vetcoders_resume_raw_transcript_path() {
 # Wrap a headless agent command so streaming-json is rendered via AgentStreamParser.
 # Grok always uses this path. Other agents pass through unchanged unless they emit
 # streaming-json in the headless resume builders.
+# Shared permission decision (Founder 13716da4): provider flags come from
+# vibecrafted_core.permission_flags, never from bypass literals embedded in
+# hint strings. stdout: shell-quoted flags, space-separated (empty when the
+# policy needs none); rc 2 + refusal on stderr when the agent/mode
+# combination cannot be enforced — callers render that refusal as a hint
+# comment and never print a downgraded command without flags.
+_vetcoders_permission_flags() {
+  local agent="$1" mode="${2:-headless}"
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root" \
+      "$py" -m vibecrafted_core.permission_flags "$agent" --mode "$mode"
+  else
+    "$py" -m vibecrafted_core.permission_flags "$agent" --mode "$mode"
+  fi
+}
+
 _vetcoders_wrap_with_agent_stream() {
   local agent="$1"
   local cmd="$2"
@@ -329,21 +349,36 @@ _vetcoders_fresh_session_command() {
   case "$tool" in
     claude)
       if [[ "$mode" == headless ]]; then
-        printf 'claude --print --dangerously-skip-permissions %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags claude headless 2>&1)"; then
+          printf 'claude --print%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'claude %s\n' "$quoted_prompt"
       fi
       ;;
     codex)
       if [[ "$mode" == headless ]]; then
-        printf 'codex exec --dangerously-bypass-approvals-and-sandbox %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags codex headless 2>&1)"; then
+          printf 'codex exec%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'codex %s\n' "$quoted_prompt"
       fi
       ;;
     agy)
       if [[ "$mode" == headless ]]; then
-        printf 'agy --dangerously-skip-permissions --print %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags agy headless 2>&1)"; then
+          printf 'agy%s --print %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'agy --prompt-interactive %s\n' "$quoted_prompt"
       fi
@@ -354,10 +389,15 @@ _vetcoders_fresh_session_command() {
     grok)
       # Interactive: positional PROMPT into the TUI (stays open).
       # Headless: --single is one-shot stdout (fleet / await / baton-pass only).
-      if [[ "$mode" == headless ]]; then
-        printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_prompt"
+      local perm_flags
+      if perm_flags="$(_vetcoders_permission_flags grok "$mode" 2>&1)"; then
+        if [[ "$mode" == headless ]]; then
+          printf 'grok --cwd .%s --no-alt-screen --output-format streaming-json --single %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf 'grok --cwd .%s --no-alt-screen %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        fi
       else
-        printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_prompt"
+        printf '# %s\n' "$perm_flags"
       fi
       ;;
     cursor)
@@ -651,7 +691,7 @@ _vetcoders_resume_agent() {
 
   local resume_cmd
   local _vetcoders_interactive_skill=resume
-  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-bypass}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
+  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
   local _resume_admission=0
   _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
   case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
@@ -727,10 +767,15 @@ _vetcoders_resume_command() {
       local claude_fork_flag=""
       [[ -z "$fork_session" ]] || claude_fork_flag=" --fork-session"
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'claude --print --dangerously-skip-permissions --resume %s%s %s\n' "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags claude headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'claude --print%s --resume %s%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
+          else
+            printf 'claude --print%s --resume %s%s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$claude_fork_flag"
+          fi
         else
-          printf 'claude --print --dangerously-skip-permissions --resume %s%s\n' "$quoted_session" "$claude_fork_flag"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'claude --resume %s%s %s\n' "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
@@ -742,10 +787,15 @@ _vetcoders_resume_command() {
       # headless = `codex exec resume` (non-interactive); `codex resume` is the
       # interactive picker and cannot run under a pipe.
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'codex exec --dangerously-bypass-approvals-and-sandbox resume %s %s\n' "$quoted_session" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags codex headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'codex exec%s resume %s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$quoted_prompt"
+          else
+            printf 'codex exec%s resume %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session"
+          fi
         else
-          printf 'codex exec --dangerously-bypass-approvals-and-sandbox resume %s\n' "$quoted_session"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'codex resume %s %s\n' "$quoted_session" "$quoted_prompt"
@@ -774,10 +824,15 @@ _vetcoders_resume_command() {
       # Since agy 1.1 --print takes the prompt as its VALUE (Go flags) and
       # print mode reads no stdin — flags first, prompt as the flag value.
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'agy --dangerously-skip-permissions --conversation %s --print %s\n' "$quoted_session" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags agy headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'agy%s --conversation %s --print %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$quoted_prompt"
+          else
+            printf 'agy%s --conversation %s --print "Continue."\n' "${perm_flags:+ $perm_flags}" "$quoted_session"
+          fi
         else
-          printf 'agy --dangerously-skip-permissions --conversation %s --print "Continue."\n' "$quoted_session"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'agy --conversation %s --prompt-interactive %s\n' "$quoted_session" "$quoted_prompt"
@@ -799,16 +854,21 @@ _vetcoders_resume_command() {
       # and would clobber the working tree.
       # Interactive: --resume into TUI (optional seed prompt as positional).
       # Headless: --single + streaming-json for fleet/await transcript parse.
-      if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_session" "$quoted_prompt"
+      local perm_flags
+      if perm_flags="$(_vetcoders_permission_flags grok "$mode" 2>&1)"; then
+        if [[ "$mode" == headless ]]; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'grok --resume %s --cwd .%s --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_session" "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+          else
+            printf 'grok --resume %s --cwd .%s --no-alt-screen --output-format streaming-json --single "Continue."\n' "$quoted_session" "${perm_flags:+ $perm_flags}"
+          fi
+        elif [[ -n "$resume_prompt" ]]; then
+          printf 'grok --resume %s --cwd .%s --no-alt-screen %s\n' "$quoted_session" "${perm_flags:+ $perm_flags}" "$quoted_prompt"
         else
-          printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single "Continue."\n' "$quoted_session"
+          printf 'grok --resume %s --cwd .%s --no-alt-screen\n' "$quoted_session" "${perm_flags:+ $perm_flags}"
         fi
-      elif [[ -n "$resume_prompt" ]]; then
-        printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_session" "$quoted_prompt"
       else
-        printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen\n' "$quoted_session"
+        printf '# %s\n' "$perm_flags"
       fi
       ;;
     *)

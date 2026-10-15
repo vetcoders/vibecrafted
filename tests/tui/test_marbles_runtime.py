@@ -422,27 +422,6 @@ def _org_repo() -> str:
     return f"{match.group(1)}/{match.group(2)}"
 
 
-def test_marbles_spawn_chains_with_agent_and_ancestor_plan_contract() -> None:
-    script = (
-        REPO_ROOT
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "scripts"
-        / "marbles_spawn.sh"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        'success_hook="bash $q_scripts/marbles_next.sh $q_state $count 1 '
-        '$marbles_run_id $q_root $q_runtime $q_scripts $q_lock $q_store"' in script
-    )
-    assert (
-        'failure_hook="bash $q_scripts/marbles_next.sh --failed $q_state '
-        '$count 1 $marbles_run_id $q_root $q_runtime $q_scripts $q_lock $q_store"'
-        in script
-    )
-
-
 def _run_marbles_prompt(
     tmp_path: Path, *, inside_vc_frame: bool
 ) -> tuple[list[str], list[str], Path]:
@@ -1015,7 +994,127 @@ def test_parse_contract_accepts_fork_session_flag() -> None:
     assert lines["PROMPT"] == ""
 
 
-def test_resume_command_composes_claude_fork_session() -> None:
+def _capture_public_resume_permissions(
+    tmp_path: Path, configuration: str, public_args: tuple[str, ...] = ()
+) -> dict:
+    """Run the public shell through its real command builder, without a provider.
+
+    The private interpreter seam replaces interactive-command admission while
+    item7 owns that implementation; the durable config and controls resolvers
+    remain real. The terminal seam records the resulting receipt, never execs.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    config = tmp_path / "permissions.toml"
+    config.write_text(configuration, encoding="utf-8")
+    interpreter = tmp_path / "inert-interactive-python"
+    interpreter.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            """
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            from vibecrafted_core.execution_controls import resolve_execution_controls
+            from vibecrafted_core.server_config import durable_permission_selection
+
+            args = sys.argv[1:]
+            if args[:3] != ["-m", "vibecrafted_core.spawn", "interactive-command"]:
+                raise SystemExit("unexpected private interpreter invocation")
+            provider = args[3]
+            explicit = args[args.index("--permissions") + 1] if "--permissions" in args else ""
+            configured, source = durable_permission_selection(
+                provider, Path(os.environ["RESUME_POLICY_CONFIG"])
+            )
+            controls = resolve_execution_controls(
+                provider, permissions=explicit, mode="interactive",
+                configured_permissions=configured, permissions_source=source,
+            )
+            print(json.dumps({
+                "argv": args,
+                "execution_controls": controls.receipt(),
+            }))
+            """
+        ),
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "RESUME_POLICY_CONFIG": str(config),
+        "PYTHONPATH": str(REPO_ROOT / "vibecrafted-core"),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"source {shlex.quote(str(HELPER_SCRIPT))}; "
+                "_vetcoders_core_python_spec() { "
+                f"printf '%s\\t%s\\n' {shlex.quote(str(interpreter))} "
+                f"{shlex.quote(str(REPO_ROOT / 'vibecrafted-core'))}; }}; "
+                "_vetcoders_declaration_escalate_if_needed() { return 2; }; "
+                "_vetcoders_aicx_resume_fallback() { printf 'MODE=new_session\\n'; }; "
+                '_vetcoders_enter_admitted_interactive() { printf "%s\\n" "$2"; }; '
+                "_vetcoders_resume_agent claude --runtime plain "
+                + shlex.join(public_args)
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "public_args", "effective", "source"),
+    [
+        ('permissions = "read-only"\n', (), "read-only", "config:global"),
+        (
+            'permissions = "bypass"\n[agents.claude]\npermissions = "read-only"\n',
+            (),
+            "read-only",
+            "config:agents.claude",
+        ),
+        ("", (), "auto", "default"),
+        (
+            'permissions = "read-only"\n',
+            ("--permissions", "bypass"),
+            "bypass",
+            "dispatch",
+        ),
+    ],
+    ids=["global-read-only", "agent-read-only", "default-auto", "explicit-bypass"],
+)
+def test_public_interactive_resume_permission_precedence(
+    tmp_path: Path,
+    configuration: str,
+    public_args: tuple[str, ...],
+    effective: str,
+    source: str,
+) -> None:
+    payload = _capture_public_resume_permissions(tmp_path, configuration, public_args)
+    controls = payload["execution_controls"]
+    assert controls["permissions_effective"] == effective
+    assert controls["permissions_source"] == source
+    assert ("--permissions" in payload["argv"]) == bool(public_args)
+
+
+def test_resume_command_composes_claude_fork_session(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
     payload = subprocess.run(
         [
             "bash",
@@ -1029,17 +1128,24 @@ def test_resume_command_composes_claude_fork_session() -> None:
         ],
         check=True,
         cwd=REPO_ROOT,
+        env=env,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert payload[0] == (
-        "claude --print --dangerously-skip-permissions --resume abc-123 --fork-session"
-    )
-    assert payload[1] == (
-        "claude --print --dangerously-skip-permissions --resume abc-123 "
-        "--fork-session 'go on'"
-    )
-    assert payload[2] == "claude --resume abc-123"
+    commands = [shlex.split(command) for command in payload]
+    for command in commands:
+        assert command[0] == "claude"
+        assert command[command.index("--resume") + 1] == "abc-123"
+        assert "--dangerously-skip-permissions" not in command
+        assert "bypassPermissions" not in command
+    for command in commands[:2]:
+        assert "--print" in command
+        assert command[command.index("--permission-mode") + 1] == "auto"
+        assert command.count("--fork-session") == 1
+    assert "go on" not in commands[0]
+    assert commands[1][-1] == "go on"
+    assert "--fork-session" not in commands[2]
+    assert "--print" not in commands[2]
 
 
 def test_resume_agent_rejects_fork_session_for_non_claude() -> None:

@@ -115,12 +115,21 @@ process drops the level. It is never reported as `live`.
 | junie    | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Durable inbox. No verified mid-turn channel.                                                                             |
 | kimi     | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Print mode has no stdin lane (`prompt_transport` argv transport).                                                        |
 | cursor   | `injected-on-call` | none                                                                               | `checkpoint-poll`         | `stream-json` is output. No verified mid-turn input.                                                                     |
+| copilot  | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Durable inbox. No verified mid-turn channel.                                                                             |
+| omp      | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Durable inbox/checkpoint delivery, not live RPC steering. Print mode consumes the initial prompt from stdin.             |
 | gemini   | `injected-on-call` | none                                                                               | `checkpoint-poll`         | Inbox provider in the store. The gemini binary is not a launch path.                                                     |
 
 An agent with no monitor uses attached MCP glue when available or explicit checkpoints.
 Wiring Claude's open stdin is a supervisor hook (`--input-format stream-json`
 and a pipe that outlives the prompt file). This module does not change that
 launcher.
+
+OMP has no wired live RPC steering lane. Historical CLI observations of
+`--mode rpc` do not establish a supported transport or current installed
+capability. Send durable inbox messages and use recipient checkpoints.
+
+Recorded probes below and in the table are historical observed contracts,
+not verification of the currently installed provider versions.
 
 ## Codex native capability boundary
 
@@ -129,9 +138,10 @@ The previous adapter failed with rc2 for leading `---`; the bound option reached
 the native `thread/queue/add` request intact for `---`, `-` and `@` bodies.
 A controlled WebSocket fixture returned three queue acceptances and one
 unsupported-method failure. The recipient then read all four through the real
-Vibecrafted checkpoint CLI before a separate recipient ACK. This proves the
-native parser, wire payload and durable fallback; it does not prove automatic
-model receipt, interactive parity, or active-turn steering.
+Vibecrafted checkpoint CLI before a separate recipient ACK. This recorded
+observation covered the native parser, wire payload and durable fallback for
+that version; it does not prove current installed behavior, automatic model
+receipt, interactive parity, or active-turn steering.
 
 The [native queue command](https://github.com/openai/codex/blob/d1e010213f4be3cb7751bf35249f87eb7d8e2659/codex-rs/tui/src/session_queue_commands.rs)
 submits `thread/queue/add`. The [queue service](https://github.com/openai/codex/blob/d1e010213f4be3cb7751bf35249f87eb7d8e2659/codex-rs/ext/queue/src/service.rs)

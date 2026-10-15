@@ -64,7 +64,7 @@ from vibecrafted_core import workflow
 
 real_popen = workflow.subprocess.Popen
 workflow._sweep_stale_runs = lambda: None
-workflow._stdin_command = lambda _agent: [sys.executable, "-c", "pass"]
+workflow._stdin_command = lambda _agent, **_kwargs: [sys.executable, "-c", "pass"]
 workflow._resolve_agent_command = lambda _agent, command, _env: list(command)
 
 if os.environ["LAUNCH_RETRY_MODE"] == "spawn":
@@ -240,7 +240,7 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [
+        lambda _agent, **_kwargs: [
             sys.executable,
             "-c",
             (
@@ -361,7 +361,7 @@ def test_independent_identical_launches_create_distinct_runs_by_default(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     first = workflow.launch_workflow(spec, source)
@@ -397,7 +397,7 @@ def test_explicit_run_ids_never_collapse_identical_launches(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     first = workflow.launch_workflow(first_spec, source)
@@ -442,7 +442,7 @@ def test_same_explicit_run_id_retries_once_and_conflicting_spec_fails_closed(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     first = workflow.launch_workflow(spec, source)
@@ -536,7 +536,7 @@ def test_terminal_dead_dispatch_claim_archives_changed_spec_and_relaunches(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     pops: list[object] = []
     _patch_launch_popen(monkeypatch, pops)
@@ -581,7 +581,7 @@ def test_transport_env_argument_supplies_canonical_retry_identity(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     first = workflow.launch_workflow(spec, source, env=transport_env)
@@ -641,7 +641,7 @@ def test_reserved_record_reclaims_only_proven_stale_owner(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     pops: list[object] = []
     _patch_launch_popen(monkeypatch, pops)
@@ -806,7 +806,7 @@ def test_complete_reservation_owner_receipt_with_recaptured_mismatch_is_reclaime
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     pops: list[object] = []
     _patch_launch_popen(monkeypatch, pops)
@@ -1436,7 +1436,7 @@ def test_launch_registry_never_persists_prompt_text(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     result = workflow.launch_workflow(spec, source)
@@ -1461,7 +1461,7 @@ def test_spawn_exception_after_run_id_does_not_mint_sibling_while_live(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     pops: list[object] = []
     _patch_launch_popen(monkeypatch, pops, boom=True)
@@ -1501,7 +1501,7 @@ def test_launch_workflow_preseeds_machine_owned_claim_digest(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     payload = workflow.launch_workflow(spec, source)
@@ -1546,7 +1546,7 @@ def test_launch_workflow_never_runs_global_sync_after_spawn(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
     monkeypatch.setattr(
         workflow,
@@ -1602,7 +1602,7 @@ def test_launch_workflow_records_failure_event_when_spawn_errors(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     def _boom(*_args: Any, **_kwargs: Any) -> None:
@@ -1639,7 +1639,7 @@ def test_launch_workflow_reports_read_phase_metadata(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [
+        lambda _agent, **_kwargs: [
             sys.executable,
             "-c",
             (
@@ -1713,7 +1713,9 @@ def test_launch_workflow_rejects_missing_provider_before_acceptance_event(
         runtime="headless",
         root=str(tmp_path),
     )
-    monkeypatch.setattr(workflow, "_stdin_command", lambda _agent: ["claude", "-p"])
+    monkeypatch.setattr(
+        workflow, "_stdin_command", lambda _agent, **_kwargs: ["claude", "-p"]
+    )
 
     def _missing(*_args: Any, **_kwargs: Any) -> list[str]:
         raise FileNotFoundError("provider executable 'claude' not found")
@@ -1867,7 +1869,7 @@ def test_terminal_runtime_launches_worker_in_vc_frame_tab(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: ["codex", "exec"],
+        lambda _agent, **_kwargs: ["codex", "exec"],
     )
     monkeypatch.setattr(
         workflow,
@@ -1953,7 +1955,9 @@ def test_headless_launch_never_creates_a_synthetic_viewer(
         root=str(tmp_path),
     )
     monkeypatch.setattr(
-        workflow, "_stdin_command", lambda _agent: [sys.executable, "-c", "pass"]
+        workflow,
+        "_stdin_command",
+        lambda _agent, **_kwargs: [sys.executable, "-c", "pass"],
     )
 
     def refuse_host_action(*args: Any, **kwargs: Any) -> workflow._HostActionResult:
@@ -2025,7 +2029,9 @@ def test_terminal_runtime_resurrects_missing_host_session(
         runtime="terminal",
         root=str(tmp_path),
     )
-    monkeypatch.setattr(workflow, "_stdin_command", lambda _agent: ["codex", "exec"])
+    monkeypatch.setattr(
+        workflow, "_stdin_command", lambda _agent, **_kwargs: ["codex", "exec"]
+    )
     monkeypatch.setattr(
         workflow,
         "_resolve_agent_command",
@@ -2073,7 +2079,9 @@ def test_terminal_runtime_host_double_fail_marks_failed_with_last_error(
         runtime="terminal",
         root=str(tmp_path),
     )
-    monkeypatch.setattr(workflow, "_stdin_command", lambda _agent: ["codex", "exec"])
+    monkeypatch.setattr(
+        workflow, "_stdin_command", lambda _agent, **_kwargs: ["codex", "exec"]
+    )
     monkeypatch.setattr(
         workflow,
         "_resolve_agent_command",
@@ -2362,7 +2370,7 @@ def test_claude_terminal_command_streams_visible_json(tmp_path: Path) -> None:
 
     assert command[:4] == ["claude", "-p", "--output-format", "stream-json"]
     assert "--verbose" in command
-    assert command[-2:] == ["--permission-mode", "bypassPermissions"]
+    assert command[-2:] == ["--permission-mode", "auto"]
 
 
 def test_stream_capable_agents_use_native_stream_commands(tmp_path: Path) -> None:
@@ -2432,7 +2440,7 @@ def test_launch_workflow_artifact_paths_are_terminal_truth(
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [
+        lambda _agent, **_kwargs: [
             sys.executable,
             "-c",
             (
@@ -3197,7 +3205,7 @@ def test_manual_explicit_resume_launches_own_tracked_headless_run(
         "gpt-5.5",
         "resume",
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--approve-for-me",
         "codex-thread-42",
         "-",
     ]
@@ -3309,7 +3317,6 @@ def test_manual_explicit_resume_agy_uses_conversation_and_stream_json(
         "gemini-3.8-flash-high",
         "--conversation",
         "839007be-60a5-43f9-842b-cfa0f8a0dc02",
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",
@@ -3479,7 +3486,7 @@ def test_native_resume_creates_new_tracked_monotonic_attempts(
         "gpt-5.5",
         "resume",
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--approve-for-me",
         "codex-native-id",
         "-",
     ]
@@ -4353,6 +4360,7 @@ def test_native_resume_revision_cas_rejects_probe_window_change(
             "expected_settlement_revision_mismatch",
             "expected=7 current=8",
         ),
+        ("controls", "execution_controls_changed", ""),
     ],
 )
 def test_native_resume_guardian_snapshot_rejects_probe_window_change(
@@ -4387,6 +4395,20 @@ def test_native_resume_guardian_snapshot_rejects_probe_window_change(
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta["agent_session_id"] = "codex-replaced-id"
             meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        elif changed_identity == "controls":
+            meta_path = (
+                tmp_path
+                / "home"
+                / "control_plane"
+                / "runtime_runs"
+                / run_id
+                / "meta.json"
+            )
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["execution_controls"] = workflow.resolve_execution_controls(
+                agent, permissions="read-only"
+            ).receipt()
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
         else:
             live_revision = 8
         return SimpleNamespace(
@@ -4418,7 +4440,7 @@ def test_native_resume_guardian_snapshot_rejects_probe_window_change(
 
     assert result["accepted"] is False
     assert result["reason"] == reason
-    assert result["detail"] == detail
+    assert result.get("detail", "") == detail
     assert result["retryable"] is False
     assert result["terminal"] is True
     assert launches == []
@@ -4739,7 +4761,7 @@ def test_build_launch_command_uses_core_stdin_agent_command_not_legacy_deck(
 ) -> None:
     captured: dict[str, str] = {}
 
-    def _fake_stdin(agent: str) -> list[str]:
+    def _fake_stdin(agent: str, **_kwargs: object) -> list[str]:
         captured["agent"] = agent
         return ["agent-bin", "-"]
 
@@ -5133,3 +5155,124 @@ def test_stop_swarm_sweeps_late_child_and_surfaces_child_refusal(
     assert stopped == [first, parent, late]
     assert [child["run_id"] for child in result["children"]] == [first, late]
     assert result["cascade_complete"] is child_accepted
+
+
+def test_native_resume_retains_exact_parent_policy_when_newer_run_shares_sid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    readonly = workflow.resolve_execution_controls(
+        "claude", permissions="read-only"
+    ).receipt()
+    bypass = workflow.resolve_execution_controls(
+        "claude", permissions="bypass"
+    ).receipt()
+    run_id, _ = _native_resume_parent(
+        monkeypatch,
+        tmp_path,
+        agent="claude",
+        meta_fields={"execution_controls": readonly},
+    )
+    runs = workflow.control_plane_home() / "runtime_runs"
+    newer = runs / "rsme-newer-bypass" / "meta.json"
+    newer.parent.mkdir()
+    newer.write_text(
+        json.dumps(
+            {
+                "run_id": newer.parent.name,
+                "agent": "claude",
+                "agent_session_id": "claude-native-id",
+                "root": str(tmp_path),
+                "execution_controls": bypass,
+            }
+        )
+    )
+    os.utime(runs / run_id / "meta.json", (100, 100))
+    os.utime(newer, (200, 200))
+    monkeypatch.setattr(
+        workflow,
+        "_read_identity_run_facts",
+        lambda rid: (
+            json.loads((runs / rid / "meta.json").read_text())
+            if (runs / rid / "meta.json").exists()
+            else None
+        ),
+    )
+    config_root = tmp_path / "config"
+    (config_root / "vibecrafted").mkdir(parents=True)
+    (config_root / "vibecrafted" / "config.toml").write_text('permissions = "bypass"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: SimpleNamespace(
+            state="confirmed",
+            executable="/private/inert/claude",
+            version="fixture",
+            detail="inert",
+        ),
+    )
+    launches = []
+
+    def launch(spec, source_dir, **kwargs):
+        launches.append((spec, kwargs["worker_command_override"]))
+        return {"accepted": True, "run_id": spec.run_id}
+
+    monkeypatch.setattr(workflow, "launch_workflow", launch)
+    monkeypatch.setattr(workflow, "append_event", lambda **kwargs: None)
+
+    result = workflow.native_resume_run(run_id, tmp_path)
+
+    assert result["accepted"] is True
+    spec, command = launches[0]
+    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert "bypassPermissions" not in command
+    assert spec.execution_controls_frozen == readonly
+
+
+def test_sid_only_resume_refuses_conflicting_policy_owners(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "vc"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    runs = home / "control_plane" / "runtime_runs"
+    for name, permission in (("work-readonly", "read-only"), ("rsme-bypass", "bypass")):
+        meta = runs / name / "meta.json"
+        meta.parent.mkdir(parents=True)
+        meta.write_text(
+            json.dumps(
+                {
+                    "run_id": name,
+                    "agent": "codex",
+                    "root": str(tmp_path),
+                    "agent_session_id": "shared-native",
+                    "execution_controls": workflow.resolve_execution_controls(
+                        "codex", permissions=permission
+                    ).receipt(),
+                }
+            )
+        )
+    monkeypatch.setattr(
+        workflow,
+        "_read_identity_run_facts",
+        lambda rid: (
+            json.loads((runs / rid / "meta.json").read_text())
+            if (runs / rid / "meta.json").exists()
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: SimpleNamespace(
+            state="confirmed",
+            executable="/private/inert/codex",
+            version="fixture",
+            detail="inert",
+        ),
+    )
+    result = workflow.manual_resume_session(
+        "codex", "shared-native", tmp_path, prompt="continue", root=tmp_path
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "native_resume_policy_unavailable"
+    assert "--run-id" in result["detail"]

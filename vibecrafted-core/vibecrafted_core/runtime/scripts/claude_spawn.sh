@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: claude_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Portable Claude spawn wrapper.
 Defaults to headless. Pass --runtime terminal for a visible vc-frame worker pane.
@@ -16,6 +17,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 model="${CLAUDE_SPAWN_MODEL:-}"
 root=""
 plan_file=""
@@ -34,6 +37,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
+      ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
       ;;
     --model)
       shift
@@ -76,6 +89,7 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions claude "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths claude "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_claude_prompt.md"
@@ -140,7 +154,7 @@ salvage_failure_report="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then 
 # Keep only JSON object lines so jq never chokes on banners, warnings, or status text.
 # Stream-json → grep JSON objects → tee raw stream → jq filter → clean text to terminal AND transcript
 # Raw JSONL lives in $HOME/.claude/projects/ — aicx ingests from there, not from us
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message $qstream_jsonl; VIBECRAFTED_PROMPT_PATH=$qruntime claude -p --output-format stream-json --verbose --dangerously-skip-permissions $model_flag < $qruntime 2>&1 | grep --line-buffered '^[[:space:]]*{' | tee $qstream_jsonl | jq --unbuffered -rj -f $qfilter | tee -a $qtranscript; pipeline_status=\$?; $last_message_extract $salvage_success_report $missing_report_guard $salvage_failure_report echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message $qstream_jsonl; VIBECRAFTED_PROMPT_PATH=$qruntime claude -p --output-format stream-json --verbose $SPAWN_PERMISSION_FLAGS $model_flag < $qruntime 2>&1 | grep --line-buffered '^[[:space:]]*{' | tee $qstream_jsonl | jq --unbuffered -rj -f $qfilter | tee -a $qtranscript; pipeline_status=\$?; $last_message_extract $salvage_success_report $missing_report_guard $salvage_failure_report echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
 
 # Combine built-in hooks with caller-provided hooks (marbles chain, etc.)
 combined_success="${claude_success_hook}${success_hook_extra:+

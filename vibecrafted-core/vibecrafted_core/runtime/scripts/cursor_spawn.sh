@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: cursor_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Portable Cursor (cursor-agent) spawn wrapper.
 Defaults to headless. Pass --runtime terminal for a visible vc-frame worker pane.
@@ -16,6 +17,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 model="${CURSOR_MODEL:-}"
 root=""
 plan_file=""
@@ -34,6 +37,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
+      ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
       ;;
     --model)
       shift
@@ -76,48 +89,12 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions cursor "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths cursor "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 
-# Probe the *selected* cursor-agent via the canonical Python surface before
-# writing launch meta/receipts. Headless bypass requires --force and --trust
-# (spawn.py PERMISSION_CONTRACT). Only a successful bounded --help may establish
-# flags — never swallow nonzero help or parse error prose. Probe before
-# spawn_write_meta so a refused launch never leaves status=launching.
-cursor_perm_flags="--force --trust"
 if (( !dry_run )); then
   spawn_require_command cursor-agent
-  probe_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
-  probe_py="$(spawn_python_bin)"
-  cursor_probe_timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
-  set +e
-  cursor_probe_out="$(
-    PYTHONPATH="$probe_core${PYTHONPATH:+:$PYTHONPATH}" \
-      "$probe_py" - "$cursor_probe_timeout" <<'PY' 2>&1
-import sys
-
-from vibecrafted_core.continuity.capabilities import (
-    probe_cursor_cli_surface,
-    require_cursor_flags,
-)
-
-timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
-try:
-    surface = probe_cursor_cli_surface(timeout=timeout, refresh=True)
-    require_cursor_flags(
-        ("--force", "--trust"), surface, permissions="bypass"
-    )
-except Exception as exc:  # noqa: BLE001 — surface refusal to spawn_die
-    print(exc)
-    raise SystemExit(1) from exc
-print(surface.version or "unknown")
-PY
-  )"
-  cursor_probe_rc=$?
-  set -e
-  if (( cursor_probe_rc != 0 )); then
-    spawn_die "${cursor_probe_out:-cursor-agent capability probe failed; cannot verify required flags --force --trust (no silent downgrade)}"
-  fi
 fi
 
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_cursor_prompt.md"
@@ -177,7 +154,7 @@ filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.."
 qfilter_py="$(spawn_shell_quote "$(spawn_python_bin)")"
 qfilter_core="$(spawn_shell_quote "$filter_core")"
 qfilter_cmd="PYTHONPATH=$qfilter_core $qfilter_py -m vibecrafted_core.agent_stream --agent cursor"
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json $cursor_perm_flags $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json $SPAWN_PERMISSION_FLAGS $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${cursor_success_hook}${success_hook_extra:+
 $success_hook_extra}"

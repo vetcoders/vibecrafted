@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- **Breaking:** execution permissions default to `auto`, not implicit bypass.
+  Explicit dispatch overrides provider configuration, then global configuration,
+  then `auto`; malformed or unsupported policies refuse launch. Direct launchers
+  use the same resolver, and admitted policy stays frozen through native resume.
+  Kimi/Copilot headless `auto` is unsupported; bypass requires explicit opt-in.
+
+### Added
+
+- OMP provider support with headless dispatch, native resume, and durable
+  inbox/checkpoint messaging (not live RPC steering). Auto uses native write
+  permissions, read-only uses a tool whitelist, and explicit bypass uses yolo;
+  headless execution refuses required exec prompts.
+
+### Fixed
+
+- OMP usage counts finalized assistant messages once, including tool turns and
+  errors, and the existing server collector includes its local sessions.
+- OMP telemetry follows native profiles and agent-directory overrides, retains
+  incomplete JSONL tails for the next scan, and refuses dedicated daemon mode.
+- Native continuation retains the selected parent's admitted policy; shared
+  session IDs cannot select another run's permissions. Interactive opt-ins stay
+  frozen through launch, and omitted public resume permissions no longer bypass
+  durable configuration.
+
 ## [4.4.0] - Unreleased
 
 ### Added

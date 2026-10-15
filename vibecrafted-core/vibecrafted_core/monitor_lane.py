@@ -52,7 +52,9 @@ _NONCE_DOMAIN = "vibecrafted.message-bus.v1\n"
 # Same token grammar as the store's message and run ids.
 _SAFE_RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TERMINAL_STATES = frozenset({"context_injected", "agent_acknowledged"})
-_NO_MONITOR = frozenset({"agy", "grok", "junie", "kimi", "copilot", "cursor", "gemini"})
+_NO_MONITOR = frozenset(
+    {"agy", "grok", "junie", "kimi", "copilot", "cursor", "gemini", "omp"}
+)
 
 # Claude Code `--input-format stream-json` user turn. Probe 2026-09-26: a
 # second line of this shape is accepted on a still-open stdin mid-turn.
@@ -148,7 +150,7 @@ def startup_lane_paragraph(run_id: str = "") -> str:
 
 
 def capability_rows() -> tuple[Capability, ...]:
-    """Eight CLIs. Declared level only; absence is not reported as ``live``."""
+    """Ten CLIs. Declared level only; absence is not reported as ``live``."""
 
     claude_source = (
         "Claude stdin stream-json user turn (probe 2026-09-26, mid-turn). "
@@ -180,7 +182,16 @@ def capability_rows() -> tuple[Capability, ...]:
             LEVEL_CHECKPOINT_POLL,
         ),
     ]
-    for provider in ("agy", "grok", "junie", "kimi", "copilot", "cursor", "gemini"):
+    for provider in (
+        "agy",
+        "grok",
+        "junie",
+        "kimi",
+        "copilot",
+        "cursor",
+        "gemini",
+        "omp",
+    ):
         rows.append(
             Capability(
                 provider,

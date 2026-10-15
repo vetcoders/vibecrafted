@@ -1,7 +1,7 @@
 # vc-agents — instrukcja launchera (bieżący deck)
 
 Wejściem dla Operatora jest deck `vibecrafted` lub helper `vc-<launcher>`.
-Agenci: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+Agenci: `claude · codex · agy · junie · grok · cursor · kimi · copilot · omp`.
 Pełna powierzchnia flag obejmuje więcej niż `--prompt`:
 
 ```bash

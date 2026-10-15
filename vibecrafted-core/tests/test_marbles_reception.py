@@ -355,6 +355,14 @@ def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
         + os.pathsep
         + os.environ.get("PATH", os.defpath),
     )
+    if agent == "kimi":
+        # kimi headless auto is refused (interactive-only); the supervised
+        # marbles loop opts into bypass through the durable config cell.
+        kimi_config = tmp_path / "xdg" / "vibecrafted"
+        kimi_config.mkdir(parents=True, exist_ok=True)
+        (kimi_config / "config.toml").write_text(
+            '[agents.kimi]\npermissions = "bypass"\n', encoding="utf-8"
+        )
     result = subprocess.run(
         [
             str(Path(sys.executable).parent / "vibecrafted"),

@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-13",
+  "generated_at": "2026-10-15",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -38,6 +38,7 @@
         "7abc3d638df60a1f2589b76191abcf17f20dedf1eb8bb8796bdb2e55e5286acc",
         "7d4e33463ee76027547e17cb30b7d878f6602a53a14f41bdea48dbb19577ed45",
         "7f20b1a0c5098e0d2f1772580c72b919e51698ab01075643faf4391c83250d2d",
+        "873ac01a6e3eb77bd1ab9f82d2857bc25a20289740d31ee762c03464f373d9e6",
         "89d65b89910354f8b4be74fc41b8705d3624447eefe2a1805ef15bc791c41729",
         "8b4e237b77800efb8855c5238a0c2b80510ba3a225686bb6ced11e1bc80964d3",
         "8d30d22477dc622d74d479020d42d3c9c0c44f5529663b85538be12f59ed8075",
@@ -56,6 +57,7 @@
         "b8f963853dfb8e8f17caf7b0a983e05789faa36d6f3d292be7cca0130df5a54f",
         "ba90f1f9f83b08179fbc60e9f2758107902e29272156d15764716bca2e3bd493",
         "bef065b730584a7f6b40c549ba5536c229fd3f340aa15c0c4ec40dd4bffc96a8",
+        "c0d9674a479811dbae22c5b706b29b1d42cd379799f22d2df51cbb2d5226c8d7",
         "c45609f7efab30a177666b467457d7e6ab8eb77ff6c1fe4541c651748b487848",
         "cbf66f9f5027293865b4a9ba1d46729a17149ab3961c592ea54dff8d1e0cf788",
         "cc1f7b894d71946819471fc3d3d1e8ce7511318479e9b0bf2c3d179830d01260",
@@ -126,6 +128,7 @@
           "6d75fb3b29988403c2a72a1e26f8160c5392a5ce",
           "733a85ee24c9c54aba04d948e03a259319fb4b7a",
           "860427ecb67f3704475ae87c3704e795f3a9339c",
+          "86d8d300664310d3063d8d0a635e04747e122a96",
           "8ead425f45c2820a85e6775b217337d938071654",
           "92f0fb5ad0b20b316b23032fd4312abd92c073e9",
           "936b4ef9ff1280441185790fb832218fa5da85cf",
@@ -138,6 +141,7 @@
           "b15caf000b129dc628b5435ebd8d77db6f726a68",
           "b5028b40391fdeb57b84642c609c27d434cd8d1a",
           "c5555356c8e2fc994bf361f7a66bf4616834d8e3",
+          "c55f4e7ec2cc57b8dbc3923986e2a4b11d235016",
           "ce461db349da0ad59ab5a3a7b31b342896a2e735",
           "db03828c742033bb7f08a4b5c19bae7fe90df2d4",
           "de45426035086b9cf8e9fee1b2d94d07465d68be",
@@ -159,14 +163,20 @@
         "references/plan-template.md": [
           "175e563e5221f1d79ef9967d44b763a32e34abec",
           "2cfabb79ddf8cf6022cb25d82d8cdfabcf46e1e9",
+          "31cb7b6c38e30bdd98cb431c7ab318c233ea4774",
+          "69bf40fe950642aca28dffe6a8289b738f1bb883",
           "877e800de5c1c56e00ffbb4a63970e7302e41e47"
         ],
         "references/runbook.md": [
+          "0ebee11048a3a1a3ce4b81198176c98b6d8df347",
+          "2008fdcbf89dfefd5da7c63f6ab59986ef8d89a3",
           "c9e7033c3f133a9ce9f8561431352320e9ac78ae",
           "d05c4afc91675770e2e2537fb1d4556ed351c4e7",
           "f84eab0c455ae7cb09a336fb51434b2c5d8d41d9"
         ],
         "references/why-matrix.md": [
+          "03669dfd16dde91abd4d2760096dcb4d00ebc3dd",
+          "5d15a2a6cb93fe6b9db6de5b78dd2c7d8fabefdf",
           "71f58886ab5186a59473c25d2914eb5ceebc5280",
           "ad7c115d78f47c85ca1d5b6ab474e89cf87be783",
           "e9075ca1d012c19c748f0911dc89161a4edede64",
@@ -4617,10 +4627,12 @@
         "72754e340660ed9f46f4719aae2b3fa829d04a992d038cdc481a3411bac12ec1",
         "758242b2f1d611293662a4c2a297788cb921336bea0e3b3d23f02678f9a14f87",
         "9090f6ae8c7df3ece7dad3665a41961f3545bcf8ec7370fd760e7f2793e24ccb",
+        "9201e5f8567e1f72582084caea7d05d3fa44ae2c6cd804143a77a992ad2d927f",
         "a94c0b6bc78ff09f01127e1dbab467e3bfa72c6a3c88c34dc1b45e5d31ef632f",
         "b1b5e395eeffdbbda44b8764ac9ed9fe0030093afc396e6693962c5b6d769514",
         "ea56b7d7121055d06b338ddd9b1d88615e7da9b1362c8c8a449be35ad4b40fec",
-        "ee671540acc4ae521ba584498f8f8a3436a31e07210cd18b95f329a7b094ff30"
+        "ee671540acc4ae521ba584498f8f8a3436a31e07210cd18b95f329a7b094ff30",
+        "fd435c4ed99f4a9f1896370728d57ef01517ebf2ba01ab5c75deaad6f91c15a2"
       ],
       "files": {
         "FLOW.md": [
@@ -4630,7 +4642,9 @@
           "c9c7a34991ca1edd84556a6837ef0442ccf1c248"
         ],
         "SKILL.md": [
+          "1b35ac514016bbf8d320966138cbdf1bd7ad3426",
           "4d6ee10055092958e7f3bafbab0e43bd1f9ee23a",
+          "4fc6b53e95e5eaeb8f743702be6cfb3ee08d7b9c",
           "649002576986e80403ec227e94c1b6d75ce4bea1",
           "6ff15a5e2031ffc9dc68ec573f0e7693c2965fb0",
           "715fee2fbf8293cb448f13831212e50b03fc31ea",

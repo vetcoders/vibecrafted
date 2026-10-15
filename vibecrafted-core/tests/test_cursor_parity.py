@@ -46,10 +46,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "vibecrafted-core"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-FLEET = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}
+FLEET = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot", "omp"}
 
 # Canonical rendered selector everywhere a workflow asks for an agent name.
-CANONICAL_SELECTOR = "<claude|codex|agy|junie|grok|cursor|kimi|copilot>"
+CANONICAL_SELECTOR = "<claude|codex|agy|junie|grok|cursor|kimi|copilot|omp>"
 STALE_SELECTOR = "<claude|codex|agy|junie|grok|cursor>"
 # Dotted fleet list; negative lookahead so the fixed line still matches.
 STALE_DOTTED_RE = re.compile(r"claude · codex · agy · junie · grok · cursor(?! · kimi)")
@@ -127,9 +127,9 @@ def test_deck_mirror_is_byte_identical_to_canonical() -> None:
 
 def test_deck_agent_acceptance_gate_lists_cursor() -> None:
     body = CANONICAL_DECK.read_text(encoding="utf-8")
-    assert "_agents=(claude codex agy junie grok cursor kimi copilot)" in body
+    assert "_agents=(claude codex agy junie grok cursor kimi copilot omp)" in body
     assert re.search(
-        r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\) return 0", body
+        r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\|omp\) return 0", body
     )
 
 
@@ -144,7 +144,9 @@ def test_deck_help_texts_include_cursor() -> None:
     assert STALE_SELECTOR not in body
     assert not STALE_DOTTED_RE.search(body)
     # help-topic dispatch: `vibecrafted help cursor` must route to agent help
-    assert re.search(r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\)", body)
+    assert re.search(
+        r"claude\|codex\|agy\|junie\|grok\|cursor\|kimi\|copilot\|omp\)", body
+    )
 
 
 def _run_deck(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -446,17 +448,58 @@ def test_marbles_verification_skips_cursor_with_warning() -> None:
     assert re.search(r"cursor\).*skipping verification", next_body)
 
 
-def test_cursor_spawn_wrapper_exists_and_probes_cursor_agent() -> None:
-    wrapper = RUNTIME_SCRIPTS / "cursor_spawn.sh"
-    assert wrapper.is_file()
-    assert os.access(wrapper, os.X_OK)
-    body = wrapper.read_text(encoding="utf-8")
-    # Probes the fleet binary, not the editor CLI.
-    assert "spawn_require_command cursor-agent" in body
-    # Headless lane uses canonical Python probe; requires --force/--trust.
-    assert "probe_cursor_cli_surface" in body
-    assert "require_cursor_flags" in body
-    assert "no silent downgrade" in body
-    assert "cursor-agent -p --output-format stream-json $cursor_perm_flags" in body
-    # Stream events flow through the shared filter as the cursor lane.
-    assert "vibecrafted_core.agent_stream --agent cursor" in body
+def test_cursor_direct_launch_refuses_missing_native_permission_flag(
+    tmp_path: Path,
+) -> None:
+    """A Cursor update cannot silently drop the resolved trust restriction."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    invoked = tmp_path / "provider-ran"
+    binary = bin_dir / "cursor-agent"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --help) echo "Usage: cursor-agent -p --output-format stream-json" ;;\n'
+        '  --version) echo "fixture-cursor" ;;\n'
+        f'  *) touch "{invoked}" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    plan = tmp_path / "plan.md"
+    plan.write_text("Inspect without mutations.\n", encoding="utf-8")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VIBECRAFTED_", "SPAWN_"))
+        and key not in {"PYTHONHOME", "PYTHONPATH"}
+    }
+    env.update(
+        PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+        HOME=str(tmp_path),
+        XDG_CONFIG_HOME=str(tmp_path / "xdg"),
+        VIBECRAFTED_HOME=str(tmp_path / "vc"),
+        VIBECRAFTED_CORE_DIR=str(CORE_ROOT),
+        VIBECRAFTED_PYTHON=sys.executable,
+        PYTHONPATH=str(CORE_ROOT),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNTIME_SCRIPTS / "cursor_spawn.sh"),
+            "--dry-run",
+            "--root",
+            str(tmp_path),
+            str(plan),
+        ],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "--trust" in result.stderr
+    assert not invoked.exists()
+    assert not (tmp_path / "vc" / "control_plane" / "runtime_runs").exists()

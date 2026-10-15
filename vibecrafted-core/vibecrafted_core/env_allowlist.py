@@ -148,6 +148,18 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
         "KIMI_API_KEY",
         "MOONSHOT_API_KEY",
         "MOONSHOT_BASE_URL",
+        # OMP profiles carry provider auth, MCP servers, and user settings.
+        # Preserve its documented config overrides, not arbitrary PI_/OMP_ vars.
+        "OMP_PROFILE",
+        "PI_PROFILE",
+        "PI_CODING_AGENT_DIR",
+        "PI_CONFIG_DIR",
+        "PI_CONFIG_FILES",
+        "PI_PACKAGE_DIR",
+        "PI_SMOL_MODEL",
+        "PI_SLOW_MODEL",
+        "PI_PLAN_MODEL",
+        "OMP_MODEL",
         # Copilot CLI login also accepts an OS credential-store token. For
         # automation these are its documented environment token sources.
         "COPILOT_GITHUB_TOKEN",

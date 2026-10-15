@@ -650,7 +650,20 @@ PY
     gemini) printf '    ⚠ gemini CLI is deprecated (dead upstream) — skipping verification\n' ;;
     agy)    nohup agy --conversation "$sid" --prompt-interactive "$prompt" >/dev/null 2>&1 & ;;
     junie)  nohup junie --session-id="$sid" --resume --task="$prompt" --project=. --skip-update-check >/dev/null 2>&1 & ;;
-    grok)   nohup grok --resume "$sid" --cwd . --permission-mode bypassPermissions --no-alt-screen --single "$prompt" >/dev/null 2>&1 & ;;
+    grok)
+      # Shared permission decision (Founder 13716da4): flags come from
+      # vibecrafted_core.permission_flags, never an embedded bypass literal.
+      # A refusal skips the verification lane like the cursor unverified path —
+      # never launch with a silent downgrade.
+      local grok_perm_flags=""
+      if grok_perm_flags="$("$(spawn_python_bin)" -m vibecrafted_core.permission_flags grok --mode headless 2>&1)"; then
+        local grok_perm_argv=()
+        eval "grok_perm_argv=($grok_perm_flags)"
+        nohup grok --resume "$sid" --cwd . "${grok_perm_argv[@]}" --no-alt-screen --single "$prompt" >/dev/null 2>&1 &
+      else
+        printf '    ⚠ grok permission flags refused: %s — skipping verification\n' "$grok_perm_flags"
+      fi
+      ;;
     # cursor-agent headless `-p --resume <id>` is UNVERIFIED (continuity
     # capabilities fail closed until proven) — never background a maybe-dead lane.
     cursor) printf '    ⚠ cursor headless resume is unverified — skipping verification\n' ;;

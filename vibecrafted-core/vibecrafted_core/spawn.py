@@ -44,7 +44,12 @@ from .env_allowlist import (
     visible_color_environment,
 )
 from .events import append_event
-from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .execution_controls import (
+    PERMISSION_POLICIES,
+    ExecutionControls,
+    controls_from_receipt,
+    resolve_execution_controls,
+)
 from .failure_attribution import attribute_failure
 from .model_overrides import _with_model_override
 from .package_resources import skills_path
@@ -84,6 +89,7 @@ POLICY_PROVIDERS = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 # Fleet agent key → installed CLI binary when they differ (key stays the UX
 # name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
@@ -750,6 +756,32 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
         ),
         "read-only": (("--available-tools=read",), "only the read tool is available"),
     },
+    # omp 18.11.0: --approval-mode takes always-ask|write|yolo and combines with
+    # -p/--print (verified: both flags accepted, rc 0). Tiers are capability ranks
+    # (read < write < exec): yolo auto-approves everything, write auto-approves
+    # read+write tiers (file edits) while exec-tier tools prompt, always-ask
+    # prompts for write and exec (pi-coding-agent tools/approval.ts:
+    # APPROVAL_MODE_MAX_TIER + modeApprovesTier). read-only has no mode of its
+    # own; it is enforced by the --tools whitelist (only read-tier tools exist
+    # in the session, so there is nothing left to prompt for).
+    "omp": {
+        "bypass": (
+            ("--approval-mode", "yolo"),
+            "approval mode yolo: every tool tier runs without prompts",
+        ),
+        "auto": (
+            ("--approval-mode", "write"),
+            "read+write tiers (incl. file edits) run automatically; exec-tier tools (bash etc.) prompt the operator",
+        ),
+        "accept-edits": (
+            ("--approval-mode", "write"),
+            "edits and other write-tier tools pass; exec-tier tools prompt and fail closed without an operator",
+        ),
+        "read-only": (
+            ("--tools", "read,grep,glob,find"),
+            "only read-tier tools are enabled; mutating tools are absent from the session",
+        ),
+    },
 }
 
 
@@ -790,6 +822,20 @@ _HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]]
         "read-only": (
             ("--available-tools=read", "--no-ask-user"),
             "only the read tool is available",
+        ),
+    },
+    # omp print mode accepts --approval-mode/--tools with -p (verified rc 0 on
+    # 18.11.0), so the interactive cells carry over verbatim; only the behavior
+    # text differs: a prompt in headless has no one to answer it, and omp fails
+    # closed with a model-visible refusal (verified: the run ends, no hang).
+    "omp": {
+        "auto": (
+            ("--approval-mode", "write"),
+            "read+write tiers run automatically; an exec-tier prompt fails closed headless with a model-visible refusal (no TUI to answer it)",
+        ),
+        "accept-edits": (
+            ("--approval-mode", "write"),
+            "edits and other write-tier tools pass; an exec-tier prompt fails closed headless with a model-visible refusal",
         ),
     },
 }
@@ -1339,8 +1385,8 @@ def resolve_provider_policy(
             False,
             reason=(
                 f"kimi {permissions} is interactive-only: --prompt rejects the "
-                "flag and print mode never prompts (omit --permissions for the "
-                "never-ask print default)"
+                "flag and print mode never prompts; explicitly select "
+                "--permissions bypass for never-ask print mode"
             ),
         )
     if (
@@ -1731,12 +1777,17 @@ def interactive_policy_command(
     *,
     provider_session_id: str | None = None,
     continuity_policy: ContinuityPolicy | None = None,
+    controls: ExecutionControls | None = None,
 ) -> list[str]:
     """Build one interactive argv from the canonical policy decision."""
+    if controls is not None:
+        if controls.provider != provider:
+            raise ValueError("admitted controls do not match interactive provider")
+        permissions = controls.permissions_effective
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
-    flags = list(decision.flags)
+    flags = list(controls.provider_flags if controls is not None else decision.flags)
     continuity = continuity_policy or ContinuityPolicy("fresh", "fresh:implicit")
     if provider == "claude":
         session_flags = (
@@ -1913,7 +1964,19 @@ def interactive_workspace_command(
     plain interpreter; a bootstrap carries its own import path and would
     override the prefix anyway.
     """
-    decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
+    from .server_config import durable_permission_selection
+
+    configured, source = durable_permission_selection(provider)
+    controls = resolve_execution_controls(
+        provider,
+        permissions=permissions,
+        configured_permissions=configured,
+        permissions_source=source,
+        mode="interactive",
+    )
+    decision = resolve_provider_policy(
+        provider, runtime, controls.permissions_effective, "interactive"
+    )
     if not decision.supported:
         raise ValueError(decision.reason)
     quota = resolve_quota_policy(token_budget, runtime=runtime)
@@ -2091,8 +2154,10 @@ def interactive_workspace_command(
             "model": model,
             "effort": effort,
             "runtime": "terminal",
+            "permissions": permissions,
         },
         Path(__file__).parent,
+        admission_controls=controls,
     )
     if spec.effort_source == "cli" and _effort_override_receipt(
         provider, spec.effort
@@ -2138,6 +2203,7 @@ def interactive_workspace_command(
         ),
         "presentation": "visible",
         "requires_pty": True,
+        "execution_controls": controls.receipt(),
         **launch_selection_receipt(spec),
         "source_snapshot": str(source_path),
         "source_digest": spec.source_digest,
@@ -2221,7 +2287,7 @@ def interactive_workspace_command(
         # the container is prepared by the launch owner inside the Frame tab.
         "local-vm" if runtime == "local-vm" else "local-native",
         "--permissions",
-        permissions,
+        controls.permissions_effective,
         "--token-budget",
         quota.selection,
         "--operator",
@@ -2704,6 +2770,22 @@ def launch_interactive_workspace(
     from .workflow import reserve_run_id
 
     admission = dict(admission or {})
+    controls = controls_from_receipt(admission.get("execution_controls") or {})
+    if controls is None:
+        from .server_config import durable_permission_selection
+
+        configured, source = durable_permission_selection(provider)
+        controls = resolve_execution_controls(
+            provider,
+            permissions=permissions,
+            configured_permissions=configured,
+            permissions_source=source,
+            mode="interactive",
+        )
+    if controls.provider != provider:
+        raise ValueError("admitted controls do not match interactive provider")
+    permissions = controls.permissions_effective
+    admission["execution_controls"] = controls.receipt()
     run_id = str(admission.get("run_id") or reserve_run_id("init"))
     try:
         continuity_policy = resolve_continuity_policy(
@@ -2789,6 +2871,7 @@ def launch_interactive_workspace(
         permissions,
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
+        controls=controls,
     )
     if (
         continuity_policy.mode == "bare-fork"
@@ -2955,7 +3038,7 @@ def launch_interactive_workspace(
         # Keep the selected executable, permission/model flags and transport.
         child_id = identity["provider_session_id"]
         resume_command = interactive_policy_command(
-            provider, command[-1], runtime, permissions
+            provider, command[-1], runtime, permissions, controls=controls
         )
         if admission.get("skill") == "fork":
             # The public bare fork has no task input. Open the native child
@@ -4907,6 +4990,7 @@ MODEL_ENV_VARS = (
     "CODEX_MODEL",
     "GEMINI_MODEL",
     "GROK_MODEL",
+    "OMP_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 
@@ -4969,10 +5053,13 @@ def _headless_policy_flags(
 ) -> tuple[list[str], str]:
     """Provider flags + effective permission word for one headless launch.
 
-    Without explicit controls this is the historical default (bypass; auto for
-    junie). With controls, the resolved argv from execution_controls is used
+    With explicit controls, the resolved argv from execution_controls is used
     verbatim — the resolver already refused anything the provider cannot
-    enforce, so nothing here approximates a requested restriction.
+    enforce, so nothing here approximates a requested restriction. Without
+    controls this consumes the same shared decision as the typed lane: durable
+    config opt-in (server_config.durable_permission_selection) over the fleet
+    default ``auto`` (Founder decision 13716da4a2b8af7049ea1565) — never a
+    per-provider bypass fallback.
     """
     if controls is not None:
         if controls.provider != agent:
@@ -4980,8 +5067,12 @@ def _headless_policy_flags(
                 f"execution controls resolved for {controls.provider}, not {agent}"
             )
         return list(controls.provider_flags), controls.permissions_effective
+    from .execution_controls import default_permissions
+    from .server_config import durable_permission_selection
+
+    configured_word, _source = durable_permission_selection(agent)
     policy = resolve_provider_policy(
-        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
+        agent, "local-native", configured_word or default_permissions(agent), "headless"
     )
     if not policy.supported:
         raise ValueError(policy.reason)
@@ -5082,6 +5173,10 @@ def _default_command(
             "-p",
             prompt,
         ]
+    if agent == "omp":
+        # omp accepts the prompt as a positional argv message too; the stdin
+        # lane (_stdin_command) stays primary so prompts never hit ps(1).
+        return ["omp", "-p", "--mode", "json", *flags, prompt]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -5194,6 +5289,17 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "--no-auto-update",
             "--output-format",
             "json",
+        ]
+    if agent == "omp":
+        # omp print mode consumes the prompt from stdin when no positional
+        # message is given (verified 18.11.0: `echo … | omp -p` rc 0), so the
+        # private stdin contract fits natively — argv carries flags only.
+        return [
+            "omp",
+            "-p",
+            "--mode",
+            "json",
+            *flags,
         ]
     raise ValueError(f"unsupported agent: {agent}")
 
@@ -5539,6 +5645,7 @@ def write_meta(
     loop_nr: str | int = 0,
     skill_code: str = "",
     framework_version: str = "",
+    execution_controls: str = "",
 ) -> Path:
     """Write initial launcher meta.json."""
     meta = Path(meta_path)
@@ -5577,6 +5684,13 @@ def write_meta(
     if requested:
         payload["model_requested"] = requested
 
+    if execution_controls:
+        controls = controls_from_receipt(json.loads(execution_controls))
+        if controls is None or controls.provider != agent:
+            raise ValueError(
+                "execution controls receipt does not match launcher provider"
+            )
+        payload["execution_controls"] = controls.receipt()
     # Cut A: durable workspace identity on every new run meta (best-effort).
     try:
         from .workspace_catalog import resolve_run_workspace_identity
@@ -6539,6 +6653,7 @@ def _build_parser() -> argparse.ArgumentParser:
     write.add_argument("--loop-nr", default="0")
     write.add_argument("--skill-code", default="")
     write.add_argument("--framework-version", default="")
+    write.add_argument("--execution-controls", default="")
 
     finalize = sub.add_parser(
         "finalize-artifacts",
@@ -6576,7 +6691,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--runtime", choices=RUNTIME_POLICIES, default="local-native"
     )
     interactive_command.add_argument(
-        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+        "--permissions", choices=PERMISSION_POLICIES, default=""
     )
     interactive_command.add_argument("--token-budget", default="safe")
     interactive_command.add_argument(
@@ -6610,7 +6725,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--runtime", choices=RUNTIME_POLICIES, default="local-native"
     )
     interactive_launch.add_argument(
-        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+        "--permissions", choices=PERMISSION_POLICIES, default=""
     )
     interactive_launch.add_argument("--root", required=True)
     interactive_launch.add_argument("--prompt", default="")
@@ -6672,6 +6787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             loop_nr=args.loop_nr,
             skill_code=args.skill_code,
             framework_version=args.framework_version,
+            execution_controls=args.execution_controls,
         )
         return 0
     if args.command == "finish-meta":

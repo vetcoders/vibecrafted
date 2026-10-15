@@ -24,8 +24,8 @@
     end
 ```
 
-Current roster is eight agents (claude · codex · agy · junie · grok · cursor ·
-kimi · copilot); pick per the Founder's current economics, not this trio alone.
+Current roster is nine agents (claude · codex · agy · junie · grok · cursor ·
+kimi · copilot · omp); pick per the Founder's current economics, not this trio alone.
 
 ## Fast execution pool — Founder selection, 2026-10-08
 

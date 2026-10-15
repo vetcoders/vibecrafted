@@ -172,6 +172,7 @@ def test_capability_table_is_explicit_per_provider() -> None:
         "copilot",
         "cursor",
         "gemini",
+        "omp",
     }
     for row in rows.values():
         assert row.declared_level in monitor_lane.LEVELS
@@ -195,7 +196,7 @@ def test_capability_table_is_explicit_per_provider() -> None:
     assert monitor_lane.effective_level("codex", native_session=False) == (
         "checkpoint-poll"
     )
-    for name in ("agy", "grok", "junie", "kimi", "cursor", "gemini"):
+    for name in ("agy", "grok", "junie", "kimi", "cursor", "gemini", "omp"):
         assert rows[name].declared_level == "injected-on-call"
         assert rows[name].monitor is None
         assert monitor_lane.effective_level(name) == "injected-on-call"

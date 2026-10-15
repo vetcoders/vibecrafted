@@ -23,13 +23,14 @@ pub const USAGE_REPORT_SCHEMA: &str = "vibecrafted.usage-report.v1";
 /// analytical adapter. Keep this inventory explicit so adding a launcher
 /// cannot silently leave cost analysis behind.
 pub const USAGE_PROVIDER_ADAPTERS: &[&str] = &[
-    "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot",
+    "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot", "omp",
 ];
 /// Canonical billing pool per launcher: the one company-level vocabulary the
 /// quota board's `scope.pool`, the UI provider-picker seeds and the usage
 /// provider filter all share. Launcher names stay valid filters; a pool name
 /// selects every launcher drawing on it. 1:1 today — a pool shared by two
 /// launchers would be a deliberate contract change, not a default.
+/// OMP fronts multiple providers, so it has no fixed company billing pool.
 pub const PROVIDER_POOLS: &[(&str, &str)] = &[
     ("agy", "google"),
     ("claude", "anthropic"),

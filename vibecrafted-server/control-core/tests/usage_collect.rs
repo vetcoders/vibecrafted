@@ -41,10 +41,26 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         ),
     )
     .unwrap();
+    let omp_agent_dir = host.join(".omp/agent");
+    let omp_sessions = omp_agent_dir.join("sessions/private-project");
+    fs::create_dir_all(&omp_sessions).unwrap();
+    fs::write(
+        omp_sessions.join("omp-session-0001.jsonl"),
+        concat!(
+            r#"{"type":"message","timestamp":"2026-10-12T11:00:00Z","message":{"role":"assistant","#,
+            r#""provider":"fixture-provider","model":"fixture-model","usage":{"input":7,"output":3,"cacheRead":2,"cacheWrite":1,"totalTokens":13}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
     // SAFETY: single test in this process; nothing reads the environment concurrently.
     unsafe {
         std::env::set_var("HOME", &host);
         std::env::set_var("VIBECRAFTED_HOME", &vc_home);
+        std::env::set_var("XDG_CONFIG_HOME", host.join(".config"));
+        std::env::set_var("XDG_DATA_HOME", host.join(".local/share"));
+        std::env::set_var("OMP_PROFILE", "default");
+        std::env::set_var("PI_CODING_AGENT_DIR", &omp_agent_dir);
     }
 
     let plane = ControlPlane::new(&vc_home);
@@ -61,10 +77,11 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
     };
     assert_eq!(status("claude"), "ok", "{outcome:?}");
     assert_eq!(status("kimi"), "ok", "{outcome:?}");
+    assert_eq!(status("omp"), "ok", "{outcome:?}");
     assert_eq!(status("agy"), "unavailable", "no ledger is not a zero");
     assert_eq!(
         outcome.agents.len(),
-        8,
+        9,
         "every provider is collected by the one owner"
     );
 
@@ -84,7 +101,31 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         .find(|r| r.agent == "kimi")
         .expect("kimi row");
     assert_eq!(kimi.tokens.tokens_total.as_u64(), Some(11));
-    assert_eq!(report.totals.runs, 2);
+    let omp = report
+        .runs
+        .iter()
+        .find(|r| r.agent == "omp")
+        .expect("OMP native session reaches the existing local reader");
+    assert_eq!(omp.origin, "local");
+    assert_eq!(omp.status, "observed");
+    assert_eq!(omp.exit_code, None);
+    assert_eq!(omp.model, "fixture-provider/fixture-model");
+    assert_eq!(omp.provider, "omp");
+    assert_eq!(omp.tokens.tokens_input.as_u64(), Some(7));
+    assert_eq!(omp.tokens.tokens_output.as_u64(), Some(3));
+    assert_eq!(omp.tokens.tokens_cached_input.as_u64(), Some(2));
+    assert_eq!(omp.tokens.tokens_cache_write.as_u64(), Some(1));
+    assert_eq!(omp.tokens.tokens_total.as_u64(), Some(13));
+    assert_eq!(omp.cost.amount["value"], "unknown");
+    assert_eq!(control_core::usage::provider_pool("omp"), None);
+    let omp_source = report
+        .local_sources
+        .iter()
+        .find(|source| source.agent == "omp")
+        .expect("OMP local source");
+    assert_eq!(omp_source.source, "scan_cache");
+    assert_eq!(omp_source.counted, 1);
+    assert_eq!(report.totals.runs, 3);
 
     // A fresh collection exists: a second owner or a restart is a no-op.
     let again = plane.collect_local_usage(Duration::from_secs(3600));
@@ -94,12 +135,62 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
     );
 
     // Quota refresh only touches what has an authoritative source; nothing is guessed.
-    let quota = plane.refresh_quota(&["cursor".to_string(), "codex".to_string()]);
+    let quota =
+        plane.refresh_quota(&["cursor".to_string(), "codex".to_string(), "omp".to_string()]);
     assert!(quota.started, "{quota:?}");
     assert!(
         quota.agents.iter().all(|a| a.status == "unavailable"),
         "{quota:?}"
     );
+    assert!(
+        quota
+            .agents
+            .iter()
+            .any(|agent| agent.agent == "omp" && agent.status == "unavailable"),
+        "OMP has no authoritative company quota: {quota:?}"
+    );
+    let omp_quota: serde_json::Value =
+        serde_json::from_slice(&fs::read(vc_home.join("telemetry/omp/quota.json")).unwrap())
+            .unwrap();
+    assert_eq!(omp_quota["agent"], "omp");
+    assert_eq!(omp_quota["metrics"]["fleet_processed_total"], 13);
+    assert!(omp_quota["quota"].get("limit").is_none());
+    assert!(omp_quota["quota"].get("remaining").is_none());
+
+    // Observe the actual collector request at an inert executable boundary.
+    // No fixture response claims that a provider was collected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = root.join("inert-collector");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n/bin/cat > \"$VIBECRAFTED_HOME/collector-request.json\"\nprintf '[]'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        // SAFETY: this binary contains exactly one test.
+        unsafe {
+            std::env::set_var("VIBECRAFTED_PYTHON", &executable);
+        }
+        let captured = plane.collect_local_usage(Duration::ZERO);
+        assert!(captured.started, "{captured:?}");
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(vc_home.join("collector-request.json")).unwrap())
+                .unwrap();
+        assert_eq!(request["mode"], "local");
+        assert_eq!(
+            request["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|agent| agent.as_str() == Some("omp"))
+                .count(),
+            1,
+            "the existing collector requests OMP exactly once"
+        );
+    }
     let none = plane.refresh_quota(&["not-a-provider".to_string()]);
     assert!(!none.started);
     fs::remove_dir_all(root).ok();

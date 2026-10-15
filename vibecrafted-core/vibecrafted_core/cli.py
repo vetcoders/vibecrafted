@@ -68,6 +68,7 @@ AGENTS = {
     "cursor",
     "kimi",
     "copilot",
+    "omp",
     "swarm",
 }
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}

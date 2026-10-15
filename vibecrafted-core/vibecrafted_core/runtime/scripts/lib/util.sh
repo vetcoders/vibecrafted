@@ -350,6 +350,18 @@ spawn_validate_runtime() {
   esac
 }
 
+# Resolve once before any launch side effects. The helper emits only shell-quoted
+# assignments; the generated command and its metadata consume this same receipt.
+spawn_resolve_permissions() {
+  # Runtime selects presentation only: even terminal/visible panes run the
+  # provider's print/exec command, so permission support is always headless.
+  local agent="$1" permissions="${3:-}" sandbox="${4:-}" resolved
+  resolved="$(spawn_python_module vibecrafted_core.permission_flags "$agent" \
+    --mode headless --permissions "$permissions" --sandbox "$sandbox" --shell-env)" || return $?
+  eval "$resolved"
+  export SPAWN_EXECUTION_CONTROLS
+}
+
 # Normalize a model frontmatter value: empty string for placeholders
 # (`pending`, `unknown`, `null`), pass-through otherwise. Used by every
 # marbles dispatch site so a single point of truth gates which model values
@@ -358,7 +370,7 @@ spawn_validate_runtime() {
 spawn_clean_model() {
   local raw="${1:-}"
   case "$raw" in
-    pending|unknown|null) printf '' ;;
+    pending|unknown|null|*-cli-default) printf '' ;;
     *) printf '%s' "$raw" ;;
   esac
 }

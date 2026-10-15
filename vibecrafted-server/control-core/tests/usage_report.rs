@@ -183,16 +183,6 @@ fn usage_report_filters_window_and_dimensions_without_following_symlinks() {
 }
 
 #[test]
-fn analytical_adapter_inventory_covers_every_supported_provider() {
-    assert_eq!(
-        control_core::USAGE_PROVIDER_ADAPTERS,
-        &[
-            "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"
-        ]
-    );
-}
-
-#[test]
 fn usage_report_recovers_transcript_totals_without_treating_missing_as_zero() {
     let home = fixture_home("transcript-recovery");
     let now = Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap();
@@ -451,8 +441,8 @@ fn local_usage_reads_real_provider_formats_and_never_fabricates_completion() {
     assert_eq!(source(&report, "codex").source, "absent");
     assert_eq!(
         report.local_sources.len(),
-        8,
-        "all eight providers are accounted for"
+        9,
+        "all supported providers are accounted for"
     );
     fs::remove_dir_all(home).ok();
 }
@@ -793,8 +783,8 @@ fn provider_filter_roundtrips_pool_names_and_launcher_names() {
 
 #[test]
 fn every_seeded_pool_name_selects_exactly_its_own_launcher() {
-    // One VC run per adapter; each picker seed (pool vocabulary) must select
-    // exactly the run of its own launcher — 1:1, no overlap, no empty seed.
+    // Each company-pool picker seed selects its own launcher's run.
+    // Multiprovider launchers such as OMP need not have a company pool.
     let home = fixture_home("provider-pool-map");
     let pairs = [
         ("agy", "google"),
@@ -806,12 +796,7 @@ fn every_seeded_pool_name_selects_exactly_its_own_launcher() {
         ("junie", "jetbrains"),
         ("kimi", "moonshot"),
     ];
-    assert_eq!(
-        pairs.len(),
-        control_core::USAGE_PROVIDER_ADAPTERS.len(),
-        "test inventory tracks the adapter inventory"
-    );
-    for (agent, _) in &pairs {
+    for agent in control_core::USAGE_PROVIDER_ADAPTERS {
         write_meta(
             &home,
             &format!("run-{agent}"),
@@ -839,6 +824,15 @@ fn every_seeded_pool_name_selects_exactly_its_own_launcher() {
         let ids: Vec<_> = report.runs.iter().map(|run| run.run_id.as_str()).collect();
         assert_eq!(ids, [format!("run-{agent}")], "pool {pool}");
     }
+    let omp = plane.usage_report(
+        now(),
+        UsageFilter {
+            provider: Some("omp".into()),
+            ..UsageFilter::default()
+        },
+    );
+    assert_eq!(omp.runs.len(), 1);
+    assert_eq!(omp.runs[0].run_id, "run-omp");
     fs::remove_dir_all(home).ok();
 }
 
@@ -927,5 +921,51 @@ fn a_measured_zero_token_bucket_stays_known_in_scan_and_archive() {
         assert_eq!(run.exit_code, None);
     }
     assert_eq!(report.totals.runs_tokens_unknown, 0);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn omp_missing_projection_and_unmeasured_archive_never_become_known_zero() {
+    let home = fixture_home("omp-local-unknown");
+    let plane = ControlPlane::new(&home);
+    let filter = UsageFilter {
+        agent: Some("omp".to_string()),
+        ..UsageFilter::default()
+    };
+    let absent = plane.usage_report(now(), filter.clone());
+    assert_eq!(source(&absent, "omp").source, "absent");
+    assert_eq!(absent.totals.runs, 0);
+
+    let archive = home.join("telemetry/archive");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(
+        archive.join("omp.jsonl"),
+        concat!(
+            "{\"day\":\"2026-10-12\",\"model\":\"unmeasured-provider-model\"}\n",
+            "{\"day\":\"2026-10-12\",\"model\":\"other-provider-model\",",
+            "\"input_tokens\":7,\"output_tokens\":3,\"cache_read_tokens\":2,\"cache_creation_tokens\":1}\n"
+        ),
+    )
+    .unwrap();
+    let report = plane.usage_report(now(), filter);
+    assert_eq!(source(&report, "omp").source, "archive");
+    assert_eq!(source(&report, "omp").counted, 2);
+    assert_eq!(report.totals.runs, 2);
+    assert_eq!(report.totals.runs_tokens_unknown, 1);
+    assert_eq!(report.totals.tokens_total_known, 13);
+    let unmeasured = report
+        .runs
+        .iter()
+        .find(|run| run.model == "unmeasured-provider-model")
+        .expect("unmeasured OMP activity remains visible");
+    assert_eq!(unmeasured.tokens.tokens_total["value"], "unknown");
+    for run in &report.runs {
+        assert_eq!(run.agent, "omp");
+        assert_eq!(run.origin, "local");
+        assert_eq!(run.status, "observed");
+        assert_eq!(run.exit_code, None);
+        assert_eq!(run.cost.amount["value"], "unknown");
+    }
+    assert_eq!(control_core::usage::provider_pool("omp"), None);
     fs::remove_dir_all(home).ok();
 }

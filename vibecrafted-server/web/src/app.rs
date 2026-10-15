@@ -965,6 +965,7 @@ pub fn UsagePage() -> impl IntoView {
                             <option value="grok">"grok"</option>
                             <option value="junie">"junie"</option>
                             <option value="kimi">"kimi"</option>
+                            <option value="omp">"omp"</option>
                         </select></label>
                         <label><span>"Model"</span><select id="usage-model" name="model">
                             <option value="">"all"</option>
@@ -1298,7 +1299,7 @@ fn usage_dashboard_script() -> &'static str {
     renderDimensions('usage-models', report.dimensions && report.dimensions.models);
     const pickers = report.pickers || report.dimensions || {};
     const providerNames = ['google','anthropic','openai','github','anysphere','xai','jetbrains','moonshot'];
-    const agentNames = ['agy','claude','codex','copilot','cursor','grok','junie','kimi'];
+    const agentNames = ['agy','claude','codex','copilot','cursor','grok','junie','kimi','omp'];
     populatePicker('provider', [...providerNames.map((name) => ({name})), ...(pickers.providers || [])]);
     populatePicker('agent', [...agentNames.map((name) => ({name})), ...(pickers.agents || [])]);
     populatePicker('model', pickers.models);

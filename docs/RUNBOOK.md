@@ -3,7 +3,8 @@
 Terminal-first, in order, from a cold terminal to a supervised release.
 Linux/WSL2 use this POSIX deck; native Windows supports a smaller surface.
 Start with the [Entry book](ENTRY_BOOK.md) for installation and platform limits.
-[Polski](pl/RUNBOOK.md). Verified against the source deck on 2026-10-06.
+[Polski](pl/RUNBOOK.md). Source-deck comparison recorded on 2026-10-06;
+that historical snapshot does not verify the currently installed CLI.
 This is the _operational_ companion to the canon: what to type, what you will
 see, and what to do when it breaks. For the phase doctrine see
 [`runtime/LIFECYCLE.md`](runtime/LIFECYCLE.md); for runtime failure classes see
@@ -58,10 +59,17 @@ Notes that save time:
 - `vibecrafted start --repo /path/to/repo` creates and enters a new workspace.
   It is **create-only**, not a dashboard alias. Exit 3 means the name exists;
   `vibecrafted start resume` deliberately re-enters an existing workspace.
-- Agents: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+- Agents: `claude · codex · agy · junie · grok · cursor · kimi · copilot · omp`.
   `--model` support and permission/sandbox support are provider-specific;
   unsupported combinations fail before launch. Read `vibecrafted capabilities --json`
   and the selected skill's `--help` instead of assuming flag parity.
+- Checkouts and worktrees have one canonical home. Dispatch cuts land in
+  `${VIBECRAFTED_HOME:-~/.vibecrafted}/worktrees/<org>/<repo>/<YYYY_MMDD>/<cut-id>`
+  (owner: `vibecrafted_core/dispatch/worktrees.py`; branch canon `cut/<id>`,
+  baseline is always a full pinned SHA), artifacts in
+  `${VIBECRAFTED_HOME:-~/.vibecrafted}/artifacts/<org>/<repo>/<stamp>`.
+  Hand-created working checkouts follow the same geometry; never invent
+  ad-hoc paths next to it.
 - Every skill installs a `vc-<skill>` shortcut. `justdo` is its own posture
   and skill identity, not an alias of `implement`.
 - Native Windows: `doctor` and `server` have native owners. `start`, `dashboard`,
@@ -71,6 +79,31 @@ Notes that save time:
 <!-- Sources: scripts/vibecrafted cmd_start_help / cmd_init_help / help_all;
      vibecrafted-core/vibecrafted_core/cli.py win32 lifecycle refusal;
      vibecrafted-core/vibecrafted_core/help_surface.py capabilities. -->
+
+### Permission policy before dispatch
+
+In `~/.config/vibecrafted/config.toml` (honoring `XDG_CONFIG_HOME`), keep the
+global auto-first default and opt into bypass only where intended:
+
+```toml
+permissions = "auto"
+
+[agents.omp]
+permissions = "bypass"
+```
+
+Precedence: explicit dispatch (`--permissions`) > `agents.<provider>.permissions`
+
+> global `permissions` > `auto`. Malformed settings and unsupported combinations
+> refuse launch, never silently bypass. Sandbox remains independent. The admitted
+> policy is frozen through argv, metadata and native resume, including direct
+> portable launchers, which use the central resolver rather than a no-flag lane.
+
+OMP `auto` selects its native write tier; headless execution refuses an exec
+prompt requirement. Read-only uses a tool whitelist; bypass selects native yolo
+and is opt-in. Kimi/Copilot headless `auto` is unsupported: select a supported
+explicit policy or interactive runtime. OMP messages use durable inbox/checkpoint
+delivery, not live RPC steering.
 
 ## 2. Dispatch grammar (one public shape, one engine)
 

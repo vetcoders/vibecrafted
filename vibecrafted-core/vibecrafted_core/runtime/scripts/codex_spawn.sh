@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: codex_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Modes are labels for the artifact metadata, e.g. implement, review, or plan.
 Runtime modes:
@@ -19,6 +20,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 model="${CODEX_MODEL:-}"
 root=""
 plan_file=""
@@ -37,6 +40,16 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
+      ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
       ;;
     --model)
       shift
@@ -79,6 +92,7 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions codex "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths codex "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_codex_prompt.md"
@@ -121,7 +135,7 @@ fi
 failure_report_fallback="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-codex}\"; printf 'status: failed\n'; printf '%s\n\n' '---'; printf '%s\n' 'Codex failed before writing a standalone report file.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message, if present:'; printf '%s\n' $qlast_message; } > $qreport; fi;"
 # Failure fallback is emitted inside the child shell before it exits so meta
 # finalization cannot race ahead of the minimal failure report.
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; codex exec -C $qroot --json --dangerously-bypass-approvals-and-sandbox $model_flag --output-last-message $qlast_message - < $qruntime 2>&1 | $qpython $qbridge --transcript $qtranscript ${bridge_flags}; pipeline_status=\$?; $last_message_fallback $missing_report_guard $failure_report_fallback echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; codex exec -C $qroot --json $SPAWN_PERMISSION_FLAGS $model_flag --output-last-message $qlast_message - < $qruntime 2>&1 | $qpython $qbridge --transcript $qtranscript ${bridge_flags}; pipeline_status=\$?; $last_message_fallback $missing_report_guard $failure_report_fallback echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
 
 # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
 # dollar expressions in the producing shell would change the emitted contract.

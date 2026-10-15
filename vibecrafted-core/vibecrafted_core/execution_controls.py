@@ -103,6 +103,12 @@ SANDBOX_EVIDENCE: dict[str, str] = {
         "GitHub Copilot CLI 1.0.89-7 --help (2026-09-29): permission, path, "
         "URL and tool controls exist; no explicit shell sandbox on/off flag"
     ),
+    "omp": (
+        "omp 18.11.0 --help (probed 2026-10-15): no sandbox surface. "
+        "Permission tiers via --approval-mode always-ask|write|yolo (combines "
+        "with -p/--print), tool whitelist via --tools; neither is an OS "
+        "confinement boundary"
+    ),
 }
 
 # What each provider's sandbox actually confines. Named in every receipt so a
@@ -124,6 +130,7 @@ SANDBOX_BOUNDARY: dict[str, str] = {
     "junie": "",
     "kimi": "",
     "copilot": "",
+    "omp": "",
 }
 
 # Claude Code's documented hard-gate shape: the sandbox must be on, a missing
@@ -181,8 +188,15 @@ def parse_sandbox_word(value: Any, *, label: str = "--sandbox") -> bool | None:
 
 
 def default_permissions(provider: str) -> str:
-    """The policy a launcher applies when ``--permissions`` is omitted."""
-    return "auto" if provider == "junie" else "bypass"
+    """The policy a launcher applies when ``--permissions`` is omitted.
+
+    Fleet doctrine (Founder decision 13716da4a2b8af7049ea1565, 2026-10-15):
+    the default is ``auto`` for every provider; every other mode is a deliberate
+    opt-in via durable config or an explicit dispatch selection. There is no
+    per-provider bypass fallback here — an unsupported ``auto`` combination is
+    refused by the caller with the named alternative, never downgraded.
+    """
+    return "auto"
 
 
 def sandbox_word(value: bool | None) -> str:
@@ -205,6 +219,9 @@ class ExecutionControls:
     behavior: str
     evidence: str
     boundary: str = ""
+    # Where the effective permission word came from: "dispatch" (explicit
+    # --permissions), "config:agents.<provider>", "config:global", or "default".
+    permissions_source: str = ""
 
     @property
     def requested(self) -> bool:
@@ -218,6 +235,7 @@ class ExecutionControls:
             "provider": self.provider,
             "permissions_requested": self.permissions_requested,
             "permissions_effective": self.permissions_effective,
+            "permissions_source": self.permissions_source or "default",
             "sandbox_requested": sandbox_word(self.sandbox_requested),
             "sandbox_effective": self.sandbox_effective,
             "provider_flags": list(self.provider_flags),
@@ -397,11 +415,59 @@ def _apply_sandbox(
             f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
         )
 
+    if provider == "omp":
+        if sandbox is None:
+            return (
+                base_flags,
+                "provider-default",
+                "omp exposes no sandbox control",
+            )
+        raise _refuse(
+            provider,
+            "omp 18.11.0 exposes no sandbox control, so --sandbox "
+            f"{sandbox_word(sandbox)} cannot be enforced. Omit --sandbox.",
+        )
+
     if sandbox is None:
         return base_flags, "provider-default", ""
     raise _refuse(
         provider,
         "no sandbox contract is recorded for this provider; omit --sandbox",
+    )
+
+
+def controls_from_receipt(payload: dict[str, Any]) -> ExecutionControls | None:
+    """Rebuild the frozen decision from a stored ``execution_controls`` receipt.
+
+    Admission freezes the resolved controls into the run meta; argv builders and
+    resume paths consume THIS reconstruction instead of re-resolving against
+    live config (Founder decision 13716da4a2b8af7049ea1565: one frozen decision
+    rides from admission to argv/meta and resume). ``None`` only when the
+    payload carries no receipt at all; a malformed receipt raises.
+    """
+    if not payload:
+        return None
+    if payload.get("schema") != "vibecrafted.execution_controls.v1":
+        raise ExecutionControlsError(
+            f"unknown execution_controls receipt schema: {payload.get('schema')!r}"
+        )
+    provider = str(payload.get("provider") or "")
+    effective = str(payload.get("permissions_effective") or "")
+    if not provider or effective not in PERMISSION_POLICIES:
+        raise ExecutionControlsError(
+            "execution_controls receipt is missing provider/permissions_effective"
+        )
+    return ExecutionControls(
+        provider=provider,
+        permissions_requested=str(payload.get("permissions_requested") or ""),
+        permissions_effective=effective,
+        sandbox_requested=parse_sandbox_word(payload.get("sandbox_requested") or None),
+        sandbox_effective=str(payload.get("sandbox_effective") or ""),
+        provider_flags=tuple(str(flag) for flag in payload.get("provider_flags") or ()),
+        behavior=str(payload.get("behavior") or ""),
+        evidence=str(payload.get("evidence") or ""),
+        boundary=str(payload.get("boundary") or ""),
+        permissions_source=str(payload.get("permissions_source") or "default"),
     )
 
 
@@ -411,19 +477,33 @@ def resolve_execution_controls(
     permissions: str = "",
     sandbox: bool | None = None,
     mode: str = "headless",
+    configured_permissions: str = "",
+    permissions_source: str = "",
 ) -> ExecutionControls:
     """Resolve the exact provider argv for the requested controls, or refuse.
 
-    ``permissions`` is one of :data:`PERMISSION_POLICIES` or ``""`` (provider
-    default: ``bypass``, ``auto`` for junie). ``sandbox`` is ``True``/``False``
-    or ``None`` (provider default). Raises :class:`ExecutionControlsError`
-    naming the provider and a supported alternative whenever the installed CLI
-    cannot enforce the combination.
+    ``permissions`` is one of :data:`PERMISSION_POLICIES` or ``""`` (explicit
+    dispatch selection). ``configured_permissions`` is the durable config word
+    (already loaded by the caller from ``server_config``), with
+    ``permissions_source`` naming the config cell for receipts. Precedence:
+    explicit dispatch > durable config > fleet default (``auto``). A malformed
+    configured word refuses before launch, never silently reverts. Raises
+    :class:`ExecutionControlsError` naming the provider and a supported
+    alternative whenever the installed CLI cannot enforce the combination.
     """
     from .spawn import resolve_provider_policy
 
     requested = parse_permissions_word(permissions)
-    effective = requested or default_permissions(provider)
+    configured = parse_permissions_word(
+        configured_permissions, label="durable config permissions"
+    )
+    effective = requested or configured or default_permissions(provider)
+    if requested:
+        source = "dispatch"
+    elif configured:
+        source = permissions_source or "config"
+    else:
+        source = "default"
     try:
         policy = resolve_provider_policy(provider, "local-native", effective, mode)
     except ValueError as exc:
@@ -457,4 +537,5 @@ def resolve_execution_controls(
         behavior=behavior,
         evidence=SANDBOX_EVIDENCE.get(provider, ""),
         boundary=SANDBOX_BOUNDARY.get(provider, ""),
+        permissions_source=source,
     )
