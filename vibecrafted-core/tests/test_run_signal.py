@@ -8,11 +8,13 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from vibecrafted_core import (
     control_plane,
     process_control,
@@ -664,34 +666,128 @@ def _collect_cli(
     return int(proc.returncode if proc.returncode is not None else 1), payload, stderr
 
 
-def _wait_for_connections(
-    pid: int, socket_path: Path, *, expected: int, gate: Path, timeout: float = 90.0
-) -> None:
-    """Block until ``pid`` holds ``expected`` accepted connections on the socket.
+def _count_lsof_socket_rows(output: str, pid: int, socket_path: Path) -> int:
+    """Count ``lsof -F pfn`` unix-socket fds of ``pid`` named exactly ``socket_path``.
 
-    lsof lists the listener plus each accepted connection by the socket path.
-    Hosts without lsof fall back to a fixed hold so the test is never weaker
-    than the old fixed-delay worker.
+    A listener and every connection it accepted carry the bound path as their
+    name (macOS prints the bare path, Linux appends `` type=STREAM``); the
+    connecting side prints ``->0x...`` / a bare ``type=STREAM`` and is not
+    counted. Rows of any other pid, any other path, and anything malformed
+    count as zero.
+    """
+    current: int | None = None
+    rows = 0
+    for line in output.splitlines():
+        if not line:
+            continue
+        field, value = line[0], line[1:]
+        if field == "p":
+            current = int(value) if value.isdigit() else None
+        elif (
+            field == "n"
+            and current == pid
+            and value.removesuffix(" type=STREAM") == str(socket_path)
+        ):
+            rows += 1
+    return rows
+
+
+def _wait_for_connections(
+    pid: int,
+    socket_path: Path,
+    *,
+    expected: int,
+    timeout: float = 90.0,
+    lsof_timeout: float = 10.0,
+    process: subprocess.Popen[str] | None = None,
+) -> None:
+    """Block until ``pid`` holds the listener plus ``expected`` accepted connections.
+
+    Evidence is ``lsof -F pfn`` of that exact pid, bounded per call. Without
+    lsof the precondition cannot be proven, so this fails instead of falling
+    back to a timing guess (hosted macOS and ubuntu runners ship lsof).
     """
     lsof = shutil.which("lsof")
-    if lsof is None:
-        time.sleep(4.0)
-        return
+    assert lsof is not None, "lsof is required to prove the connection precondition"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        listing = subprocess.run(
-            [lsof, "-nU", "-a", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
-        if sum(1 for row in listing.splitlines() if str(socket_path) in row) >= (
-            expected + 1
-        ):
+        assert process is None or process.poll() is None, "dispatcher exited early"
+        try:
+            listing = subprocess.run(
+                [lsof, "-nP", "-a", "-U", "-p", str(pid), "-F", "pfn"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=lsof_timeout,
+            ).stdout
+        except subprocess.TimeoutExpired:
+            listing = ""
+        if _count_lsof_socket_rows(listing, pid, socket_path) >= expected + 1:
             return
         time.sleep(0.1)
-    gate.write_text("abort\n", encoding="utf-8")
-    raise AssertionError(f"dispatcher never reached {expected} connections")
+    raise AssertionError(f"pid {pid} never reached {expected} accepted connections")
+
+
+_MACOS_LSOF = "p42\nf0\nn->0x1\nf3\nn{path}\nf4\nn->0x2\nf6\nn{path}\nf7\nn{path}\n"
+_LINUX_LSOF = (
+    "p42\nf3\nn{path} type=STREAM\nf4\nntype=STREAM\nf6\nn{path} type=STREAM\n"
+    "f7\nn{path} type=STREAM\n"
+)
+
+
+def test_lsof_parser_counts_only_exact_pid_and_path() -> None:
+    path = Path("/tmp/vc/run.sock")
+    for template in (_MACOS_LSOF, _LINUX_LSOF):
+        listing = template.format(path=path)
+        assert _count_lsof_socket_rows(listing, 42, path) == 3
+        # Wrong pid, wrong path (incl. a longer path sharing the prefix) never count.
+        assert _count_lsof_socket_rows(listing, 43, path) == 0
+        assert _count_lsof_socket_rows(listing, 42, Path("/tmp/vc/other.sock")) == 0
+        assert _count_lsof_socket_rows(listing, 42, Path("/tmp/vc/run.soc")) == 0
+    # Listener-only, truncated, empty and malformed output cannot reach expected+1.
+    listener_only = "p42\nf3\nn/tmp/vc/run.sock\n"
+    assert _count_lsof_socket_rows(listener_only, 42, path) == 1
+    for garbage in (
+        "",
+        "\n",
+        "n/tmp/vc/run.sock\n",
+        "pxyz\nn/tmp/vc/run.sock\n",
+        "\x00\xff",
+    ):
+        assert _count_lsof_socket_rows(garbage, 42, path) == 0
+    # A second process's rows after the target pid do not leak into its count.
+    mixed = "p42\nf3\nn/tmp/vc/run.sock\np99\nf3\nn/tmp/vc/run.sock\n"
+    assert _count_lsof_socket_rows(mixed, 42, path) == 1
+
+
+def test_wait_for_connections_needs_real_accepted_sockets() -> None:
+    # AF_UNIX paths are length-capped; pytest's tmp_path is too long for them.
+    with tempfile.TemporaryDirectory(prefix="vc-") as short:
+        _exercise_wait_for_connections(Path(short) / "s.sock")
+
+
+def _exercise_wait_for_connections(path: Path) -> None:
+    listener = socket.socket(socket.AF_UNIX)
+    clients: list[socket.socket] = []
+    accepted: list[socket.socket] = []
+    try:
+        listener.bind(str(path))
+        listener.listen()
+        # Listener only: the gate must not release.
+        with pytest.raises(AssertionError, match="never reached"):
+            _wait_for_connections(os.getpid(), path, expected=2, timeout=1.0)
+        for _ in range(2):
+            client = socket.socket(socket.AF_UNIX)
+            client.connect(str(path))
+            clients.append(client)
+            accepted.append(listener.accept()[0])
+        _wait_for_connections(os.getpid(), path, expected=2, timeout=10.0)
+        # A different pid with the right path is not evidence.
+        with pytest.raises(AssertionError, match="never reached"):
+            _wait_for_connections(os.getppid(), path, expected=2, timeout=1.0)
+    finally:
+        for sock in (*clients, *accepted, listener):
+            sock.close()
 
 
 def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
@@ -719,7 +815,7 @@ def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     )
     try:
         _wait_for(socket_path)
-        _wait_for_connections(process.pid, socket_path, expected=20, gate=gate)
+        _wait_for_connections(process.pid, socket_path, expected=20, process=process)
         gate.write_text("go\n", encoding="utf-8")
         for client in clients:
             rc, payload, err = _collect_cli(client, timeout=90)
@@ -727,9 +823,10 @@ def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
             payloads.append(payload)
         stdout, stderr = process.communicate(timeout=5)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
+        for owned in (process, *clients):
+            if owned.poll() is None:
+                owned.kill()
+                owned.communicate(timeout=10)
 
     assert process.returncode == 0, (stdout, stderr)
     assert len(payloads) == 20

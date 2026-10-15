@@ -509,11 +509,16 @@ def test_help_surface_documents_the_controls(world: _World) -> None:
     result = _cli(["help", "workflow"], cwd=world.outside, env=world.env)
     assert result.returncode == 0, result.stderr
     assert "--permissions <policy>" in result.stdout
+    # Auto-first: the help never advertises bypass as the default.
+    assert "default: per-agent/global config, else auto" in result.stdout
+    assert "default: bypass" not in result.stdout
     assert "--sandbox [true|false]" in result.stdout
     assert "--permissions auto --sandbox true" in result.stdout
     argparse_help = _cli(["workflow", "--help"], cwd=world.outside, env=world.env)
     assert argparse_help.returncode == 0
     assert "--permissions" in argparse_help.stdout
+    assert "else auto" in " ".join(argparse_help.stdout.split())
+    assert "default: bypass" not in argparse_help.stdout
     assert "--sandbox" in argparse_help.stdout
 
 

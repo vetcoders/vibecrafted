@@ -643,7 +643,7 @@ def _option_lines(topic: str) -> list[str]:
         "  --base <ref|SHA|HEAD>          Pinned commit; local HEAD or identity remote HEAD by default",
         "  --execution-runtime <living-tree|local-worktrees>  Execution location",
         "  --worktree [true|false]        Alias for local-worktrees; dirty parent preserved",
-        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
+        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: per-agent/global config, else auto)",
         "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
         "  --remediate-trust-block       Founder-authorized continuation on a trust BLOCK; does not rewrite the journal",
         "  --remediation-reason <text>   Required with --remediate-trust-block; recorded on the launch receipt",

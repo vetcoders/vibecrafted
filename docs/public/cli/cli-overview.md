@@ -50,18 +50,18 @@ supervised run.
 
 Every skill launcher accepts the same flag contract:
 
-| Flag                       | Meaning                                                                              |
-| -------------------------- | ------------------------------------------------------------------------------------ |
-| `-p, --prompt <text>`      | Inline prompt                                                                        |
-| `-f, --file <path.md>`     | Input file as prompt context                                                         |
-| `--repo <path>`            | Repository to work in, from any directory (`--root`: legacy)                         |
-| `--worktree [true\|false]` | Run in a fresh linked checkout of `--repo` (clean Git root)                          |
-| `--permissions <policy>`   | `bypass\|auto\|accept-edits\|read-only`, enforced by the agent CLI (default: bypass) |
-| `--sandbox [true\|false]`  | Agent CLI sandbox on/off; refused before launch when it cannot be enforced           |
-| `--model <name>`           | Agent model override (passed through exactly, e.g. `claude-fable-5-1`)               |
-| `--count <n>`              | Marbles / Polarize loop count (default: 3)                                           |
-| `--depth <n>`              | Marbles plan crawl depth (default: 3)                                                |
-| `--session <id>`           | Session ID for `vibecrafted resume` / `vibecrafted fork`                             |
+| Flag                       | Meaning                                                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `-p, --prompt <text>`      | Inline prompt                                                                                                            |
+| `-f, --file <path.md>`     | Input file as prompt context                                                                                             |
+| `--repo <path>`            | Repository to work in, from any directory (`--root`: legacy)                                                             |
+| `--worktree [true\|false]` | Run in a fresh linked checkout of `--repo` (clean Git root)                                                              |
+| `--permissions <policy>`   | `bypass\|auto\|accept-edits\|read-only`, enforced by the agent CLI (default: durable per-agent/global config, else auto) |
+| `--sandbox [true\|false]`  | Agent CLI sandbox on/off; refused before launch when it cannot be enforced                                               |
+| `--model <name>`           | Agent model override (passed through exactly, e.g. `claude-fable-5-1`)                                                   |
+| `--count <n>`              | Marbles / Polarize loop count (default: 3)                                                                               |
+| `--depth <n>`              | Marbles plan crawl depth (default: 3)                                                                                    |
+| `--session <id>`           | Session ID for `vibecrafted resume` / `vibecrafted fork`                                                                 |
 
 `--verbose` is a global option for detailed output. `--repo` and the legacy
 `--root` go through one selector everywhere: passing both with different
