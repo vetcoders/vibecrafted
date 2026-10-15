@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -39,6 +40,7 @@ def _dispatcher(
     delay: float = 0.15,
     home: Path | None = None,
     heartbeat_lines: int = 0,
+    gate: Path | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     home = home or tmp_path / "home"
@@ -46,15 +48,25 @@ def _dispatcher(
     report = tmp_path / f"{run_id}.md"
     transcript = tmp_path / f"{run_id}.log"
     meta.parent.mkdir(parents=True, exist_ok=True)
+    # ``gate`` replaces the fixed sleep with a release the test grants once it
+    # has proof of its precondition; the cap only bounds a test that never does.
+    hold = (
+        f"time.sleep({delay!r})\n"
+        if gate is None
+        else (
+            f"_g = Path({str(gate)!r}); _t = time.monotonic() + 120\n"
+            "while not _g.exists() and time.monotonic() < _t: time.sleep(0.05)\n"
+        )
+    )
     worker = (
-        "import os,time; from pathlib import Path; "
-        f"time.sleep({delay!r}); "
-        f"[(print('pulse-' + str(i) + '-' + ('x' * 1024), flush=True)) for i in range({heartbeat_lines})]; "
-        "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
-        "'---\\nrun_id: "
+        "import os,time; from pathlib import Path\n"
+        + hold
+        + f"[(print('pulse-' + str(i) + '-' + ('x' * 1024), flush=True)) for i in range({heartbeat_lines})]; "
+        + "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
+        + "'---\\nrun_id: "
         + run_id
         + "\\nagent: python\\nskill: test\\nstatus: completed\\nclaim_status: completed\\nfinalized: true\\nclaim: uds-test\\n---\\nbody\\n', encoding='utf-8'); "
-        "print('done')"
+        + "print('done')"
     )
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
@@ -652,6 +664,36 @@ def _collect_cli(
     return int(proc.returncode if proc.returncode is not None else 1), payload, stderr
 
 
+def _wait_for_connections(
+    pid: int, socket_path: Path, *, expected: int, gate: Path, timeout: float = 90.0
+) -> None:
+    """Block until ``pid`` holds ``expected`` accepted connections on the socket.
+
+    lsof lists the listener plus each accepted connection by the socket path.
+    Hosts without lsof fall back to a fixed hold so the test is never weaker
+    than the old fixed-delay worker.
+    """
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        time.sleep(4.0)
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        listing = subprocess.run(
+            [lsof, "-nU", "-a", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        if sum(1 for row in listing.splitlines() if str(socket_path) in row) >= (
+            expected + 1
+        ):
+            return
+        time.sleep(0.1)
+    gate.write_text("abort\n", encoding="utf-8")
+    raise AssertionError(f"dispatcher never reached {expected} connections")
+
+
 def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -662,17 +704,25 @@ def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
     socket_path = run_signal_socket_path(run_id)
     payloads: list[dict[str, object]] = []
     # Arm all twenty clients before the dispatcher exists: the launch-grace
-    # re-arm holds them until the socket binds, so every client is connected
-    # before the worker exits instead of racing the post-terminal teardown
-    # grace (twenty cold CLI boots can outlast it on a loaded host).
+    # re-arm holds them until the socket binds. The worker is then held on a
+    # gate that is released only once the dispatcher demonstrably has all twenty
+    # connections: twenty cold CLI boots can outlast any fixed worker delay on a
+    # loaded host, and a client that connects after teardown honestly reports
+    # signal_kind "missing" (durable terminal), which is not a fanout member.
     clients = [
-        _spawn_cli_await(home, run_id, config_home=config_home) for _ in range(20)
+        _spawn_cli_await(home, run_id, config_home=config_home, hard_cap="90")
+        for _ in range(20)
     ]
-    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=4.0, home=home)
+    gate = tmp_path / "release-worker"
+    process, _meta, _report = _dispatcher(
+        tmp_path, run_id, delay=0.0, home=home, gate=gate
+    )
     try:
         _wait_for(socket_path)
+        _wait_for_connections(process.pid, socket_path, expected=20, gate=gate)
+        gate.write_text("go\n", encoding="utf-8")
         for client in clients:
-            rc, payload, err = _collect_cli(client)
+            rc, payload, err = _collect_cli(client, timeout=90)
             assert rc == 0, (payload, err)
             payloads.append(payload)
         stdout, stderr = process.communicate(timeout=5)

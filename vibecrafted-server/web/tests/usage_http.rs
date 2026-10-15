@@ -171,7 +171,9 @@ async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
         .map(|run| run["origin"].as_str().expect("origin").to_string())
         .collect();
     assert!(origins.contains(&"vc".to_string()) && origins.contains(&"local".to_string()));
-    assert_eq!(all["local_sources"].as_array().expect("sources").len(), 8);
+    // One entry per supported provider (control_core::usage roster, the same nine
+    // control-core/tests/usage_report.rs accounts for), omp included.
+    assert_eq!(all["local_sources"].as_array().expect("sources").len(), 9);
 
     // The picker lists exactly the dimension names the API reports; choosing any
     // of them must return exactly that dimension's runs.
