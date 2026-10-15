@@ -1437,8 +1437,9 @@ run_candidate_command() {
 # reconcile after publication) and the foundations installer. A minimal host
 # then needs only the preflighted prerequisites. tests/tui/test_install_bootstrap.py
 # pins this list against the recipe.
-# Invoked through run_candidate_command "$@", which shellcheck cannot follow.
-# shellcheck disable=SC2329
+# Invoked through run_candidate_command "$@", which shellcheck cannot follow:
+# newer releases flag the function (SC2329), older ones its body (SC2317).
+# shellcheck disable=SC2317,SC2329
 install_selected_runtime_pack() {
   # `make -C <candidate>` runs its recipes from the candidate root; so do these.
   (cd "$candidate_root" \
