@@ -1429,19 +1429,12 @@ def test_runtime_pack_menu_policy_swift_behavior(tmp_path: Path) -> None:
         REPO_ROOT
         / "vibecrafted-app/shell-agent/app/Vibecrafted/RuntimePackMenuPolicy.swift"
     )
+    server_policy = policy.with_name("ServerMenuPolicy.swift")
     # Top-level expressions are only allowed in a file named main.swift.
     harness = tmp_path / "main.swift"
     harness.write_text(
         """
 import Foundation
-
-enum TrayServerHealth: String {
-  case checking
-  case healthy
-  case transitioning
-  case failed
-  case neutral
-}
 
 func expect(_ condition: Bool, _ label: String) {
   if !condition { fatalError(label) }
@@ -1514,7 +1507,15 @@ print("runtime-pack-policy-ok")
     )
     binary = tmp_path / "runtime-pack-policy-check"
     compile_result = subprocess.run(
-        [swiftc, "-O", "-o", str(binary), str(policy), str(harness)],
+        [
+            swiftc,
+            "-O",
+            "-o",
+            str(binary),
+            str(policy),
+            str(server_policy),
+            str(harness),
+        ],
         check=False,
         capture_output=True,
         text=True,
