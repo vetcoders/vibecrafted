@@ -148,26 +148,9 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     wrapper = generation / "bin/vc-terminal"
     shutil.copy2(REPO_ROOT / "scripts/vc-terminal-product-entry.sh", wrapper)
     wrapper.chmod(0o755)
-    if sys.platform == "darwin":
-        fixture_app = tmp_path / "Applications/Vibecrafted.app"
-        fixture_host = fixture_app / "Contents/MacOS/vc-terminal"
-        fixture_host.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(host, fixture_host)
-        (fixture_app / "Contents/Info.plist").write_bytes(
-            plistlib.dumps(
-                {
-                    "CFBundleIdentifier": "io.vetcoders.vibecrafted",
-                    "CFBundleExecutable": "Vibecrafted",
-                }
-            )
-        )
-        # Remap only the fixed installation root in a private script fixture;
-        # never execute a host application during this command-contract test.
-        wrapper.write_text(
-            wrapper.read_text().replace(
-                "/Applications/Vibecrafted.app", str(fixture_app)
-            )
-        )
+    from _runtime_pack_fixture import bind_private_terminal_wrapper
+
+    bind_private_terminal_wrapper(wrapper, host)
     config_home = tmp_path / "home/.config"
     entry = config_home / "vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
