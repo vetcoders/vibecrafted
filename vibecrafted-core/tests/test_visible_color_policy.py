@@ -58,6 +58,7 @@ def _seed_claude_parent_usage(tmp_path, repo, monkeypatch):
         + "\n"
     )
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    return source
 
 
 @pytest.mark.parametrize(
@@ -75,6 +76,9 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
+    claude_config = tmp_path / "claude-config"
+    parent_usage_source = None
+    parent_usage_baseline = b""
     capture = tmp_path / "provider.json"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -85,7 +89,7 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
         "from pathlib import Path\n"
         "if '--version' in sys.argv: print('2.1.232 (Claude Code)'); sys.exit(0)\n"
         "if '--help' in sys.argv: print('--session-id <uuid>'); sys.exit(0)\n"
-        f"Path({str(capture)!r}).write_text(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CLICOLOR', 'CLICOLOR_FORCE', 'NODE_DISABLE_COLORS', 'ANSI_COLORS_DISABLED', 'CODEX_SESSION_ID', 'VIBECRAFTED_RESUME_CONTEXT', 'AICX_CONTINUITY_FILE', 'PYTHONNOUSERSITE', 'VIBECRAFTED_RUN_ID', 'VIBECRAFTED_WORKER_SESSION', 'PYTHONDONTWRITEBYTECODE')}}}}))\n"
+        f"Path({str(capture)!r}).write_text(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CLICOLOR', 'CLICOLOR_FORCE', 'NODE_DISABLE_COLORS', 'ANSI_COLORS_DISABLED', 'CODEX_SESSION_ID', 'VIBECRAFTED_RESUME_CONTEXT', 'AICX_CONTINUITY_FILE', 'PYTHONNOUSERSITE', 'VIBECRAFTED_RUN_ID', 'VIBECRAFTED_WORKER_SESSION', 'PYTHONDONTWRITEBYTECODE', 'CLAUDE_CONFIG_DIR')}}}}))\n"
     )
     stub.chmod(0o755)
     for key, value in POLLUTED.items():
@@ -100,6 +104,8 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
     monkeypatch.setenv(
         "PYTHONPATH", str(tmp_path / "runtime/releases/fixture/python-site")
     )
+    if provider == "claude":
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
     from vibecrafted_core.continuity import capabilities
 
     monkeypatch.setattr(
@@ -128,7 +134,8 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
         else {}
     )
     if provider == "claude" and entry == "fork":
-        _seed_claude_parent_usage(tmp_path, repo, monkeypatch)
+        parent_usage_source = _seed_claude_parent_usage(tmp_path, repo, monkeypatch)
+        parent_usage_baseline = parent_usage_source.read_bytes()
     result = spawn.launch_interactive_workspace(
         provider,
         "color task",
@@ -147,6 +154,8 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
     assert _color(observed["env"]) == EXPECTED
     assert "CODEX_SESSION_ID" not in observed["env"]
     assert "PYTHONNOUSERSITE" not in observed["env"]
+    if provider == "claude":
+        assert observed["env"]["CLAUDE_CONFIG_DIR"] == str(claude_config)
     if entry != "fork":
         assert "VIBECRAFTED_RESUME_CONTEXT" not in observed["env"]
         assert "AICX_CONTINUITY_FILE" not in observed["env"]
@@ -161,7 +170,12 @@ def test_interactive_provider_receives_color_and_sanitized_identity(
             observed["argv"][observed["argv"].index("--resume") + 1]
             == "explicit-parent"
         )
+        assert parent_usage_source is not None
+        assert parent_usage_source.read_bytes() == parent_usage_baseline
     assert _color(os.environ) == POLLUTED
+    assert os.environ["CODEX_SESSION_ID"] == "stale-parent"
+    assert os.environ["VIBECRAFTED_RESUME_CONTEXT"] == "/stale-pack"
+    assert os.environ["AICX_CONTINUITY_FILE"] == "/stale-aicx"
 
 
 @pytest.mark.parametrize("runtime", ["terminal", "visible", "headless"])

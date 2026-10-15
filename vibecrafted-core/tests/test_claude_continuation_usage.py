@@ -123,6 +123,49 @@ def test_fresh_session_collision_still_refuses(tmp_path):
         reader(tmp_path, tmp_path / "config")
 
 
+def test_inert_fork_refuses_missing_parent_before_provider_start(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    from vibecrafted_core.spawn import launch_interactive_workspace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    started = tmp_path / "provider-started"
+    fake = fakebin / "claude"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib,sys\n"
+        "if '--help' in sys.argv:\n"
+        " print('--resume --fork-session --print --session-id <uuid>'); sys.exit(0)\n"
+        "if '--version' in sys.argv:\n"
+        " print('2.1.300 (Claude Code)'); sys.exit(0)\n"
+        f"pathlib.Path({str(started)!r}).write_text('started')\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fakebin))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("PATH", str(fakebin) + os.pathsep + os.environ["PATH"])
+
+    with pytest.raises(ValueError, match="fork parent usage source is missing"):
+        launch_interactive_workspace(
+            "claude",
+            "fixture",
+            "local-native",
+            "read-only",
+            repo,
+            "unmetered",
+            continuity="bare-fork",
+            parent_session_id=PARENT,
+            admission={},
+        )
+    assert not started.exists()
+
+
 @pytest.mark.parametrize("mode", ["resume", "fork"])
 @pytest.mark.parametrize("budget", ["unmetered", "10", "4"])
 @pytest.mark.parametrize("operator", ["none", "auto"])
