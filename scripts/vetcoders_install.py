@@ -10197,11 +10197,11 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
             "schema",
             str(snapshot / _RUNTIME_GENERATION_MANIFEST),
         ]
-        if sys.platform == "win32" and _windows_embed_binds_python_site(runtime_python):
-            # Embeddable ._pth keeps python-site on sys.path despite -I/-S.
-            shim = temporary / "hide-python-site.py"
-            shim.write_text(_RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8")
-            schema_argv = [str(shim), *schema_argv]
+        # Native Py_SetPath and embeddable ._pth both retain python-site under
+        # -I/-S. Hide it explicitly for this dependency-negative control only.
+        shim = temporary / "hide-python-site.py"
+        shim.write_text(_RUNTIME_VERIFIER_HIDE_PYTHON_SITE_SHIM, encoding="utf-8")
+        schema_argv = [str(shim), *schema_argv]
         _assert_runtime_verifier_semantic_failure(
             run_candidate(schema_argv, cache=cache),
             expected_code=_RUNTIME_VERIFIER_E_DEPENDENCY,
