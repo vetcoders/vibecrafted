@@ -161,7 +161,9 @@ def _wrapper_flags(version: str) -> list[str]:
     ]
 
 
-def _wrapper_command(arguments: list[str], env: dict[str, str]) -> list[str]:
+def _wrapper_command(
+    arguments: list[str], env: dict[str, str], *, lifecycle_signals: bool = False
+) -> list[str]:
     host = installer._FIXED_TERMINAL_HOST
     root = host.parents[4].resolve()
     witnesses = [host]
@@ -173,6 +175,7 @@ def _wrapper_command(arguments: list[str], env: dict[str, str]) -> list[str]:
         ["/bin/bash", str(WRAPPER), *arguments],
         allowed=tuple(witnesses),
         fixture_root=root,
+        same_sandbox_signals=lifecycle_signals,
     )
 
 
@@ -390,7 +393,9 @@ def _start_public_wrapper(
     stderr_file = stderr_path.open("w", encoding="utf-8")
     try:
         proc = subprocess.Popen(
-            _wrapper_command(list(arguments), env),
+            # Only the signal/lifecycle tests start the wrapper through here;
+            # they need it to stop its own fenced descendants.
+            _wrapper_command(list(arguments), env, lifecycle_signals=True),
             cwd=str(REPO_ROOT),
             stdout=stdout_file,
             stderr=stderr_file,

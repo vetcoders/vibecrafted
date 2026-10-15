@@ -1742,3 +1742,47 @@ def test_pack_route_mirrors_the_makefile_install_recipe() -> None:
     assert (
         "bash scripts/install-foundations.sh loctree aicx prview screenscribe" in route
     )
+
+
+def test_install_sh_gui_hands_the_chosen_pack_to_the_gui_installer(
+    tmp_path: Path,
+) -> None:
+    """--gui branches before the TUI/make routes; the verified pack must still
+    reach the GUI installer, and no make is required for that advertised route."""
+    fixture = _supplied_pack_fixture(tmp_path)
+    capture = tmp_path / "gui-argv.txt"
+    (tmp_path / "source" / "scripts" / "installer_gui.py").write_text(
+        "import os, sys\n"
+        "open(os.environ['GUI_CAPTURE'], 'w').write('\\n'.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "source"
+    _write_distribution_manifest_stub(source_dir)
+    _write_v2_archive(source_dir, fixture["archive"], "vibecrafted-main")
+    env = _supplied_pack_env(tmp_path, fixture)
+    env["GUI_CAPTURE"] = str(capture)
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--yes",
+            "--gui",
+            "--archive-file",
+            str(fixture["archive"]),
+            "--runtime-pack-file",
+            str(fixture["pack"]),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert argv[argv.index("--runtime-pack") + 1] == str(fixture["pack"])
+    assert (
+        argv[argv.index("--expected-source-revision") + 1]
+        == "0123456789abcdef0123456789abcdef01234567"
+    )

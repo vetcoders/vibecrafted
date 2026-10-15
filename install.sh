@@ -1669,7 +1669,16 @@ if [[ "$target" == "vibecrafted" && "$use_gui" == "1" ]]; then
   info "▸ Launching the guided installer (browser UI)…"
   vinfo "  python3 $gui_installer --source $candidate_root"
   export VIBECRAFTED_RUNTIME="$runtime"
-  run_candidate_command python3 "$gui_installer" --source "$candidate_root"
+  # Hand the verified pack to the GUI's install plan (it otherwise source-installs).
+  gui_pack_args=()
+  if [[ -n "$selected_runtime_pack" ]]; then
+    gui_pack_args=(
+      --runtime-pack "$selected_runtime_pack"
+      --expected-source-revision "$expected_revision"
+    )
+  fi
+  run_candidate_command python3 "$gui_installer" --source "$candidate_root" \
+    ${gui_pack_args[@]+"${gui_pack_args[@]}"}
 fi
 
 if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
