@@ -266,7 +266,8 @@ def test_resume_excludes_exact_historical_replay_before_version_validation(tmp_p
 
 
 @pytest.mark.parametrize(
-    "mutation", ["content", "uuid", "message_id", "session", "version", "usage"]
+    "mutation",
+    ["content", "uuid", "message_id", "session", "version", "usage", "empty_session"],
 )
 def test_resume_refuses_tampered_historical_replay(tmp_path, mutation):
     config = tmp_path / "config"
@@ -283,6 +284,8 @@ def test_resume_refuses_tampered_historical_replay(tmp_path, mutation):
         replay["message"]["id"] = "changed"
     elif mutation == "session":
         replay["sessionId"] = PARENT
+    elif mutation == "empty_session":
+        replay["sessionId"] = ""
     elif mutation == "usage":
         replay["message"]["usage"]["input_tokens"] = 999999
     else:

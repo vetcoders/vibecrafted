@@ -2745,9 +2745,9 @@ class _ClaudeTranscriptUsage:
         message = event.get("message")
         inherited = self.inherited_events.get(event.get("uuid"))
         if inherited is not None:
-            if event.get("sessionId") not in (
-                self.provider_session_id,
-                self.fork_parent_session_id,
+            if event.get("sessionId") != self.provider_session_id and not (
+                self.fork_parent_session_id
+                and event.get("sessionId") == self.fork_parent_session_id
             ):
                 raise RuntimeError(
                     "provider inherited event belongs to a foreign session"
