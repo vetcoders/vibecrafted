@@ -250,3 +250,59 @@ def test_resume_refuses_duplicate_session_sources_at_admission(tmp_path):
     source(config / "projects", CHILD, [event(tmp_path)])
     with pytest.raises(RuntimeError, match="multiple provider usage sources"):
         reader(tmp_path, config, resume=True)
+
+
+def test_resume_excludes_exact_historical_replay_before_version_validation(tmp_path):
+    config = tmp_path / "config"
+    old = event(tmp_path, uid="old", version="2.1.296", tokens=100000)
+    path = source(config, CHILD, [old])
+    usage = reader(tmp_path, config, resume=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(old) + "\n")
+    assert usage.poll()["total_tokens"] == 0
+    with path.open("a") as handle:
+        handle.write(json.dumps(event(tmp_path)) + "\n")
+    assert usage.poll()["total_tokens"] == 5
+
+
+@pytest.mark.parametrize(
+    "mutation", ["content", "uuid", "message_id", "session", "version", "usage"]
+)
+def test_resume_refuses_tampered_historical_replay(tmp_path, mutation):
+    config = tmp_path / "config"
+    old = event(tmp_path, uid="old", version="2.1.296")
+    path = source(config, CHILD, [old])
+    usage = reader(tmp_path, config, resume=True)
+    replay = json.loads(json.dumps(old))
+    if mutation == "content":
+        replay["message"]["content"] = ["tampered"]
+    elif mutation == "uuid":
+        replay["uuid"] = "changed"
+        replay["version"] = "2.1.300"
+    elif mutation == "message_id":
+        replay["message"]["id"] = "changed"
+    elif mutation == "session":
+        replay["sessionId"] = PARENT
+    elif mutation == "usage":
+        replay["message"]["usage"]["input_tokens"] = 999999
+    else:
+        replay["version"] = "2.1.300"
+    with path.open("a") as handle:
+        handle.write(json.dumps(replay) + "\n")
+    with pytest.raises(RuntimeError, match="inherited|historical|foreign session"):
+        usage.poll()
+
+
+@pytest.mark.parametrize("rewritten", [False, True])
+def test_fork_confirmation_distinguishes_parent_copy_from_child_ack(
+    tmp_path, rewritten
+):
+    config = tmp_path / "config"
+    old = event(tmp_path, PARENT, uid="old", version="2.1.296")
+    source(config, PARENT, [old])
+    usage = reader(tmp_path, config, fork_parent_session_id=PARENT)
+    source(config, CHILD, [dict(old, sessionId=CHILD if rewritten else PARENT)])
+    assert usage.poll()["total_tokens"] == 0
+    receipt = {"native_fork": True, "native_identity_status": "pending"}
+    assert usage.confirm_fork_receipt(receipt) is rewritten
+    assert receipt.get("native_child_session_id", "") == (CHILD if rewritten else "")

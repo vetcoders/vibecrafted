@@ -2577,6 +2577,7 @@ class _ClaudeTranscriptUsage:
         self.validated_source_state: tuple[int, int, int] | None = None
         self.inherited_events: dict[str, str] = {}
         self.fork_parent_session_id = fork_parent_session_id
+        self.resume = resume
         self.confirmed_session_id = ""
         if resume and fork_parent_session_id:
             raise ValueError("resume and fork usage boundaries are mutually exclusive")
@@ -2603,6 +2604,15 @@ class _ClaudeTranscriptUsage:
                 message = event.get("message")
                 if isinstance(message, dict) and isinstance(message.get("id"), str):
                     self.seen_message_ids.add(message["id"])
+                    if isinstance(message.get("usage"), dict):
+                        key = event.get("uuid")
+                        if not isinstance(key, str) or not key:
+                            raise ValueError(
+                                "resume history has no attributable event UUID"
+                            )
+                        self.inherited_events[key] = self._inherited_digest(
+                            event, include_usage=True
+                        )
             # Historical message IDs prevent replay, but are not this run's usage.
             self.historical_message_ids = self.seen_message_ids
             self.seen_message_ids = set()
@@ -2653,11 +2663,13 @@ class _ClaudeTranscriptUsage:
         return events
 
     @staticmethod
-    def _inherited_digest(event: dict[str, Any]) -> str:
+    def _inherited_digest(event: dict[str, Any], *, include_usage: bool = False) -> str:
         # Claude rewrites sessionId/slug/parentUuid and may recompute historical
         # usage. UUID + immutable message content/version/cwd prove inheritance.
         message = {
-            key: value for key, value in event["message"].items() if key != "usage"
+            key: value
+            for key, value in event["message"].items()
+            if include_usage or key != "usage"
         }
         payload = {key: event.get(key) for key in ("uuid", "type", "version", "cwd")}
         payload["message"] = message
@@ -2731,8 +2743,6 @@ class _ClaudeTranscriptUsage:
         if not isinstance(event, dict):
             raise TypeError("provider usage event must be a JSON object")
         message = event.get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
-            return
         inherited = self.inherited_events.get(event.get("uuid"))
         if inherited is not None:
             if event.get("sessionId") not in (
@@ -2742,11 +2752,22 @@ class _ClaudeTranscriptUsage:
                 raise RuntimeError(
                     "provider inherited event belongs to a foreign session"
                 )
-            if self._inherited_digest(event) != inherited:
-                raise RuntimeError("provider fork inherited event content changed")
+            if (
+                not isinstance(message, dict)
+                or self._inherited_digest(event, include_usage=self.resume) != inherited
+            ):
+                raise RuntimeError(
+                    "provider continuation inherited event content changed"
+                )
             if event.get("sessionId") == self.provider_session_id:
                 self.confirmed_session_id = self.provider_session_id
             return
+        if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
+            return
+        if message.get("id") in self.historical_message_ids:
+            raise RuntimeError(
+                "provider historical message has an unverified replay identity"
+            )
         if event.get("sessionId") != self.provider_session_id:
             raise RuntimeError("provider usage event belongs to a foreign session")
         event_cwd = event.get("cwd")
@@ -2763,10 +2784,7 @@ class _ClaudeTranscriptUsage:
         message_id = message.get("id")
         if not isinstance(message_id, str) or not message_id:
             raise RuntimeError("provider usage event has no attributable message id")
-        if (
-            message_id in self.seen_message_ids
-            or message_id in self.historical_message_ids
-        ):
+        if message_id in self.seen_message_ids:
             return
         usage = message["usage"]
         values: dict[str, int] = {}
