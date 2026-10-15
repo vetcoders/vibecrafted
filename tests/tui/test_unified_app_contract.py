@@ -4538,7 +4538,21 @@ def test_unified_release_has_one_top_level_owner() -> None:
     )
     assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in terminal_entry
     assert "_vc_terminal_is_bundle_host" in terminal_entry
-    assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
+    assert "unset VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT" in terminal_entry
+    assert 'host_tail=(${1+"$@"})' in terminal_entry
+    assert (
+        'admission_args=(admit --wrapper-pid "$$" --host "$host" --config "$config")'
+        in terminal_entry
+    )
+    assert (
+        '"${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"}' in terminal_entry
+    )
+    assert (
+        'fresh) exec "$host" --config-file "$config" '
+        '${host_tail[@]+"${host_tail[@]}"} ;;' in terminal_entry
+    )
+    assert "--config-file | --config-file=*)" in terminal_entry
+    assert "--socket | --socket=*)" in terminal_entry
     assert "sign_nested_app_bundles" in builder
     assert "sign_helper_scripts" in builder
     assert builder.index("sign_nested_app_bundles") < builder.index(
