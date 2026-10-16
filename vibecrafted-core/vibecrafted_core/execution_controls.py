@@ -222,10 +222,11 @@ class ExecutionControls:
     # Where the effective permission word came from: "dispatch" (explicit
     # --permissions), "config:agents.<provider>", "config:global", or "default".
     permissions_source: str = ""
+    permissions_reason: str = ""
 
     @property
     def requested(self) -> bool:
-        """True when the caller passed at least one control explicitly."""
+        """True when dispatch or durable config selected at least one control."""
         return bool(self.permissions_requested) or self.sandbox_requested is not None
 
     def receipt(self) -> dict[str, Any]:
@@ -236,6 +237,7 @@ class ExecutionControls:
             "permissions_requested": self.permissions_requested,
             "permissions_effective": self.permissions_effective,
             "permissions_source": self.permissions_source or "default",
+            "permissions_reason": self.permissions_reason,
             "sandbox_requested": sandbox_word(self.sandbox_requested),
             "sandbox_effective": self.sandbox_effective,
             "provider_flags": list(self.provider_flags),
@@ -468,6 +470,7 @@ def controls_from_receipt(payload: dict[str, Any]) -> ExecutionControls | None:
         evidence=str(payload.get("evidence") or ""),
         boundary=str(payload.get("boundary") or ""),
         permissions_source=str(payload.get("permissions_source") or "default"),
+        permissions_reason=str(payload.get("permissions_reason") or ""),
     )
 
 
@@ -504,6 +507,10 @@ def resolve_execution_controls(
         source = permissions_source or "config"
     else:
         source = "default"
+    reason = ""
+    if provider == "junie" and mode == "headless" and effective == "bypass":
+        effective = "auto"
+        reason = "junie-headless-no-bypass"
     try:
         policy = resolve_provider_policy(provider, "local-native", effective, mode)
     except ValueError as exc:
@@ -527,9 +534,11 @@ def resolve_execution_controls(
     behavior = policy.behavior
     if note:
         behavior = f"{behavior}; {note}" if behavior else note
+    if reason:
+        behavior = f"{behavior}; requested bypass adapted to auto: {reason}"
     return ExecutionControls(
         provider=provider,
-        permissions_requested=requested,
+        permissions_requested=requested or configured,
         permissions_effective=effective,
         sandbox_requested=sandbox,
         sandbox_effective=sandbox_effective,
@@ -538,4 +547,5 @@ def resolve_execution_controls(
         evidence=SANDBOX_EVIDENCE.get(provider, ""),
         boundary=SANDBOX_BOUNDARY.get(provider, ""),
         permissions_source=source,
+        permissions_reason=reason,
     )

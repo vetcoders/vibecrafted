@@ -86,6 +86,7 @@ In `~/.config/vibecrafted/config.toml` (honoring `XDG_CONFIG_HOME`), keep the
 global auto-first default and opt into bypass only where intended:
 
 ```toml
+[runtime.picking]
 permissions = "auto"
 
 [agents.omp]
@@ -94,10 +95,18 @@ permissions = "bypass"
 
 Precedence: explicit dispatch (`--permissions`) > `agents.<provider>.permissions`
 
-> global `permissions` > `auto`. Malformed settings and unsupported combinations
-> refuse launch, never silently bypass. Sandbox remains independent. The admitted
-> policy is frozen through argv, metadata and native resume, including direct
-> portable launchers, which use the central resolver rather than a no-flag lane.
+> Settings' `runtime.picking.permissions` > `auto`. Legacy top-level `permissions`
+> is used only when the Settings key is absent; a blank Settings value clears that
+> override to `auto`, even if a legacy value remains. Malformed selected settings
+> refuse launch. Sandbox remains independent. The admitted policy is frozen through
+> argv, metadata and supported native resume, including direct portable launchers,
+> which use the central resolver rather than a no-flag lane.
+
+Junie headless adapts requested `bypass` to effective `auto`: its native `--brave`
+flag is interactive-only. Receipts retain the requested word and configuration
+source with `permissions_reason: junie-headless-no-bypass`; they never claim
+bypass was enforced. Read-only, accept-edits and explicit sandbox requests still
+refuse where Junie cannot enforce them. Native headless resume remains unverified.
 
 OMP `auto` selects its native write tier; headless execution refuses an exec
 prompt requirement. Read-only uses a tool whitelist; bypass selects native yolo
