@@ -5,6 +5,7 @@
 use crate::config::AppConfig;
 use control_core::{
     ControlPlane, FrameSessionInventory, RunStatus, StateView, WorkspaceProjection,
+    read::ProjectionCache,
 };
 use crossterm::event::{
     self, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -376,6 +377,35 @@ fn host_raw_source_change(state_root: &Path, path: &Path) -> bool {
     })
 }
 
+/// Whether the watcher registered by [`host_watch_roots`] reports changes to
+/// this exact file, so that no notification may stand in for a re-read. Purely
+/// structural (no filesystem calls): the reader's content cache asks it for
+/// every path it fills. Everything else (lifecycle reports, transcripts, any
+/// file outside the registered roots) is only ever reused on a matching stat.
+fn host_event_covers(state_root: &Path, path: &Path) -> bool {
+    if let Ok(relative) = path.strip_prefix(state_root) {
+        let first = relative.components().next().map(|part| part.as_os_str());
+        return path.extension().is_some_and(|ext| ext == "json")
+            && ["runs", "runtime_runs", "lifecycle_runs"]
+                .iter()
+                .any(|name| first == Some(std::ffi::OsStr::new(name)));
+    }
+    let Some(home) = state_root.parent() else {
+        return false;
+    };
+    let Some(file) = path.file_name().map(|file| file.to_string_lossy()) else {
+        return false;
+    };
+    ["artifacts", "locks", "marbles"].iter().any(|name| {
+        path.strip_prefix(home.join(name)).is_ok()
+            && match *name {
+                "artifacts" => file.ends_with(".meta.json"),
+                "locks" => file.ends_with(".lock"),
+                _ => file == "state.json",
+            }
+    })
+}
+
 fn host_watch_roots(state_root: &Path) -> anyhow::Result<Vec<(PathBuf, RecursiveMode)>> {
     let mut roots = vec![state_root.to_path_buf()];
     if let Some(home) = state_root.parent() {
@@ -487,11 +517,32 @@ fn host_watcher(
     Ok(watcher)
 }
 
+#[derive(Default)]
 struct HostRunReader {
     cached: Option<(StateView, String, Instant)>,
     raw_sources: Option<(control_core::read::RawRunSources, Instant)>,
+    /// Receipt bytes kept between projection passes, so a heartbeat re-reads
+    /// the file it touched instead of every run's history. A derived memo:
+    /// verdicts, liveness probes and time-derived health are still computed
+    /// fresh on top of it.
+    cache: Option<Arc<ProjectionCache>>,
+    /// Whether a registered watcher's silence may stand in for a stat. Without
+    /// one the cache only ever reuses bytes whose stat still matches.
+    watching: bool,
 }
 impl HostRunReader {
+    /// Forget what a change notification names; an empty list is a rescan.
+    fn note_change(&self, paths: &[PathBuf]) {
+        if let Some(cache) = &self.cache {
+            cache.invalidate_paths(paths);
+        }
+    }
+    /// Forget every cached receipt (watcher loss or re-registration).
+    fn forget_receipts(&self) {
+        if let Some(cache) = &self.cache {
+            cache.clear();
+        }
+    }
     fn raw_inventory_changed(&self, paths: &[PathBuf]) -> bool {
         paths.is_empty()
             || self.raw_sources.as_ref().is_none_or(|(sources, _)| {
@@ -508,7 +559,20 @@ impl HostRunReader {
         status: &str,
     ) -> HostSnapshot {
         let now = Instant::now();
-        let plane = ControlPlane::from_control_plane_home(&config.state_root);
+        let cache = self
+            .cache
+            .get_or_insert_with(|| {
+                let state_root = config.state_root.clone();
+                Arc::new(ProjectionCache::new(
+                    &ControlPlane::from_control_plane_home(&config.state_root),
+                    crate::WATCHER_FALLBACK_INTERVAL,
+                    move |path| host_event_covers(&state_root, path),
+                ))
+            })
+            .clone();
+        cache.set_event_trust(self.watching);
+        let plane = ControlPlane::from_control_plane_home(&config.state_root)
+            .with_cache(Arc::clone(&cache));
         let raw_due = raw_invalidated
             || self
                 .raw_sources
@@ -527,6 +591,7 @@ impl HostRunReader {
             })
         {
             crate::app::trace_expensive_refresh("host_control_plane");
+            let reads_before = cache.stats().reads;
             self.cached = Some((
                 plane.compute_view_with_raw_sources(
                     chrono::Utc::now(),
@@ -534,6 +599,10 @@ impl HostRunReader {
                 ),
                 chrono::Utc::now().to_rfc3339(),
                 now,
+            ));
+            crate::app::trace_expensive_refresh(&format!(
+                "host_file_reads:{}",
+                cache.stats().reads - reads_before
             ));
         }
         let (runs, sampled_at, _) = self.cached.as_ref().expect("initial projection loaded");
@@ -1241,10 +1310,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
     // Only start the reader after terminal setup succeeds. Its watcher owns
     // a wake sender, so an early terminal error must not leave a reader alive.
     let reader = std::thread::spawn(move || {
-        let mut source = HostRunReader {
-            cached: None,
-            raw_sources: None,
-        };
+        let mut source = HostRunReader::default();
         let mut invalidated = true;
         let mut raw_invalidated = true;
         let mut watcher = None;
@@ -1267,6 +1333,10 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                 }) {
                     Ok(active) => {
                         watcher = Some(active);
+                        // Receipts read before this registration (or while no
+                        // watcher ran) were verified without notifications;
+                        // none of them may be trusted on its silence.
+                        source.forget_receipts();
                         watch_status = "watching changes · liveness recheck ≤30 s".into();
                     }
                     Err(error) => {
@@ -1275,6 +1345,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                     }
                 }
             }
+            source.watching = watcher.is_some();
             if let Err(mpsc::TrySendError::Disconnected(_)) = snapshot_tx.try_send(source.snapshot(
                 &reader_config,
                 invalidated,
@@ -1299,6 +1370,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
             let until_recheck = until_view_recheck.min(until_raw_recheck);
             match wake_rx.recv_timeout(HOST_STATUS_INTERVAL.min(until_recheck)) {
                 Ok(HostWake::Changed { raw_sources, paths }) => {
+                    source.note_change(&paths);
                     raw_invalidated |= raw_sources && source.raw_inventory_changed(&paths);
                     // Coalesce a write/rename burst, with a fixed deadline so
                     // continuous writes cannot postpone refresh indefinitely.
@@ -1310,11 +1382,13 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                             HostWake::Stop => return,
                             HostWake::WatchError(error) => {
                                 watcher = None;
+                                source.forget_receipts();
                                 raw_invalidated = true;
                                 watch_status =
                                     format!("watcher unavailable: {error} · fallback ≤30 s");
                             }
                             HostWake::Changed { raw_sources, paths } => {
+                                source.note_change(&paths);
                                 raw_invalidated |=
                                     raw_sources && source.raw_inventory_changed(&paths)
                             }
@@ -1327,6 +1401,7 @@ pub fn run(config: AppConfig, route: HostRoute) -> anyhow::Result<()> {
                 }
                 Ok(HostWake::WatchError(error)) => {
                     watcher = None;
+                    source.forget_receipts();
                     invalidated = true;
                     raw_invalidated = true;
                     watch_status = format!("watcher unavailable: {error} · fallback ≤30 s");
@@ -1541,10 +1616,7 @@ mod tests {
             server: "http://127.0.0.1:1".into(),
             view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
         };
-        let mut reader = HostRunReader {
-            cached: None,
-            raw_sources: None,
-        };
+        let mut reader = HostRunReader::default();
         assert!(
             reader
                 .snapshot(
@@ -1580,6 +1652,168 @@ mod tests {
         assert!(snapshot.refresh_status.contains("unavailable"));
     }
 
+    fn receipt_config(temp: &Path) -> AppConfig {
+        AppConfig {
+            state_root: temp.join("control_plane"),
+            command_deck: temp.join("unused"),
+            repo: temp.into(),
+            presentation: crate::launch::Presentation::Headless,
+            tick_rate: Duration::from_millis(50),
+            no_verify_gate: false,
+            server: "http://127.0.0.1:1".into(),
+            view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
+        }
+    }
+
+    /// `count` finished runs with a snapshot and a runtime receipt each, aged
+    /// past the cache's settle window.
+    fn write_finished_runs(root: &Path, count: usize) {
+        let aged = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let at = chrono::Utc::now().to_rfc3339();
+        for i in 0..count {
+            let id = format!("done-{i:03}");
+            let snapshot = root.join(format!("runs/{id}.json"));
+            std::fs::write(&snapshot, serde_json::json!({
+                "run_id":id, "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":format!("/fixture/{id}"), "started_at":at, "updated_at":at,
+                "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false
+            }).to_string()).unwrap();
+            let runtime = root.join(format!("runtime_runs/{id}"));
+            std::fs::create_dir_all(&runtime).unwrap();
+            let meta = runtime.join("meta.json");
+            std::fs::write(&meta, serde_json::json!({"run_id":id, "status":"completed", "exit_code":0, "completed_at":at, "agent":"codex"}).to_string()).unwrap();
+            for path in [snapshot, meta] {
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_modified(aged)
+                    .unwrap();
+            }
+        }
+    }
+
+    fn cache_reads(reader: &HostRunReader) -> u64 {
+        reader.cache.as_ref().expect("cache built").stats().reads
+    }
+
+    #[test]
+    fn host_event_covers_only_what_the_watcher_reports() {
+        let root = Path::new("/h/.vibecrafted/control_plane");
+        for covered in [
+            "/h/.vibecrafted/control_plane/runs/a.json",
+            "/h/.vibecrafted/control_plane/runtime_runs/a/meta.json",
+            "/h/.vibecrafted/control_plane/runtime_runs/a/delivery-seal.json",
+            "/h/.vibecrafted/control_plane/lifecycle_runs/a/state.json",
+            "/h/.vibecrafted/artifacts/org/repo/day/a.meta.json",
+            "/h/.vibecrafted/locks/org/a.lock",
+            "/h/.vibecrafted/marbles/a/state.json",
+        ] {
+            assert!(host_event_covers(root, Path::new(covered)), "{covered}");
+        }
+        // Not reported by the host watcher's filter (or outside its roots): the
+        // cache may reuse these only on a matching stat, never on silence.
+        for uncovered in [
+            "/h/.vibecrafted/control_plane/lifecycle_runs/a/report.md",
+            "/h/.vibecrafted/control_plane/runtime_runs/a/transcript.log",
+            "/h/.vibecrafted/control_plane/events.jsonl",
+            "/h/.vibecrafted/artifacts/org/repo/day/a.json",
+            "/h/.vibecrafted/locks/org/a.txt",
+            "/h/.vibecrafted/marbles/a/other.json",
+            "/elsewhere/reports/stage-report.md",
+        ] {
+            assert!(
+                !host_event_covers(root, Path::new(uncovered)),
+                "{uncovered}"
+            );
+        }
+    }
+
+    #[test]
+    fn reader_rereads_only_the_receipts_a_notification_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("control_plane");
+        std::fs::create_dir_all(root.join("runs")).unwrap();
+        std::fs::create_dir_all(root.join("runtime_runs")).unwrap();
+        write_finished_runs(&root, 40);
+        let config = receipt_config(temp.path());
+        let mut reader = HostRunReader {
+            watching: true,
+            ..HostRunReader::default()
+        };
+        reader.snapshot(&config, true, true, "fixture");
+        let cold = cache_reads(&reader);
+        assert!(cold >= 80, "cold pass reads every receipt: {cold}");
+
+        // Unchanged inputs, recomputed anyway (e.g. a heartbeat elsewhere).
+        reader.snapshot(&config, true, false, "fixture");
+        assert_eq!(cache_reads(&reader), cold, "unchanged receipts are kept");
+
+        // One announced rewrite costs one read, and the projection sees it.
+        let meta = root.join("runtime_runs/done-007/meta.json");
+        std::fs::write(&meta, serde_json::json!({"run_id":"done-007", "status":"completed", "exit_code":0, "completed_at":chrono::Utc::now().to_rfc3339(), "agent":"claude"}).to_string()).unwrap();
+        reader.note_change(&[meta]);
+        reader.snapshot(&config, true, false, "fixture");
+        assert_eq!(cache_reads(&reader), cold + 1);
+
+        // An announced snapshot rewrite is read once and shows in the view.
+        let path = root.join("runs/done-003.json");
+        let at = chrono::Utc::now().to_rfc3339();
+        std::fs::write(&path, serde_json::json!({
+            "run_id":"done-003", "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":"/fixture/announced", "started_at":at, "updated_at":at,
+            "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false
+        }).to_string()).unwrap();
+        reader.note_change(&[path]);
+        let announced = reader.snapshot(&config, true, false, "fixture");
+        assert_eq!(cache_reads(&reader), cold + 2);
+        assert!(
+            announced
+                .runs
+                .recent_runs
+                .iter()
+                .any(|run| run.root == "/fixture/announced")
+        );
+
+        // A path-less wake (explicit refresh, rescan) forgets everything.
+        reader.note_change(&[]);
+        reader.snapshot(&config, true, false, "fixture");
+        assert!(cache_reads(&reader) >= cold + 2 + 80);
+    }
+
+    #[test]
+    fn reader_without_a_watcher_never_serves_a_changed_receipt_from_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("control_plane");
+        std::fs::create_dir_all(root.join("runs")).unwrap();
+        std::fs::create_dir_all(root.join("runtime_runs")).unwrap();
+        write_finished_runs(&root, 5);
+        let config = receipt_config(temp.path());
+        // `watching` stays false: fallback mode has no notification evidence.
+        let mut reader = HostRunReader::default();
+        let first = reader.snapshot(&config, true, true, "fallback");
+        assert!(
+            first
+                .runs
+                .recent_runs
+                .iter()
+                .any(|run| run.root == "/fixture/done-002")
+        );
+        let path = root.join("runs/done-002.json");
+        let at = chrono::Utc::now().to_rfc3339();
+        std::fs::write(&path, serde_json::json!({
+            "run_id":"done-002", "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":"/fixture/rewritten-silently", "started_at":at, "updated_at":at,
+            "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false
+        }).to_string()).unwrap();
+        // No note_change: a changed stamp alone must surface the new bytes.
+        let second = reader.snapshot(&config, true, false, "fallback");
+        assert!(
+            second
+                .runs
+                .recent_runs
+                .iter()
+                .any(|run| run.root == "/fixture/rewritten-silently")
+        );
+    }
+
     #[test]
     fn raw_fallback_is_not_postponed_by_fresh_control_plane_updates() {
         let temp = tempfile::tempdir().unwrap();
@@ -1595,10 +1829,7 @@ mod tests {
             server: "http://127.0.0.1:1".into(),
             view: crate::observe::ConsoleView::Host(HostRoute::Dashboard),
         };
-        let mut reader = HostRunReader {
-            cached: None,
-            raw_sources: None,
-        };
+        let mut reader = HostRunReader::default();
         reader.snapshot(&config, false, false, "fixture");
         // The root was absent at discovery; emulate a dropped create event.
         let directory = temp.path().join("artifacts/org/day/reports");

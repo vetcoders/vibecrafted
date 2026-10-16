@@ -18,8 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(not(unix))]
 use std::process::{Command, Stdio};
-use std::sync::{LazyLock, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
@@ -85,6 +85,362 @@ pub fn is_safe_run_id(run_id: &str) -> bool {
 pub struct ControlPlane {
     home: PathBuf,
     control_plane_home: PathBuf,
+    /// Optional derived read cache owned by a long-lived reader. Absent for
+    /// one-shot callers, whose reads stay byte-for-byte what they were.
+    cache: Option<Arc<ProjectionCache>>,
+}
+
+/// A file's identity and contents-age as one `stat` reports it. Two equal
+/// stamps mean the same inode, size, mtime and ctime, so a rewrite, an atomic
+/// replacement or a swapped symlink target cannot pass for the cached bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+    changed_ns: i128,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let (device, inode, changed_ns) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                meta.dev(),
+                meta.ino(),
+                i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+            )
+        };
+        #[cfg(not(unix))]
+        let (device, inode, changed_ns) = (0, 0, 0);
+        Some(Self {
+            device,
+            inode,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            changed_ns,
+        })
+    }
+
+    /// A stamp is only proof of unchanged bytes once its mtime tick is behind
+    /// us: a write in the same tick would leave the stamp unchanged.
+    fn is_settled(&self, now: SystemTime) -> bool {
+        self.modified.is_some_and(|modified| {
+            now.duration_since(modified)
+                .is_ok_and(|age| age >= PROJECTION_CACHE_SETTLE)
+        })
+    }
+}
+
+/// Mirrors [`RGLOB_TRUST_AFTER`]: a file modified this recently may change
+/// again within the same timestamp tick, so its bytes are never trusted by stamp.
+const PROJECTION_CACHE_SETTLE: Duration = Duration::from_secs(2);
+/// Bounds on what one reader may retain; past either the cache starts over
+/// instead of growing with the machine's whole run history.
+const PROJECTION_CACHE_MAX_ENTRIES: usize = 32_768;
+const PROJECTION_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
+const PROJECTION_CACHE_MAX_FILE: usize = 4 * 1024 * 1024;
+/// More changed paths than this in one wake is a storm, not a delta.
+const PROJECTION_CACHE_MAX_INVALIDATIONS: usize = 64;
+
+/// How many file reads a [`ProjectionCache`] absorbed or performed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Files actually opened and read (a miss, a change, or an unsettled stamp).
+    pub reads: u64,
+    /// Lookups answered without any filesystem call, on watcher evidence.
+    pub trusted_hits: u64,
+    /// Lookups answered by one `stat` that matched the cached stamp.
+    pub stamp_hits: u64,
+    /// Entries dropped because a change notification named them.
+    pub invalidations: u64,
+}
+
+/// One file's bytes, plus its parse when a `Value` consumer asked for it.
+struct CachedBody {
+    text: String,
+    parsed: std::sync::OnceLock<Option<serde_json::Value>>,
+}
+
+impl CachedBody {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            parsed: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn value(&self) -> Option<&serde_json::Value> {
+        self.parsed
+            .get_or_init(|| serde_json::from_str(&self.text).ok())
+            .as_ref()
+    }
+}
+
+/// A file's JSON, parsed once per distinct content and shared by reference.
+struct JsonDoc(Arc<CachedBody>);
+
+impl std::ops::Deref for JsonDoc {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &serde_json::Value {
+        static NULL: serde_json::Value = serde_json::Value::Null;
+        self.0.value().unwrap_or(&NULL)
+    }
+}
+
+struct CachedRead {
+    /// `None` records that the file was absent or unreadable when last read.
+    body: Option<Arc<CachedBody>>,
+    /// Stamp taken before the read; `None` when the file did not stat.
+    stamp: Option<FileStamp>,
+    /// Whether `stamp` outlived the settle window and may prove unchanged bytes.
+    settled: bool,
+    /// Whether change notifications cover this path, so absence of one is evidence.
+    watched: bool,
+    verified: Instant,
+    seen: u64,
+}
+
+struct CacheInner {
+    entries: HashMap<PathBuf, CachedRead>,
+    bytes: usize,
+    pass: u64,
+    trusting_events: bool,
+    stats: CacheStats,
+}
+
+/// A watching reader's memo of file *contents* between control-plane reads.
+///
+/// Every projection pass used to reopen and reparse every run's receipts even
+/// when one heartbeat had changed. This keeps the bytes of unchanged files and
+/// re-reads only what a notification names or a `stat` says changed. It is a
+/// derived projection: the verdicts, merging, liveness probes and time-derived
+/// health are all still computed fresh on top of it, and `compute_view` without
+/// a cache is unchanged. An entry is reused on watcher evidence only while the
+/// caller vouches that the watcher is live and only for paths it covers; for
+/// everything else, and once the trust window lapses, a matching stamp (inode,
+/// size, mtime, ctime) older than the settle window is required.
+pub struct ProjectionCache {
+    home: PathBuf,
+    canonical_home: PathBuf,
+    event_trust: Duration,
+    watched: Box<dyn Fn(&Path) -> bool + Send + Sync>,
+    inner: Mutex<CacheInner>,
+}
+
+impl std::fmt::Debug for ProjectionCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectionCache")
+            .field("home", &self.home)
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProjectionCache {
+    /// A cache for `plane`. `event_trust` bounds how long a watcher's silence
+    /// is evidence of an unchanged file (the reader's liveness-recheck bound);
+    /// `watched` says which paths those notifications actually cover.
+    #[must_use]
+    pub fn new(
+        plane: &ControlPlane,
+        event_trust: Duration,
+        watched: impl Fn(&Path) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            home: plane.home.clone(),
+            canonical_home: plane
+                .home
+                .canonicalize()
+                .unwrap_or_else(|_| plane.home.clone()),
+            event_trust,
+            watched: Box::new(watched),
+            inner: Mutex::new(CacheInner {
+                entries: HashMap::new(),
+                bytes: 0,
+                pass: 0,
+                trusting_events: false,
+                stats: CacheStats::default(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Counters since construction.
+    #[must_use]
+    pub fn stats(&self) -> CacheStats {
+        self.lock().stats
+    }
+
+    /// Whether silence from the change watcher may stand in for a `stat`.
+    /// Off while no watcher is registered: such a reader has no evidence at all.
+    pub fn set_event_trust(&self, enabled: bool) {
+        self.lock().trusting_events = enabled;
+    }
+
+    /// Forget everything (explicit refresh, watcher loss or re-registration).
+    pub fn clear(&self) {
+        let mut inner = self.lock();
+        inner.stats.invalidations += inner.entries.len() as u64;
+        inner.entries.clear();
+        inner.bytes = 0;
+    }
+
+    /// Drop what a change notification names. An empty list is the watcher's
+    /// "something I cannot enumerate changed", which forgets everything.
+    pub fn invalidate_paths(&self, paths: &[PathBuf]) {
+        if paths.is_empty() || paths.len() > PROJECTION_CACHE_MAX_INVALIDATIONS {
+            self.clear();
+            return;
+        }
+        // Native events use canonical paths; entries use the plane's home.
+        let local: Vec<PathBuf> = paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&self.canonical_home)
+                    .map_or_else(|_| path.clone(), |relative| self.home.join(relative))
+            })
+            .collect();
+        let mut inner = self.lock();
+        let before = inner.entries.len();
+        // A directory event also names everything beneath it (removal, rename,
+        // atomic publication), so match by prefix rather than by file alone.
+        inner
+            .entries
+            .retain(|key, _| !local.iter().any(|path| key.starts_with(path)));
+        let removed = before - inner.entries.len();
+        inner.stats.invalidations += removed as u64;
+        inner.bytes = inner
+            .entries
+            .values()
+            .map(|entry| entry.body.as_ref().map_or(0, |body| body.text.len()))
+            .sum();
+    }
+
+    fn begin_pass(&self) {
+        self.lock().pass += 1;
+    }
+
+    /// Entries no read of the finished pass touched belong to files that are
+    /// gone from the projection; keeping them would only grow the cache.
+    fn end_pass(&self) {
+        let mut inner = self.lock();
+        let pass = inner.pass;
+        inner.entries.retain(|_, entry| entry.seen == pass);
+        inner.bytes = inner
+            .entries
+            .values()
+            .map(|entry| entry.body.as_ref().map_or(0, |body| body.text.len()))
+            .sum();
+    }
+
+    /// The file's text, or `None` when it cannot be read — exactly what
+    /// `fs::read_to_string(path).ok()` would answer, at a fraction of the cost
+    /// whenever nothing changed.
+    fn read_body(&self, path: &Path) -> Option<Arc<CachedBody>> {
+        let now = Instant::now();
+        {
+            let mut inner = self.lock();
+            let pass = inner.pass;
+            let trusting = inner.trusting_events;
+            let trust = self.event_trust;
+            let mut verdict = None;
+            if let Some(entry) = inner.entries.get_mut(path) {
+                entry.seen = pass;
+                if trusting && entry.watched && now.duration_since(entry.verified) < trust {
+                    verdict = Some((entry.body.clone(), true));
+                } else {
+                    let current = FileStamp::of(path);
+                    let unchanged = match (entry.stamp, current) {
+                        (None, None) => true,
+                        (Some(cached), Some(current)) => entry.settled && cached == current,
+                        _ => false,
+                    };
+                    if unchanged {
+                        entry.verified = now;
+                        verdict = Some((entry.body.clone(), false));
+                    }
+                }
+            }
+            match verdict {
+                Some((body, trusted)) => {
+                    if trusted {
+                        inner.stats.trusted_hits += 1;
+                    } else {
+                        inner.stats.stamp_hits += 1;
+                    }
+                    return body;
+                }
+                None => inner.stats.reads += 1,
+            }
+        }
+        // The stamp precedes the read: a write in between leaves a stamp older
+        // than the bytes, which can only cost one extra read, never a stale hit.
+        let stamp = FileStamp::of(path);
+        let body: Option<Arc<CachedBody>> = fs::read_to_string(path)
+            .ok()
+            .map(|text| Arc::new(CachedBody::new(text)));
+        let settled = stamp.is_some_and(|stamp| stamp.is_settled(SystemTime::now()));
+        let watched = (self.watched)(path);
+        let size = body.as_ref().map_or(0, |body| body.text.len());
+        let mut inner = self.lock();
+        if size > PROJECTION_CACHE_MAX_FILE {
+            inner.entries.remove(path);
+            return body;
+        }
+        if inner.entries.len() >= PROJECTION_CACHE_MAX_ENTRIES
+            || inner.bytes + size > PROJECTION_CACHE_MAX_BYTES
+        {
+            inner.entries.clear();
+            inner.bytes = 0;
+        }
+        let pass = inner.pass;
+        let replaced = inner.entries.insert(
+            path.to_path_buf(),
+            CachedRead {
+                body: body.clone(),
+                stamp,
+                settled,
+                watched,
+                verified: now,
+                seen: pass,
+            },
+        );
+        inner.bytes += size;
+        if let Some(old) = replaced {
+            inner.bytes = inner
+                .bytes
+                .saturating_sub(old.body.as_ref().map_or(0, |body| body.text.len()));
+        }
+        body
+    }
+}
+
+/// Closes a [`ProjectionCache`] pass on drop so an early return cannot leave
+/// the next pass pruning against a stale generation.
+struct CachePass<'a>(Option<&'a ProjectionCache>);
+
+impl<'a> CachePass<'a> {
+    fn begin(cache: Option<&'a ProjectionCache>) -> Self {
+        if let Some(cache) = cache {
+            cache.begin_pass();
+        }
+        Self(cache)
+    }
+}
+
+impl Drop for CachePass<'_> {
+    fn drop(&mut self) {
+        if let Some(cache) = self.0 {
+            cache.end_pass();
+        }
+    }
 }
 
 /// Opaque raw-source inventory for a watching reader. Paths are scoped to the
@@ -142,6 +498,7 @@ impl ControlPlane {
         Self {
             home,
             control_plane_home,
+            cache: None,
         }
     }
 
@@ -160,6 +517,50 @@ impl ControlPlane {
         Self {
             home,
             control_plane_home,
+            cache: None,
+        }
+    }
+
+    /// The same plane reading through a long-lived reader's [`ProjectionCache`].
+    /// The cache must have been built for this plane's home.
+    #[must_use]
+    pub fn with_cache(mut self, cache: Arc<ProjectionCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Read a text file through the cache when this plane has one.
+    fn read_text_at(&self, path: &Path) -> Option<Arc<CachedBody>> {
+        match &self.cache {
+            Some(cache) => cache.read_body(path),
+            None => fs::read_to_string(path)
+                .ok()
+                .map(|text| Arc::new(CachedBody::new(text))),
+        }
+    }
+
+    /// A file's JSON as a `Value`, parsed once per distinct content when this
+    /// plane has a cache. `None` for an unreadable file or invalid JSON.
+    fn read_value_at(&self, path: &Path) -> Option<JsonDoc> {
+        let body = self.read_text_at(path)?;
+        body.value()?;
+        Some(JsonDoc(body))
+    }
+
+    fn read_run_status_at(&self, path: &Path, probe_worker_alive: bool) -> Option<RunStatus> {
+        let payload = self.read_value_at(path)?;
+        let mut run = serde_json::from_value::<RunStatus>((*payload).clone()).ok()?;
+        enrich_run_status(&mut run, &payload, probe_worker_alive);
+        Some(run)
+    }
+
+    /// Read and parse a JSON file through the cache when this plane has one.
+    /// Typed reads parse the cached bytes themselves, so serde's behaviour for
+    /// `T` is exactly what an uncached read gets.
+    fn read_json_at<T: serde::de::DeserializeOwned>(&self, path: &Path) -> Option<T> {
+        match &self.cache {
+            Some(cache) => serde_json::from_str(&cache.read_body(path)?.text).ok(),
+            None => read_json(path),
         }
     }
 
@@ -241,7 +642,7 @@ impl ControlPlane {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(run) = read_run_status(&path, false) {
+            if let Some(run) = self.read_run_status_at(&path, false) {
                 if is_safe_run_id(&run.run_id) {
                     let run = self.attach_runtime_recovery_if_present(run, false);
                     runs.push(self.attach_seal_if_present(run));
@@ -261,7 +662,7 @@ impl ControlPlane {
             return None;
         }
         let direct = self.run_snapshot_dir().join(format!("{target}.json"));
-        if let Some(run) = read_run_status(&direct, true) {
+        if let Some(run) = self.read_run_status_at(&direct, true) {
             if run.run_id == target {
                 let run = self.attach_runtime_recovery_if_present(run, true);
                 return Some(self.attach_seal_if_present(run));
@@ -308,7 +709,7 @@ impl ControlPlane {
             return run;
         }
         let path = self.runtime_run_dir(&run.run_id).join("meta.json");
-        let Some(payload) = read_json::<serde_json::Value>(&path) else {
+        let Some(payload) = self.read_value_at(&path) else {
             if probe_worker_alive {
                 refresh_worker_liveness(&mut run);
             }
@@ -402,7 +803,7 @@ impl ControlPlane {
             return;
         }
         let path = self.runtime_run_dir(&run.run_id).join("meta.json");
-        let Some(payload) = read_json::<serde_json::Value>(&path) else {
+        let Some(payload) = self.read_value_at(&path) else {
             return;
         };
         let string = |key: &str| {
@@ -460,7 +861,8 @@ impl ControlPlane {
             return None;
         }
         let path = self.runtime_run_dir(target).join("delivery-seal.json");
-        read_json::<DeliverySealRef>(&path).filter(|seal| !seal.seal_id.is_empty())
+        self.read_json_at::<DeliverySealRef>(&path)
+            .filter(|seal| !seal.seal_id.is_empty())
     }
 
     /// Resolve a run straight from `runtime_runs/<id>/` — the read-follows-write
@@ -480,22 +882,20 @@ impl ControlPlane {
         if !dir.is_dir() {
             return None;
         }
-        let meta = read_json::<serde_json::Value>(&dir.join("meta.json"));
+        let meta_doc = self.read_value_at(&dir.join("meta.json"));
+        let meta: Option<&serde_json::Value> = meta_doc.as_deref();
         let value = |key: &str| {
-            meta.as_ref()
-                .and_then(|payload| payload.get(key))
+            meta.and_then(|payload| payload.get(key))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string()
         };
         let integer = |key: &str| {
-            meta.as_ref()
-                .and_then(|payload| payload.get(key))
+            meta.and_then(|payload| payload.get(key))
                 .and_then(coerce_int_value)
         };
         let boolean = |key: &str| {
-            meta.as_ref()
-                .and_then(|payload| payload.get(key))
+            meta.and_then(|payload| payload.get(key))
                 .and_then(serde_json::Value::as_bool)
         };
         let state = {
@@ -574,8 +974,8 @@ impl ControlPlane {
             worker_alive: boolean("worker_alive"),
             process_truth: value("process_truth"),
             process_truth_reason: value("process_truth_reason"),
-            operator_agent: meta.as_ref().and_then(operator_agent_projection),
-            continuity: meta.as_ref().and_then(continuity_projection),
+            operator_agent: meta.and_then(operator_agent_projection),
+            continuity: meta.and_then(continuity_projection),
             recovery_required: boolean("recovery_required").unwrap_or(false),
             stop_reason: value("stop_reason"),
             agent_session_id: value("agent_session_id"),
@@ -608,35 +1008,48 @@ impl ControlPlane {
             delivery_state: None,
             seal: None,
         };
-        enrich_run_status(
-            &mut status,
-            meta.as_ref().unwrap_or(&serde_json::Value::Null),
-            true,
-        );
+        enrich_run_status(&mut status, meta.unwrap_or(&serde_json::Value::Null), true);
         Some(status)
     }
 
-    /// Every run currently materialised under `runtime_runs/` as a read-only
-    /// [`RunStatus`]. The aggregate counterpart to
-    /// [`Self::resolve_runtime_run`]; used by [`Self::compute_view`] so a fresh
-    /// run shows on the dashboard before the snapshot sync merges it.
-    fn iter_runtime_run_status(&self) -> Vec<RunStatus> {
+    /// Runs materialised under `runtime_runs/` that no richer source has
+    /// surfaced yet, appended to `runs` when still fresh. The aggregate
+    /// counterpart to [`Self::resolve_runtime_run`], used by
+    /// [`Self::compute_view`] so a just-launched run shows on the dashboard
+    /// before the snapshot sync merges it. A directory whose id `runs` already
+    /// carries can only be discarded by that merge, so it is never resolved:
+    /// on a machine with thousands of finished runs that is nearly every
+    /// directory, and each resolution reads and parses its receipt.
+    fn append_fresh_runtime_runs(&self, runs: &mut Vec<RunStatus>, now: DateTime<Utc>) {
         let root = self.control_plane_home().join("runtime_runs");
         let Ok(entries) = fs::read_dir(&root) else {
-            return Vec::new();
+            return;
         };
-        let mut runs = Vec::new();
+        let known: HashSet<String> = runs.iter().map(|run| run.run_id.clone()).collect();
         for entry in entries.flatten() {
-            if !entry.path().is_dir() {
+            let is_dir = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => true,
+                // A symlinked run directory is followed, as `is_dir` does.
+                Ok(kind) if kind.is_symlink() => entry.path().is_dir(),
+                _ => false,
+            };
+            if !is_dir {
                 continue;
             }
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(run) = self.resolve_runtime_run(name) {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if known.contains(&name) {
+                continue;
+            }
+            if let Some(run) = self.resolve_runtime_run(&name) {
+                if !runs.iter().any(|existing| existing.run_id == run.run_id)
+                    && self.runtime_run_is_fresh(&run.run_id, now)
+                {
                     runs.push(run);
                 }
             }
         }
-        runs
     }
 
     /// Read exact routing axes from canonical runtime receipts.
@@ -673,7 +1086,7 @@ impl ControlPlane {
             if meta.file_type().is_symlink() || !meta.is_file() {
                 continue;
             }
-            let Some(wire) = read_json::<RunRoutingWire>(&meta_path) else {
+            let Some(wire) = self.read_json_at::<RunRoutingWire>(&meta_path) else {
                 continue;
             };
             if wire.run_id.trim() != directory_run_id {
@@ -696,7 +1109,7 @@ impl ControlPlane {
             return None;
         }
         let state_path = self.lifecycle_run_dir(target).join("state.json");
-        let run = read_json::<LifecycleRun>(&state_path)?;
+        let run = self.read_json_at::<LifecycleRun>(&state_path)?;
         if run.run_id == target {
             Some(self.project_lifecycle_read(run, &state_path, Utc::now()))
         } else {
@@ -718,7 +1131,7 @@ impl ControlPlane {
                 continue;
             }
             let state_path = entry.path().join("state.json");
-            let Some(run) = read_json::<LifecycleRun>(&state_path) else {
+            let Some(run) = self.read_json_at::<LifecycleRun>(&state_path) else {
                 continue;
             };
             if !is_safe_run_id(&run.run_id) {
@@ -767,7 +1180,7 @@ impl ControlPlane {
         state_paths
             .into_iter()
             .filter_map(|(_, state_path)| {
-                let run = read_json::<LifecycleRun>(&state_path)?;
+                let run = self.read_json_at::<LifecycleRun>(&state_path)?;
                 if run.run_id.is_empty() {
                     return None;
                 }
@@ -871,8 +1284,12 @@ impl ControlPlane {
     fn lifecycle_dou_index_from_reports(&self, run: &LifecycleRun) -> Option<i64> {
         self.lifecycle_stage_report_path(run)
             .as_deref()
-            .and_then(report_dou_index)
-            .or_else(|| report_dou_index(&self.lifecycle_report_path(run)))
+            .and_then(|path| self.read_text_at(path))
+            .and_then(|body| report_dou_index_text(&body.text))
+            .or_else(|| {
+                self.read_text_at(&self.lifecycle_report_path(run))
+                    .and_then(|body| report_dou_index_text(&body.text))
+            })
     }
 
     fn lifecycle_state_path(&self, run: &LifecycleRun) -> PathBuf {
@@ -929,13 +1346,7 @@ impl ControlPlane {
         // runtime dir is live before Python writes runs/<id>.json. Fresh only;
         // the directory itself is not liveness evidence.
         let now = chrono::Utc::now();
-        for run in self.iter_runtime_run_status() {
-            if !runs.iter().any(|existing| existing.run_id == run.run_id)
-                && self.runtime_run_is_fresh(&run.run_id, now)
-            {
-                runs.push(run);
-            }
-        }
+        self.append_fresh_runtime_runs(&mut runs, now);
         sort_recent_first(&mut runs);
         self.project_view(runs, settlement_counts)
     }
@@ -998,6 +1409,7 @@ impl ControlPlane {
         if sources.home != self.home {
             return self.compute_view(now);
         }
+        let _pass = CachePass::begin(self.cache.as_deref());
         let (merged, settlement_counts, mut events) =
             self.merge_derived_runs_with_sources(now, sources);
         if events.len() > crate::model::EVENT_TAIL_LIMIT {
@@ -1059,7 +1471,7 @@ impl ControlPlane {
             if !regular_raw_path(&self.home, path, &mut raw_directories) {
                 continue;
             }
-            if let Some(payload) = read_json::<serde_json::Value>(path) {
+            if let Some(payload) = self.read_value_at(path) {
                 if let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone()) {
                     if let Some(mut status) = meta.normalize(now) {
                         enrich_run_status(&mut status, &payload, false);
@@ -1072,7 +1484,10 @@ impl ControlPlane {
             if !regular_raw_path(&self.home, path, &mut raw_directories) {
                 continue;
             }
-            if let Some(status) = normalize_lock(path, now) {
+            if let Some(status) = self
+                .read_text_at(path)
+                .and_then(|body| normalize_lock_text(&body.text, now))
+            {
                 raw.absorb(&mut merged, status, path);
             }
         }
@@ -1080,8 +1495,9 @@ impl ControlPlane {
             if !regular_raw_path(&self.home, path, &mut raw_directories) {
                 continue;
             }
-            if let Some(status) =
-                read_json::<MarblesState>(path).and_then(|state| state.normalize(now))
+            if let Some(status) = self
+                .read_json_at::<MarblesState>(path)
+                .and_then(|state| state.normalize(now))
             {
                 raw.absorb(&mut merged, status, path);
             }
@@ -1180,13 +1596,7 @@ impl ControlPlane {
         // Read-follows-write — keeps the dashboard from a silent gap before the
         // sync merges the run (Niezmiennik 3). Only a recently touched fallback
         // can be live; the durable directory itself is not liveness evidence.
-        for run in self.iter_runtime_run_status() {
-            if !merged.iter().any(|r| r.run_id == run.run_id)
-                && self.runtime_run_is_fresh(&run.run_id, now)
-            {
-                merged.push(run);
-            }
-        }
+        self.append_fresh_runtime_runs(&mut merged, now);
         self.append_discoverable_lifecycle_runs(&mut merged);
         quarantine_test_runs(&mut merged);
 
@@ -1891,13 +2301,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
-fn read_run_status(path: &Path, probe_worker_alive: bool) -> Option<RunStatus> {
-    let payload = read_json::<serde_json::Value>(path)?;
-    let mut run = serde_json::from_value::<RunStatus>(payload.clone()).ok()?;
-    enrich_run_status(&mut run, &payload, probe_worker_alive);
-    Some(run)
-}
-
 fn object_bool(
     object: Option<&serde_json::Map<String, serde_json::Value>>,
     key: &str,
@@ -2166,8 +2569,7 @@ fn existing_or_canonical(declared: &str, canonical: PathBuf) -> PathBuf {
     }
 }
 
-fn report_dou_index(path: &Path) -> Option<i64> {
-    let text = fs::read_to_string(path).ok()?;
+fn report_dou_index_text(text: &str) -> Option<i64> {
     let mut lines = text.lines();
     if lines.next()?.trim() != "---" {
         return None;
@@ -2317,8 +2719,7 @@ fn rglob(root: &Path, pred: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
 }
 
 /// Normalise a `*.lock` key=value file. Mirrors `control_plane._normalize_lock`.
-fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
-    let text = fs::read_to_string(path).ok()?;
+fn normalize_lock_text(text: &str, now: DateTime<Utc>) -> Option<RunStatus> {
     let mut kv = std::collections::BTreeMap::new();
     for line in text.lines() {
         if let Some((key, value)) = line.split_once('=') {

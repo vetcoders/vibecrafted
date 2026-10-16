@@ -115,6 +115,21 @@ impl Host {
     fn reads(&self) -> usize {
         self.count("host_control_plane")
     }
+    /// Receipt files each recomputation actually opened, in order.
+    fn file_reads(&self) -> Vec<usize> {
+        fs::read_to_string(self.root.path().join("reads.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let kind = serde_json::from_str::<serde_json::Value>(line).ok()?;
+                kind["kind"]
+                    .as_str()?
+                    .strip_prefix("host_file_reads:")?
+                    .parse()
+                    .ok()
+            })
+            .collect()
+    }
     fn wait(&mut self, label: &str, predicate: impl Fn(&Self) -> bool) {
         self.wait_for(label, Duration::from_secs(10), predicate);
     }
@@ -295,4 +310,67 @@ fn host_rechecks_pid_exit_within_the_liveness_bound_without_disk_changes() {
         host.count("host_raw_sources"),
         host.count("host_watcher")
     );
+}
+
+#[test]
+fn sustained_heartbeats_reread_only_the_touched_receipt_on_the_host_routes() {
+    const FINISHED: usize = 120;
+    for route in ["host", "host-config"] {
+        let mut host = Host::launch_route(route);
+        host.wait("initial projection", |h| !h.file_reads().is_empty());
+        let state = host.root.path().join("home/.vibecrafted/control_plane");
+        let aged = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let at = chrono::Utc::now().to_rfc3339();
+        fs::create_dir_all(state.join("runtime_runs")).unwrap();
+        for i in 0..FINISHED {
+            let id = format!("done-{i:03}");
+            let snapshot = state.join(format!("runs/{id}.json"));
+            fs::write(&snapshot, serde_json::json!({"run_id":id, "state":"completed", "health":"final", "agent":"codex", "skill":"workflow", "mode":"headless", "root":format!("/fixture/{id}"), "started_at":at, "updated_at":at, "operator_session":"", "latest_report":"", "latest_transcript":"", "last_error":"", "source":"fixture", "lock_present":false}).to_string()).unwrap();
+            let runtime = state.join(format!("runtime_runs/{id}"));
+            fs::create_dir_all(&runtime).unwrap();
+            let meta = runtime.join("meta.json");
+            fs::write(&meta, serde_json::json!({"run_id":id, "status":"completed", "exit_code":0, "completed_at":at, "agent":"codex"}).to_string()).unwrap();
+            for path in [snapshot, meta] {
+                File::options()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_modified(aged)
+                    .unwrap();
+            }
+        }
+        // An explicit refresh is the one honest full read: every receipt once.
+        std::thread::sleep(Duration::from_secs(1));
+        host.master.write_all(b"r").unwrap();
+        host.wait("explicit refresh reads every receipt", |h| {
+            h.file_reads().iter().any(|reads| *reads >= FINISHED)
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        let settled = host.file_reads().len();
+
+        // A live run heartbeats; nothing else changes.
+        let live = state.join("runtime_runs/live");
+        fs::create_dir_all(&live).unwrap();
+        for beat in 0..8 {
+            fs::write(live.join("meta.json"), serde_json::json!({"run_id":"live", "status":"running", "agent":"codex", "worker_pid":std::process::id(), "updated_at":chrono::Utc::now().to_rfc3339(), "started_at":at, "beat":beat}).to_string()).unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        host.wait("heartbeat projections", |h| h.file_reads().len() > settled);
+        std::thread::sleep(Duration::from_secs(1));
+        let beats = host.file_reads()[settled..].to_vec();
+        assert!(
+            beats.iter().all(|reads| *reads <= 6),
+            "{route}: a heartbeat re-read finished receipts: {beats:?}"
+        );
+        assert!(
+            host.contents().contains("Active runs") || route == "host-config",
+            "{route}: view stays live"
+        );
+        host.master.write_all(b"q").unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while host.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until, "{route}: quit blocked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
