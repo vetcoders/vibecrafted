@@ -288,10 +288,11 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
         source_door = payload / "config/runtime-pin/bin" / name
         assert installed_door.read_bytes() == source_door.read_bytes()
         assert installed_door.stat().st_mode & 0o777 == 0o755
-    # Nested zsh inside product shells restores the pinned door after startup.
-    for stage in (".zshenv", ".zprofile", ".zlogin"):
-        assert (product_config / "vc-terminal" / stage).read_text() == (
-            installer._PRODUCT_ZDOTDIR_PIN_STAGE
+    # Nested zsh inside product shells composes the user's login startup and
+    # restores the pinned door; the stages are the generation's own files.
+    for stage, source in installer._product_zdotdir_stage_sources(payload).items():
+        assert (product_config / "vc-terminal" / stage).read_bytes() == (
+            source.read_bytes()
         )
     assert not (debris_dir / "alacritty.toml").exists()
     assert not (debris_dir / "launch-alt-screen.zsh").exists()
