@@ -1563,6 +1563,9 @@ def materialize_instance(
         # reuse, refresh or stale it. Correcting its role is not a relabelling.
         host_instances = set()
         for item in existing:
+            # Inactive history cannot participate in project-seat preparation.
+            if item.status != INSTANCE_STATUS_LIVE:
+                continue
             payload = (
                 _read_json(workspace_session_path(item.vibecrafted_session_id))
                 if item.vibecrafted_session_id

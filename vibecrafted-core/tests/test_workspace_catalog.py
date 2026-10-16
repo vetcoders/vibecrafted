@@ -407,6 +407,94 @@ def test_wes_orphan_session_refuses_before_materialization(
     )
 
 
+@pytest.mark.parametrize(
+    "status", [wc.INSTANCE_STATUS_STALE, wc.INSTANCE_STATUS_DETACHED]
+)
+@pytest.mark.parametrize("attachment_state", ["missing", "dead"])
+def test_inactive_malformed_logical_history_does_not_block_fresh_materialization(
+    home: Path, tmp_path: Path, status: str, attachment_state: str
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    first = wc.resolve_run_workspace_identity(root=root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=first.workspace_id,
+        vibecrafted_session_id=first.vibecrafted_session_id,
+        workspace_instance_id=first.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="historical",
+        state=attachment_state,
+        socket_dir="/private/synthetic",
+    )
+    instance_path = wc.instance_path(first.workspace_instance_id)
+    payload = json.loads(instance_path.read_text())
+    payload["status"] = status
+    instance_path.write_text(json.dumps(payload))
+    logical_path = wc.workspace_session_path(first.vibecrafted_session_id)
+    payload = json.loads(logical_path.read_text())
+    payload["schema"] = "historical-unreadable"
+    logical_path.write_text(json.dumps(payload))
+    before = {path: path.read_bytes() for path in (instance_path, logical_path)}
+    fresh_session_id = wc.new_uuid7()
+
+    fresh = wc.materialize_instance(
+        workspace_id=first.workspace_id,
+        root=root,
+        vibecrafted_session_id=fresh_session_id,
+        build_id=first.build_id,
+    )
+
+    assert fresh.workspace_instance_id != first.workspace_instance_id
+    assert fresh.vibecrafted_session_id == fresh_session_id
+    assert fresh.workspace_id == first.workspace_id
+    assert fresh.status == wc.INSTANCE_STATUS_LIVE
+    assert len(wc.list_instances(workspace_id=first.workspace_id)) == 2
+    assert {path: path.read_bytes() for path in before} == before
+    # Selecting the damaged historical identity is still an explicit refusal.
+    after = {path: path.read_bytes() for path in home.rglob("*.json")}
+    with pytest.raises(wc.WorkspaceCatalogError, match="session record schema"):
+        wc.materialize_instance(
+            workspace_id=first.workspace_id,
+            root=root,
+            vibecrafted_session_id=first.vibecrafted_session_id,
+            build_id=first.build_id,
+        )
+    assert {path: path.read_bytes() for path in home.rglob("*.json")} == after
+
+
+@pytest.mark.parametrize("attachment_state", ["live", "missing", "dead"])
+def test_live_instance_malformed_logical_record_refuses_without_mutation(
+    home: Path, tmp_path: Path, attachment_state: str
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    first = wc.resolve_run_workspace_identity(root=root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=first.workspace_id,
+        vibecrafted_session_id=first.vibecrafted_session_id,
+        workspace_instance_id=first.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="vc-host",
+        state=attachment_state,
+        socket_dir="/private/synthetic",
+    )
+    path = wc.workspace_session_path(first.vibecrafted_session_id)
+    payload = json.loads(path.read_text())
+    payload["schema"] = "unreadable-current-owner"
+    path.write_text(json.dumps(payload))
+    before = {path: path.read_bytes() for path in home.rglob("*.json")}
+
+    with pytest.raises(wc.WorkspaceCatalogError, match="session record schema"):
+        wc.materialize_instance(
+            workspace_id=first.workspace_id,
+            root=root,
+            vibecrafted_session_id=wc.new_uuid7(),
+            build_id=first.build_id,
+        )
+
+    assert {path: path.read_bytes() for path in home.rglob("*.json")} == before
+
+
 def test_wes_live_return_ignores_stale_history_and_dead_foreign_names(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
