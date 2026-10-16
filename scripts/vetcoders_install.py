@@ -24444,15 +24444,14 @@ def _stage_runtime_product_config(
             ):
                 shutil.copy2(src, terminal / "bin" / src.name)
                 (terminal / "bin" / src.name).chmod(0o755)
-    (terminal / ".zshrc").write_text(
-        'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
-        encoding="utf-8",
-    )
     # Every zsh started inside a product shell -- `zsh -c`, `zsh -l`, Frame
-    # panes -- reads this ZDOTDIR. The login stages are real generation files
-    # (config/runtime-pin/zsh-product): .zshenv/.zprofile restore the global
-    # baseline `-d` skips, run the user's own login startup, and then put the
-    # pinned generation's python door back in front of PATH.
+    # panes -- reads this ZDOTDIR. The startup stages are real generation
+    # files (config/runtime-pin/zsh-product): .zshenv/.zprofile compose the
+    # user's own login startup, .zshrc composes the user's own interactive
+    # layer and then loads the product profile (interactive.zsh, staged
+    # beside it above), and every stage puts the pinned generation's python
+    # door back in front of PATH. Already-installed trampolines that source
+    # launch-primary-shell.zsh keep working through its sourced branch.
     for stage, stage_source in _product_zdotdir_stage_sources(generation).items():
         if stage_source.is_file() or sys.platform != "win32":
             shutil.copy2(stage_source, terminal / stage)
@@ -24928,15 +24927,16 @@ _PRODUCT_TERMINAL_DEBRIS = (
     "vc-terminal/alacritty.toml",
 )
 _PRODUCT_PRIMARY_SHELL_NAME = "launch-primary-shell.zsh"
-_PRODUCT_ZDOTDIR_STAGES = (".zshenv", ".zprofile", ".zlogin")
+_PRODUCT_ZDOTDIR_STAGES = (".zshenv", ".zprofile", ".zshrc", ".zlogin")
 
 
 def _product_zdotdir_stage_sources(generation: Path) -> dict[str, Path]:
-    """Product ZDOTDIR login stages: the generation's zsh-product files.
+    """Product ZDOTDIR startup stages: the generation's zsh-product files.
 
     Real, reviewable files ship with the generation instead of installer-
-    embedded strings: .zshenv/.zprofile compose the user's own login startup
-    and restore the pinned python door; .zlogin restores the door only.
+    embedded strings: .zshenv/.zprofile compose the user's own login startup,
+    .zshrc composes the user's own interactive layer and then loads the
+    product profile, and every stage restores the pinned python door.
     """
     base = generation / "config" / "runtime-pin" / "zsh-product"
     return {stage: base / stage for stage in _PRODUCT_ZDOTDIR_STAGES}

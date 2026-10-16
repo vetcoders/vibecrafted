@@ -1,19 +1,21 @@
-"""Product shells compose the user's login environment; personal rc stays opt-in.
+"""Product shells compose the user's startup environment; nothing is gated.
 
 The product terminal, Frame panes and Quick cmd run `zsh -d` with a product
-ZDOTDIR: zsh itself then reads neither the global /etc stages nor the user's
-own startup files. The product login stages therefore restore the native login
-composition -- the global baseline `-d` skips, then the user's own
-.zshenv/.zprofile exactly as zsh would without Vibecrafted (the runtime-pin
-guest stages), then the pinned generation's python door back in front. The
-user's PATH tools work without `personal-shell`; the interactive ~/.zshrc
-stays behind that explicit command, and the python pin owns python/python3
-inside product shells only.
+ZDOTDIR: zsh itself then reads neither the global login files nor the user's
+own startup. The product stages therefore restore the native composition --
+the global baseline only where `-d` skipped it, then the user's own
+.zshenv/.zprofile/.zshrc exactly as zsh would run them without Vibecrafted
+(the runtime-pin guest stages), then the pinned generation's python door back
+in front. The user's PATH tools work without `personal-shell` in both the
+login and the interactive lane; personal-shell stays the explicit release of
+the product's interactive pins, and the python pin owns python/python3 inside
+product shells only.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +46,8 @@ pytestmark = [
     ),
 ]
 
-PRODUCT_STAGES = (".zshenv", ".zprofile", ".zlogin")
+LOGIN_STAGES = (".zshenv", ".zprofile", ".zlogin")
+PRODUCT_STAGES = (".zshenv", ".zprofile", ".zshrc", ".zlogin")
 
 
 def _fake_tool(directory: Path, name: str, marker: str) -> Path:
@@ -104,19 +107,26 @@ def world(tmp_path: Path) -> dict[str, Path]:
 
 
 def _stage_product_zdotdir(home: Path) -> Path:
-    """What the installer writes into ~/.config/vibecrafted/vc-terminal."""
+    """What the installer writes into ~/.config/vibecrafted/vc-terminal.
+
+    The startup stages are the generation's zsh-product files; the product
+    interactive profile sits beside them as interactive.zsh (stubbed here
+    with a marker, the way the installed copy stands in for the profile).
+    """
 
     product = home / ".config/vibecrafted/vc-terminal"
     product.mkdir(parents=True)
     for stage in PRODUCT_STAGES:
         shutil.copy2(ZSH_PRODUCT / stage, product / stage)
-    (product / ".zshrc").write_text("print -r -- PRODUCT_ZSHRC_RAN\n")
+    (product / "interactive.zsh").write_text("print -r -- PRODUCT_INTERACTIVE_RAN\n")
     return product
 
 
 def _product_env(world: dict[str, Path], product: Path) -> dict[str, str]:
     """A fresh product shell's inheritance: the bare launchd PATH plus the
-    entry exports. No user login PATH has been composed anywhere yet."""
+    entry exports. No user login PATH has been composed anywhere yet.
+    XDG_CONFIG_HOME is pinned into the fixture home: this host exports it
+    globally, and it must never redirect the product config tree."""
 
     generation = world["generation"]
     return {
@@ -126,6 +136,7 @@ def _product_env(world: dict[str, Path], product: Path) -> dict[str, str]:
         "TERM": "dumb",
         "SHELL": "/bin/zsh",
         "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "XDG_CONFIG_HOME": str(world["home"] / ".config"),
         "ZDOTDIR": str(product),
         "VIBECRAFTED_HOME": str(world["home"] / ".vibecrafted"),
         "VIBECRAFTED_RUNTIME_ROOT": str(generation),
@@ -190,6 +201,9 @@ def test_product_login_shell_composes_the_users_login_path(
     assert f"{home}/user-zshenv-bin/user-env-tool" in result.stdout
     assert "USER_ENV_TOOL_RAN=run" in result.stdout
     assert "zshenv=1 zprofile=1" in result.stdout
+    # The lane boundary is native: a non-interactive product shell never
+    # reads .zshrc, so the personal interactive layer stays out of it.
+    assert "PERSONAL_ZSHRC_EXECUTED" not in result.stdout + result.stderr
 
 
 def test_product_login_shell_keeps_the_door_in_front_of_user_prepends(
@@ -215,13 +229,20 @@ def test_product_login_shell_keeps_the_door_in_front_of_user_prepends(
     _assert_pinned(world, result)
 
 
-def test_product_interactive_shell_never_runs_the_personal_zshrc(
+def test_product_interactive_shell_composes_the_personal_zshrc(
     world: dict[str, Path],
 ) -> None:
-    """The interactive layer stays product-owned: personal ~/.zshrc (and the
-    PATH it adds) loads only through the explicit personal-shell command."""
+    """The Founder's original defect, closed: a PATH declared only in the
+    user's ~/.zshrc works right after product entry, without personal-shell.
+    The user's file runs first via the guest-ZDOTDIR composition, the product
+    interactive profile still runs after it, and nothing VC adds reorders the
+    user's own layering -- only the pinned python door stays in front."""
 
     home = world["home"]
+    # A same-named tool in two user dirs: the layer the user put last (their
+    # .zshrc) must win, exactly as a native interactive zsh would order it.
+    _fake_tool(home / "user-login-bin", "duo-tool", "DUO_FROM_LOGIN")
+    _fake_tool(home / "user-interactive-bin", "duo-tool", "DUO_FROM_INTERACTIVE")
     product = _stage_product_zdotdir(home)
     result = _run(
         [
@@ -231,19 +252,108 @@ def test_product_interactive_shell_never_runs_the_personal_zshrc(
             "-i",
             "-c",
             (
-                "command -v user-login-tool; "
-                "command -v user-interactive-tool || print -r -- INTERACTIVE_TOOL_ABSENT; "
-                'print -r -- "zshrc=${PERSONAL_ZSHRC_RAN-UNSET}"'
+                "command -v user-interactive-tool; user-interactive-tool run; "
+                "command -v duo-tool; duo-tool probe; "
+                'print -r -- "zshrc=$PERSONAL_ZSHRC_RAN"; '
+                f'print -r -- "door=${{PATH%%:*}}"; python3 -c "{PROBE}"'
             ),
         ],
         _product_env(world, product),
         home,
     )
-    assert "PRODUCT_ZSHRC_RAN" in result.stdout
-    assert "PERSONAL_ZSHRC_EXECUTED" not in result.stdout + result.stderr
-    assert "zshrc=UNSET" in result.stdout
-    assert f"{home}/user-login-bin/user-login-tool" in result.stdout
-    assert "INTERACTIVE_TOOL_ABSENT" in result.stdout
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    # The user's .zshrc-declared PATH is composed in (the falsifier's bar).
+    assert f"{home}/user-interactive-bin/user-interactive-tool" in out
+    assert "USER_INTERACTIVE_TOOL_RAN=run" in out
+    assert "zshrc=1" in out
+    # Native user layering is preserved: the user's interactive dir outranks
+    # the user's login dir; nothing VC adds reorders the user's entries.
+    assert f"{home}/user-interactive-bin/duo-tool" in out
+    assert "DUO_FROM_INTERACTIVE=probe" in out
+    assert "DUO_FROM_LOGIN" not in out
+    # User file first, product interactive profile after it.
+    assert "PERSONAL_ZSHRC_EXECUTED" in out
+    assert "PRODUCT_INTERACTIVE_RAN" in out
+    assert out.index("PERSONAL_ZSHRC_EXECUTED") < out.index("PRODUCT_INTERACTIVE_RAN")
+    # The declared exception, unchanged: the pinned door still owns python
+    # inside the product shell, and the foreign python never runs.
+    assert "HOST_PYTHON_SELECTED" not in out + result.stderr
+    lines = [line for line in out.splitlines() if line.startswith("used=")]
+    assert lines, (result.returncode, out, result.stderr)
+    assert (
+        Path(lines[-1].split("used=", 1)[1]).resolve() == Path(sys.executable).resolve()
+    )
+    door = world["generation"] / "config/runtime-pin/bin"
+    assert f"door={door}" in out
+
+
+def _path_helper_invocations(result: subprocess.CompletedProcess) -> int:
+    """xtrace lines of the /etc/zprofile body's own path_helper call.
+
+    zsh prefixes each traced line with the file it is currently executing, so
+    one `+/etc/zprofile:N> /usr/libexec/path_helper ...` line is one run of
+    the global login phase, whoever triggered it (native startup or a stage).
+    """
+
+    return len(
+        re.findall(
+            r"^\+/etc/zprofile:\d+> /usr/libexec/path_helper ",
+            result.stderr,
+            re.MULTILINE,
+        )
+    )
+
+
+@pytest.mark.parametrize("dash_d", [True, False], ids=["zsh -d -l", "plain zsh -l"])
+def test_product_login_shell_runs_the_global_profile_exactly_once(
+    world: dict[str, Path], dash_d: bool
+) -> None:
+    """The reviewer's measurement, pinned: under `zsh -d -l` (the product
+    entry) the global baseline comes from the product stage alone; under a
+    plain `zsh -l` on the same ZDOTDIR native zsh already ran /etc/zprofile,
+    and the stage must not replay it. Exactly one path_helper run either way,
+    and the login PATH floor it provides is present in both modes."""
+
+    etc_zprofile = Path("/etc/zprofile")
+    if not etc_zprofile.is_file() or "path_helper" not in etc_zprofile.read_text():
+        pytest.skip("this host's /etc/zprofile does not run path_helper")
+    paths = [
+        line.strip()
+        for line in Path("/etc/paths").read_text().splitlines()
+        if line.strip()
+    ]
+    if not paths:
+        pytest.skip("this host's /etc/paths is unreadable")
+    home = world["home"]
+    product = _stage_product_zdotdir(home)
+    argv = ["/bin/zsh", "-x"]
+    if dash_d:
+        argv.append("-d")
+    argv += ["-l", "-c", 'print -r -- "path=$PATH"']
+    result = _run(argv, _product_env(world, product), home)
+    assert result.returncode == 0, result.stderr
+    assert _path_helper_invocations(result) == 1, result.stderr
+    path_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("path=")
+    )
+    assert paths[0] in path_line.split(":")
+
+
+def test_product_zshenv_never_replays_the_global_environment() -> None:
+    """zsh reads /etc/zshenv on every startup before any ZDOTDIR file, and
+    `-d` (GLOBAL_RCS) does not gate it -- only `-f` (RCS) does, and that
+    suppresses the product stages too. So whenever the product .zshenv runs,
+    /etc/zshenv already ran; sourcing it could only replay it. Stock macOS
+    ships no /etc/zshenv, which is why no double-run was ever measured; the
+    audit result is pinned structurally so a future host file stays
+    single-run."""
+
+    executable = [
+        line.split("#", 1)[0]
+        for line in (ZSH_PRODUCT / ".zshenv").read_text().splitlines()
+    ]
+    assert not any("/etc/zshenv" in line for line in executable)
 
 
 def test_product_composition_follows_a_personal_zdotdir(
@@ -275,7 +385,7 @@ def test_product_composition_follows_a_personal_zdotdir(
         _product_env(world, product),
         home,
     )
-    assert "PRODUCT_ZSHRC_RAN" in result.stdout
+    assert "PRODUCT_INTERACTIVE_RAN" in result.stdout
     assert f"{relocated_bin}/relocated-tool" in result.stdout
     assert "RELOCATED_TOOL_RAN=run" in result.stdout
     assert f"user={personal}" in result.stdout
@@ -297,7 +407,7 @@ def test_quick_cmd_regenerates_the_composing_login_stages(
     result = _run(["/bin/bash", str(QUICK_CMD)], env, home)
     assert result.returncode == 0, (result.stdout, result.stderr)
     quick_zdot = home / ".vibecrafted/shell/quick-cmd"
-    for stage in PRODUCT_STAGES:
+    for stage in LOGIN_STAGES:
         assert (quick_zdot / stage).read_bytes() == (ZSH_PRODUCT / stage).read_bytes()
     probe_env = {**env, "ZDOTDIR": str(quick_zdot)}
     probe = _run(
@@ -419,9 +529,9 @@ def test_user_rc_dotfile_parses_as_posix_sh_and_zsh() -> None:
         assert result.returncode == 0, (parser, result.stderr)
 
 
-def test_runtime_pack_preserves_hidden_product_login_stages(tmp_path: Path) -> None:
+def test_runtime_pack_preserves_hidden_product_startup_stages(tmp_path: Path) -> None:
     """The recursive Runtime Pack config copy and source seal retain the
-    dotfile login stages the product ZDOTDIR is staged from."""
+    dotfile startup stages the product ZDOTDIR is staged from."""
 
     payload = seed_runtime_pack(tmp_path / "pack")
     for stage in PRODUCT_STAGES:

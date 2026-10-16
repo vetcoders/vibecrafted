@@ -1,4 +1,7 @@
-# Loaded only by the product terminal's private ZDOTDIR.
+# The product interactive profile. The product ZDOTDIR's .zshrc stage loads
+# this after composing the user's own .zshrc; the Quick cmd lane sources it
+# from its generated rc; installed legacy .zshrc trampolines reach it through
+# launch-primary-shell.zsh.
 [[ -o interactive ]] || return 0
 
 # A visible terminal enables TTY color without forcing ordinary shell pipelines.
@@ -183,7 +186,7 @@ aliases() {
     done < "$vc_file"
   done
   _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' reload 're-read the installed product profile'
-  _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' personal-shell 'load ~/.zshrc without product Atuin/Starship pins'
+  _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' personal-shell 'release product pins; re-read ~/.zshrc personal'
   _vc_terminal_catalog_emit "$vc_shell_group" 'Profile' aliases '[text] list these shortcuts, optionally filtered'
   if (( $+functions[atuin-search] )); then
     _vc_terminal_catalog_emit "$vc_shell_group" 'History' 'Ctrl+R' 'search history with Atuin'
@@ -209,9 +212,12 @@ reload() {
 }
 
 personal-shell() {
-  # Load the personal home profile inside this already-started product shell.
-  # `source ~/.zshrc` is not this transition: product ATUIN_*/STARSHIP_CONFIG
-  # /ZDOTDIR remain exported and keep winning over the personal files.
+  # Release the product's interactive pins and re-read the personal home
+  # profile under personal semantics. Startup already composed ~/.zshrc (the
+  # product ZDOTDIR's .zshrc stage); this transition is the explicit release,
+  # and a bare `source ~/.zshrc` is not it: product ATUIN_*/STARSHIP_CONFIG
+  # /ZDOTDIR remain exported and keep winning over the personal files until
+  # this runs.
   if [[ -n ${_VC_TERMINAL_PERSONAL_LOADING:-} ]]; then
     return 0
   fi
@@ -464,7 +470,7 @@ if [[ -t 1 && -z "${VIBECRAFTED_QUIET_START:-}" && -z "${VC_FRAME_PANE_ID:-}" ]]
     print '  vibecrafted --help      Explore commands'
     print '  aliases [text]          List product shortcuts (vcf-* for vc-frame)'
     print '  reload                  Re-read the installed product profile'
-    print '  personal-shell          Load ~/.zshrc without product Atuin/Starship pins'
+    print '  personal-shell          Release product pins; re-read ~/.zshrc personal'
     (( ! $+commands[atuin] )) || print '  Ctrl+R history'
     (( ! $+commands[zoxide] )) || print '  z <directory> jump'
     print '  Tab completion'
