@@ -348,12 +348,14 @@ def test_product_shell_zdotdir_restores_the_door_in_nested_login_shells(
     world: dict[str, Path],
 ) -> None:
     """Terminal, Frame panes and Quick cmd run with a product ZDOTDIR; the
-    installer's stage files bring the door back after path_helper."""
+    staged login files compose the user's own login startup and bring the
+    door back in front of it."""
 
     product = world["home"] / ".config/vibecrafted/vc-terminal"
     product.mkdir(parents=True)
+    product_stages = REPO_ROOT / "config/runtime-pin/zsh-product"
     for stage in (".zshenv", ".zprofile", ".zlogin"):
-        (product / stage).write_text(installer._PRODUCT_ZDOTDIR_PIN_STAGE)
+        shutil.copy2(product_stages / stage, product / stage)
     env = _entered(world, ZDOTDIR=str(product))
     env["PATH"] = f"{world['generation'] / 'config/runtime-pin/bin'}:{env['PATH']}"
     for argv in (

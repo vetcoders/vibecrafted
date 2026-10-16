@@ -805,6 +805,7 @@ class InstallState:
     product_tools: dict[str, dict[str, str]] = field(default_factory=dict)
     layout_transfers: list[dict[str, str]] = field(default_factory=list)
     shell_helpers: bool = False
+    shell_rc: list[dict[str, str]] = field(default_factory=list)
     install_path: str = ""
 
     @classmethod
@@ -2284,7 +2285,7 @@ def _helper_surface_label(*, zsh_available: bool | None = None) -> str:
 
 
 def _launcher_path_line() -> str:
-    """Canonical PATH-guard line ensuring ~/.local/bin is on PATH."""
+    """Retired PATH-prepend guard, retained only for exact cleanup matching."""
     return 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
 
 
@@ -2293,11 +2294,99 @@ def _legacy_launcher_path_lines() -> list[str]:
     return ['export PATH="$HOME/.local/bin:$PATH"']
 
 
+# The plain-ASCII marker survives our own legacy-rc cleanup (which strips every
+# fancy-brand comment), so the managed line keeps its provenance between
+# installs while uninstall still removes comment and line together.
+_USER_RC_GUEST_COMMENT = "Vibecrafted shell guest"
+
+
+def _user_rc_guest_line() -> str:
+    """The one managed guest line sourcing the product shell rc (rc.sh).
+
+    POSIX-safe (sh/bash/zsh) and guarded, so it is inert until rc.sh exists.
+    rc.sh itself only appends the launcher directory at the END of PATH — the
+    user's own resolution order always outranks Vibecrafted availability.
+    """
+    return (
+        '[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/rc.sh" ]'
+        ' && . "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/rc.sh"'
+    )
+
+
+def _user_rc_guest_target() -> Path:
+    """Where the product shell rc (rc.sh) is staged for the guest line to find."""
+    return xdg_config_home() / "vibecrafted" / "shell" / "rc.sh"
+
+
+def _stage_user_rc_guest(repo_root: Path, dry_run: bool) -> dict[str, str]:
+    """Stage rc.sh next to the helper shim so the managed guest line is live.
+
+    Returns the receipt record for the file: `staged` (bytes written),
+    `current` (already identical), `missing-source`, or `would-stage`.
+    """
+    target = _user_rc_guest_target()
+    source = (
+        repo_root
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "shell"
+        / "rc.sh"
+    )
+    if not source.is_file():
+        return {"path": str(target), "action": "missing-source"}
+    payload = source.read_bytes()
+    record = {"path": str(target), "sha256": hashlib.sha256(payload).hexdigest()}
+    if target.is_file() and target.read_bytes() == payload:
+        return {**record, "action": "current"}
+    if dry_run:
+        return {**record, "action": "would-stage"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return {**record, "action": "staged"}
+
+
+def _ensure_user_rc_guest_line(dry_run: bool) -> list[dict[str, str]]:
+    """Append the one managed guest line to the user's existing rc files.
+
+    Idempotent and collision-preserving: a file already carrying the line is
+    left byte-identical, a missing rc file is never created, a locked file is
+    reported, and an append never rewrites or reorders the user's own bytes.
+    Returns one receipt record per rc file touched or found compliant.
+    """
+    line = _user_rc_guest_line()
+    receipts: list[dict[str, str]] = []
+    for rcname in (".bashrc", ".zshrc"):
+        rcfile = Path.home() / rcname
+        if not rcfile.exists():
+            continue
+        existing = rcfile.read_text(encoding="utf-8")
+        if line in existing:
+            receipts.append({"path": str(rcfile), "action": "present"})
+            continue
+        if not _is_writable(rcfile):
+            receipts.append({"path": str(rcfile), "action": "locked"})
+            continue
+        if dry_run:
+            receipts.append({"path": str(rcfile), "action": "would-append"})
+            continue
+        if existing and not existing.endswith("\n"):
+            prefix = "\n\n"
+        elif existing:
+            prefix = "\n"
+        else:
+            prefix = ""
+        with open(rcfile, "a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}# {_USER_RC_GUEST_COMMENT}\n{line}\n")
+        receipts.append({"path": str(rcfile), "action": "appended"})
+    return receipts
+
+
 def _doctor_repair_rc_content(
     content: str, *, ensure_helper: bool, ensure_path: bool
 ) -> str:
     """Rebuild rc-file content with legacy Vibecrafted blocks stripped and (if `ensure_path`)
-    the canonical launcher PATH guard appended.
+    the managed shell guest line appended (rc.sh preserves user PATH order).
     """
     _ = ensure_helper  # legacy API: host-shell helper sourcing is intentionally retired
     repaired, _removed = _clean_legacy_rc_entries(content)
@@ -2305,7 +2394,7 @@ def _doctor_repair_rc_content(
         repaired, _ = _strip_rc_entry(repaired, line, comment)
     blocks: list[tuple[str, str]] = []
     if ensure_path:
-        blocks.append(("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher", _launcher_path_line()))
+        blocks.append((_USER_RC_GUEST_COMMENT, _user_rc_guest_line()))
 
     if not blocks:
         return repaired
@@ -2321,7 +2410,7 @@ def _doctor_repair_rc_content(
 
 def _doctor_fix_rc_files() -> list[DoctorFinding]:
     """Repair every present shell startup file: strip legacy helper-sourcing blocks, restore the
-    PATH-only launcher hint, backing up each changed file first.
+    managed shell guest line, backing up each changed file first.
     """
     findings: list[DoctorFinding] = []
     ensure_path = _find_launcher_wrapper("vibecrafted") is not None
@@ -2383,8 +2472,8 @@ def _doctor_fix_rc_files() -> list[DoctorFinding]:
             DoctorFinding(
                 "ok",
                 f"rc-fix:{rcname}",
-                "removed product helper sourcing and restored the PATH-only "
-                f"launcher hint (backup: {backup.name})",
+                "removed product helper sourcing and restored the "
+                f"shell guest line (backup: {backup.name})",
             )
         )
 
@@ -2817,7 +2906,7 @@ def _strip_rc_entry(
         idx += 1
 
     rebuilt = "\n".join(kept)
-    if content.endswith("\n"):
+    if content.endswith("\n") and not rebuilt.endswith("\n"):
         rebuilt += "\n"
     return rebuilt, removed
 
@@ -3165,6 +3254,7 @@ def _uninstall_rc_entries() -> list[tuple[str, str]]:
         (_old_zshrc_source_line(), "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. shell helpers"),
         (_old_zshrc_source_line(), "Vetcoders shell helpers"),
         (_launcher_path_line(), "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher"),
+        (_user_rc_guest_line(), _USER_RC_GUEST_COMMENT),
     ]
     entries.extend(
         (legacy_line, "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher")
@@ -14987,7 +15077,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         print()
 
     # --- Execute: vibecrafted launcher ---
-    _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
+    shell_rc_receipts = _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
     if current_tools is not None:
         moved_agency = cleanse_state_home_agency(current_tools, dry_run=dry_run)
         if moved_agency:
@@ -15014,6 +15104,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         foundations=installed_foundations,
         product_tools=snapshot_product_tool_state(),
         shell_helpers=install_shell,
+        shell_rc=shell_rc_receipts,
         install_path=str(store_path),
     )
     if not dry_run:
@@ -15063,8 +15154,16 @@ def _launcher_symlink_target(repo_root: Path) -> Path:
     )
 
 
-def _install_launcher(repo_root: Path, dry_run: bool, update_rc: bool = False) -> None:
-    """Install vibecrafted launcher to portable and compat bin surfaces."""
+def _install_launcher(
+    repo_root: Path, dry_run: bool, update_rc: bool = False
+) -> list[dict[str, str]]:
+    """Install vibecrafted launcher to portable and compat bin surfaces.
+
+    Returns the shell-guest receipt: the staged rc.sh record plus, when
+    `update_rc` consents to rc writes, one record per user rc file the managed
+    guest line was appended to or found present in.
+    """
+    receipts: list[dict[str, str]] = []
     launcher_src = repo_root / "scripts" / "vibecrafted"
     if launcher_src.exists():
         if not dry_run:
@@ -15123,36 +15222,33 @@ def _install_launcher(repo_root: Path, dry_run: bool, update_rc: bool = False) -
                     create_symlink(
                         Path("vibecrafted"), launcher_bin_dir / wrapper, dry_run=True
                     )
-        # Ensure $HOME/.local/bin is in PATH via shell rc files only when the
-        # caller has explicit consent. Otherwise leave a copyable instruction.
-        canonical_path_line = _launcher_path_line()
-        path_lines = [canonical_path_line, *_legacy_launcher_path_lines()]
-        path_comment = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher"
+        # The guest rc.sh is inert until the user's rc sources it; stage it
+        # unconditionally so even the manual opt-in line below is live.
+        receipts.append(_stage_user_rc_guest(repo_root, dry_run))
+        # One guest entry owns availability; retired prepend guards remain
+        # cleanup matches only. Install, doctor and manual opt-in all source rc.sh.
         if update_rc:
             for rcname in (".bashrc", ".zshrc"):
                 rcfile = Path.home() / rcname
-                if rcfile.exists():
-                    content = rcfile.read_text()
-                    cleaned = content
-                    removed = 0
-                    for path_line in path_lines:
-                        cleaned, removed_now = _strip_rc_entry(
-                            cleaned, path_line, path_comment
-                        )
-                        removed += removed_now
-                    has_path = _rc_has_vibecrafted_bin_path(cleaned)
-                    changed = removed > 0
-                    if not has_path:
-                        if cleaned and not cleaned.endswith("\n"):
-                            cleaned += "\n"
-                        cleaned += f"\n# {path_comment}\n{canonical_path_line}\n"
-                        changed = True
-                    if changed and not dry_run:
-                        rcfile.write_text(cleaned)
+                if not rcfile.exists() or not _is_writable(rcfile):
+                    continue
+                content = rcfile.read_text()
+                cleaned = content
+                for path_line in [
+                    _launcher_path_line(),
+                    *_legacy_launcher_path_lines(),
+                ]:
+                    cleaned, _ = _strip_rc_entry(
+                        cleaned, path_line, "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher"
+                    )
+                if cleaned != content and not dry_run:
+                    rcfile.write_text(cleaned)
+            receipts.extend(_ensure_user_rc_guest_line(dry_run))
         else:
             print("  Shell rc files unchanged. To expose launchers, add:")
-            print(f"    {canonical_path_line}")
+            print(f"    {_user_rc_guest_line()}")
         print()
+    return receipts
 
 
 def _print_unicode_summary(
@@ -15526,8 +15622,11 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         # A source carrier can install and verify its skill views without
         # claiming that it is a complete native Runtime Pack. Product launchers
         # remain generation-owned and are installed only by the Runtime Pack.
+        shell_rc_receipts: list[dict[str, str]] = []
         if not skills_only:
-            _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
+            shell_rc_receipts = _install_launcher(
+                repo_root, dry_run, update_rc=write_shell_rc
+            )
         if current_tools is not None:
             moved_agency = cleanse_state_home_agency(current_tools, dry_run=dry_run)
             print(f"  state agency moved: {moved_agency}")
@@ -15556,6 +15655,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             foundations=installed_foundations,
             product_tools=snapshot_product_tool_state(),
             shell_helpers=install_shell,
+            shell_rc=shell_rc_receipts,
             install_path=str(store_path),
         )
         if not dry_run:
@@ -24332,15 +24432,17 @@ def _stage_runtime_product_config(
             ):
                 shutil.copy2(src, terminal / "bin" / src.name)
                 (terminal / "bin" / src.name).chmod(0o755)
-    (terminal / ".zshrc").write_text(
-        'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
-        encoding="utf-8",
-    )
-    # Every zsh started inside a product shell -- `zsh -c`, `zsh -l` after
-    # /etc/zprofile's path_helper, Frame panes -- reads this ZDOTDIR. These
-    # stages put the pinned generation's python door back in front of PATH.
-    for stage in (".zshenv", ".zprofile", ".zlogin"):
-        (terminal / stage).write_text(_PRODUCT_ZDOTDIR_PIN_STAGE, encoding="utf-8")
+    # Every zsh started inside a product shell -- `zsh -c`, `zsh -l`, Frame
+    # panes -- reads this ZDOTDIR. The startup stages are real generation
+    # files (config/runtime-pin/zsh-product): .zshenv/.zprofile compose the
+    # user's own login startup, .zshrc composes the user's own interactive
+    # layer and then loads the product profile (interactive.zsh, staged
+    # beside it above), and every stage puts the pinned generation's python
+    # door back in front of PATH. Already-installed trampolines that source
+    # launch-primary-shell.zsh keep working through its sourced branch.
+    for stage, stage_source in _product_zdotdir_stage_sources(generation).items():
+        if stage_source.is_file() or sys.platform != "win32":
+            shutil.copy2(stage_source, terminal / stage)
     for relative in ("atuin/config.toml",):
         destination = staged / relative
         if not destination.exists():
@@ -24813,14 +24915,19 @@ _PRODUCT_TERMINAL_DEBRIS = (
     "vc-terminal/alacritty.toml",
 )
 _PRODUCT_PRIMARY_SHELL_NAME = "launch-primary-shell.zsh"
-# Product ZDOTDIR .zshenv / .zprofile / .zlogin: restore the pinned
-# generation's python door after system and stage startup reorder PATH.
-_PRODUCT_ZDOTDIR_PIN_STAGE = (
-    "# Generated by the Vibecrafted installer. Keeps the runtime python door\n"
-    "# (python/python3 = VIBECRAFTED_PYTHON) first on PATH after zsh startup.\n"
-    '[[ ! -r "${VIBECRAFTED_RUNTIME_ROOT:-}/config/runtime-pin/pin.zsh" ]] \\\n'
-    '  || builtin source "${VIBECRAFTED_RUNTIME_ROOT}/config/runtime-pin/pin.zsh"\n'
-)
+_PRODUCT_ZDOTDIR_STAGES = (".zshenv", ".zprofile", ".zshrc", ".zlogin")
+
+
+def _product_zdotdir_stage_sources(generation: Path) -> dict[str, Path]:
+    """Product ZDOTDIR startup stages: the generation's zsh-product files.
+
+    Real, reviewable files ship with the generation instead of installer-
+    embedded strings: .zshenv/.zprofile compose the user's own login startup,
+    .zshrc composes the user's own interactive layer and then loads the
+    product profile, and every stage restores the pinned python door.
+    """
+    base = generation / "config" / "runtime-pin" / "zsh-product"
+    return {stage: base / stage for stage in _PRODUCT_ZDOTDIR_STAGES}
 
 
 _FOUNDATION_TOOL_NAMES = (
