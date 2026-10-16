@@ -159,15 +159,16 @@ const PROJECTION_CACHE_SETTLE: Duration = Duration::from_secs(2);
 /// Bounds on what one reader may retain; past either the cache starts over
 /// instead of growing with the machine's whole run history.
 const PROJECTION_CACHE_MAX_ENTRIES: usize = 32_768;
-/// Approximate heap budget. Retained text counts once; a parsed `Value` is
-/// charged `PROJECTION_CACHE_PARSED_FACTOR` times its text (it is built lazily,
-/// so the charge is made up front), and a slimmed lifecycle run is charged by
-/// the same factor over its serialized size. This is an estimate, not an
-/// allocator-enforced cap: measured parsed-heap/text ratios were 1.5x for a
-/// receipt dominated by one long string, 7x for 120 short fields and 38x for
-/// arrays of tiny objects, so only `PROJECTION_CACHE_MAX_PARSED_TEXT` bounds
-/// the pathological case (per file, not in total).
-const PROJECTION_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
+/// Estimated heap the retained files may be charged before the cache starts
+/// over. Retained text counts once; a parsed `Value` is charged
+/// `PROJECTION_CACHE_PARSED_FACTOR` times its text (it is built lazily, so the
+/// charge is made up front), and a slimmed lifecycle run is charged by the same
+/// factor over its serialized size. Nothing here is allocator-enforced: the
+/// measured parsed-heap/text ratios were 1.5x for a receipt dominated by one
+/// long string, 7x for 120 short fields and 38x for arrays of tiny objects, so
+/// only `PROJECTION_CACHE_MAX_PARSED_TEXT` bounds the pathological case (per
+/// file, not in total). The event stream is estimated separately.
+const PROJECTION_CACHE_CHARGE_BUDGET: usize = 96 * 1024 * 1024;
 /// A file larger than this is read every time and never retained.
 const PROJECTION_CACHE_MAX_FILE: usize = 4 * 1024 * 1024;
 /// A `Value` parse is retained only for texts up to this size (run receipts and
@@ -177,9 +178,13 @@ const PROJECTION_CACHE_MAX_PARSED_TEXT: usize = 16 * 1024;
 const PROJECTION_CACHE_PARSED_FACTOR: usize = 8;
 /// More changed paths than this in one wake is a storm, not a delta.
 const PROJECTION_CACHE_MAX_INVALIDATIONS: usize = 64;
-/// The active event stream is retained incrementally only up to this size
-/// (retained events cost several times their text; not part of the budget above).
-const PROJECTION_CACHE_MAX_EVENT_BYTES: u64 = 32 * 1024 * 1024;
+/// The active event stream is retained incrementally only while the file is at
+/// most this large (an input size, not a heap size: retained events cost
+/// `PROJECTION_CACHE_EVENT_FACTOR` times their text).
+const PROJECTION_CACHE_MAX_EVENT_FILE: u64 = 32 * 1024 * 1024;
+/// Estimated retained heap per byte of event file. Measured on 9.9 MB files of
+/// `Vec<Event>`: 6.5x with 2-field payloads, 5.2x with 12-field payloads.
+const PROJECTION_CACHE_EVENT_FACTOR: u64 = 7;
 /// Bytes compared at both ends of a retained event prefix before extending it.
 const EVENT_FINGERPRINT_BYTES: u64 = 128;
 
@@ -277,12 +282,19 @@ struct Hit {
 
 /// The active event stream, retained so only appended bytes are read again.
 struct EventMemo {
-    device: u64,
-    inode: u64,
-    /// End of the last complete line already folded into `events`.
+    /// Stamp taken before the read that produced `events`.
+    stamp: FileStamp,
+    /// Length at that stamp; the file may only have grown since, never shrunk.
+    file_len: u64,
+    /// End of the last complete line already folded into `events` (at most
+    /// `file_len`: a half-written final line is not an event yet).
     cursor: u64,
     head: Vec<u8>,
     tail: Vec<u8>,
+    /// When the whole stream was last parsed from byte zero. Appends extend a
+    /// prefix nobody re-reads, so this bounds how long a rewritten interior
+    /// can go unnoticed.
+    verified: Instant,
     events: Arc<Vec<Event>>,
 }
 
@@ -369,10 +381,16 @@ impl ProjectionCache {
         self.lock().stats
     }
 
-    /// Approximate heap currently charged to retained files (see the budget note).
+    /// Estimated heap pinned by retained files and the event stream (see the
+    /// budget note; an estimate from measured ratios, not an allocation count).
     #[must_use]
-    pub fn charged_bytes(&self) -> usize {
-        self.lock().bytes
+    pub fn estimated_charge(&self) -> usize {
+        let inner = self.lock();
+        inner.bytes
+            + inner.events.as_ref().map_or(0, |memo| {
+                usize::try_from(memo.file_len.saturating_mul(PROJECTION_CACHE_EVENT_FACTOR))
+                    .unwrap_or(usize::MAX)
+            })
     }
 
     /// Whether silence from the change watcher may stand in for a `stat`.
@@ -485,7 +503,7 @@ impl ProjectionCache {
         let watched = (self.watched)(path);
         let mut inner = self.lock();
         if inner.entries.len() >= PROJECTION_CACHE_MAX_ENTRIES
-            || inner.bytes + charge > PROJECTION_CACHE_MAX_BYTES
+            || inner.bytes + charge > PROJECTION_CACHE_CHARGE_BUDGET
         {
             inner.entries.clear();
             inner.bytes = 0;
@@ -568,91 +586,97 @@ impl ProjectionCache {
         run
     }
 
-    /// The active event stream exactly as `read_since(0)` returns it, reading
-    /// only appended bytes while the retained prefix still matches the file:
-    /// same inode, no shrink, identical bytes at both ends of the prefix. A
-    /// rotation, truncation or rewrite fails one of those and reads in full.
+    /// The active event stream exactly as `read_since(0)` returns it.
+    ///
+    /// Only appended bytes are read while the retained prefix can be believed:
+    /// same inode and native identity, no shrink, identical bytes at both ends
+    /// of the prefix, and, when the length has not grown, an unchanged stamp
+    /// (a same-size rewrite moves mtime and ctime). What a stamp cannot tell
+    /// apart from an append is an interior rewrite that is followed by an
+    /// append, or one inside a single timestamp tick; those are bounded by
+    /// re-parsing the whole stream from byte zero at least once per
+    /// `event_trust` (the reader's recovery interval; zero means every pass).
+    /// Rotation, truncation, rewrite and an explicit refresh read in full.
     fn read_events(
         &self,
         path: &Path,
         read_since: impl Fn(u64) -> std::io::Result<crate::events::EventBatch>,
     ) -> Arc<Vec<Event>> {
-        let full = |cache: &Self| -> Arc<Vec<Event>> {
+        let full = |cache: &Self, stamp: Option<FileStamp>| -> Arc<Vec<Event>> {
             cache.lock().stats.event_full_reads += 1;
-            Arc::new(read_since(0).map(|batch| batch.events).unwrap_or_default())
-        };
-        let Some((device, inode, len)) = event_file_identity(path) else {
-            self.lock().events = None;
-            return full(self);
-        };
-        let memo = self.lock().events.take();
-        let mut memo = memo.filter(|memo| {
-            memo.device == device
-                && memo.inode == inode
-                && len >= memo.cursor
-                && event_fingerprint(path, memo.cursor)
-                    .is_some_and(|(head, tail)| head == memo.head && tail == memo.tail)
-        });
-        let mut extended = false;
-        if let Some(retained) = memo.as_mut() {
-            self.lock().stats.event_tail_reads += 1;
-            match read_since(retained.cursor) {
-                Ok(batch)
-                    if batch.cursor >= retained.cursor
-                        && batch
-                            .events
-                            .first()
-                            .is_none_or(|event| event.cursor > retained.cursor) =>
-                {
-                    Arc::make_mut(&mut retained.events).extend(batch.events);
-                    retained.cursor = batch.cursor;
-                    extended = true;
-                }
-                _ => {}
-            }
-        }
-        if !extended {
-            self.lock().stats.event_full_reads += 1;
-            memo = match read_since(0) {
-                Ok(batch) => Some(EventMemo {
-                    device,
-                    inode,
-                    cursor: batch.cursor,
-                    head: Vec::new(),
-                    tail: Vec::new(),
-                    events: Arc::new(batch.events),
-                }),
-                Err(_) => None,
+            let batch = read_since(0);
+            let Some(stamp) = stamp.filter(|stamp| stamp.native_identity) else {
+                return Arc::new(batch.map(|batch| batch.events).unwrap_or_default());
             };
-        }
-        let Some(mut memo) = memo else {
-            return Arc::new(Vec::new());
-        };
-        let events = Arc::clone(&memo.events);
-        if len <= PROJECTION_CACHE_MAX_EVENT_BYTES {
-            if let Some((head, tail)) = event_fingerprint(path, memo.cursor) {
-                memo.head = head;
-                memo.tail = tail;
-                self.lock().events = Some(memo);
+            let Ok(batch) = batch else {
+                return Arc::new(Vec::new());
+            };
+            let events = Arc::new(batch.events);
+            if stamp.len <= PROJECTION_CACHE_MAX_EVENT_FILE {
+                if let Some((head, tail)) = event_fingerprint(path, batch.cursor) {
+                    cache.lock().events = Some(EventMemo {
+                        stamp,
+                        file_len: stamp.len,
+                        cursor: batch.cursor,
+                        head,
+                        tail,
+                        verified: Instant::now(),
+                        events: Arc::clone(&events),
+                    });
+                }
             }
+            events
+        };
+        // The stamp precedes every read, as everywhere else in this cache.
+        let current = FileStamp::of(path);
+        let memo = self.lock().events.take();
+        let (Some(current), Some(mut memo)) = (current, memo) else {
+            return full(self, current);
+        };
+        let believable = current.native_identity
+            && memo.stamp.native_identity
+            && memo.stamp.device == current.device
+            && memo.stamp.inode == current.inode
+            && current.len >= memo.file_len
+            && (current.len > memo.file_len
+                || current.changed_ns == memo.stamp.changed_ns
+                    && current.modified == memo.stamp.modified)
+            && memo.verified.elapsed() < self.event_trust
+            && event_fingerprint(path, memo.cursor)
+                .is_some_and(|(head, tail)| head == memo.head && tail == memo.tail);
+        if !believable {
+            return full(self, Some(current));
         }
-        events
-    }
-}
-
-/// `(device, inode, len)` of the active event stream, where the platform has
-/// native identity; `None` makes the caller read in full.
-fn event_file_identity(path: &Path) -> Option<(u64, u64, u64)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::metadata(path).ok()?;
-        meta.is_file().then(|| (meta.dev(), meta.ino(), meta.len()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
+        if current.len == memo.file_len {
+            // Nothing appended and nothing rewritten: no read at all.
+            let events = Arc::clone(&memo.events);
+            self.lock().events = Some(memo);
+            return events;
+        }
+        self.lock().stats.event_tail_reads += 1;
+        match read_since(memo.cursor) {
+            Ok(batch)
+                if batch.cursor >= memo.cursor
+                    && batch
+                        .events
+                        .first()
+                        .is_none_or(|event| event.cursor > memo.cursor) =>
+            {
+                Arc::make_mut(&mut memo.events).extend(batch.events);
+                memo.cursor = batch.cursor;
+                memo.file_len = current.len;
+                memo.stamp = current;
+                if let Some((head, tail)) = event_fingerprint(path, memo.cursor) {
+                    memo.head = head;
+                    memo.tail = tail;
+                    let events = Arc::clone(&memo.events);
+                    self.lock().events = Some(memo);
+                    return events;
+                }
+                Arc::clone(&memo.events)
+            }
+            _ => full(self, Some(current)),
+        }
     }
 }
 

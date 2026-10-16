@@ -932,7 +932,7 @@ fn projection_cache_matches_canonical_at_real_lifecycle_and_event_sizes() {
     eprintln!(
         "lifecycle text {} KiB, cache charge {} KiB",
         text_bytes / 1024,
-        cache.charged_bytes() / 1024
+        cache.estimated_charge() / 1024
     );
 
     // Unchanged: nothing re-read or re-parsed, only the event tail asked for.
@@ -944,7 +944,10 @@ fn projection_cache_matches_canonical_at_real_lifecycle_and_event_sizes() {
         "unchanged lifecycle states stay parsed"
     );
     assert_eq!(after.event_full_reads, 1);
-    assert!(after.event_tail_reads > before.event_tail_reads);
+    assert_eq!(
+        after.event_tail_reads, before.event_tail_reads,
+        "an untouched stream is not read at all"
+    );
 
     // Heartbeats append events; the prefix is never read again.
     for beat in 0..5 {
@@ -1100,5 +1103,136 @@ fn only_a_fresh_unmerged_runtime_directory_surfaces_as_a_launch() {
     cache.invalidate_paths(std::slice::from_ref(&fresh));
     assert_cached_matches_canonical(&home, &cached, &sources, now);
     assert!(cache.stats().reads - reads <= 3, "{:?}", cache.stats());
+    fs::remove_dir_all(home).ok();
+}
+
+fn event_n(i: usize) -> String {
+    format!(
+        "{}\n",
+        json!({"ts": "2026-10-16T00:00:00Z", "run_id": "mid-run", "kind": "note",
+            "message": format!("event {i:04}"), "payload": {"n": i}})
+    )
+}
+
+/// `n` events of one run, each its own line; the view shows the newest 16.
+fn numbered_events(n: usize) -> String {
+    (0..n).map(event_n).collect()
+}
+
+/// Rewrite `from` to `to` in place (same length, same inode): a middle event
+/// beyond the 128-byte ends the retained prefix is fingerprinted by.
+fn rewrite_in_place(path: &Path, from: &str, to: &str) {
+    use std::os::unix::fs::FileExt;
+    assert_eq!(from.len(), to.len());
+    let text = fs::read_to_string(path).unwrap();
+    let at = text.find(from).expect("event to rewrite") as u64;
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(to.as_bytes(), at).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn projection_cache_rejects_a_same_size_rewrite_of_a_middle_event() {
+    let home = temp_home("cache-event-rewrite");
+    let now = Utc::now();
+    let events = home.join("control_plane/events.jsonl");
+    fs::write(&events, numbered_events(40)).unwrap();
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let before = cached.compute_view_with_raw_sources(now, &sources);
+    assert!(before.events.iter().any(|e| e.message == "event 0028"));
+    assert_eq!(cache.stats().event_full_reads, 1);
+
+    // Event 28 is far from both 128-byte ends of the 40-line file, yet inside
+    // the newest-16 window the view shows, so a stale prefix would be visible.
+    rewrite_in_place(&events, "event 0028", "event 0099");
+    let after = cached.compute_view_with_raw_sources(now, &sources);
+    assert!(
+        after.events.iter().any(|e| e.message == "event 0099")
+            && !after.events.iter().any(|e| e.message == "event 0028"),
+        "the rewritten middle event must reach the view, not the retained prefix"
+    );
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(cache.stats().event_full_reads, 2, "a rewrite re-parses");
+    fs::remove_dir_all(home).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn projection_cache_converges_on_a_rewrite_that_is_followed_by_an_append() {
+    let home = temp_home("cache-event-rewrite-append");
+    let now = Utc::now();
+    let events = home.join("control_plane/events.jsonl");
+    fs::write(&events, numbered_events(40)).unwrap();
+    // The prefix is re-verified from byte zero at least once per this interval.
+    let recheck = StdDuration::from_millis(150);
+    let (cached, cache) = cached_plane(&home, recheck);
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let pristine = format!("{:?}", ControlPlane::new(&home).compute_view(now).events);
+
+    // A rewrite plus an append cannot be told from an append by size or stamp.
+    rewrite_in_place(&events, "event 0028", "event 0099");
+    append(&events, &event_n(40));
+    let canonical = format!("{:?}", ControlPlane::new(&home).compute_view(now).events);
+    assert_ne!(canonical, pristine, "the rewrite is a real change");
+    let full_reads = cache.stats().event_full_reads;
+
+    std::thread::sleep(recheck * 2);
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(
+        cache.stats().event_full_reads,
+        full_reads + 1,
+        "the bounded recheck re-parsed the whole stream"
+    );
+
+    // And the recovery is not a one-off: the next rewrite+append converges too.
+    rewrite_in_place(&events, "event 0030", "event 0098");
+    append(&events, &event_n(41));
+    std::thread::sleep(recheck * 2);
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn projection_cache_leaves_public_typed_lifecycle_reads_full() {
+    let home = temp_home("cache-typed-lifecycle");
+    let now = Utc::now();
+    let old = iso_ago(now, 3600);
+    let state = write_big_lifecycle(&home, "typed-life", "completed", &old, None, 170 * 1024);
+    fs::File::options()
+        .write(true)
+        .open(&state)
+        .unwrap()
+        .set_modified(SystemTime::now() - StdDuration::from_secs(3600))
+        .unwrap();
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    // Warm the slimmed projection cache, then use the public typed API.
+    let _ = cached.compute_view_with_raw_sources(now, &sources);
+    let plain = ControlPlane::new(&home);
+    for api in [
+        format!("{:?}", cached.load_lifecycle_runs()),
+        format!("{:?}", cached.resolve_lifecycle_run("typed-life")),
+    ] {
+        assert!(api.contains("context_atlas"), "full fields survive");
+        assert!(api.len() > 100_000, "the 170 KB container is not slimmed");
+    }
+    assert_eq!(
+        format!("{:?}", cached.load_lifecycle_runs()),
+        format!("{:?}", plain.load_lifecycle_runs())
+    );
+    assert_eq!(
+        format!("{:?}", cached.resolve_lifecycle_run("typed-life")),
+        format!("{:?}", plain.resolve_lifecycle_run("typed-life"))
+    );
+    assert_eq!(
+        format!("{:?}", cached.load_lifecycle_run_summaries()),
+        format!("{:?}", plain.load_lifecycle_run_summaries())
+    );
     fs::remove_dir_all(home).ok();
 }
