@@ -29,6 +29,32 @@ from vibecrafted_core.lifecycle_runner import (
 )
 from vibecrafted_core.workflows.model import WorkflowManifest, WorkflowStage
 
+
+def test_stage_progress_forwards_only_exact_growing_raw_transcript(monkeypatch, capsys):
+    from vibecrafted_core import lifecycle_runner
+
+    launch = {"run_id": "owned-stage", "transcript": "/private-fixture/raw.log"}
+
+    def awaiter(payload, *, on_poll, **_kwargs):
+        for run in [
+            {**launch, "transcript_bytes": 10},
+            {**launch, "transcript_bytes": 10, "heartbeat_at": "later"},
+            {**launch, "transcript_bytes": 9},
+            {**launch, "transcript_bytes": 999, "run_id": "sibling"},
+            {**launch, "transcript_bytes": 999, "transcript": "/unrelated"},
+            {**launch, "transcript_bytes": True},
+            {**launch, "transcript_bytes": 20},
+        ]:
+            on_poll(run)
+        return {"completed": True}
+
+    monkeypatch.setattr(lifecycle_runner, "await_launch_truth", awaiter)
+    assert LifecycleRunner._await_stage(launch) == {"completed": True}
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["bytes"] for row in rows] == [10, 20]
+    assert all(row["child_run_id"] == "owned-stage" for row in rows)
+
+
 from .lifecycle_schema_assertions import (
     assert_lifecycle_state_matches_packaged_schema,
     assert_worker_report_frontmatter_matches_packaged_schema,

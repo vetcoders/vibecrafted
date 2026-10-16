@@ -756,18 +756,50 @@ class LifecycleRunner:
         supervisor, parser, worktrees and receipts in play.
         """
         self.launcher = launcher
-        self.awaiter = awaiter or (
-            lambda payload: await_launch_truth(
-                payload,
-                timeout_seconds=_lifecycle_await_idle_seconds(),
-                interval_seconds=5,
-                hard_cap_seconds=_lifecycle_await_hard_cap_seconds(),
-            )
-        )
+        self.awaiter = awaiter or self._await_stage
         self.fleet_supervisor = fleet_supervisor
         self.fleet_launch = fleet_launch
         self.cell_launcher = cell_launcher
         self.fleet_await_config = fleet_await_config
+
+    @staticmethod
+    def _await_stage(launch: dict[str, Any]) -> dict[str, Any]:
+        last_bytes = 0
+
+        def forward_output(run: dict[str, Any] | None) -> None:
+            nonlocal last_bytes
+            if not run or run.get("run_id") != launch.get("run_id"):
+                return
+            if run.get("transcript") != launch.get("transcript"):
+                return
+            size = run.get("transcript_bytes")
+            if (
+                not isinstance(size, int)
+                or isinstance(size, bool)
+                or size <= last_bytes
+            ):
+                return
+            last_bytes = size
+            # The outer supervisor already consumes stdout. Forward only
+            # observed raw output from this launched stage, never idle pulses.
+            print(
+                json.dumps(
+                    {
+                        "type": "workflow.stage_activity",
+                        "child_run_id": run["run_id"],
+                        "bytes": size,
+                    }
+                ),
+                flush=True,
+            )
+
+        return await_launch_truth(
+            launch,
+            timeout_seconds=_lifecycle_await_idle_seconds(),
+            interval_seconds=5,
+            hard_cap_seconds=_lifecycle_await_hard_cap_seconds(),
+            on_poll=forward_output,
+        )
 
     async def run(self, spec: LifecycleRunSpec) -> dict[str, Any]:
         """Execute the full lifecycle: initialize state, then loop launching stages until

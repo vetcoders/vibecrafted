@@ -44,7 +44,7 @@ from .report_contract import (
     validate_report_file,
     worker_authored_report,
 )
-from .run_mutation import run_mutation_locks
+from .run_mutation import RunMetaMutationError, read_run_meta, run_mutation_locks
 from .run_signal import wait_for_run_signal
 from .runtime_paths import vibecrafted_home
 from .settlement import (
@@ -4090,6 +4090,12 @@ def resolve_run(run_id: str) -> ResolvedRun:
     if run_dir.is_dir():
         meta = run_dir / "meta.json"
         transcript = run_dir / "transcript.log"
+        # Nested providers keep their announced transcript beside the report;
+        # their canonical metadata still owns that exact path.
+        if not transcript.is_file() and meta.is_file():
+            recorded = _read_json(meta).get("transcript")
+            if recorded:
+                transcript = Path(str(recorded))
         return ResolvedRun(
             run_id=target,
             source="runtime_runs",
@@ -4553,13 +4559,62 @@ def await_run(
     outruns the dispatcher's own boot (no socket, no durable trace yet) gets
     one bounded launch-grace slice before the run is declared missing.
 
-    ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
-    only paces liveness re-checks while no socket exists.
+    ``on_poll`` receives owned raw-output growth on existing socket events and
+    a reconciled snapshot at each terminal/missing-socket wake. Heartbeats
+    alone never produce raw-output progress. ``interval_seconds`` only paces
+    liveness re-checks while no socket exists.
     """
     target = str(run_id or "").strip()
     if not target:
         raise ValueError("run_id is required")
     hard_cap = _resolve_await_hard_cap(hard_cap_seconds)
+    checked_output_bytes = 0
+
+    def observed_output(event: Any) -> None:
+        nonlocal checked_output_bytes
+        from .process_control import validate_process_identity
+
+        # The existing dispatcher stream wakes us; durable, exact owned run
+        # identity and raw transcript growth decide whether this was progress.
+        # Heartbeats, replayed events and provider-supplied child labels do not.
+        if on_poll is None:
+            return
+        try:
+            meta = read_run_meta(
+                _runtime_run_dir(target) / "meta.json", expected_run_id=target
+            )
+            identity = meta.get("worker_identity")
+            if not isinstance(identity, dict) or event.get(
+                "dispatcher_pid"
+            ) != identity.get("ppid"):
+                return
+            transcript = Path(str(meta.get("transcript") or ""))
+            if not transcript.is_file():
+                return
+            size = transcript.stat().st_size
+            if size <= checked_output_bytes:
+                return
+            # Coalesce queued wake events before the OS ownership check. A
+            # terminal child may leave many notifications for the same bytes;
+            # rechecking its dead process for each one delays terminal delivery.
+            checked_output_bytes = size
+            valid, _reason, current = validate_process_identity(
+                identity,
+                expected_pid=meta.get("worker_pid"),
+                expected_pgid=meta.get("worker_pgid"),
+                expected_run_id=target,
+                env_index={},
+            )
+            if (
+                not valid
+                or current is None
+                or current.ppid != event.get("dispatcher_pid")
+            ):
+                return
+        except (OSError, RunMetaMutationError, ValueError):
+            return
+        on_poll({**meta, "transcript_bytes": size})
+
     try:
         rearm_interval = max(float(interval_seconds), 0.01)
     except (TypeError, ValueError):
@@ -4581,7 +4636,11 @@ def await_run(
     )
 
     while True:
-        signal = wait_for_run_signal(target, timeout=hard_cap)
+        signal = (
+            wait_for_run_signal(target, timeout=hard_cap, _on_event=observed_output)
+            if on_poll is not None
+            else wait_for_run_signal(target, timeout=hard_cap)
+        )
         kind = str(signal.get("kind") or "missing")
 
         runtime_meta_path = _runtime_run_dir(target) / "meta.json"

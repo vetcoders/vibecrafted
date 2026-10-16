@@ -216,6 +216,10 @@ def _provider(bin_dir: Path, *, scenario: str):
 
         scenario = SCENARIO
         argv = sys.argv[1:]
+        if argv[:1] == ['queue']:
+            Path(os.environ['R2_QUEUE_CAPTURE']).write_text(json.dumps(argv))
+            print('private fixture queue accepted', flush=True)
+            sys.exit(0)
         prompt = argv[argv.index('-p') + 1] if Path(sys.argv[0]).name == 'kimi' else sys.stdin.read()
         if Path(sys.argv[0]).name == 'agy' and prompt.startswith('{'):
             prompt = json.loads(prompt)['message']['content'][0]['text']
@@ -235,10 +239,10 @@ def _provider(bin_dir: Path, *, scenario: str):
             native_id = round_id+'-wrong-native'
         print(json.dumps({'type':'thread.started','thread_id':native_id}), flush=True)
         print('[12:00:00] session: ' + native_id, flush=True)
-        for _ in range(12):
+        for _ in range(120 if scenario == 'productive' and not receiver else 12):
             # No human display fragment: still real productive stream activity.
             print(json.dumps({'type':'item.started','item':{'type':'command_execution'}}), flush=True)
-            time.sleep(.025)
+            time.sleep(.1 if scenario == 'productive' and not receiver else .025)
         _, header, _ = report.read_text().split('---', 2)
         fields = yaml.safe_load(header)
         status = 'blocked' if scenario == 'worker-blocked' and not receiver else 'failed' if scenario == 'reader-failed-report' and receiver else 'completed'
@@ -249,7 +253,7 @@ def _provider(bin_dir: Path, *, scenario: str):
             assert 'marbles-reception.v1' not in prompt
             assert 'scope_evidence' not in prompt
             assert 'reception.json' not in prompt
-            if scenario == 'silent':
+            if scenario in {'silent', 'idle'}:
                 time.sleep(120)
             if scenario == 'empty-commits':
                 subprocess.run(['git','commit','--allow-empty','-q','-m',f'empty fixture {index}'],check=True)
@@ -952,3 +956,113 @@ def test_public_stop_uses_lifecycle_owner_and_reaps_inert_write(
     assert terminal["status"] == terminal["execution_state"] == "interrupted"
     assert terminal["operator_actions"][-1]["action"] == "interrupt_workflow"
     assert not list(home.rglob("*marbles-L2.meta.json"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source READ guard")
+def test_public_productive_child_outlives_outer_silence_bound(tmp_path):
+    result, launch, completion, parent, _ = _public_run(
+        tmp_path, "productive", count=2, silence="8", deck=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not completion["timed_out"]
+    write, audit = parent["lifecycle"]["stages"]
+    assert audit["workflow"] == "audit"
+    workers = write["write_cycle"]["workers"]
+    assert len(workers) == write["write_cycle"]["workers_completed"] == 2
+    assert workers[0]["output"] == workers[1]["input"]
+    assert workers[0]["input"]["head"] != workers[0]["output"]["head"]
+    assert workers[1]["input"]["head"] != workers[1]["output"]["head"]
+    assert (Path(launch["root"]) / "assigned.txt").read_text() == "2"
+    assert len(parent["lifecycle"]["stages"]) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source child identity")
+def test_public_live_child_resolves_exact_run_and_native_session(
+    tmp_path, monkeypatch, request
+):
+    import time
+
+    from vibecrafted_core import message_control
+    from vibecrafted_core.workflow import stop_run
+
+    result, launch, _, _, _ = _public_run(
+        tmp_path, "silent", count=2, deck=True, await_run=False
+    )
+    assert result.returncode == 0
+    home = tmp_path / "vc-home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    request.addfinalizer(
+        lambda: stop_run(launch["run_id"], reason="private fixture cleanup")
+    )
+    deadline = time.monotonic() + 20
+    leaf = None
+    while time.monotonic() < deadline:
+        for path in home.rglob("*marbles-L1.meta.json"):
+            leaf = json.loads(path.read_text())
+            if leaf.get("agent_session_id"):
+                break
+        if leaf and leaf.get("agent_session_id"):
+            break
+        time.sleep(0.05)
+    assert leaf and leaf.get("agent_session_id"), "inert child identity never published"
+    child_id = leaf["run_id"]
+    assert message_control.resolve_message_run(run_id=child_id) == child_id
+    assert (
+        message_control.resolve_message_run(session=leaf["agent_session_id"])
+        == child_id
+    )
+    queue_capture = tmp_path / "queue.json"
+    fixture_env = dict(os.environ)
+    fixture_env.update(
+        HOME=str(tmp_path / "user"),
+        PATH=str(tmp_path / "user/.local/bin") + os.pathsep + os.environ["PATH"],
+        R2_QUEUE_CAPTURE=str(queue_capture),
+    )
+    # Only the private executable's queue branch runs; no provider API exists.
+    sent = message_control.send_message(
+        session=leaf["agent_session_id"],
+        text="private fixture checkpoint",
+        env=fixture_env,
+    )
+    assert sent["run_id"] == child_id
+    assert sent["delivery_state"] == "provider_accepted"
+    assert json.loads(queue_capture.read_text()) == [
+        "queue",
+        "--thread",
+        leaf["agent_session_id"],
+        "--message=private fixture checkpoint",
+    ]
+    assert message_control.receive_messages(run_id=child_id) == [sent]
+    assert message_control.receive_messages(run_id=launch["run_id"]) == []
+    with pytest.raises(
+        message_control.MessageControlError, match="message_target_mismatch"
+    ):
+        message_control.acknowledge_message(sent["message_id"], run_id=launch["run_id"])
+    ack = message_control.acknowledge_message(sent["message_id"], run_id=child_id)
+    assert ack["delivery_state"] == "agent_acknowledged"
+    assert message_control.receive_messages(run_id=child_id) == []
+    from vibecrafted_core.control_plane import await_run, resolve_run
+
+    assert (
+        resolve_run(child_id).meta
+        == home / "control_plane/runtime_runs" / child_id / "meta.json"
+    )
+    stopped = stop_run(child_id, reason="private exact-child stop", grace_seconds=2)
+    assert stopped["accepted"] and stopped["alive_after_grace"] is False
+    awaited = await_run(child_id, timeout_seconds=3, interval_seconds=0.05)
+    assert awaited["completed"] and not awaited["worker_alive"]
+    assert (
+        message_control.resolve_message_run(session=leaf["agent_session_id"])
+        == child_id
+    )
+    assert not list(home.rglob("*marbles-L2.meta.json"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source nested silence")
+def test_public_nested_output_stops_and_true_silence_is_bounded(tmp_path):
+    result, _launch, _completion, parent, _ = _public_run(
+        tmp_path, "idle", count=2, silence="4", deck=True
+    )
+    assert result.returncode != 0
+    assert parent["status"] != "completed"
+    assert not list((tmp_path / "vc-home").rglob("*marbles-L2.meta.json"))

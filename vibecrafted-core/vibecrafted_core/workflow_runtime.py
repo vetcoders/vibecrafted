@@ -687,6 +687,20 @@ async def _run_child(
         agent=agent,
         prompt=prompt,
     )
+    # The existing runtime registry owns every executable run. Keep the report
+    # layout as a read-only alias, never a second mutable metadata authority.
+    from .control_plane import control_plane_home
+
+    artifact_meta = meta
+    meta = control_plane_home() / "runtime_runs" / run_id / "meta.json"
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    if artifact_meta.is_symlink():
+        if artifact_meta.resolve() != meta.resolve():
+            raise ValueError("child_receipt_alias_conflict")
+    elif artifact_meta.exists():
+        raise ValueError("child_receipt_alias_conflict")
+    else:
+        artifact_meta.symlink_to(meta.resolve())
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
@@ -723,14 +737,21 @@ async def _run_child(
         child_command, receiver_guard = await asyncio.to_thread(
             readonly_command, root, child_command, agent
         )
-    _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
+    registration = {
+        "run_id": run_id,
+        "agent": agent,
+        "parent_run_id": _parent_run_id(),
+        "root": root,
+        "report": str(report),
+        "transcript": str(transcript),
+        **selection,
+    }
+    _write_json(meta, registration)
     if receiver_guard is not None:
         _write_json(
             meta,
             {
-                "run_id": run_id,
-                "agent": agent,
-                **selection,
+                **registration,
                 "receiver_guard": receiver_guard,
             },
         )
@@ -895,7 +916,7 @@ def _lane_meta_path(agent: str) -> Path:
         label=f"research-{agent}",
         agent=agent,
         prompt="",
-    )[2]
+    )[2].resolve()
 
 
 def _lane_progress_fingerprint(

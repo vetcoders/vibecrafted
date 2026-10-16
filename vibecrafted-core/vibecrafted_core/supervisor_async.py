@@ -1022,6 +1022,12 @@ class AsyncSupervisor:
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
                     latest.setdefault("skill", skill)
+                    # These are live execution facts. Await/progress and exact
+                    # child control need them before terminal summary writing.
+                    if handle.report_path is not None:
+                        latest["report"] = str(handle.report_path)
+                    if handle.transcript_path is not None:
+                        latest["transcript"] = str(handle.transcript_path)
                     for field, value in workspace_fields.items():
                         latest.setdefault(field, value)
                     latest["worker_pid"] = handle.process.pid

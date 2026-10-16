@@ -15,6 +15,78 @@ import pytest
 from vibecrafted_core import control_plane, process_control
 
 
+def test_await_progress_requires_owned_worker_and_coalesces_replayed_bytes(
+    monkeypatch, tmp_path
+):
+    import subprocess
+    import sys
+
+    home = tmp_path / "private-home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    target = "exact-private-child"
+    directory = home / "control_plane/runtime_runs" / target
+    directory.mkdir(parents=True)
+    transcript = directory / "transcript.log"
+    meta = directory / "meta.json"
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(20)"], start_new_session=True
+    )
+    try:
+        identity = process_control.process_identity_receipt(process.pid, run_id=target)
+        assert identity
+        payload = {
+            "run_id": target,
+            "agent": "codex",
+            "status": "running",
+            "worker_pid": process.pid,
+            "worker_pgid": process.pid,
+            "worker_identity": identity,
+            "transcript": str(transcript),
+        }
+        meta.write_text(json.dumps(payload))
+
+        def signal(_run_id, *, _on_event, **_kwargs):
+            event = {"dispatcher_pid": os.getpid()}
+            transcript.write_bytes(b"1234")
+            _on_event({"dispatcher_pid": -1})
+            _on_event(event)
+            _on_event(event)  # replay and heartbeat: same raw bytes
+            meta.write_text(
+                json.dumps(
+                    {
+                        **payload,
+                        "worker_identity": {**identity, "start_token": "forged"},
+                    }
+                )
+            )
+            transcript.write_bytes(b"12345678")
+            _on_event(event)
+            meta.write_text(json.dumps(payload))
+            _on_event(event)  # stale bytes cannot become fresh progress
+            transcript.write_bytes(b"1234567890123456")
+            _on_event(event)
+            process.terminate()
+            process.wait(timeout=5)
+            transcript.write_bytes(b"x" * 32)
+            _on_event(event)  # a dead owner's late bytes cannot keep a parent alive
+            meta.write_text(
+                json.dumps({**payload, "status": "failed", "exit_code": -15})
+            )
+            return {"kind": "terminal", "run_id": target}
+
+        monkeypatch.setattr(control_plane, "wait_for_run_signal", signal)
+        observed = []
+        result = control_plane.await_run(target, on_poll=observed.append)
+        assert [
+            r["transcript_bytes"] for r in observed if r and "transcript_bytes" in r
+        ] == [4, 16]
+        assert result["completed"] and not result["worker_alive"]
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+
+
 def _append_event_in_process(home: str, ready: Any) -> None:
     os.environ["VIBECRAFTED_HOME"] = home
     ready.set()

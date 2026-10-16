@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1223,6 +1224,7 @@ def await_launch_truth(
     hard_cap_seconds: float | None = None,
     require_report: bool = True,
     require_transcript_output: bool = False,
+    on_poll: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     """Await a launched workflow and verify its announced artifact paths.
 
@@ -1248,6 +1250,7 @@ def await_launch_truth(
         timeout_seconds=timeout_seconds,
         interval_seconds=interval_seconds,
         hard_cap_seconds=hard_cap_seconds,
+        **({"on_poll": on_poll} if on_poll is not None else {}),
     )
     run = dict(awaited.get("run") or {})
     await_reason = str(awaited.get("reason") or "")
