@@ -1122,6 +1122,153 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
     } == snapshot
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("condition", ["stale", "unbound", "ambiguous", "corrupt"])
+def test_public_return_refusal_offers_executable_preserving_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, condition: str
+) -> None:
+    """A refused return leaves a shell and an exact, opt-in physical entry."""
+    from vibecrafted_core import workspace_catalog as wc
+
+    name = "seat ' $(false)"
+    scene = Scene(tmp_path, live=(name,), clients=(name,), git=True)
+    env = scene.env({"SSH_TTY": "/dev/private-fixture"})
+    # Spaces and quotes must survive the suggested command as single values.
+    socket = tmp_path / "socket ' root"
+    socket.mkdir()
+    env.update(VC_FRAME_SOCKET_DIR=str(socket), ZELLIJ_SOCKET_DIR=str(socket))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    first = wc.resolve_run_workspace_identity(root=scene.root, env={})
+    if condition != "unbound":
+        wc.record_runtime_session_attachment(
+            workspace_id=first.workspace_id,
+            vibecrafted_session_id=first.vibecrafted_session_id,
+            workspace_instance_id=first.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=name,
+            state="live",
+            socket_dir=str(socket),
+        )
+    if condition == "stale":
+        path = wc.instance_path(first.workspace_instance_id)
+        payload = json.loads(path.read_text())
+        payload["status"] = wc.INSTANCE_STATUS_STALE
+        path.write_text(json.dumps(payload))
+    elif condition == "ambiguous":
+        second = wc.materialize_instance(
+            workspace_id=first.workspace_id,
+            root=scene.root,
+            vibecrafted_session_id=wc.new_uuid7(),
+            build_id=first.build_id,
+        )
+        wc.record_runtime_session_attachment(
+            workspace_id=second.workspace_id,
+            vibecrafted_session_id=second.vibecrafted_session_id,
+            workspace_instance_id=second.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=name,
+            state="live",
+            socket_dir=str(socket),
+        )
+    elif condition == "corrupt":
+        wc.workspace_session_path(first.vibecrafted_session_id).write_text("{broken")
+    _write(
+        scene.owner,
+        f"#!{sys.executable}\nimport sys\n"
+        f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
+        "from vibecrafted_core.workspace_catalog import workspace_cli_main\n"
+        "sys.exit(workspace_cli_main(sys.argv[2:]))\n",
+    )
+    preserved = {
+        str(p): p.read_bytes()
+        for folder in (wc.instances_dir(), wc.sessions_dir(), scene.table)
+        for p in folder.rglob("*")
+        if p.is_file()
+    }
+    invocation = f"vc-start {shlex.quote(name)} --repo {shlex.quote(str(scene.root))}"
+    script = _entry_script(scene, invocation) + '\nprintf "SHELL_USABLE\\n"\n'
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    expected_rc = 2 if condition in ("stale", "unbound") else 4
+    assert f"RC=[{expected_rc}]" in output, output
+    assert "SHELL_USABLE" in output
+    assert not _creates(scene.calls()) and not _attaches(scene.calls())
+    assert scene.terminal_launches(wait=0) == []
+    assert "From another terminal, inspect the existing session" in output, output
+    command = next(
+        line.strip() for line in output.splitlines() if line.startswith("    env ")
+    )
+    words = shlex.split(command)
+    assert words[-3:] == [str(scene.generation / "bin/vc-frame"), "attach", name]
+    assert f"VC_FRAME_SOCKET_DIR={socket}" in words
+    assert f"ZELLIJ_SOCKET_DIR={socket}" in words
+    # Check the suggested command itself under a real private PTY. It must
+    # clear inherited Frame markers and use the observed socket namespace.
+    env.update(VC_FRAME="1", VC_FRAME_SESSION_NAME=name, ZELLIJ_SESSION_NAME=name)
+    inspection = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pty,sys;sys.exit(pty.spawn("
+            + repr(_shell_argv(shell, command))
+            + "))",
+        ],
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert inspection.returncode == 0, inspection.stdout + inspection.stderr
+    assert [call["attached"] for call in _attaches(scene.calls())] == [name]
+    assert _attaches(scene.calls())[0]["VC_FRAME_SOCKET_DIR"] == str(socket)
+    assert not _creates(scene.calls())
+    assert {
+        str(p): p.read_bytes()
+        for folder in (wc.instances_dir(), wc.sessions_dir(), scene.table)
+        for p in folder.rglob("*")
+        if p.is_file()
+    } == preserved
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("state", ["dead", "missing", "error", "unavailable-engine"])
+def test_preserving_return_hint_requires_observed_live_session_and_owned_engine(
+    tmp_path: Path, shell: str, state: str
+) -> None:
+    scene = Scene(tmp_path)
+    if state == "unavailable-engine":
+        (scene.generation / "libexec/vc-frame").unlink()
+    script = _entry_script(
+        scene,
+        "_vetcoders_start_preserving_return_hint project "
+        + ("live" if state == "unavailable-engine" else state),
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        env=scene.env(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "RC=[0]" in result.stdout
+    assert "attach" not in result.stdout
+    assert scene.calls() == []
+
+
 def _shell_argv(shell: str, script: str) -> list[str]:
     if shell == "zsh":
         return ["zsh", "-f", "-c", script]

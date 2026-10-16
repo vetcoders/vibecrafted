@@ -91,7 +91,8 @@ _vetcoders_product_workspace_prepare() {
     [[ "$resolve_status" -ne 0 ]] || resolve_status=1
     printf "vc-start: could not resolve requested workspace root '%s' (status %s).\n" \
       "$requested_root" "$resolve_status" >&2
-    printf "vc-start: inconsistent workspace ownership requires explicit recovery; no seat was adopted.\n" >&2
+    printf 'vc-start: saved workspace details could not be verified; automatic return stopped.\n' >&2
+    _vetcoders_start_preserving_return_hint "$runtime_session" "$runtime_state"
     return "$resolve_status"
   fi
   while IFS= read -r line; do
@@ -1319,6 +1320,7 @@ _vetcoders_start_check_existing_owner() {
   owner="$(_vetcoders_product_core_cli workspace session-owner \
     --runtime-session-id "$name" --socket-dir "$socket_dir" --runtime-state "$state" 2>/dev/null)" || {
     printf 'vc-start: could not verify the owner of workspace %s.\n' "$(_vetcoders_shell_quote "$name")" >&2
+    _vetcoders_start_preserving_return_hint "$name" "$state"
     return 4
   }
   if [[ -n "$owner" && "$owner" != "$root" ]]; then
@@ -1326,6 +1328,23 @@ _vetcoders_start_check_existing_owner() {
     return $?
   fi
   return 0
+}
+
+# An inventory-observed live session can be inspected explicitly even when
+# automatic WES admission refuses. This is advice, never adoption or a retry:
+# use the selected engine and socket, drop inherited identities, and leave
+# catalog/session records untouched. Do not offer resurrection for dead or
+# unknown inventory, or fall back to an ambient PATH engine.
+_vetcoders_start_preserving_return_hint() {
+  local name="${1:-}" state="${2:-}" engine="" socket_dir=""
+  [[ -n "$name" && "$state" == live ]] || return 0
+  engine="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 0
+  socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 0
+  printf 'From another terminal, inspect the existing session before choosing where to continue:\n' >&2
+  printf '    env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME -u VIBECRAFTED_WORKSPACE_ID -u VIBECRAFTED_SESSION_ID -u VIBECRAFTED_WORKSPACE_INSTANCE_ID -u VIBECRAFTED_BUILD_ID -u VIBECRAFTED_OPERATOR_SESSION -u VIBECRAFTED_WORKSPACE_ROOT %s %s %s attach %s\n' \
+    "$(_vetcoders_shell_quote "VC_FRAME_SOCKET_DIR=$socket_dir")" \
+    "$(_vetcoders_shell_quote "ZELLIJ_SOCKET_DIR=$socket_dir")" \
+    "$(_vetcoders_shell_quote "$engine")" "$(_vetcoders_shell_quote "$name")" >&2
 }
 
 # Refuse when the inventory cannot answer. Exit 4.
