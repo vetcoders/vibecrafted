@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -2070,3 +2071,111 @@ def test_terminal_summary_keeps_validated_stream_identity_in_aliases(
     assert payload["agent_session_id"] == sid
     assert payload["session_id"] == sid
     assert payload["runtime_session_id"] == handle.session_id
+
+
+# The provider is a private Python fixture; no agent CLI/API is launched.
+@pytest.mark.parametrize("replacement", ["symlink", "regular"])
+def test_supervisor_holds_writer_identity_across_raw_path_replacement(
+    tmp_path, replacement
+):
+    raw = tmp_path / "raw.log"
+    meta = tmp_path / "meta.json"
+    release = tmp_path / "release"
+    unrelated = tmp_path / "unrelated.log"
+    unrelated.write_bytes(b"unrelated remains untouched")
+
+    async def exercise():
+        from vibecrafted_core.supervisor_async import AsyncSupervisor
+
+        task = asyncio.create_task(
+            AsyncSupervisor().run(
+                run_id="owned-writer-object",
+                root=tmp_path,
+                command=[
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib,time\nprint('first raw event',flush=True)\n"
+                        f"p=pathlib.Path({str(release)!r})\n"
+                        "while not p.exists():\n time.sleep(.01)\n"
+                        "print('second raw event',flush=True)"
+                    ),
+                ],
+                env={"VIBECRAFTED_AGENT": "codex"},
+                meta_path=meta,
+                transcript_path=raw,
+                require_report=False,
+            )
+        )
+        try:
+            for _ in range(100):
+                if raw.exists() and b"first raw event" in raw.read_bytes():
+                    break
+                await asyncio.sleep(0.02)
+            assert b"first raw event" in raw.read_bytes()
+            receipt = json.loads(meta.read_text())
+            before = raw.stat()
+            assert receipt["transcript_identity"] == {
+                "device": before.st_dev,
+                "inode": before.st_ino,
+            }
+            retained = tmp_path / "actual-writer-object"
+            raw.rename(retained)
+            if replacement == "symlink":
+                raw.symlink_to(unrelated)
+            else:
+                raw.write_bytes(b"replacement remains untouched")
+            release.touch()
+            handle = await asyncio.wait_for(task, timeout=5)
+            assert handle.process.returncode == 0
+            assert b"second raw event" in retained.read_bytes()
+            assert unrelated.read_bytes() == b"unrelated remains untouched"
+            if replacement == "regular":
+                assert raw.read_bytes() == b"replacement remains untouched"
+            assert (
+                json.loads(meta.read_text())["transcript_identity"]
+                == receipt["transcript_identity"]
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("target", ["symlink", "directory", "fifo"])
+def test_supervisor_refuses_nonregular_raw_target_and_reaps_child(tmp_path, target):
+    from vibecrafted_core.supervisor_async import AsyncSupervisor
+
+    raw = tmp_path / "raw.log"
+    unrelated = tmp_path / "unrelated.log"
+    unrelated.write_bytes(b"untouched")
+    if target == "symlink":
+        raw.symlink_to(unrelated)
+    elif target == "directory":
+        raw.mkdir()
+    else:
+        os.mkfifo(raw)
+    meta = tmp_path / "meta.json"
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="refused-raw-target",
+            root=tmp_path,
+            command=[
+                sys.executable,
+                "-c",
+                "import time; print('raw',flush=True); time.sleep(20)",
+            ],
+            meta_path=meta,
+            transcript_path=raw,
+            require_report=False,
+        )
+    )
+    assert handle.process.returncode is not None
+    assert handle.exit_code != 0
+    assert unrelated.read_bytes() == b"untouched"
+    assert json.loads(meta.read_text())["terminal_reason"] == "transcript_unavailable"

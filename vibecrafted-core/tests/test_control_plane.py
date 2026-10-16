@@ -15,6 +15,104 @@ import pytest
 from vibecrafted_core import control_plane, process_control
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["regular", "symlink", "replaced", "directory", "fifo", "raced", "unregistered"],
+)
+def test_await_raw_progress_refuses_unrelated_or_replaced_target(
+    monkeypatch, tmp_path, target
+):
+    import subprocess
+    import sys
+
+    home = tmp_path / "private-home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "owned-raw-stream"
+    directory = home / "control_plane/runtime_runs" / run_id
+    directory.mkdir(parents=True)
+    raw = directory / "transcript.log"
+    raw.write_bytes(b"")
+    original = raw.stat()
+    unrelated = tmp_path / "unrelated.log"
+    unrelated.write_bytes(b"")
+    if target == "symlink":
+        raw.unlink()
+        raw.symlink_to(unrelated)
+    elif target == "directory":
+        raw.unlink()
+        raw.mkdir()
+    elif target == "fifo":
+        raw.unlink()
+        os.mkfifo(raw)
+    meta = directory / "meta.json"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(20)"], start_new_session=True
+    )
+    try:
+        identity = process_control.process_identity_receipt(child.pid, run_id=run_id)
+        assert identity
+        payload = {
+            "run_id": run_id,
+            "status": "running",
+            "worker_pid": child.pid,
+            "worker_pgid": child.pid,
+            "worker_identity": identity,
+            "transcript": str(raw),
+            "transcript_identity": {
+                "device": original.st_dev,
+                "inode": original.st_ino,
+            },
+        }
+        if target == "unregistered":
+            payload.pop("transcript_identity")
+        meta.write_text(json.dumps(payload))
+
+        validate = process_control.validate_process_identity
+
+        def replace_during_ownership_check(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            if target == "raced" and not (directory / "race-old-stream").exists():
+                raw.rename(directory / "race-old-stream")
+                raw.write_bytes(b"unrelated replacement")
+            return result
+
+        monkeypatch.setattr(
+            process_control, "validate_process_identity", replace_during_ownership_check
+        )
+
+        def signal(_run_id, *, _on_event, **_kwargs):
+            for size in (5, 11):
+                if target == "replaced" and size == 11:
+                    raw.rename(directory / "old-owned-stream")
+                if target in {"regular", "replaced", "raced", "unregistered"}:
+                    raw.write_bytes(b"x" * size)
+                elif target == "symlink":
+                    unrelated.write_bytes(b"x" * size)
+                _on_event({"dispatcher_pid": os.getpid()})
+            child.terminate()
+            child.wait(timeout=5)
+            meta.write_text(
+                json.dumps({**payload, "status": "failed", "exit_code": -15})
+            )
+            return {"kind": "terminal", "run_id": run_id}
+
+        monkeypatch.setattr(control_plane, "wait_for_run_signal", signal)
+        observed = []
+        control_plane.await_run(run_id, on_poll=observed.append)
+        sizes = [
+            row["transcript_bytes"]
+            for row in observed
+            if row and "transcript_bytes" in row
+        ]
+        assert sizes == (
+            [5, 11] if target == "regular" else [5] if target == "replaced" else []
+        )
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=5)
+
+
 def test_await_progress_requires_owned_worker_and_coalesces_replayed_bytes(
     monkeypatch, tmp_path
 ):
@@ -27,6 +125,8 @@ def test_await_progress_requires_owned_worker_and_coalesces_replayed_bytes(
     directory = home / "control_plane/runtime_runs" / target
     directory.mkdir(parents=True)
     transcript = directory / "transcript.log"
+    transcript.touch()
+    raw_identity = transcript.stat()
     meta = directory / "meta.json"
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(20)"], start_new_session=True
@@ -42,6 +142,10 @@ def test_await_progress_requires_owned_worker_and_coalesces_replayed_bytes(
             "worker_pgid": process.pid,
             "worker_identity": identity,
             "transcript": str(transcript),
+            "transcript_identity": {
+                "device": raw_identity.st_dev,
+                "inode": raw_identity.st_ino,
+            },
         }
         meta.write_text(json.dumps(payload))
 

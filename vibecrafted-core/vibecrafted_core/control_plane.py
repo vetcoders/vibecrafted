@@ -4589,28 +4589,56 @@ def await_run(
             ) != identity.get("ppid"):
                 return
             transcript = Path(str(meta.get("transcript") or ""))
-            if not transcript.is_file():
-                return
-            size = transcript.stat().st_size
-            if size <= checked_output_bytes:
-                return
-            # Coalesce queued wake events before the OS ownership check. A
-            # terminal child may leave many notifications for the same bytes;
-            # rechecking its dead process for each one delays terminal delivery.
-            checked_output_bytes = size
-            valid, _reason, current = validate_process_identity(
-                identity,
-                expected_pid=meta.get("worker_pid"),
-                expected_pgid=meta.get("worker_pgid"),
-                expected_run_id=target,
-                env_index={},
-            )
-            if (
-                not valid
-                or current is None
-                or current.ppid != event.get("dispatcher_pid")
+            expected = meta.get("transcript_identity")
+            if not isinstance(expected, dict) or any(
+                not isinstance(expected.get(key), int)
+                or isinstance(expected.get(key), bool)
+                for key in ("device", "inode")
             ):
                 return
+            visible = transcript.lstat()
+            if not stat.S_ISREG(visible.st_mode):
+                return
+            descriptor = os.open(
+                transcript,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                key = (opened.st_dev, opened.st_ino)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or key != (visible.st_dev, visible.st_ino)
+                    or key != (expected["device"], expected["inode"])
+                ):
+                    return
+                size = opened.st_size
+                if size <= checked_output_bytes:
+                    return
+                # Coalesce notifications before OS checks. The expected file
+                # identity comes from the descriptor the actual writer holds,
+                # never from this reader's first observation of a pathname.
+                checked_output_bytes = size
+                valid, _reason, current = validate_process_identity(
+                    identity,
+                    expected_pid=meta.get("worker_pid"),
+                    expected_pgid=meta.get("worker_pgid"),
+                    expected_run_id=target,
+                    env_index={},
+                )
+                visible_after = transcript.lstat()
+                if (
+                    not valid
+                    or current is None
+                    or current.ppid != event.get("dispatcher_pid")
+                    or not stat.S_ISREG(visible_after.st_mode)
+                    or key != (visible_after.st_dev, visible_after.st_ino)
+                ):
+                    return
+            finally:
+                os.close(descriptor)
         except (OSError, RunMetaMutationError, ValueError):
             return
         on_poll({**meta, "transcript_bytes": size})
