@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import plistlib
 import re
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -42,70 +45,83 @@ def private_native_copy(
     *,
     sign_command: Callable[[list[str]], list[str]] = lambda command: command,
 ) -> Path:
-    """Copy a system executable to a private path where it really executes.
+    """Copy one named system executable to a private path where it really runs.
 
-    The copied platform binary is ad-hoc signed locally, then exec-probed with
-    ``probe_args``. macOS 15 ships these tools as x86_64 + arm64e only, and a
-    non-Apple arm64e slice is killed (SIGKILL) at exec, so the whole-file copy
-    can be unrunnable there. Falling back to a thin slice runs the genuine
-    native bytes (x86_64 via Rosetta) with their real behavior. A candidate is
-    accepted only after an actual execution; none runnable is a loud failure.
+    The copy is ad-hoc signed locally, then accepted only after an actual exec
+    with ``probe_args`` returns 0 and prints. Candidates: the whole file, then
+    the host-native thin slice when the file carries one; never an emulated
+    architecture. Every candidate is built in a private directory this call
+    creates and removes; ``destination`` is linked in only if it does not
+    already exist (symlinks included), so a refusal never touches it.
+
+    Hosted macOS 15 killed the whole-file copy of /bin/ps and /bin/bash
+    (SIGKILL before main). Working hypothesis, unproven until that runner
+    executes a successor: macOS 15 ships these as x86_64 + arm64e only and
+    refuses a non-Apple arm64e slice. The failure message therefore records
+    host, architectures and each attempt's return code for that falsification.
     """
     assert sys.platform == "darwin"
+    if os.path.lexists(destination):
+        raise AssertionError(f"refusing to replace pre-existing {destination}")
     archs = subprocess.run(
         ["/usr/bin/lipo", "-archs", str(source)],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.split()
-    # arm64e is never retried thin: the whole copy already carries that slice.
     candidates: list[str | None] = [
         None,
-        *(a for a in ("arm64", "x86_64") if a in archs),
+        *(arch for arch in (platform.machine(),) if arch in archs),
     ]
     attempts: list[str] = []
-    for arch in candidates:
-        label = arch or "whole-file"
-        destination.unlink(missing_ok=True)
-        if arch is None:
-            shutil.copyfile(source, destination)
-            assert destination.read_bytes() == source.read_bytes()
-        else:
+    work = Path(tempfile.mkdtemp(prefix=".native-copy-", dir=destination.parent))
+    try:
+        for arch in candidates:
+            candidate = work / f"{arch or 'whole'}-{source.name}"
+            if arch is None:
+                shutil.copyfile(source, candidate)
+                assert candidate.read_bytes() == source.read_bytes()
+            else:
+                subprocess.run(
+                    [
+                        "/usr/bin/lipo",
+                        str(source),
+                        "-thin",
+                        arch,
+                        "-output",
+                        str(candidate),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+            candidate.chmod(0o755)
             subprocess.run(
-                [
-                    "/usr/bin/lipo",
-                    str(source),
-                    "-thin",
-                    arch,
-                    "-output",
-                    str(destination),
-                ],
+                sign_command(
+                    ["/usr/bin/codesign", "--force", "--sign", "-", str(candidate)]
+                ),
                 check=True,
                 capture_output=True,
             )
-        destination.chmod(0o755)
-        subprocess.run(
-            sign_command(
-                ["/usr/bin/codesign", "--force", "--sign", "-", str(destination)]
-            ),
-            check=True,
-            capture_output=True,
-        )
-        probe = subprocess.run(
-            [str(destination), *probe_args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        if probe.returncode == 0 and probe.stdout.strip():
-            return destination
-        attempts.append(
-            f"{label}: rc={probe.returncode} {probe.stderr.strip()[:120]!r}"
-        )
-    destination.unlink(missing_ok=True)
+            probe = subprocess.run(
+                [str(candidate), *probe_args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                os.link(candidate, destination)
+                return destination
+            attempts.append(
+                f"{arch or 'whole-file'}: rc={probe.returncode} "
+                f"{probe.stderr.strip()[:120]!r}"
+            )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     raise AssertionError(
-        f"no runnable private copy of {source} (archs={archs}): " + "; ".join(attempts)
+        f"no runnable private copy of {source} (archs={archs}, "
+        f"host={platform.machine()} macOS {platform.mac_ver()[0]}): "
+        + "; ".join(attempts)
     )
 
 

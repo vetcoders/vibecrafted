@@ -3225,7 +3225,19 @@ def test_terminal_path_fence_admits_only_the_exact_framework_delegate(
         timeout=30,
         check=False,
     )
-    assert probe.stdout.strip() == "framework-ok", probe.stderr
+    assert probe.returncode == 0 and probe.stdout.strip() == "framework-ok", (
+        probe.stderr
+    )
+    # Foreign denied-exec control: an executable outside the fence stays refused.
+    foreign = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert foreign.returncode != 0
+    assert "Operation not permitted" in foreign.stderr
 
 
 def _terminal_path_bind_bundle(source: str, bundle: Path) -> str:

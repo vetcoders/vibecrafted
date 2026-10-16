@@ -103,10 +103,10 @@ def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     if not Path("/usr/bin/codesign").exists():
         pytest.skip("requires macOS strict codesign")
     fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
-    # Seatbelt refuses the system setuid ps. Borrow its exact native bytes
-    # without privilege in this private fixture, retaining the real census.
-    # macOS 15 ships ps as x86_64 + arm64e, and a copied arm64e slice is
-    # SIGKILLed at exec, so the helper settles on a slice that really runs.
+    # Seatbelt refuses the system setuid ps. Run the authentic selected ps code
+    # bytes (whole file, else the host-native thin slice) from a private,
+    # locally ad-hoc-signed copy without privilege, retaining the real census.
+    # The helper accepts a copy only after a real exec of the census command.
     private_ps = private_native_copy(
         Path("/bin/ps"),
         tmp_path / "ps",
@@ -143,7 +143,7 @@ def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
 def test_private_native_copy_runs_real_census_and_fails_loud(tmp_path: Path) -> None:
-    """Canary for hosted macOS 15, where a whole arm64e copy dies with SIGKILL."""
+    """Falsifiable canary for hosted macOS 15 copied-native failures."""
     ps = private_native_copy(
         Path("/bin/ps"), tmp_path / "ps", ("-axo", "pid=,command=")
     )
@@ -156,11 +156,32 @@ def test_private_native_copy_runs_real_census_and_fails_loud(tmp_path: Path) -> 
     )
     assert census.returncode == 0, census.stderr
     assert str(os.getpid()) in {line.split()[0] for line in census.stdout.splitlines()}
-    # Negative control: a probe no slice can satisfy reports every attempt.
+    assert not list(tmp_path.glob(".native-copy-*"))
+    # Negative control: a probe no candidate can satisfy reports every attempt
+    # and leaves no destination behind.
     with pytest.raises(AssertionError, match="no runnable private copy") as refused:
         private_native_copy(Path("/bin/ps"), tmp_path / "ps-never", ("--no-such-flag",))
     assert "whole-file: rc=" in str(refused.value)
     assert not (tmp_path / "ps-never").exists()
+    assert not list(tmp_path.glob(".native-copy-*"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
+def test_private_native_copy_never_replaces_existing_destination(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "existing"
+    sentinel.write_bytes(b"keep me")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"foreign")
+    link = tmp_path / "link"
+    link.symlink_to(outside)
+    for target in (sentinel, link):
+        with pytest.raises(AssertionError, match="refusing to replace"):
+            private_native_copy(Path("/bin/ps"), target, ("-axo", "pid=,command="))
+    assert sentinel.read_bytes() == b"keep me"
+    assert link.is_symlink() and outside.read_bytes() == b"foreign"
+    assert not list(tmp_path.glob(".native-copy-*"))
 
 
 def app(path: Path, number: int) -> Path:

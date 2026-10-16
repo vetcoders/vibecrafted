@@ -4191,8 +4191,13 @@ def _run_with_owned_terminal_ancestor(
     host.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
         # Apple's copied platform binary otherwise dies before main. This
-        # private process fixture gets a local ad-hoc signature, no app build;
-        # macOS 15's arm64e-only slice is replaced by one that really executes.
+        # private process fixture gets a local ad-hoc signature, no app build.
+        # The helper keeps the authentic bash code bytes (whole file, else the
+        # host-native thin slice) and accepts a copy only after a real exec.
+        # The scene's own stub is the only thing replaced; the helper itself
+        # refuses any pre-existing destination.
+        assert host.parent.resolve().is_relative_to(scene.generation.parent.resolve())
+        host.unlink(missing_ok=True)
         private_native_copy(
             Path("/bin/bash"), host, ("--noprofile", "--norc", "-c", "echo ready")
         )
