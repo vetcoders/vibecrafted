@@ -90,6 +90,7 @@ def test_registry_models_input_policy() -> None:
 def test_registry_models_read_write_lifecycle() -> None:
     assert registry.workflow_definition("scaffold").cadence == "read"
     assert registry.workflow_definition("workflow").cadence == "write"
+    assert registry.workflow_definition("prune").cadence == "write"
     assert registry.workflow_definition("marbles").cadence == "write"
     assert registry.workflow_definition("audit").cadence == "read"
     assert registry.workflow_definition("dou").cadence == "read"
@@ -230,3 +231,61 @@ def test_prune_default_prompt_can_be_overridden(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setenv("VIBECRAFTED_WORKFLOWS_DIR", str(tmp_path))
 
     assert registry.workflow_default_prompt("prune") == "custom prune prompt"
+
+
+def test_prune_cadence_action_semantics_projections() -> None:
+    """vc-prune is an ACTION workflow (removes dead code/silencers and commits).
+
+    Classification must project cadence=write / can_modify_code=True across
+    public definition, manifest/stage controls, capability payload, and
+    launch projection, while controls (review/audit) remain read-only.
+    """
+    definition = registry.workflow_definition("prune")
+    assert definition is not None
+    assert definition.cadence == "write"
+    assert definition.can_modify_code is True
+
+    # Controls (review, audit) must remain read-only
+    review = registry.workflow_definition("review")
+    audit = registry.workflow_definition("audit")
+    assert (
+        review is not None
+        and review.cadence == "read"
+        and review.can_modify_code is False
+    )
+    assert (
+        audit is not None and audit.cadence == "read" and audit.can_modify_code is False
+    )
+
+    # Manifest projection controls remain read-only
+    ship = registry.workflow_manifest("vc-ship")
+    assert ship is not None
+    assert ship.stage("review").can_modify_code is False
+    assert ship.stage("audit").can_modify_code is False
+    review_manifest = registry.workflow_manifest("vc-review")
+    assert review_manifest is not None
+    assert review_manifest.first_stage.can_modify_code is False
+    assert review_manifest.first_stage.phase == "read"
+
+    # Capability payload projection
+    from vibecrafted_core import workflow_capabilities
+
+    cap_payload = workflow_capabilities.workflow_capabilities_payload()
+    cap_by_name = {row["name"]: row for row in cap_payload["workflows"]}
+    assert cap_by_name["prune"]["cadence"] == "write"
+    assert cap_by_name["prune"]["can_modify_code"] is True
+    assert cap_by_name["review"]["cadence"] == "read"
+    assert cap_by_name["review"]["can_modify_code"] is False
+    assert cap_by_name["audit"]["cadence"] == "read"
+    assert cap_by_name["audit"]["can_modify_code"] is False
+
+    # Launch metadata projection
+    launch_meta_prune = workflow._workflow_metadata("prune")
+    assert launch_meta_prune["phase"] == "write"
+    assert launch_meta_prune["can_modify_code"] is True
+    launch_meta_review = workflow._workflow_metadata("review")
+    assert launch_meta_review["phase"] == "read"
+    assert launch_meta_review["can_modify_code"] is False
+    launch_meta_audit = workflow._workflow_metadata("audit")
+    assert launch_meta_audit["phase"] == "read"
+    assert launch_meta_audit["can_modify_code"] is False

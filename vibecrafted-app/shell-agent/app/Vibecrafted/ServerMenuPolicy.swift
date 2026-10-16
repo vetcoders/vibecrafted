@@ -429,8 +429,9 @@ func runtimeReinstallPresentation(
       title = "Vibecrafted runtime already current"
       detail += "\nThis App carries the same generation."
     } else {
-      title = "Runtime upgrade is not available"
-      detail += "\nThis carrier is not proven newer than the installed runtime."
+      title = "Use this App's runtime?"
+      actionTitle = "Use this App runtime"
+      detail += "\nThis App carries a different build. Publishing it is your explicit choice."
     }
   case .absent(let reason):
     title = "Install the Vibecrafted runtime from this App?"

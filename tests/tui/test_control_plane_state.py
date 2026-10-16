@@ -8,7 +8,7 @@ from vibecrafted_core import control_plane
 
 
 def _now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(dt.UTC).isoformat()
 
 
 def test_sync_state_normalizes_agent_meta_and_lock(monkeypatch, tmp_path: Path) -> None:

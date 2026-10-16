@@ -128,11 +128,72 @@ struct NativeCommandRecoveryTests {
       isRunning: false, isRegistered: true) == .ended, "Exited process considered ready")
   }
 
+  static func testHostReceiptAndReuseState() throws {
+    let host = URL(fileURLWithPath: "/fixture/Vibecrafted.app/Contents/MacOS/vc-terminal")
+    func receipt(_ fields: [String: Any]) throws -> TerminalLauncher.HostReceipt {
+      var object: [String: Any] = ["schema": TerminalLauncher.HostReceipt.schema, "kind": "reused",
+        "host_pid": 4242, "host_start": "1760000000.000123", "executable": host.path,
+        "delivery": "create_window_request_written", "agent_start_proven": false]
+      object.merge(fields) { $1 }
+      return try TerminalLauncher.HostReceipt(
+        data: try JSONSerialization.data(withJSONObject: object), terminalHost: host)
+    }
+    let reused = try receipt([:])
+    try require(reused.kind == .reused && reused.hostProcessIdentifier == 4242, "Receipt changed")
+    for bad: [String: Any] in [["schema": "other"], ["kind": "window"], ["host_pid": 0],
+      ["host_start": ""], ["executable": "/Applications/Other.app/vc-terminal"],
+      ["agent_start_proven": true]] {
+      try rejects { _ = try receipt(bad) }
+    }
+    let fresh = try receipt(["kind": "fresh", "host_pid": 77])
+    let live: (Int32) -> String? = { $0 == 4242 ? "1760000000.000123" : nil }
+    let swapped: (Int32) -> String? = { _ in "1760000999.000001" }
+    typealias State = TerminalLauncher.HostState
+    func state(_ running: Bool, _ status: Int32?, _ receipt: TerminalLauncher.HostReceipt?,
+               _ token: @escaping (Int32) -> String? = live) -> State {
+      TerminalLauncher.hostState(launcherPID: 77, launcherRunning: running,
+        launcherStatus: status, receipt: receipt, startToken: token)
+    }
+    // Fresh: the launcher PID is the host (wrapper execs in place).
+    try require(state(true, nil, nil) == .launching(77), "Admission phase lost")
+    try require(state(true, nil, fresh) == .launching(77), "Fresh host not the launcher")
+    try require(state(false, 0, fresh) == .ended(0), "Fresh host end mistaken for reuse")
+    // Reused: a successful IPC child exit is not a GUI end.
+    try require(state(true, nil, reused) == .launching(77), "Reuse before launcher exit")
+    try require(state(false, 0, reused) == .reused(4242), "IPC child exit 0 reported ended")
+    try require(state(false, 0, reused).hostProcessIdentifier == 4242, "Reused host not observed")
+    try require(state(false, 0, reused, swapped) == .ended(0), "Recycled host PID adopted")
+    try require(state(false, 0, reused, { _ in nil }) == .ended(0), "Exited host adopted")
+    try require(state(false, 75, reused) == .ended(75), "Unconfirmed delivery reported ready")
+    try require(state(false, 0, nil) == .ended(0), "Missing receipt fabricated a host")
+    let foreignFresh = try receipt(["kind": "fresh", "host_pid": 99])
+    try require(state(true, nil, foreignFresh) == .ended(nil), "Fresh receipt for another PID")
+    // Registration still gates on the resolved host, never on agent start.
+    let root = URL(fileURLWithPath: "/fixture/generation")
+    let specification = try TerminalLauncher.Specification(generationRoot: root,
+      terminal: root.appendingPathComponent("bin/vc-terminal"), terminalHost: host,
+      primaryShell: root.appendingPathComponent("bin/zsh"), start: root.appendingPathComponent("bin/vc-start"),
+      workingDirectory: root, environment: ["VIBECRAFTED_ROOT": root.path,
+        "VIBECRAFTED_RUNTIME_ROOT": root.path, "VIBECRAFTED_TERMINAL_HOST": host.path])
+    let launch = TerminalLauncher.Receipt(processIdentifier: 77, specification: specification)
+    let observation = TerminalRegistrationObservation(receipt: launch, now: 0, timeout: 10)
+    let reusedState = state(false, 0, reused)
+    try require(observation.observe(now: 1, currentLaunchID: launch.launchID,
+      isRunning: reusedState.hostProcessIdentifier != nil, isRegistered: true) == .ready,
+      "Reused host registration not ready")
+    try require(observation.observe(now: 1, currentLaunchID: launch.launchID,
+      isRunning: state(false, 75, reused).hostProcessIdentifier != nil, isRegistered: true) == .ended,
+      "Refused launch focused a host")
+    try require(TerminalLauncher.kernelStartToken(getpid()) != nil, "Own kernel identity unreadable")
+    try require(TerminalLauncher.kernelStartToken(-1) == nil, "Invalid PID has an identity")
+  }
+
   static func main() throws {
     try testRejectedNativePayloads()
     try testExactLaunchSpecification()
     try testNativeConfirmationAndPathBoundary()
     try testBoundedRegistrationObservation()
+    try testHostReceiptAndReuseState()
     print("NativeCommandRecoveryTests passed")
   }
 }

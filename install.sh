@@ -1312,11 +1312,32 @@ channel_mode=0
 if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
   channel_mode=1
 fi
+# A supplied pack installs through install_selected_runtime_pack (below), which
+# never runs make. Only routes that still hand off to the candidate Makefile
+# need it: no supplied pack (source carrier), the attended TUI (its manifest
+# installation phase is `make install`), or an explicit non-install target.
+# Name that requirement before the first network byte, not after the download.
+pack_install_target() {
+  case "$1" in
+    install|install-auto|install-source) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+route_needs_make=0
+if [[ "$channel_mode" == "0" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+  route_needs_make=1
+elif [[ "$target" == "vibecrafted" ]]; then
+  if [[ "$use_gui" != "1" ]] && is_interactive_session; then
+    route_needs_make=1
+  fi
+elif ! pack_install_target "$target"; then
+  route_needs_make=1
+fi
 # Generation-local native entrypoints use file to reject scripts/foreign formats.
 # Bare Debian does not provide it; refuse before download instead of installing
 # a vc-frame wrapper that later misreports its present engine as missing.
 preflight_tools=(tar python3 openssl file)
-if [[ "$channel_mode" == "0" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+if [[ "$route_needs_make" == "1" ]]; then
   preflight_tools+=(make)
 fi
 if [[ -n "$archive_url" || -n "$runtime_pack_url" || "$channel_mode" == "1" ]]; then
@@ -1409,6 +1430,25 @@ run_candidate_command() {
   bootstrap_handoff=1
   "$@" || status=$?
   exit "$status"
+}
+
+# Install the verified, supplied Runtime Pack without make: the Makefile
+# `install` recipe's two steps, the pack installer (which owns the service
+# reconcile after publication) and the foundations installer. A minimal host
+# then needs only the preflighted prerequisites. tests/tui/test_install_bootstrap.py
+# pins this list against the recipe.
+# Invoked through run_candidate_command "$@", which shellcheck cannot follow:
+# newer releases flag the function (SC2329), older ones its body (SC2317).
+# shellcheck disable=SC2317,SC2329
+install_selected_runtime_pack() {
+  # `make -C <candidate>` runs its recipes from the candidate root; so do these.
+  (cd "$candidate_root" \
+    && VIBECRAFTED_RUNTIME_PACK="$selected_runtime_pack" \
+      bash scripts/install-runtime-pack.sh \
+      --expected-source-revision "$expected_revision") || return $?
+  (cd "$candidate_root" \
+    && bash scripts/install-foundations.sh loctree aicx prview screenscribe) \
+    || return $?
 }
 
 extract_root="$tmpdir/extract"
@@ -1630,7 +1670,16 @@ if [[ "$target" == "vibecrafted" && "$use_gui" == "1" ]]; then
   info "▸ Launching the guided installer (browser UI)…"
   vinfo "  python3 $gui_installer --source $candidate_root"
   export VIBECRAFTED_RUNTIME="$runtime"
-  run_candidate_command python3 "$gui_installer" --source "$candidate_root"
+  # Hand the verified pack to the GUI's install plan (it otherwise source-installs).
+  gui_pack_args=()
+  if [[ -n "$selected_runtime_pack" ]]; then
+    gui_pack_args=(
+      --runtime-pack "$selected_runtime_pack"
+      --expected-source-revision "$expected_revision"
+    )
+  fi
+  run_candidate_command python3 "$gui_installer" --source "$candidate_root" \
+    ${gui_pack_args[@]+"${gui_pack_args[@]}"}
 fi
 
 if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
@@ -1646,12 +1695,10 @@ if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
 
   export VIBECRAFTED_RUNTIME="$runtime"
   if [[ -n "$selected_runtime_pack" ]]; then
-    run_candidate_command env \
-      VIBECRAFTED_RUNTIME_PACK="$selected_runtime_pack" \
-      bash "$candidate_root/scripts/install-runtime-pack.sh" \
-      --expected-source-revision "$expected_revision"
+    run_candidate_command install_selected_runtime_pack
   fi
-  run_candidate_command make --no-print-directory -C "$candidate_root" install-auto RUNTIME="$runtime"
+  run_candidate_command make --no-print-directory -C "$candidate_root" install-auto \
+    RUNTIME="$runtime"
 fi
 
 # Interactive terminal session: default target is the built-in
@@ -1686,10 +1733,21 @@ if [[ "$target" == "vibecrafted" ]]; then
   info "▸ Opening the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. installer…"
   vinfo "  uv run --project $installer_dir vetcoders-installer $manifest"
   export VIBECRAFTED_RUNTIME="$runtime"
+  # The manifest's installation phase is a bare `make install`; it inherits
+  # this environment, so the verified pack the bootstrap selected is the pack
+  # that phase installs (make imports these as variables), never a source build.
+  if [[ -n "$selected_runtime_pack" ]]; then
+    export RUNTIME_PACK="$selected_runtime_pack"
+    export RUNTIME_PACK_EXPECTED_SOURCE_REVISION="$expected_revision"
+  fi
   run_candidate_command uv run --project "$installer_dir" --quiet vetcoders-installer "$manifest"
 fi
 
 post_install_banner
+if [[ -n "$selected_runtime_pack" ]] && pack_install_target "$target"; then
+  info "▸ Installing the verified Runtime Pack…"
+  run_candidate_command install_selected_runtime_pack
+fi
 info "▸ Running make ${target}…"
 # An explicit make target still installs the Runtime Pack this bootstrap
 # verified: hand it over, with the source revision it was proven against.

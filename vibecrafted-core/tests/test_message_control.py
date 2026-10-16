@@ -326,6 +326,29 @@ def test_copilot_message_uses_durable_inbox_and_explicit_ack(
     assert message_control.receive_messages(run_id="copilot-run") == []
 
 
+def test_omp_message_uses_durable_inbox_and_explicit_ack(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """omp is an inbox provider: durable store, explicit receive + ACK, no queue."""
+    home = tmp_path / "home"
+    _run(home, "omp-run", agent="omp", session="omp-session")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+
+    def no_provider_queue(*_args, **_kwargs):
+        raise AssertionError("omp message must stay in the run inbox")
+
+    queued = message_control.send_message(
+        run_id="omp-run", text="check the latest diff", runner=no_provider_queue
+    )
+    assert queued["delivery_state"] == "inbox_pending"
+    assert message_control.receive_messages(run_id="omp-run") == [queued]
+    acknowledged = message_control.acknowledge_message(
+        queued["message_id"], run_id="omp-run"
+    )
+    assert acknowledged["delivery_state"] == "agent_acknowledged"
+    assert message_control.receive_messages(run_id="omp-run") == []
+
+
 def test_missing_or_runtime_provider_identity_is_refused(
     monkeypatch, tmp_path: Path
 ) -> None:

@@ -653,11 +653,7 @@ class CliSessionChain(SessionChain):
                 ],
             )
 
-        since = (
-            (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours))
-            .date()
-            .isoformat()
-        )
+        since = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)).date().isoformat()
         warnings: list[str] = []
         raw_items: list[dict[str, Any]] = []
         listing_completed = False
@@ -946,8 +942,8 @@ def _parse_ts(value: str) -> dt.datetime | None:
     except ValueError:
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=dt.timezone.utc)
-    return stamp.astimezone(dt.timezone.utc)
+        stamp = stamp.replace(tzinfo=dt.UTC)
+    return stamp.astimezone(dt.UTC)
 
 
 def _in_window(record: SessionRecord, cutoff: dt.datetime) -> bool:
@@ -1277,7 +1273,7 @@ def assemble_resume_continuity_pack(
     now: dt.datetime | None = None,
 ) -> ResumePack:
     """Build the resume pack. Never selects native resume on its own."""
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     cutoff = now - dt.timedelta(hours=hours)
     root = root.resolve()
     identity = resolve_project_identity(root)

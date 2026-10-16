@@ -178,9 +178,12 @@ def environment_capabilities_payload() -> dict[str, dict[str, Any]]:
             available = bool(substrate["worktree_substrate"])
             reason = "" if available else "git/dispatch manage_worktrees unavailable"
         elif policy == "local-vm":
+            # The local container (dev_container) hosts interactive Agents
+            # only; skill launchers keep running on the host.
             available = False
             reason = (
-                "no canonical VM entrypoint"
+                "the local container serves interactive Agents only "
+                "(vibecrafted init <agent> --policy-runtime local-vm)"
                 if substrate["vm"]
                 else "Docker/Colima is not detected"
             )

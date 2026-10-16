@@ -16,20 +16,35 @@ Pick the channel that matches your platform, then verify the result with
 | Channel                      | Platform             | What you get                                             | Status                                   |
 | ---------------------------- | -------------------- | -------------------------------------------------------- | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server   | Build path complete; publication pending |
-| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built and signed with the DMG            |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, foundations, vc-server        | Built from checkout; publication pending |
-| Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills             | Published; CI-gated                      |
+| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built with the DMG; publication pending  |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, vc-server, Terminal, Frame    | Built from checkout; publication pending |
+| Bootstrap `install.sh`       | macOS, Linux, WSL2   | The version named in `vibecrafted.io/channel/main.json`  | Published; `4.1.0` channel on 2026-10-14 |
 | Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                                | Published                                |
 
 On macOS and Linux, use the bootstrap today. On Windows, install the win32-x64
 Runtime Pack with `install.ps1 -Pack`.
 
+The website and GitHub Releases are separate publishers, so check both:
+
+```bash
+gh release view --repo vetcoders/vibecrafted --json tagName,assets
+curl -fsSL https://vibecrafted.io/channel/main.json
+```
+
+Tags `v4.0.0` through `v4.3.3` were never published as GitHub Releases; the
+newest release before 4.4 is `v3.5.0`, without DMG or Runtime Pack carriers.
+
 ## macOS and Linux
 
 ```bash
 curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
+
+The bootstrap installs the release bound by
+`https://vibecrafted.io/channel/main.json`; it does not follow a Git branch. On
+2026-10-14 that manifest named `4.1.0`. Confirm what you received with
+`vibecrafted --version`.
 
 The installer detects your platform and Linux distribution family first, reports
 every missing prerequisite in one pass instead of failing one tool at a time,
@@ -46,11 +61,13 @@ bash install.sh
 
 ### Linux is a first-class runtime
 
-The Linux install path is gated on every push and pull request. Two jobs run:
-Ubuntu on a hosted runner, which exercises real `/etc/os-release` detection and
-the apt-family prerequisite hints, and `debian:bookworm-slim` in a container,
-which exercises the bare-minimum case with no pre-baked tooling. Both assert
-that `vibecrafted doctor` reports green afterwards.
+The Linux install path is gated on pushes and pull requests to `main`,
+`develop` and `release/*`. `.github/workflows/install-linux.yml` builds a Linux
+x64 Runtime Pack on Ubuntu 22.04, then installs it with this tree's
+`install.sh` on Ubuntu 22.04, Ubuntu 24.04 and `debian:bookworm-slim`, and runs
+`vibecrafted doctor`. The 22.04 and Debian jobs explicitly waive foundations;
+24.04 keeps the hard foundation gate. CI installs from the checkout, not from
+the published website channel.
 
 The macOS-only surfaces are the desktop app, notarization, and the `locterm`
 runtime. The command deck, control plane, dispatch, skills, and settlement
@@ -142,7 +159,7 @@ curl -fsSLO https://github.com/vetcoders/vibecrafted/releases/latest/download/Vi
 curl -fsSLO https://github.com/vetcoders/vibecrafted/releases/latest/download/Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 sha256sum -c Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 tar -xzf Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz
-bash vibecrafted-<version>/install.sh
+bash vibecrafted-<version>/install.sh --runtime-pack-file /absolute/path/to/matching-pack.tar.gz install
 ```
 
 What the tarball is, and what it is not:
@@ -160,14 +177,14 @@ What the tarball is, and what it is not:
   runtime.
 - Linux prebuilt packs (`linux-x64`, `linux-arm64`) are built natively by
   `scripts/build-linux-runtime-pack.sh` and are not produced by macOS
-  `make release`. 4.3.1 does not ship a systemd unit; start the server
+  `make release`. Vibecrafted does not ship a systemd unit; start the server
   and guardian with `vibecrafted server start`.
 - On Windows, use the native win32-x64 Runtime Pack. The portable Linux
   tarball is the POSIX alternative inside WSL2.
 
 The checksum proves the bytes survived the wire. The provenance carrier proves
-they are the distribution they claim to be — that is the part `curl | bash`
-from a branch cannot give you.
+they are the distribution they claim to be, pinned to one commit — the part
+`curl | bash`, which follows the website channel, cannot give you.
 
 ### Runtime boundary
 

@@ -1,4 +1,4 @@
-# Cut 4.3.3 with six carriers
+# Cut 4.4.0 with six carriers
 
 This is the Agent-Operator preparation sequence. Merging into `main`, creating
 and pushing the release tag, publication, and replacing a live App remain
@@ -7,19 +7,19 @@ Founder actions. [RELEASE_KICKOFF.md](RELEASE_KICKOFF.md) defines the product;
 
 ## 0. One immutable release
 
-One GitHub Release `v4.3.3` carries one framework commit and one recorded
-terminal/Frame donor tuple. `VERSION` is already `4.3.3`.
+One GitHub Release `v4.4.0` carries one framework commit and one recorded
+terminal/Frame donor tuple. `VERSION` is already `4.4.0`.
 
 The publisher's closed allowlist contains **16 assets**:
 
 | Carrier or receipt                                                    | Required sidecars | Evidence                              |
 | --------------------------------------------------------------------- | ----------------- | ------------------------------------- |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
-| `Vibecrafted_RuntimePack_4.3.3-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
-| `Vibecrafted_4.3.3-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
-| `Vibecrafted_RuntimePack_4.3.3-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
+| `Vibecrafted_RuntimePack_4.4.0-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
+| `Vibecrafted_4.4.0-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
+| `Vibecrafted_RuntimePack_4.4.0-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
 | `release-output.json`                                                 | `.sig`            | source tuple and bound macOS carriers |
 
 Sidecars append their suffix to the complete carrier filename.
@@ -36,7 +36,7 @@ The portable archive is a source distribution, not proof of a native runtime.
 Inspect the exact source and donor commits before any build:
 
 ```bash
-test "$(tr -d '[:space:]' < VERSION)" = "4.3.3"
+test "$(tr -d '[:space:]' < VERSION)" = "4.4.0"
 git status --porcelain
 git rev-parse HEAD
 git -C ../vc-terminal status --porcelain
@@ -145,7 +145,7 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
 uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
   --release-output dist/release-output.json \
   --signature dist/release-output.json.sig \
-  --output dist/vibecrafted-4.3.3-walkaround.json
+  --output dist/vibecrafted-4.4.0-walkaround.json
 ```
 
 Verify each checksum, detached Runtime Pack signature, DMG staple and
@@ -168,11 +168,19 @@ the Founder’s live runtime. Missing fixtures are a failed required gate.
 
 ## 4. Founder buttons and native Windows evidence
 
-After reviewing the exact candidate, promote it to `main` and tag that commit:
+After reviewing the exact candidate, promote it to `main`, update the clean
+checkout, and rehearse the resulting commit before tagging. A green PR run
+does not certify a squash commit. Follow the exact-SHA ceremony in
+[RELEASE_KICKOFF.md](RELEASE_KICKOFF.md#exact-sha-rehearsal-before-tagging):
 
 ```bash
-git tag -a v4.3.3 -m "Vibecrafted 4.3.3"
-git push origin v4.3.3
+git pull --ff-only origin main
+RELEASE_SHA="$(git rev-parse HEAD)"
+gh workflow run gate-rehearsal.yml --ref main
+# Wait for success on exactly RELEASE_SHA, then admit immediately before tagging.
+bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
+  git tag -a v4.4.0 -m "Vibecrafted 4.4.0" "$RELEASE_SHA"
+git push origin v4.4.0
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```
 
@@ -214,3 +222,58 @@ Finally verify the public release asset set, HTTPS install/landing paths,
 canonical metadata, sitemap/robots and first-run behavior from public downloads.
 A local notarized DMG is artifact evidence; publication and installed runtime
 each need their own receipt.
+
+## 6. Website bootstrap channel — a second publisher
+
+`https://vibecrafted.io` is not published from this repository. The site,
+`install.sh`, `install.ps1`, `channel/main.json`, `SHA256SUMS`,
+`vibecrafted-signing.pub` and the `vibecrafted-v<version>.tar.gz` archive come
+from `VetCoders/vibecrafted-io` (`make site-release`, which rsyncs the built
+site to the Caddy host). Its `scripts/sync-docs.sh` mirrors this repository's
+`docs/public/` into the site at build time. Here, `docs/index.html` is only a
+redirect stub, `docs/CNAME` is historical, and `.github/workflows/static.yml`
+is disabled; none of them serve the domain.
+
+`make publish-release` does not update the website. A GitHub Release can
+therefore be newer than what `curl -fsSL https://vibecrafted.io/install.sh | bash`
+installs. On 2026-10-14 the website channel named `4.1.0`, and its `install.sh`
+was byte-identical to the one at tag `v4.1.0`.
+
+This tree's `install.sh` accepts a channel only when:
+
+- `channel/main.json` binds top-level `archive_url` and `runtime_pack_url`;
+  otherwise it stops with
+  `Channel manifest must bind archive_url and runtime_pack_url`;
+- the archive at `archive_url` carries a closed `source-provenance.json`
+  (the portable tarball, or `scripts/distribution_manifest.py archive`
+  output); a plain `tar` of a checkout is refused;
+- `runtime_pack_url` has adjacent `.sha256` and `.sig` files;
+- `SHA256SUMS` and `vibecrafted-signing.pub` sit beside `archive_url`.
+  Without them the archive's checksum and signature checks are skipped with a
+  warning.
+
+The bootstrap reads one `runtime_pack_url` for every host; it does not select a
+per-platform pack. Bind only a pack that installs on every platform the channel
+advertises, or leave the website on its previous coherent channel.
+
+As measured on 2026-10-14, the site publisher meets none of the first two
+conditions: `scripts/sync_site_release_assets.py` writes no `runtime_pack_url`,
+and its `bundle-build` archive has no `source-provenance.json`. Do not run
+`make site-release` against this tree until that publisher emits the contract
+above; the result would be a bootstrap that refuses every install.
+
+Before any website publication, record the live identity:
+
+```bash
+curl -fsSL https://vibecrafted.io/channel/main.json
+curl -fsSL https://vibecrafted.io/install.sh | shasum -a 256
+curl -fsSL https://vibecrafted.io/SHA256SUMS
+```
+
+A docs-only website refresh that keeps the current signed channel is a
+separate Founder button: build `vibecrafted-io` without `SITE_RELEASE_MODE`
+from a sibling checkout at the published commit, then deploy. That content
+build still copies install assets from `vibecrafted-io/framework/` whenever
+`framework/VERSION` exists, so confirm it names the live channel version
+first. Re-run the three probes afterwards; the channel identity must not
+change.

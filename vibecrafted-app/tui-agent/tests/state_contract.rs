@@ -1052,6 +1052,7 @@ async fn queue_scope_and_search_filter_the_visible_run_list() {
         no_verify_gate: false,
     })
     .unwrap();
+    app.refresh_control_plane();
     assert_eq!(app.runs.len(), 1);
     assert_eq!(app.runs[0].snapshot.run_id, "active-codex");
 

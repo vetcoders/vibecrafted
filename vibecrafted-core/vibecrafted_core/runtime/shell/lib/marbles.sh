@@ -151,7 +151,7 @@ _vetcoders_aicx_resume_fallback() {
   local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
   local tmp_dir context_file meta_file aicx_bin python_spec py source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
-    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
+    echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, the Homebrew prefix, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
     return 1
   }
@@ -296,6 +296,26 @@ _vetcoders_resume_raw_transcript_path() {
 # Wrap a headless agent command so streaming-json is rendered via AgentStreamParser.
 # Grok always uses this path. Other agents pass through unchanged unless they emit
 # streaming-json in the headless resume builders.
+# Shared permission decision (Founder 13716da4): provider flags come from
+# vibecrafted_core.permission_flags, never from bypass literals embedded in
+# hint strings. stdout: shell-quoted flags, space-separated (empty when the
+# policy needs none); rc 2 + refusal on stderr when the agent/mode
+# combination cannot be enforced — callers render that refusal as a hint
+# comment and never print a downgraded command without flags.
+_vetcoders_permission_flags() {
+  local agent="$1" mode="${2:-headless}"
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root" \
+      "$py" -m vibecrafted_core.permission_flags "$agent" --mode "$mode"
+  else
+    "$py" -m vibecrafted_core.permission_flags "$agent" --mode "$mode"
+  fi
+}
+
 _vetcoders_wrap_with_agent_stream() {
   local agent="$1"
   local cmd="$2"
@@ -329,21 +349,36 @@ _vetcoders_fresh_session_command() {
   case "$tool" in
     claude)
       if [[ "$mode" == headless ]]; then
-        printf 'claude --print --dangerously-skip-permissions %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags claude headless 2>&1)"; then
+          printf 'claude --print%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'claude %s\n' "$quoted_prompt"
       fi
       ;;
     codex)
       if [[ "$mode" == headless ]]; then
-        printf 'codex exec --dangerously-bypass-approvals-and-sandbox %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags codex headless 2>&1)"; then
+          printf 'codex exec%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'codex %s\n' "$quoted_prompt"
       fi
       ;;
     agy)
       if [[ "$mode" == headless ]]; then
-        printf 'agy --dangerously-skip-permissions --print %s\n' "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags agy headless 2>&1)"; then
+          printf 'agy%s --print %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf '# %s\n' "$perm_flags"
+        fi
       else
         printf 'agy --prompt-interactive %s\n' "$quoted_prompt"
       fi
@@ -354,10 +389,15 @@ _vetcoders_fresh_session_command() {
     grok)
       # Interactive: positional PROMPT into the TUI (stays open).
       # Headless: --single is one-shot stdout (fleet / await / baton-pass only).
-      if [[ "$mode" == headless ]]; then
-        printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_prompt"
+      local perm_flags
+      if perm_flags="$(_vetcoders_permission_flags grok "$mode" 2>&1)"; then
+        if [[ "$mode" == headless ]]; then
+          printf 'grok --cwd .%s --no-alt-screen --output-format streaming-json --single %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        else
+          printf 'grok --cwd .%s --no-alt-screen %s\n' "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+        fi
       else
-        printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_prompt"
+        printf '# %s\n' "$perm_flags"
       fi
       ;;
     cursor)
@@ -404,9 +444,10 @@ _vetcoders_resume_agent() {
   fi
   local _vetcoders_contract_allow_model=1
   local _vetcoders_contract_single_prompt=1
+  local _vetcoders_contract_allow_session_selection=1
   _vetcoders_parse_contract "$@" || return 1
   case "${_vetcoders_contract_runtime:-}" in
-    ""|headless|terminal|visible) ;;
+    ""|headless|terminal|visible|plain) ;;
     *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
   esac
   case "${_vetcoders_contract_execution_runtime:-}" in
@@ -451,6 +492,7 @@ _vetcoders_resume_agent() {
     [[ -n "${_vetcoders_contract_last:-}" ]] && core_args+=(--last)
     [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt-stdin)
     [[ -n "${_vetcoders_contract_model:-}" ]] && core_args+=(--model "$_vetcoders_contract_model")
+    [[ -n "${_vetcoders_contract_effort:-}" ]] && core_args+=(--effort "$_vetcoders_contract_effort")
     [[ -n "${_vetcoders_contract_base:-}" ]] && core_args+=(--base "$_vetcoders_contract_base")
     [[ -n "${_vetcoders_contract_file:-}" ]] && core_args+=(--file "$_vetcoders_contract_file")
     [[ -n "${_vetcoders_contract_root:-}" ]] && core_args+=(--root "$_vetcoders_contract_root")
@@ -479,16 +521,16 @@ _vetcoders_resume_agent() {
   # Promote the first tail token only when it looks like a session id (not a
   # free-form prompt word).
   if [[ -z "$_vetcoders_contract_session" && -n "$_vetcoders_contract_tail" ]]; then
-    local -a _resume_positional=()
-    read -r -a _resume_positional <<<"$_vetcoders_contract_tail"
-    local _maybe_session="${_resume_positional[0]:-}"
+    # The shared parser joins tail tokens with spaces. Parameter expansion
+    # preserves that contract in both bash and zsh (read -a is bash-only).
+    local _maybe_session="${_vetcoders_contract_tail%% *}"
     # UUIDs / long hex / codex-style tokens; short words stay as prompt text.
     # A dash-leading token is never a session id — long flags like
     # --dangerously-skip-permissions would otherwise satisfy the length regex.
     if [[ "$_maybe_session" != -* ]] &&
       [[ "$_maybe_session" =~ ^[0-9a-fA-F-]{8,}$ || "$_maybe_session" =~ ^[0-9a-zA-Z_-]{16,}$ ]]; then
       _vetcoders_contract_session="$_maybe_session"
-      local _resume_rest="${_vetcoders_contract_tail#"${_resume_positional[0]}"}"
+      local _resume_rest="${_vetcoders_contract_tail#"$_maybe_session"}"
       _resume_rest="${_resume_rest# }"
       if [[ "$_vetcoders_contract_prompt" == "$_vetcoders_contract_tail" ]]; then
         _vetcoders_contract_prompt="$_resume_rest"
@@ -520,6 +562,7 @@ _vetcoders_resume_agent() {
     local -a native_args=(resume-session "$tool" --agent-session-id "$_vetcoders_contract_session")
     [[ -z "${_vetcoders_contract_root:-}" ]] || native_args+=(--repo "$_vetcoders_contract_root")
     [[ -z "${_vetcoders_contract_model:-}" ]] || native_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_effort:-}" ]] || native_args+=(--effort "$_vetcoders_contract_effort")
     if [[ -n "$_vetcoders_contract_file" ]]; then
       [[ -z "$_vetcoders_contract_prompt" ]] || { printf 'Use one of --prompt or --file.\n' >&2; return 2; }
       _vetcoders_run_core_cli "${native_args[@]}" --prompt-file "$_vetcoders_contract_file"
@@ -537,6 +580,7 @@ _vetcoders_resume_agent() {
     local -a fresh_args=(workflow "$tool" --runtime headless)
     [[ -z "${_vetcoders_contract_root:-}" ]] || fresh_args+=(--repo "$_vetcoders_contract_root")
     [[ -z "${_vetcoders_contract_model:-}" ]] || fresh_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_effort:-}" ]] || fresh_args+=(--effort "$_vetcoders_contract_effort")
     [[ -z "${_vetcoders_contract_base:-}" ]] || fresh_args+=(--base "$_vetcoders_contract_base")
     [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || fresh_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
     [[ -z "${_vetcoders_contract_worktree:-}" ]] || fresh_args+=(--worktree "$_vetcoders_contract_worktree")
@@ -553,7 +597,8 @@ _vetcoders_resume_agent() {
   # Missing owned interpreter/import-root is a real refusal. Prove it before
   # AICX continuity or provider composition so a broken/foreign owner cannot
   # assemble a pack and then fail.
-  _vetcoders_core_python_spec >/dev/null || return 1
+  local resume_python_spec=""
+  resume_python_spec="$(_vetcoders_core_python_spec)" || return 1
 
   [[ -z "$_vetcoders_contract_count" ]] || {
     echo "--count is only supported by vibecrafted marbles." >&2
@@ -563,6 +608,34 @@ _vetcoders_resume_agent() {
     echo "--depth is only supported by vibecrafted marbles." >&2
     return 1
   }
+
+  # An exact native identity owns its default checkout. Resolve and validate
+  # it before opening a detached terminal, while an explicit --repo/--root
+  # still binds. Ambient worker roots are defaults, never user overrides.
+  # The child receives the existing typed selection receipt and absolute root,
+  # then revalidates both through session-source before any provider admission.
+  if [[ -n "$_vetcoders_contract_session" ]] &&
+    [[ "$_vetcoders_contract_session" != current && "$_vetcoders_contract_session" != last && "$_vetcoders_contract_session" != previous ]]; then
+    local resume_repository_explicit="${_vetcoders_contract_root:-}"
+    local resume_selection="" resume_selected_root="" selection_python=""
+    local -a selection_args=(session-source "$tool" --session "$_vetcoders_contract_session" --root "$(_vetcoders_effective_project_root)")
+    [[ -n "$resume_repository_explicit" ]] || selection_args+=(--infer-recorded-root)
+    [[ -z "$_vetcoders_contract_session_selection" ]] || selection_args+=(--session-selection "$_vetcoders_contract_session_selection")
+    resume_selection="$(_vetcoders_run_core_cli "${selection_args[@]}")" || return 1
+    selection_python="${resume_python_spec%%$'\t'*}"
+    resume_selected_root="$("$selection_python" -c 'import json,sys; print(json.loads(sys.argv[1])["selection_root"])' "$resume_selection")" || return 1
+    [[ -n "$resume_selected_root" ]] || { echo "resume: incomplete session selection receipt" >&2; return 1; }
+    # Prefix transport flags so an existing literal `--` retains its payload.
+    if [[ -z "$resume_repository_explicit" ]]; then
+      _vetcoders_resume_public_argv=(--root "$resume_selected_root" "${_vetcoders_resume_public_argv[@]}")
+    fi
+    if [[ -z "$_vetcoders_contract_session_selection" ]]; then
+      _vetcoders_resume_public_argv=(--session-selection "$resume_selection" "${_vetcoders_resume_public_argv[@]}")
+    fi
+    _vetcoders_contract_root="$resume_selected_root"
+    _vetcoders_contract_session_selection="$resume_selection"
+    resume_declared_root="$resume_selected_root"
+  fi
 
   # Admission is deliberately before AICX: a public no-TTY request must hand
   # the declaration to its visible terminal child before composing continuity
@@ -618,11 +691,23 @@ _vetcoders_resume_agent() {
 
   local resume_cmd
   local _vetcoders_interactive_skill=resume
-  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-bypass}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
+  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
   local _resume_admission=0
   _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
   case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
   resume_declared_root="$_vetcoders_contract_root"
+  # The shared admission helper in operator.sh sets the exact child ID.
+  # An ambient Frame/parent run is unrelated.
+  # shellcheck disable=SC2154
+  local VIBECRAFTED_RUN_ID="$_vetcoders_interactive_run_id"
+
+  # `--runtime plain`: the caller's terminal IS the Agent TTY (the Agents
+  # launcher opens exactly one Frame tab for this command). Resolving an
+  # operator session here would open a second tab for the same conversation.
+  if [[ "$runtime" == plain ]]; then
+    _vetcoders_init_in_current_terminal "$tool" "$resume_cmd" plain resume
+    return $?
+  fi
 
   # Interactive resume — provider-neutral policy (adapters only change argv):
   #   bare resume → interactive → explicit or detected operator target
@@ -639,8 +724,8 @@ _vetcoders_resume_agent() {
     # canonical bound live | create).
     _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$resume_declared_root" resume || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
-      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
-      printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
+      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" "$tool" || return 1
+      printf 'Resume accepted; provider starting: run_id=%s target=%s\n' "$VIBECRAFTED_RUN_ID" "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
       [[ -z "$resume_declared_root" ]] || printf '  root:    %s\n' "$resume_declared_root"
       if [[ -n "$_vetcoders_contract_session" ]]; then
@@ -686,10 +771,15 @@ _vetcoders_resume_command() {
       local claude_fork_flag=""
       [[ -z "$fork_session" ]] || claude_fork_flag=" --fork-session"
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'claude --print --dangerously-skip-permissions --resume %s%s %s\n' "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags claude headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'claude --print%s --resume %s%s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
+          else
+            printf 'claude --print%s --resume %s%s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$claude_fork_flag"
+          fi
         else
-          printf 'claude --print --dangerously-skip-permissions --resume %s%s\n' "$quoted_session" "$claude_fork_flag"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'claude --resume %s%s %s\n' "$quoted_session" "$claude_fork_flag" "$quoted_prompt"
@@ -701,10 +791,15 @@ _vetcoders_resume_command() {
       # headless = `codex exec resume` (non-interactive); `codex resume` is the
       # interactive picker and cannot run under a pipe.
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'codex exec --dangerously-bypass-approvals-and-sandbox resume %s %s\n' "$quoted_session" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags codex headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'codex exec%s resume %s %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$quoted_prompt"
+          else
+            printf 'codex exec%s resume %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session"
+          fi
         else
-          printf 'codex exec --dangerously-bypass-approvals-and-sandbox resume %s\n' "$quoted_session"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'codex resume %s %s\n' "$quoted_session" "$quoted_prompt"
@@ -733,10 +828,15 @@ _vetcoders_resume_command() {
       # Since agy 1.1 --print takes the prompt as its VALUE (Go flags) and
       # print mode reads no stdin — flags first, prompt as the flag value.
       if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'agy --dangerously-skip-permissions --conversation %s --print %s\n' "$quoted_session" "$quoted_prompt"
+        local perm_flags
+        if perm_flags="$(_vetcoders_permission_flags agy headless 2>&1)"; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'agy%s --conversation %s --print %s\n' "${perm_flags:+ $perm_flags}" "$quoted_session" "$quoted_prompt"
+          else
+            printf 'agy%s --conversation %s --print "Continue."\n' "${perm_flags:+ $perm_flags}" "$quoted_session"
+          fi
         else
-          printf 'agy --dangerously-skip-permissions --conversation %s --print "Continue."\n' "$quoted_session"
+          printf '# %s\n' "$perm_flags"
         fi
       elif [[ -n "$resume_prompt" ]]; then
         printf 'agy --conversation %s --prompt-interactive %s\n' "$quoted_session" "$quoted_prompt"
@@ -758,16 +858,21 @@ _vetcoders_resume_command() {
       # and would clobber the working tree.
       # Interactive: --resume into TUI (optional seed prompt as positional).
       # Headless: --single + streaming-json for fleet/await transcript parse.
-      if [[ "$mode" == headless ]]; then
-        if [[ -n "$resume_prompt" ]]; then
-          printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_session" "$quoted_prompt"
+      local perm_flags
+      if perm_flags="$(_vetcoders_permission_flags grok "$mode" 2>&1)"; then
+        if [[ "$mode" == headless ]]; then
+          if [[ -n "$resume_prompt" ]]; then
+            printf 'grok --resume %s --cwd .%s --no-alt-screen --output-format streaming-json --single %s\n' "$quoted_session" "${perm_flags:+ $perm_flags}" "$quoted_prompt"
+          else
+            printf 'grok --resume %s --cwd .%s --no-alt-screen --output-format streaming-json --single "Continue."\n' "$quoted_session" "${perm_flags:+ $perm_flags}"
+          fi
+        elif [[ -n "$resume_prompt" ]]; then
+          printf 'grok --resume %s --cwd .%s --no-alt-screen %s\n' "$quoted_session" "${perm_flags:+ $perm_flags}" "$quoted_prompt"
         else
-          printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen --output-format streaming-json --single "Continue."\n' "$quoted_session"
+          printf 'grok --resume %s --cwd .%s --no-alt-screen\n' "$quoted_session" "${perm_flags:+ $perm_flags}"
         fi
-      elif [[ -n "$resume_prompt" ]]; then
-        printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_session" "$quoted_prompt"
       else
-        printf 'grok --resume %s --cwd . --permission-mode bypassPermissions --no-alt-screen\n' "$quoted_session"
+        printf '# %s\n' "$perm_flags"
       fi
       ;;
     *)

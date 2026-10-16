@@ -281,11 +281,43 @@ def _probe_codex_resume_contract(
     env["TEST_ATTACH_CAPTURE"] = str(probe.attach_capture)
     env["TEST_CORE_ARGV"] = str(probe.core_argv_capture)
     env["TEST_CORE_STDIN"] = str(probe.core_stdin_capture)
+    env["TEST_CORE_PYTHON"] = sys.executable
+    env["TEST_CORE_ROOT"] = str(REPO_ROOT / "vibecrafted-core")
     env["TEST_OPERATOR_AVAILABLE"] = "1" if operator_available else ""
     if operator_available:
         # Headless requests only enter the visible-host branch when an operator
         # surface is already known; interactive Codex may also prepare one.
         env["VIBECRAFTED_OPERATOR_SESSION"] = "operator-session"
+
+    # Exact default resume now needs canonical checkout facts before host
+    # admission. The mode-contract fixture owns these facts; session-source
+    # runs the actual resolver while task commands retain the argv/stdin spy.
+    native = ""
+    if "--session" in args:
+        native = args[args.index("--session") + 1]
+    elif args and re.fullmatch(r"[0-9a-fA-F-]{8,}", args[0]):
+        native = args[0]
+    if native and native not in {"current", "last", "previous"}:
+        selected_root = REPO_ROOT
+        for flag in ("--repo", "--root"):
+            if flag in args:
+                selected_root = Path(args[args.index(flag) + 1]).resolve()
+        meta = (
+            probe.home
+            / ".vibecrafted/control_plane/runtime_runs/fixture-source/meta.json"
+        )
+        meta.parent.mkdir(parents=True)
+        meta.write_text(
+            json.dumps(
+                {
+                    "run_id": "fixture-source",
+                    "agent": agent,
+                    "agent_session_id": native,
+                    "root": str(selected_root),
+                }
+            ),
+            encoding="utf-8",
+        )
 
     resume_invocation = f"vc-resume {shlex.quote(agent)}"
     if runtime is not None:
@@ -333,6 +365,10 @@ def _probe_codex_resume_contract(
                     "  fi",
                     "}",
                     "_vetcoders_run_core_cli() {",
+                    '  if [[ "$1" == session-source ]]; then',
+                    '    PYTHONPATH="$TEST_CORE_ROOT" "$TEST_CORE_PYTHON" -m vibecrafted_core.cli "$@"',
+                    "    return $?",
+                    "  fi",
                     '  printf \'%s\\0\' "$@" > "$TEST_CORE_ARGV"',
                     '  cat > "$TEST_CORE_STDIN"',
                     "}",
@@ -1657,7 +1693,7 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     # test_aicx_resume_fallback_refuses_basename_union_without_origin).
     _git_origin_checkout(repo, "https://github.com/Fixture/repo.git")
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     fresh = now.isoformat().replace("+00:00", "Z")
     pruned_src = tmp_path / "pruned-session.jsonl"  # deliberately absent
     live_src = tmp_path / "live-session.jsonl"
@@ -1785,6 +1821,27 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
     assert result.returncode == 0, result.stderr
     assert "MODE=new_session" in result.stdout
     assert "aicx foundation not found" not in result.stderr
+
+
+def test_aicx_discovery_checks_path_before_homebrew_fallbacks() -> None:
+    """div0, 2026-10-10: aicx installed by npm under /opt/homebrew/bin, but the
+    product shell's PATH does not carry the Homebrew prefix, so bare resume
+    refused workspace entry on a machine with a healthy foundation. Discovery
+    must check PATH before probing standard Homebrew bin dirs explicitly, so
+    the selected binary wins. Homebrew paths cannot be faked under a test HOME,
+    hence this source contract.
+    """
+    source = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh"
+    ).read_text()
+    start = source.index("_vetcoders_aicx_bin()")
+    body = source[start : source.index("\n}", start)]
+    for prefix in ("/opt/homebrew/bin/aicx", "/usr/local/bin/aicx"):
+        assert prefix in body, f"discovery does not probe {prefix}"
+    # PATH stays ahead of the Homebrew probe: an operator-chosen aicx (and a
+    # test fake injected via PATH) must win over the system-wide install.
+    assert body.index("$HOME/.cargo/bin/aicx") < body.index("command -v aicx")
+    assert body.index("command -v aicx") < body.index("/opt/homebrew/bin/aicx")
 
 
 def _resume_pack(home: Path, agent: str) -> Path:

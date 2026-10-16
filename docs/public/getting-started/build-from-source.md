@@ -26,11 +26,11 @@ for daily operation, use the [Runbook](../../RUNBOOK.md).
   baseline; `ensure_node` downloads 22.16.0 when Node/npm are absent.
 - Rust is stable on Windows. The Linux assembler and its CI build pin the
   stable release **1.97.0**, including both WASM targets on that toolchain.
-- **`make install` consumes a Runtime Pack; it does not compile one.**
-  `make install-source` is the retained maintainer spelling, currently defined
-  as `install-source: install`. The local compilation sequence is
-  `make runtime-pack` followed by `make install-source`. Calling the latter
-  alone is not a build. A supplied `RUNTIME_PACK` overrides build selection.
+- **`make install` builds and installs a Runtime Pack from the committed checkout.**
+  `make install-source` is the retained alias. The macOS source lane builds
+  Frame and Terminal at the full SHAs in `config/source-components.json`, using
+  detached worktrees so dirty donor checkouts stay intact. A supplied
+  `RUNTIME_PACK` installs that existing carrier without compiling.
 - Foundations are external products: npm `@loctree/loctree`, npm
   `@loctree/aicx`, GitHub releases `vetcoders/prview-rs`, PyPI `screenscribe`.
   They are never vendored into the pack. `REQUIRE_FOUNDATIONS` defaults to
@@ -164,14 +164,13 @@ Source: [Linux workflow](../../../.github/workflows/install-linux.yml) →
 Maintainers with the product release key in `~/.keys/vibecrafted-signing.key`:
 
 ```bash
-make runtime-pack
-make install-source
+make install
 ```
 
-Expected: `make runtime-pack` prints a signed pack path and writes
-`build/runtime-pack-selection.json`; the second command installs that completed
-carrier. Missing product credentials stop this lane before compilation.
-An interrupted build leaves selection pending and installation refuses it.
+Expected: the build writes `build/runtime-pack-selection.json` for the signed
+pack and the installer publishes that exact carrier. Missing product credentials
+stop this lane before compilation. An interrupted build leaves selection pending
+and installation refuses it.
 
 For an independent developer, use the assembler lane and your own trust anchor.
 Do not request or copy the product's private key:

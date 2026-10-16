@@ -8,9 +8,15 @@
 # Each repo gets its own container + its own named volumes (session history for
 # claude / codex / gemini / kimi + the AICX corpus). Rebuild or `down` freely —
 # history survives. Wipe with:  docker compose -p <project> -f compose.dev.yaml down -v
+#
+# The recipe lives in vibecrafted-core/vibecrafted_core/runtime/dev-container
+# so that it ships with every installed generation; the Agents launcher
+# ("local container" environment) drives the same compose project through
+# vibecrafted_core.dev_container.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+recipe="$(cd "$here/../vibecrafted-core/vibecrafted_core/runtime/dev-container" && pwd)"
 
 repo="${1:-$PWD}"
 if [ ! -d "$repo" ]; then
@@ -37,13 +43,21 @@ echo "[dev-up] repo:     $repo"
 echo "[dev-up] project:  $project"
 echo "[dev-up] building + starting (first build compiles the toolchain; grab a coffee)…"
 
-VC_WORKSPACE_DIR="$repo" "$DOCKER" compose -p "$project" -f "$here/compose.dev.yaml" up -d --build
+# The bind mount is the host checkout: Linux uv must not create/replace its
+# host Python environment. VC_DEV_SKIP_SYNC=0 is an explicit caller opt-in.
+VC_WORKSPACE_DIR="$repo" VC_DEV_SKIP_SYNC="${VC_DEV_SKIP_SYNC:-1}" \
+  "$DOCKER" compose -p "$project" -f "$recipe/compose.dev.yaml" up -d --build
+
+# Compose interpolates the required workspace for every verb, including exec
+# and down. Keep each copyable command self-contained and preserve shell data.
+printf -v workspace_assignment 'VC_WORKSPACE_DIR=%q' "$repo"
+printf -v compose_command '%q compose -p %q -f %q' "$DOCKER" "$project" "$recipe/compose.dev.yaml"
 
 cat <<EOF
 
 [dev-up] up. Session history persists in the '${project}_*' volumes.
 
-  Enter shell:   $DOCKER compose -p $project -f $here/compose.dev.yaml exec dev zsh
-  Stop:          $DOCKER compose -p $project -f $here/compose.dev.yaml down
-  Wipe history:  $DOCKER compose -p $project -f $here/compose.dev.yaml down -v
+  Enter shell:   $workspace_assignment $compose_command exec dev zsh
+  Stop:          $workspace_assignment $compose_command down
+  Wipe history:  $workspace_assignment $compose_command down -v
 EOF

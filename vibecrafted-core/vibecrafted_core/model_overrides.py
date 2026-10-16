@@ -18,6 +18,8 @@ MODEL_OVERRIDE_FLAGS = {
     # form and treat `-m` as an existing pin (same rule as grok).
     "kimi": "--model",
     "copilot": "--model",
+    # omp: `--model <provider/model>` (fuzzy match accepted).
+    "omp": "--model",
 }
 
 MODEL_OVERRIDE_FLAG_ALIASES: dict[str, tuple[str, ...]] = {

@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import NoReturn
 
+import pytest
 from vibecrafted_core import control_plane, dispatcher
 from vibecrafted_core import supervisor_async as supervisor_async_module
 from vibecrafted_core.artifacts import validate_artifacts
@@ -26,6 +27,109 @@ from vibecrafted_core.supervisor_async import AsyncRunHandle, AsyncSupervisor
 
 def _runtime_meta(tmp_path: Path, run_id: str) -> Path:
     return tmp_path / "home" / "control_plane" / "runtime_runs" / run_id / "meta.json"
+
+
+def test_fallback_retains_claude_final_text_once_without_display_noise():
+    answer = "# READ verification\n\n```marbles-reception\n{}\n```"
+    events = [
+        {"type": "user", "message": {"role": "user", "content": answer}},
+        {"role": "tool", "content": answer},
+        {"type": "tool_result", "text": answer},
+        {"type": "thinking", "text": answer},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": answer},
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": answer},
+                    {"type": "tool_use", "input": {"command": answer}},
+                    {"type": "text", "text": answer},
+                ],
+            },
+        },
+        {"type": "result", "subtype": "success", "result": answer},
+    ]
+    transcript = "\n".join(json.dumps(event) for event in events)
+    assert supervisor_async_module._fallback_report_body(transcript) == answer + "\n"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "result", "result": "final assistant answer"},
+        {"role": "assistant", "content": "final assistant answer"},
+        {"event": "result", "result": {"response": "final assistant answer"}},
+        {
+            "type": "assistant.message",
+            "data": {"content": "final assistant answer"},
+        },
+    ],
+)
+def test_fallback_understands_canonical_provider_answer_shapes(event):
+    assert supervisor_async_module._fallback_report_body(json.dumps(event)) == (
+        "final assistant answer\n"
+    )
+
+
+def test_fallback_does_not_coerce_malformed_json_transport_into_report():
+    broken = (
+        '{"type": "assistant", "message": "unterminated\n```marbles-reception\n{}\n```'
+    )
+    assert not supervisor_async_module._fallback_report_body(broken)
+
+
+def test_fallback_keeps_different_terminal_evidence_for_validation():
+    first = "```marbles-reception\n{}\n```"
+    second = '```marbles-reception\n{"different": true}\n```'
+    transcript = "\n".join(
+        json.dumps(event)
+        for event in [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": first}]},
+            },
+            {"type": "result", "result": second},
+        ]
+    )
+    assert (
+        supervisor_async_module._fallback_report_body(transcript).count(
+            "```marbles-reception"
+        )
+        == 2
+    )
+
+
+def test_fallback_preserves_plain_markdown_with_fenced_json():
+    body = '# plain report\n\n```marbles-reception\n{"actual": true}\n```\n'
+    assert supervisor_async_module._fallback_report_body(body) == body
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"role": "tool", "content": "poison"},
+        {"role": "user", "content": "poison"},
+        {"type": "thinking", "text": "poison"},
+        {"type": "error", "message": "poison"},
+        {"type": "unknown", "data": "poison"},
+        {"type": "result", "is_error": True, "result": "poison"},
+        {"type": "assistant", "message": {"role": "tool", "content": "poison"}},
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "subagent-tool",
+            "message": {"content": [{"type": "text", "text": "poison"}]},
+        },
+    ],
+)
+def test_fallback_excludes_unattested_structured_output(event):
+    assert not supervisor_async_module._fallback_report_body(json.dumps(event))
 
 
 def test_lifecycle_transition_table_rejects_backwards_transition() -> None:
@@ -1590,6 +1694,79 @@ def test_unparseable_silence_override_does_not_disable_the_bound() -> None:
             os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = previous
 
 
+@pytest.mark.parametrize("productive", [True, False])
+def test_nested_workflow_activity_and_timeout_have_terminal_truth(
+    tmp_path, monkeypatch, productive
+):
+    """Real nested source runtime: movement survives, mute children are reaped."""
+    import os
+    import textwrap
+
+    from vibecrafted_core.control_plane import await_run
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+    monkeypatch.setenv("VIBECRAFTED_RUN_ID", "nested-parent")
+    monkeypatch.setenv("VIBECRAFTED_REPORT_PATH", str(tmp_path / "parent.md"))
+    monkeypatch.setenv("VIBECRAFTED_META_PATH", str(tmp_path / "parent.meta.json"))
+    monkeypatch.setenv("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", "0.7")
+    script = tmp_path / "nested.py"
+    code = (
+        'import time; [(print(\'{"type":"item.started"}\',flush=True),time.sleep(.04)) for _ in range(40)]'
+        if productive
+        else "import time;time.sleep(120)"
+    )
+    script.write_text(
+        textwrap.dedent(f"""\
+        import asyncio,sys
+        from vibecrafted_core.workflow_runtime import _run_child, _with_shutdown
+        async def run():
+            result = await _run_child(kind="marbles", label="marbles-L1", agent="codex",
+                                      root={str(tmp_path)!r},prompt="fixture",
+                                      command=[sys.executable,"-c",{code!r}])
+            return 0 if result.exit_code == 0 else 1
+        sys.exit(asyncio.run(_with_shutdown(run())))
+    """)
+    )
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="nested-parent",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            meta_path=tmp_path / "parent.meta.json",
+            transcript_path=tmp_path / "parent.log",
+            require_report=False,
+        )
+    )
+    meta = json.loads((tmp_path / "parent.meta.json").read_text())
+    assert meta["exit_code"] == handle.exit_code
+    assert meta["completed_at"] and meta["status"] in {
+        "completed",
+        "failed",
+        "timed_out",
+    }
+    if productive:
+        assert handle.exit_code == 0 and handle.state is not RunState.STALLED
+        assert "workflow.child_activity" in (tmp_path / "parent.log").read_text()
+    else:
+        assert handle.exit_code != 0
+        assert meta["liveness"] == "terminal"
+    child_meta = tmp_path / "nested-parent-children" / "marbles-L1.meta.json"
+    child = json.loads(child_meta.read_text())
+    assert child["exit_code"] is not None and child["completed_at"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(child["worker_pid"], 0)
+    assert not (child_meta.parent / "marbles-L2.meta.json").exists()
+    # Await uses durable terminal metadata after its notification socket is gone.
+    from vibecrafted_core.control_plane import control_plane_home
+
+    runtime_dir = control_plane_home() / "runtime_runs" / "nested-parent"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "meta.json").write_text(json.dumps(meta))
+    outcome = await_run("nested-parent", timeout_seconds=2, interval_seconds=0.05)
+    assert outcome["completed"] and not outcome["timed_out"]
+    assert outcome["run"]["exit_code"] == handle.exit_code
+
+
 def test_kimi_provider_session_id_lands_in_meta_before_settlement(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1652,3 +1829,244 @@ def test_kimi_provider_session_id_lands_in_meta_before_settlement(
     payload = json.loads(meta.read_text())
     assert payload["provider_session_id"] == session_id
     assert payload["provider_session_source"] == "provider_session_store"
+    # The settlement summary must not erase the adopted native identity from
+    # the legacy aliases (agent_session_id / session_id) or the resume hint.
+    assert handle.agent_session_id == session_id
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["runtime_session_id"] == handle.session_id != session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+    assert "<session_id>" not in payload["resume_command"]
+
+
+def _write_kimi_store_session(provider_home: Path, root: Path, session_id: str) -> None:
+    state = (
+        provider_home
+        / ".kimi-code"
+        / "sessions"
+        / f"wd_{root.name}_00"
+        / session_id
+        / "state.json"
+    )
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "id": session_id,
+                "version": 2,
+                "cwd": str(root),
+                "createdAt": int(time.time() * 1000),
+            }
+        )
+    )
+
+
+def _kimi_store_worker(tmp_path: Path, *, sleep: float) -> Path:
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import time\n"
+        'print(\'{\\"role\\":\\"meta\\",\\"type\\":\\"system.version\\",\\"version\\":\\"9.9.9\\"}\', flush=True)\n'
+        f"time.sleep({sleep})\n"
+    )
+    return worker
+
+
+def test_kimi_store_identity_survives_normal_settlement_in_meta_and_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Normal exit after store adoption keeps one native identity everywhere."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_feedface-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, session_id)
+    worker = _kimi_store_worker(tmp_path, sleep=0.2)
+    meta = tmp_path / "run.meta.json"
+    report = tmp_path / "report.md"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-store-normal",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={"VIBECRAFTED_AGENT": "kimi"},
+            meta_path=meta,
+            report_path=report,
+            transcript_path=tmp_path / "transcript.log",
+            timeout=30,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.agent_session_id == session_id
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == session_id
+    assert payload["provider_session_source"] == "provider_session_store"
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["runtime_session_id"] != session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+    report_text = report.read_text(encoding="utf-8")
+    assert f"session_id: {session_id}" in report_text
+    assert f"provider_session_id: {session_id}" in report_text
+
+
+def test_kimi_store_identity_survives_supervisor_cancellation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cancelling after store adoption settles meta with the same native identity."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    session_id = "session_cafebabe-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, session_id)
+    worker = _kimi_store_worker(tmp_path, sleep=3600)
+    meta = tmp_path / "run.meta.json"
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            AsyncSupervisor().run(
+                run_id="kimi-store-cancel",
+                command=[sys.executable, str(worker)],
+                root=root,
+                env={"VIBECRAFTED_AGENT": "kimi"},
+                meta_path=meta,
+                transcript_path=tmp_path / "transcript.log",
+                require_report=False,
+            )
+        )
+        for _ in range(1000):
+            await asyncio.sleep(0.01)
+            try:
+                live = json.loads(meta.read_text())
+            except (OSError, ValueError):
+                continue
+            if live.get("provider_session_id") == session_id:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    payload = json.loads(meta.read_text())
+    assert payload["terminal_reason"] == "supervisor_cancelled"
+    assert payload["provider_session_id"] == session_id
+    assert payload["agent_session_id"] == session_id
+    assert payload["session_id"] == session_id
+    assert payload["resume_command"].endswith(f"kimi -S {session_id}")
+
+
+def test_kimi_store_identity_equal_to_parent_session_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A store hit that equals a parent/runtime session never becomes the child's."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    provider_home = tmp_path / "providerhome"
+    monkeypatch.setenv("VIBECRAFTED_PROVIDER_STORE_HOME", str(provider_home))
+    root = tmp_path / "worktree"
+    root.mkdir()
+    parent_session = "session_0badc0de-1234-4567-89ab-0123456789ab"
+    _write_kimi_store_session(provider_home, root, parent_session)
+    worker = _kimi_store_worker(tmp_path, sleep=0.2)
+    meta = tmp_path / "run.meta.json"
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="kimi-store-parent",
+            command=[sys.executable, str(worker)],
+            root=root,
+            env={
+                "VIBECRAFTED_AGENT": "kimi",
+                "VIBECRAFTED_PARENT_SESSION_ID": parent_session,
+            },
+            meta_path=meta,
+            transcript_path=tmp_path / "transcript.log",
+            timeout=30,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.agent_session_id == ""
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_source"] == "refused"
+    assert payload["provider_session_id"] != parent_session
+    assert payload["agent_session_id"] == ""
+    assert parent_session not in str(payload.get("session_id") or "")
+    assert parent_session not in str(payload.get("resume_command") or "")
+
+
+def test_store_adoption_does_not_replace_declared_launch_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The launch contract's declared child session outranks a store guess."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    declared = "session_11111111-1234-4567-89ab-0123456789ab"
+    store = "session_22222222-1234-4567-89ab-0123456789ab"
+    monkeypatch.setattr(
+        supervisor_async_module, "kimi_session_id_from_store", lambda *a, **k: store
+    )
+    meta = tmp_path / "run.meta.json"
+    meta.write_text(json.dumps({"run_id": "declared-run"}))
+    handle = AsyncRunHandle(
+        run_id="declared-run",
+        command=("inert-fixture",),
+        root=tmp_path,
+        process=None,  # type: ignore[arg-type]
+        started_at=supervisor_async_module._utc_now(),
+        meta_path=meta,
+        agent="kimi",
+        agent_session_id=declared,
+        session_id="01a129f4-ebf6-7443-b384-11ee95bdce5e",
+    )
+
+    AsyncSupervisor()._adopt_provider_session_identity(handle)
+
+    assert handle.agent_session_id == declared
+
+
+def test_terminal_summary_keeps_validated_stream_identity_in_aliases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stream/store identity validated by telemetry is not blanked at close."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / "control_plane").mkdir(parents=True)
+    sid = "session_89a3be19-5623-4000-9000-123456789abc"
+    meta = tmp_path / "run.meta.json"
+    meta.write_text(
+        json.dumps(
+            {"run_id": "summary-run", "agent_session_id": sid, "session_id": sid}
+        )
+    )
+
+    class _Exited:
+        pid = 123456
+        returncode = 0
+
+    handle = AsyncRunHandle(
+        run_id="summary-run",
+        command=("inert-fixture",),
+        root=tmp_path,
+        process=_Exited(),  # type: ignore[arg-type]
+        started_at=supervisor_async_module._utc_now(),
+        meta_path=meta,
+        agent="kimi",
+        session_id="01a129f4-ebf6-7443-b384-11ee95bdce5e",
+        stream_session_id=sid,
+        stream_session_source="provider_session_store",
+        exit_code=0,
+    )
+
+    AsyncSupervisor()._write_meta_summary(handle)
+
+    payload = json.loads(meta.read_text())
+    assert payload["provider_session_id"] == sid
+    assert payload["agent_session_id"] == sid
+    assert payload["session_id"] == sid
+    assert payload["runtime_session_id"] == handle.session_id

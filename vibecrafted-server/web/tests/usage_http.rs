@@ -6,11 +6,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{StatusCode, header};
 use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use vibecrafted_server_web::control::api::control_routes_for;
 
 struct TestHome(PathBuf);
@@ -86,13 +84,20 @@ fn test_app(home: &std::path::Path) -> axum::Router {
 }
 
 async fn get(home: &std::path::Path, uri: &str) -> (StatusCode, String, Value) {
-    let response = test_app(home)
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("private listener");
+    let addr = listener.local_addr().expect("private address");
+    let app = test_app(home);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("private HTTP");
+    });
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("private client")
+        .get(format!("http://{addr}{uri}"))
+        .send()
         .await
         .expect("response");
     let status = response.status();
@@ -102,14 +107,10 @@ async fn get(home: &std::path::Path, uri: &str) -> (StatusCode, String, Value) {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let bytes = to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body");
-    (
-        status,
-        cache,
-        serde_json::from_slice(&bytes).expect("JSON response"),
-    )
+    let body = response.json().await.expect("JSON response");
+    server.abort();
+    let _ = server.await;
+    (status, cache, body)
 }
 
 #[tokio::test]
@@ -140,68 +141,116 @@ async fn usage_api_projects_filters_totals_and_validation() {
 }
 
 #[tokio::test]
-async fn quota_dashboard_reads_monitor_snapshots_and_stays_quiet_when_absent() {
+async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
     let home = TestHome::new();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
-    let agy = json!({
-        "ts": ts,
-        "model_id": "gemini-3.1-pro-high",
-        "metrics": {"estimated_tokens": 12400, "cost_usd": 0.042},
-        "quota": {"status": "RESOURCE_EXHAUSTED", "quota_reset_in": "2h"}
-    });
-    let kimi = json!({
-        "ts": ts,
-        "kind": "ok",
-        "plan": "Coding",
-        "limit5h": {"usedRatio": 0.97},
-        "monthTotal": {"usedRatio": 0.41},
-        "monthCode": {"usedRatio": 0.12}
-    });
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", agy.to_string());
-        std::env::set_var("VIBECRAFTED_KIMI_QUOTA_JSON", kimi.to_string());
-    }
+    // Host activity the collector left behind (the real fleet_engine entry shape).
+    let dir = home.0.join("telemetry/claude");
+    fs::create_dir_all(&dir).expect("telemetry dir");
+    let mtime = chrono::Utc::now().timestamp() as f64 - 60.0;
+    fs::write(
+        dir.join("scan-cache.json"),
+        serde_json::to_vec(
+            &json!({"files": {"/s/claude/aaaa1111-2222-3333-4444-555566667777.jsonl": {
+                "parser": 3,
+                "days": [{"day": "2026-10-12", "model": "claude-opus-5-5",
+                          "input_tokens": 10, "output_tokens": 5,
+                          "cache_read_tokens": 0, "cache_creation_tokens": 0}],
+                "record": {"id": "aaaa1111-2222-3333-4444-555566667777", "mtime": mtime}
+            }}}),
+        )
+        .expect("json"),
+    )
+    .expect("scan cache");
 
-    let (status, cache, board) = get(&home.0, "/api/usage/quota").await;
+    let (status, _, all) = get(&home.0, "/api/usage?window=all").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cache, "no-store");
-    assert_eq!(board["schema"], "vibecrafted.quota-dashboard.v1");
-    let agents = board["agents"].as_array().expect("agents");
-    assert_eq!(agents.len(), 2);
-    assert_eq!(agents[0]["id"], "agy");
-    assert_eq!(agents[0]["status"], "blocked");
-    assert_eq!(agents[0]["headline"], "EXHAUSTED");
-    assert!(
-        agents[0]["detail"]
-            .as_str()
-            .expect("detail")
-            .contains("api-equiv")
+    let origins: Vec<_> = all["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .map(|run| run["origin"].as_str().expect("origin").to_string())
+        .collect();
+    assert!(origins.contains(&"vc".to_string()) && origins.contains(&"local".to_string()));
+    // One entry per supported provider (control_core::usage roster, the same nine
+    // control-core/tests/usage_report.rs accounts for), omp included.
+    assert_eq!(all["local_sources"].as_array().expect("sources").len(), 9);
+
+    // The picker lists exactly the dimension names the API reports; choosing any
+    // of them must return exactly that dimension's runs.
+    for (picker, param) in [
+        ("providers", "provider"),
+        ("agents", "agent"),
+        ("models", "model"),
+    ] {
+        let names = all["dimensions"][picker].as_array().expect("dimension");
+        assert!(!names.is_empty(), "{picker}");
+        for dimension in names {
+            let name = dimension["name"].as_str().expect("name");
+            let uri = format!("/api/usage?window=all&{param}={name}");
+            let (status, _, filtered) = get(&home.0, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(filtered["totals"]["runs"], dimension["runs"], "{uri}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_api_provider_filter_roundtrips_seeded_pool_names() {
+    // The UI seeds the provider picker with pool names (google, anthropic,
+    // openai, github, anysphere, xai, jetbrains, moonshot). Every seed must be
+    // a working filter against rows that carry launcher vocabulary, or the
+    // picker offers options that silently select nothing.
+    let home = TestHome::new(); // pre-seeded: codex VC run ("run-usd")
+    fs::create_dir_all(home.0.join("control_plane/runtime_runs/run-claude")).expect("run dir");
+    fs::write(
+        home.0.join("control_plane/runtime_runs/run-claude/meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "run-claude",
+            "agent": "claude",
+            "agent_model": "claude-opus-5-5",
+            "status": "completed",
+            "exit_code": 0,
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+            "usage": {"schema": "vibecrafted.usage.v1", "unit": "tokens", "source": "provider_stream",
+                      "events": 1, "tokens_input": 3, "tokens_cached_input": 0,
+                      "tokens_cache_write": 0, "tokens_output": 2, "tokens_total": 5},
+            "cost": {"amount": 0.01, "currency": "USD", "source": "estimated:test"}
+        }))
+        .expect("json"),
+    )
+    .expect("meta");
+
+    let (status, _, anthropic) = get(&home.0, "/api/usage?window=all&provider=anthropic").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        anthropic["totals"]["runs"], 1,
+        "anthropic selects claude rows"
     );
-    assert_eq!(agents[0]["tokens"], 12400);
-    assert_eq!(agents[1]["id"], "kimi");
-    assert_eq!(agents[1]["status"], "blocked");
-    assert_eq!(agents[1]["bars"][0]["label"], "5h");
-    assert_eq!(agents[1]["bars"][0]["level"], "blocked");
-    assert_eq!(agents[1]["bars"][1]["text"], "41%");
+    assert_eq!(anthropic["runs"][0]["run_id"], "run-claude");
 
-    unsafe {
-        std::env::set_var("VIBECRAFTED_AGY_QUOTA_JSON", "/nonexistent/agy-quota.json");
-        std::env::set_var(
-            "VIBECRAFTED_KIMI_QUOTA_JSON",
-            "/nonexistent/kimi-quota.json",
-        );
-    }
-    let (status, _, quiet) = get(&home.0, "/api/usage/quota").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(quiet["agents"][0]["present"], false);
-    assert_eq!(quiet["agents"][0]["status"], "absent");
-    assert_eq!(quiet["agents"][1]["status"], "absent");
+    let (_, _, openai) = get(&home.0, "/api/usage?window=all&provider=openai").await;
+    assert_eq!(openai["totals"]["runs"], 1, "openai selects codex rows");
+    assert_eq!(openai["runs"][0]["run_id"], "run-usd");
 
-    unsafe {
-        std::env::remove_var("VIBECRAFTED_AGY_QUOTA_JSON");
-        std::env::remove_var("VIBECRAFTED_KIMI_QUOTA_JSON");
+    let (_, _, launcher) = get(&home.0, "/api/usage?window=all&provider=codex").await;
+    assert_eq!(launcher["totals"]["runs"], 1, "launcher names keep working");
+
+    for seed in [
+        "google",
+        "anthropic",
+        "openai",
+        "github",
+        "anysphere",
+        "xai",
+        "jetbrains",
+        "moonshot",
+    ] {
+        let (status, _, _) = get(&home.0, &format!("/api/usage?window=all&provider={seed}")).await;
+        assert_eq!(status, StatusCode::OK, "seeded picker value {seed}");
     }
+    let (_, _, anysphere) = get(&home.0, "/api/usage?window=all&provider=anysphere").await;
+    assert_eq!(
+        anysphere["totals"]["runs"], 0,
+        "a pool with no rows is honestly empty, not an error"
+    );
 }

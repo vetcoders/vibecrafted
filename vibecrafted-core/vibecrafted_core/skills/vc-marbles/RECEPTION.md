@@ -9,6 +9,87 @@ Workers are blind on purpose.
 
 Reception is the only place allowed to remember.
 
+## Current sequential core contract
+
+`workflow_runtime.run_marbles` owns the WRITE → READ → reception → next WRITE
+sequence. It awaits every phase; it does not use the legacy shell watcher or
+fire-and-forget verification. Research and polarize retain their own contracts.
+
+Each WRITE worker gets the unchanged task and current assigned tree, one bounded
+cut, commit and report. The receiver may resume a completed provider session
+through a verified native adapter; otherwise it starts a fresh informed READ
+session with the same provider. That fallback is recorded, never presented as a
+native resume. Prior reports, findings and metrics belong only to reception.
+
+The receiver emits its report through stdout; the runtime persists the artifact.
+On macOS a `sandbox-exec` write-deny profile protects the assigned source and
+shared Git metadata, independently of provider permission flags. Artifacts and
+provider stores outside that boundary remain writable. Codex's inner tool sandbox
+is explicitly bypassed **only inside this external source/Git boundary** using
+its existing canonical bypass command. Nested restrictive Codex sandbox profiles
+fail before commands start; native read-only alone also refuses external gate
+outputs. The receipt records external enforcement and the inner bypass separately.
+A non-paid native-command regression proves reads and external output work while
+source and shared Git writes are refused. A content/branch/HEAD receipt before
+and after READ must agree.
+Linux and other hosts without a verified source guard currently block reception
+with `receiver_source_guard_unavailable`; portable enforcement remains unverified.
+
+READ never inherits the task's edit/commit/touch instructions as write authority.
+Verification must use normal shared-target leases and existing external output
+paths. Disable Python source caches and put temporary outputs outside source.
+If a gate requires source touching or unavailable execution, record an unknown
+gate and incomplete scope. Never weaken the source guard or invent a passed check.
+
+The report must contain exactly one fenced `marbles-reception` JSON document:
+
+```json
+{
+  "schema": "vibecrafted.marbles-reception.v1",
+  "candidate_run_id": "exact WRITE run id",
+  "candidate_sha": "exact current full HEAD",
+  "root": "exact assigned absolute root",
+  "scope_verified": true,
+  "scope_evidence": "Concrete coverage evidence for the assigned acceptance",
+  "gate": "pass",
+  "checks": [
+    { "command": "exact command", "exit_code": 0, "evidence": "actual result" }
+  ],
+  "blocker": "",
+  "attacked": [],
+  "resolved": [],
+  "still_open": [],
+  "discovered": [],
+  "regressions": []
+}
+```
+
+Each finding is `{id, severity, cluster, evidence}` with stable identity and
+severity `high`, `medium` or `low`. Every attacked finding needs an explicit
+resolved or open disposition. Resolutions must be attacked and cannot also be
+open. Missing fields, duplicate identities/JSON keys, contradictory gate checks,
+unsupported schema or mismatched candidate identity block convergence. Narrative
+prose and worker exit zero are never converted into structured facts.
+
+The receiver attests verification; the runtime checks transport, schema, source
+immutability and ledger algebra. This is not independent proof that a provider
+actually ran every claimed command; real provider acceptance remains an Operator
+checkpoint. No automatic operator-debt acceptance or parallel candidate ranking
+is implemented by this sequential path.
+
+`reception.json` records accepted reports, unresolved findings, regressions,
+delta/stepper, routing and verdict after each round. Two same-cluster failed gates,
+two negative deltas, or two rounds without source/backlog progress escalate.
+Surface-shift recommendations stay within the unchanged task. A maximum count
+ends execution, not convergence: `completed` + `not_converged` is valid. Only a
+verified empty ledger with a passing gate stops as `converged`. Incomplete or
+malformed verification yields `blocked` while preserving the WRITE execution receipt.
+Stdout-only receiver frontmatter is finalized by the runtime only after the
+document, candidate identity and unchanged source are verified. Valid incomplete
+READ evidence gets a non-empty `blocked` claim; malformed/missing evidence is not
+promoted into an accepted finalized claim. Receiver process completion remains a
+separate fact from that semantic attestation.
+
 Reception owns:
 
 - the authoritative open-finding ledger

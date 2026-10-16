@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+# The retained sidecar cases exercise the shipped internal child/migration
+# functions, not today's public service frontend. The foreground integration
+# below separately verifies the real supervisor and its embedded Guardian.
 import base64
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -214,7 +218,11 @@ def _wait_for_supervisor_success(
                 last_error = f"success does not attest server PID {server_pid}"
             elif (
                 guardian_pid is not None
-                and payload.get("managed_pair", {}).get("guardian_pid") != guardian_pid
+                and payload.get("managed_pair", {}).get(
+                    "guardian_owner_pid",
+                    payload.get("managed_pair", {}).get("guardian_pid"),
+                )
+                != guardian_pid
             ):
                 last_error = f"success does not attest guardian PID {guardian_pid}"
             else:
@@ -231,7 +239,7 @@ def _run_launcher(
     env: dict[str, str], *args: str, check: bool = False
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(LAUNCHER), *args],
+        [_fixture_launcher(env, args), *args],
         check=check,
         cwd=REPO_ROOT,
         env=env,
@@ -239,6 +247,12 @@ def _run_launcher(
         text=True,
         timeout=20,
     )
+
+
+def _fixture_launcher(env: dict[str, str], args: tuple[str, ...]) -> str:
+    if args[:2] in (("server", "start"), ("server", "stop")):
+        return env["VIBECRAFTED_TEST_CHILD_LAUNCHER"]
+    return str(LAUNCHER)
 
 
 def _run_server_helper(
@@ -524,6 +538,7 @@ import json
 import os
 import signal
 import time
+import threading
 
 host, raw_port = os.environ["VC_SERVER_ADDR"].rsplit(":", 1)
 log_path = os.environ.get("VIBECRAFTED_TEST_LIFECYCLE_LOG") or os.environ[
@@ -574,12 +589,16 @@ def serve_connection(connection):
         if os.environ.get("SSE_STATUS") == "404":
             reply = response(404, "text/plain", b"")
         else:
-            reply = response(
-                200,
-                "text/event-stream",
-                b": ping\\n\\n",
-                ("Cache-Control: no-cache",),
-            )
+            try:
+                connection.sendall(b"HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nCache-Control: no-cache\\r\\n\\r\\n")
+                while True:
+                    connection.sendall(b": ping\\n\\n")
+                    # Match a live, low-frequency heartbeat stream. Three
+                    # heartbeats intentionally end Guardian's replay window;
+                    # a 50ms fixture made readiness flicker every 150ms.
+                    time.sleep(5)
+            except OSError:
+                return
     else:
         reply = response(404, "text/plain", b"")
     try:
@@ -600,8 +619,10 @@ with socket.socket() as server:
     server.listen(128)
     while True:
         connection, _ = server.accept()
-        with connection:
-            serve_connection(connection)
+        def serve_owned(connection=connection):
+            with connection:
+                serve_connection(connection)
+        threading.Thread(target=serve_owned, daemon=True).start()
 """,
     )
     _write_executable(
@@ -673,6 +694,15 @@ while True:
     )
     (bin_dir / "python3").symlink_to(Path(sys.executable).resolve())
 
+    child_launcher = tmp_path / "child-lifecycle" / "vibecrafted"
+    _write_executable(
+        child_launcher,
+        "#!/bin/bash\n"
+        f"source {shlex.quote(str(LAUNCHER))} help >/dev/null\n"
+        "export VIBECRAFTED_SERVER_SUPERVISOR_CHILD=1\n"
+        'shift\n_with_server_lifecycle_lock "$@"\n',
+    )
+
     env = os.environ.copy()
     env.update(
         {
@@ -682,6 +712,7 @@ while True:
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "LIFECYCLE_LOG": str(lifecycle_log),
             "VIBECRAFTED_TEST_LIFECYCLE_LOG": str(lifecycle_log),
+            "VIBECRAFTED_TEST_CHILD_LAUNCHER": str(child_launcher),
         }
     )
 
@@ -749,7 +780,7 @@ def test_server_lifecycle_starts_heals_and_stops_guardian(
 
     doctor = _run_launcher(env, "server", "doctor")
     assert doctor.returncode == 0, doctor.stderr
-    assert "Guardian entrypoint present and executable" in doctor.stdout
+    assert "Guardian entrypoint present and executable" not in doctor.stdout
     assert "Guardian PID" in doctor.stdout
     assert "Server and guardian doctor check passed" in doctor.stdout
 
@@ -786,6 +817,27 @@ def test_server_lifecycle_starts_heals_and_stops_guardian(
     assert lifecycle_lines.index("guardian-stop", 2) < lifecycle_lines.index(
         "server-stop"
     )
+
+
+def test_public_start_requires_supervisor_before_starting_any_child(
+    isolated_server_runtime: tuple[dict[str, str], Path, Path],
+) -> None:
+    """A legacy Guardian executable cannot substitute for today's service owner."""
+    env, state_dir, lifecycle_log = isolated_server_runtime
+    result = subprocess.run(
+        [str(LAUNCHER), "server", "start", "--port", str(_free_port())],
+        env=env,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 78, result.stdout + result.stderr
+    assert "vc-server-supervisor" in result.stderr
+    assert not lifecycle_log.exists()
+    assert not (state_dir / "server.pid").exists()
+    assert not (state_dir / "guardian.pid").exists()
 
 
 def test_symlinked_guardian_entrypoint_gets_durable_identity(
@@ -1191,7 +1243,7 @@ def test_concurrent_server_starts_create_exactly_one_managed_pair(
     env, state_dir, lifecycle_log = isolated_server_runtime
     port = _free_port()
     argv = [
-        str(LAUNCHER),
+        _fixture_launcher(env, ("server", "start")),
         "server",
         "start",
         "--host",
@@ -1253,8 +1305,22 @@ def test_manual_stop_serializes_against_concurrent_supervisor_acquire(
 
     delayed_stop_env = env.copy()
     delayed_stop_env["VIBECRAFTED_TEST_SERVER_STOP_DELAY"] = "0.6"
+    delayed_stop_env["PYTHONPATH"] = str(REPO_ROOT / "vibecrafted-core")
     stopper = subprocess.Popen(
-        [str(LAUNCHER), "server", "stop"],
+        [
+            sys.executable,
+            "-m",
+            "vibecrafted_core.server_supervisor",
+            "manual-stop",
+            "--launcher",
+            env["VIBECRAFTED_TEST_CHILD_LAUNCHER"],
+            "--home",
+            env["VIBECRAFTED_HOME"],
+            "--runtime-home",
+            env["VIBECRAFTED_RUNTIME_HOME"],
+            "--operator-home",
+            env["HOME"],
+        ],
         cwd=REPO_ROOT,
         env=delayed_stop_env,
         stdout=subprocess.PIPE,
@@ -1318,7 +1384,7 @@ def test_stale_lifecycle_lock_is_quarantined_once_under_parallel_recovery(
     delayed_env = env.copy()
     delayed_env["SERVER_START_DELAY"] = "30"
     argv = [
-        str(LAUNCHER),
+        _fixture_launcher(env, ("server", "start")),
         "server",
         "start",
         "--host",
@@ -1539,7 +1605,7 @@ def test_term_ignoring_server_remains_tracked_until_confirmed_sigkill(
     server_pid = int((state_dir / "server.pid").read_text(encoding="utf-8"))
 
     stopper = subprocess.Popen(
-        [str(LAUNCHER), "server", "stop"],
+        [_fixture_launcher(env, ("server", "stop")), "server", "stop"],
         cwd=REPO_ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -1586,11 +1652,11 @@ def test_server_runtime_uses_custom_vibecrafted_home(
     assert stopped.returncode == 0, stopped.stderr
 
 
-def test_supervisor_and_fake_service_manager_repair_every_proven_process(
+def test_supervisor_and_fake_service_manager_repair_server_and_embedded_owner(
     isolated_server_runtime: tuple[dict[str, str], Path, Path],
     tmp_path: Path,
 ) -> None:
-    env, state_dir, _ = isolated_server_runtime
+    env, state_dir, lifecycle_log = isolated_server_runtime
     port = _free_port()
     wrapper_receipt = tmp_path / "fake-launchd.json"
     wrapper_script = tmp_path / "fake-launchd.py"
@@ -1675,6 +1741,7 @@ write_receipt(None, "stopped")
         "--command-timeout",
         "20",
     ]
+    supervisor_log = (tmp_path / "foreground-supervisor.log").open("w")
     wrapper = subprocess.Popen(
         [
             sys.executable,
@@ -1685,8 +1752,8 @@ write_receipt(None, "stopped")
         cwd=REPO_ROOT,
         env=supervisor_env,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=supervisor_log,
+        stderr=supervisor_log,
     )
     try:
         first_supervisor = _wait_for_proven_supervisor_pid(
@@ -1694,120 +1761,61 @@ write_receipt(None, "stopped")
             state_dir,
         )
         first_server = _wait_for_proven_managed_pid(state_dir, "server")
-        first_guardian = _wait_for_proven_managed_pid(state_dir, "guardian")
-        first_success = _wait_for_supervisor_success(
-            state_dir,
-            server_pid=first_server,
-            guardian_pid=first_guardian,
+        _wait_for_supervisor_success(
+            state_dir, server_pid=first_server, guardian_pid=first_supervisor
         )
-
-        status = _run_launcher(env, "server", "status")
-        assert status.returncode == 0, status.stderr
-        assert "Supervision: FOREGROUND" in status.stdout
-        assert f"Server: RUNNING (PID {first_server}" in status.stdout
-        assert f"Guardian: RUNNING (PID {first_guardian}" in status.stdout
-        packaged_pair_probe = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import sys; from pathlib import Path; "
-                    "from vibecrafted_core.server_supervisor import "
-                    "SupervisorPaths, _child_environment, _pair_healthy; "
-                    "paths=SupervisorPaths.create(home=Path(sys.argv[2]), "
-                    "runtime_home=Path(sys.argv[3]), "
-                    "operator_home=Path(sys.argv[4])); "
-                    "raise SystemExit(0 if _pair_healthy("
-                    "Path(sys.argv[1]), _child_environment(paths)) else 1)"
-                ),
-                str(PACKAGED_LAUNCHER.resolve()),
-                env["VIBECRAFTED_HOME"],
-                env["VIBECRAFTED_RUNTIME_HOME"],
-                env["HOME"],
-            ],
-            cwd=REPO_ROOT,
-            env=supervisor_env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
+        execution = json.loads((state_dir / "guardian.execution.json").read_text())
+        assert execution["execution"] == "supervisor-thread"
+        assert execution["owner_pid"] == first_supervisor
+        assert execution["ready"] is True, (
+            execution,
+            (tmp_path / "foreground-supervisor.log").read_text(),
         )
-        assert packaged_pair_probe.returncode == 0, packaged_pair_probe.stderr
+        assert not (state_dir / "guardian.pid").exists()
+        assert "guardian-start" not in lifecycle_log.read_text()
 
-        refused = _run_launcher(env, "server", "stop")
-        assert refused.returncode == 75
-        assert "coordination lease is already active" in refused.stderr
-        assert _process_alive(first_server)
-        assert _process_alive(first_guardian)
+        status = _run_launcher(env, "server", "supervisor-pair-health")
+        assert status.returncode == 0, (
+            status.stdout + status.stderr,
+            json.loads((state_dir / "status.json").read_text()),
+            json.loads((state_dir / "guardian.execution.json").read_text()),
+        )
+        assert f"supervisor thread, owner PID {first_supervisor}" in status.stdout
 
         os.kill(first_server, signal.SIGKILL)
         _wait_until_dead(first_server)
         second_server = _wait_for_proven_managed_pid(
-            state_dir,
-            "server",
-            previous=first_server,
-        )
-        second_guardian = _wait_for_proven_managed_pid(
-            state_dir,
-            "guardian",
-            previous=first_guardian,
-        )
-        second_success = _wait_for_supervisor_success(
-            state_dir,
-            previous=first_success,
-            server_pid=second_server,
-            guardian_pid=second_guardian,
-        )
-        assert second_server != first_server
-        assert second_guardian != first_guardian
-
-        os.kill(second_guardian, signal.SIGKILL)
-        _wait_until_dead(second_guardian)
-        third_guardian = _wait_for_proven_managed_pid(
-            state_dir,
-            "guardian",
-            previous=second_guardian,
+            state_dir, "server", previous=first_server
         )
         _wait_for_supervisor_success(
-            state_dir,
-            previous=second_success,
-            server_pid=second_server,
-            guardian_pid=third_guardian,
+            state_dir, server_pid=second_server, guardian_pid=first_supervisor
         )
-        assert _wait_for_proven_managed_pid(state_dir, "server") == second_server
+        assert not (state_dir / "guardian.pid").exists()
 
         os.kill(first_supervisor, signal.SIGKILL)
         _wait_until_dead(first_supervisor)
         second_supervisor = _wait_for_proven_supervisor_pid(
-            wrapper_receipt,
-            state_dir,
-            previous=first_supervisor,
+            wrapper_receipt, state_dir, previous=first_supervisor
         )
-        assert second_supervisor != first_supervisor
+        _wait_for_supervisor_success(
+            state_dir, server_pid=second_server, guardian_pid=second_supervisor
+        )
         assert _wait_for_proven_managed_pid(state_dir, "server") == second_server
-        assert _wait_for_proven_managed_pid(state_dir, "guardian") == third_guardian
-
-        healed = _run_launcher(env, "server", "status")
-        assert healed.returncode == 0, healed.stderr
-        assert "Server: RUNNING" in healed.stdout
-        assert "Guardian: RUNNING" in healed.stdout
+        assert not (state_dir / "guardian.pid").exists()
 
         wrapper.terminate()
         wrapper.wait(timeout=30)
         _wait_until_dead(second_server, timeout=10)
-        _wait_until_dead(third_guardian, timeout=10)
-        assert not (state_dir / "server.pid").exists()
-        assert not (state_dir / "guardian.pid").exists()
         assert not _process_alive(second_supervisor)
         stopped_receipt = json.loads(
             (state_dir / "supervisor.status.json").read_text(encoding="utf-8")
         )
         assert stopped_receipt["state"] == "stopped"
-        stopped = _run_launcher(env, "server", "status")
-        assert stopped.returncode == 0, stopped.stderr
-        assert "Supervision: UNSUPERVISED" in stopped.stdout
-        assert "Server: STOPPED" in stopped.stdout
-        assert "Guardian: STOPPED" in stopped.stdout
+        execution = json.loads((state_dir / "guardian.execution.json").read_text())
+        assert execution["ready"] is False
+        assert not (state_dir / "server.pid").exists()
+        assert not (state_dir / "guardian.pid").exists()
+
     finally:
         if wrapper.poll() is None:
             wrapper.terminate()
@@ -1819,6 +1827,7 @@ write_receipt(None, "stopped")
         cleanup_env = env.copy()
         cleanup_env["VIBECRAFTED_SERVER_SUPERVISOR_CHILD"] = "1"
         _run_launcher(cleanup_env, "server", "stop")
+        supervisor_log.close()
 
 
 def test_malicious_cli_host_and_status_json_are_never_executed(

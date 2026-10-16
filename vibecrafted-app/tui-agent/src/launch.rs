@@ -939,10 +939,30 @@ fn stdout_view(buffer: &Arc<Mutex<BoundedCapture>>) -> (Vec<u8>, StdoutAnswer) {
 /// otherwise fill its pipe while VOC is still blocked writing stdin — a
 /// two-sided wedge that no timeout on `wait` can unstick.
 pub(crate) fn run_bounded(
+    command: Command,
+    stdin_payload: Option<String>,
+    deadline: Duration,
+    what: &str,
+) -> anyhow::Result<LauncherRun> {
+    run_bounded_with_timeout_policy(command, stdin_payload, deadline, what, false)
+}
+
+/// Read-only queries own their child: a deadline cancels and reaps that child.
+/// Launchers keep the preservation policy above because they can admit work.
+pub(crate) fn run_bounded_read(
+    command: Command,
+    deadline: Duration,
+    what: &str,
+) -> anyhow::Result<LauncherRun> {
+    run_bounded_with_timeout_policy(command, None, deadline, what, true)
+}
+
+fn run_bounded_with_timeout_policy(
     mut command: Command,
     stdin_payload: Option<String>,
     deadline: Duration,
     what: &str,
+    cancel_on_timeout: bool,
 ) -> anyhow::Result<LauncherRun> {
     command.stdin(if stdin_payload.is_some() {
         Stdio::piped()
@@ -1005,13 +1025,27 @@ pub(crate) fn run_bounded(
         }
         let waited = started.elapsed();
         if waited >= deadline {
-            // Nothing is killed here. The launcher may already have admitted
-            // a run and detached a worker; ending it to tidy up a client-side
-            // wait would destroy the work the operator asked for. The child is
-            // reaped in the background so it cannot become a zombie.
-            thread::spawn(move || {
+            if cancel_on_timeout {
+                if let Err(error) = child.kill() {
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    let (text, answer) = stdout_view(&stdout);
+                    return Ok(LauncherRun::Unobservable {
+                        error: format!("failed to cancel {what} after its deadline: {error}"),
+                        stdout: text,
+                        stderr: snapshot(&stderr),
+                        answer,
+                    });
+                }
                 let _ = child.wait();
-            });
+            } else {
+                // A launcher may have admitted a worker. Preserve it and reap
+                // it in the background, as the launcher contract requires.
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
             let (text, answer) = stdout_view(&stdout);
             return Ok(LauncherRun::Undecided {
                 waited,

@@ -910,7 +910,7 @@ vc-start() {
     printf 'vc-start: required product start helper missing\n' >&2
     return 1
   fi
-  # One parser, one owner: the create-only workspace contract in dashboard.sh
+  # One parser, one owner: the repository entry contract in dashboard.sh
   # (root → name → live inventory → exclusive create → enter / VC Terminal).
   _vetcoders_start_prepare_arguments "$@" || return $?
   # The sourced facade/parser initializes this shared result before the consuming function runs;

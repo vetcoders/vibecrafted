@@ -112,6 +112,7 @@ def _fake_supervision_provider(path: Path) -> None:
         "capture = pathlib.Path(os.environ['SUPERVISION_CAPTURES']) / f'{role}.json'\n"
         "capture.write_text(json.dumps({\n"
         "  'pid': os.getpid(), 'role': role,\n"
+        "  'color': {k:os.environ.get(k) for k in ('NO_COLOR','NODE_DISABLE_COLORS','ANSI_COLORS_DISABLED','FORCE_COLOR','CLICOLOR','CLICOLOR_FORCE')},\n"
         "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
         "  'session_id': sys.argv[sys.argv.index('--session-id') + 1],\n"
         "}) + '\\n', encoding='utf-8')\n"
@@ -707,6 +708,16 @@ def test_supervised_terminal_semantics_settle_both_processes(
         SUPERVISION_CAPTURES=str(captures),
         PATH=str(fake_bin) + os.pathsep + env["PATH"],
     )
+    env.update(
+        TERM="xterm-256color",
+        COLORTERM="truecolor",
+        NO_COLOR="1",
+        NODE_DISABLE_COLORS="1",
+        ANSI_COLORS_DISABLED="1",
+        FORCE_COLOR="0",
+        CLICOLOR="0",
+        CLICOLOR_FORCE="0",
+    )
     env["AGENT_EXIT" if exit_role == "agent" else "OPERATOR_EXIT"] = str(exit_code)
     completed = subprocess.run(
         [*_interactive_argv(repo), "--operator", "auto"],
@@ -734,6 +745,14 @@ def test_supervised_terminal_semantics_settle_both_processes(
     assert metas["agent"]["terminal_reason"] == child_reason
     assert metas["operator"]["terminal_reason"] == operator_reason
     for role in ("operator", "agent"):
+        assert captured[role]["color"] == {
+            "NO_COLOR": None,
+            "NODE_DISABLE_COLORS": None,
+            "ANSI_COLORS_DISABLED": None,
+            "FORCE_COLOR": "3",
+            "CLICOLOR": "1",
+            "CLICOLOR_FORCE": "1",
+        }
         assert metas[role]["liveness"] == "terminal"
         with pytest.raises(ProcessLookupError):
             os.kill(captured[role]["pid"], 0)
@@ -1311,15 +1330,29 @@ def test_every_runtime_permission_provider_mode_cell_is_explicit() -> None:
 def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     provider: str,
 ) -> None:
-    assert resolve_provider_policy(
+    interactive = resolve_provider_policy(
         provider, "local-worktrees", "bypass", "interactive"
-    ).supported
+    )
+    if provider == "omp":
+        # Headless-only worker: no interactive argv/resume builder exists.
+        assert not interactive.supported
+        assert "headless-only" in interactive.reason
+    else:
+        assert interactive.supported
     assert not resolve_provider_policy(
         provider, "local-worktrees", "bypass", "headless"
     ).supported
+    # local-vm is the local container: supported exactly for the providers its
+    # recipe installs, refused per provider (never globally) otherwise.
+    container = resolve_provider_policy(provider, "local-vm", "bypass", "interactive")
+    if provider in {"claude", "codex", "kimi"}:
+        assert container.supported, container.reason
+    else:
+        assert not container.supported
+        assert "not installed in the local container recipe" in container.reason
     assert (
-        "VM entrypoint"
-        in resolve_provider_policy(provider, "local-vm", "bypass", "interactive").reason
+        "interactive Agent Workspaces only"
+        in resolve_provider_policy(provider, "local-vm", "bypass", "headless").reason
     )
     assert (
         "coming soon"
@@ -1327,6 +1360,20 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
             provider, "cloud-soon", "bypass", "interactive"
         ).reason
     )
+
+
+@pytest.mark.parametrize("permissions", PERMISSION_POLICIES)
+def test_omp_never_advertises_an_interactive_cell_it_cannot_launch(
+    permissions: str,
+) -> None:
+    """No omp interactive cell is supported, and the refusal is the honest policy
+    reason at the decision point rather than a late "unsupported provider"."""
+    for runtime in RUNTIME_POLICIES:
+        cell = resolve_provider_policy("omp", runtime, permissions, "interactive")
+        assert not cell.supported
+    assert resolve_provider_policy("omp", "local-native", "auto", "headless").supported
+    with pytest.raises(ValueError, match="headless-only worker"):
+        interactive_policy_command("omp", "hi", "local-native", "auto")
 
 
 def test_accept_edits_is_native_or_unsupported_never_approximated() -> None:
@@ -1393,6 +1440,38 @@ def test_kimi_interactive_command_is_flags_only_tui_entry() -> None:
         interactive_policy_command("kimi", "/vc-init", "local-native", "accept-edits")
 
 
+def test_kimi_interactive_owner_trusts_only_its_selected_workspace(tmp_path):
+    repo = tmp_path / "selected"
+    _repo(repo)
+    capture = tmp_path / "kimi-env.json"
+    binary = tmp_path / "bin/kimi"
+    binary.parent.mkdir()
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,pathlib,sys\n"
+        "if '--version' in sys.argv: print('2.1.1'); raise SystemExit(0)\n"
+        "if '--help' in sys.argv: print('--session <id> --auto'); raise SystemExit(0)\n"
+        f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{'trust':os.environ.get('KIMI_CODE_TRUST_WORKSPACE'),'cwd':os.getcwd()}}))\n"
+    )
+    binary.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("KIMI_CODE_TRUST_WORKSPACE", None)
+    env.update(
+        VIBECRAFTED_HOME=str(tmp_path / "state"), PATH=f"{binary.parent}:{env['PATH']}"
+    )
+    argv = _interactive_argv(repo)
+    argv[argv.index("claude")] = "kimi"
+    argv[argv.index("read-only")] = "bypass"
+    argv.extend(["--token-budget", "unmetered"])
+    result = subprocess.run(
+        argv, env=env, capture_output=True, text=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(capture.read_text()) == {"trust": "1", "cwd": str(repo)}
+    assert "KIMI_CODE_TRUST_WORKSPACE" not in env
+
+
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1419,6 +1498,78 @@ def test_interactive_workspace_command_wraps_the_exact_init_route(
 
 
 @pytest.mark.parametrize(
+    "provider", ["codex", "claude", "agy", "grok", "junie", "copilot"]
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_interactive_effort_selection(tmp_path, monkeypatch, provider, explicit):
+    _repo(tmp_path)
+    config = tmp_path / "xdg" / "vibecrafted"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text(f'[agents.{provider}]\neffort = "low"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent))
+    command = interactive_workspace_command(
+        provider,
+        "/vc-init",
+        "local-native",
+        "bypass",
+        tmp_path,
+        token_budget="unmetered",
+        model="exact-provider-model",
+        effort="high" if explicit else "",
+    )
+    admission = json.loads(Path(command[-1]).read_text())
+    assert (
+        admission["model_requested"]
+        == admission["model_effective"]
+        == "exact-provider-model"
+    )
+    assert (
+        admission["effort_requested"]
+        == admission["effort_effective"]
+        == ("high" if explicit else "low")
+    )
+    assert admission["effort_source"] == ("cli" if explicit else "config.toml")
+    assert admission["effort_override_supported"] is True
+    assert admission["effort_override_skipped"] is False
+    assert (
+        config / "config.toml"
+    ).read_text() == f'[agents.{provider}]\neffort = "low"\n'
+
+
+@pytest.mark.parametrize(
+    "provider,effort,reason",
+    [
+        ("kimi", "high", "Effort is unavailable"),
+        ("cursor", "high", "Effort is unavailable"),
+    ]
+    + [
+        ("codex", invalid, "effort")
+        for invalid in (" high", "high ", "--high", "high\nlow")
+    ],
+)
+def test_interactive_effort_refuses_before_run_allocation(
+    tmp_path, monkeypatch, provider, effort, reason
+):
+    _repo(tmp_path)
+    # A refused control must not reserve a run or create a worktree.
+    monkeypatch.setattr(
+        "vibecrafted_core.workflow.reserve_run_id",
+        lambda *_: pytest.fail("refused effort allocated a run"),
+    )
+    with pytest.raises(ValueError, match=reason):
+        interactive_workspace_command(
+            provider,
+            "/vc-init",
+            "local-native",
+            "bypass",
+            tmp_path,
+            token_budget="unmetered",
+            effort=effort,
+            execution_runtime="local-worktrees",
+        )
+
+
+@pytest.mark.parametrize(
     ("selection", "runtime", "expected_kind", "expected_budget"),
     [
         (None, "local-native", "bounded", 250_000),
@@ -1442,8 +1593,14 @@ def test_invalid_bounded_quota_fails_closed(selection: str) -> None:
 
 
 def test_unlimited_quota_is_restricted_to_observed_local_native() -> None:
-    with pytest.raises(ValueError, match="User-observed local-native"):
-        resolve_quota_policy("unlimited", runtime="local-worktrees")
+    # Every local interactive environment is watched in a Frame tab; a missing
+    # meter is "no data", not a refusal of the environment.
+    for runtime in ("local-native", "local-worktrees", "local-vm"):
+        assert resolve_quota_policy("unmetered", runtime=runtime).kind == "unmetered"
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unlimited", runtime="local-worktrees", mode="headless")
+    with pytest.raises(ValueError, match="User-observed interactive"):
+        resolve_quota_policy("unmetered", runtime="cloud-soon")
 
 
 def test_unsupported_provider_quota_fails_before_runtime_truth(
@@ -1892,12 +2049,25 @@ def test_continuity_modes_are_exact_and_fresh_proves_scoped_absence() -> None:
         },
         policy,
     )
-    assert child == {"PATH": "/tools", "HOME": "/user"}
+    assert child == {
+        "PATH": "/tools",
+        "HOME": "/user",
+        "TERM": "xterm-256color",
+        "FORCE_COLOR": "2",
+        "CLICOLOR": "1",
+        "CLICOLOR_FORCE": "1",
+    }
 
 
 def test_full_lineage_requires_explicit_parent_evidence() -> None:
-    with pytest.raises(ValueError, match="parent lineage id"):
+    # Missing lineage is a choice to make, not a malformed identifier, and it
+    # never silently becomes fresh.
+    with pytest.raises(ValueError, match="full-lineage needs a parent lineage"):
         resolve_continuity_policy("full-lineage", provider="claude", env={})
+    with pytest.raises(ValueError, match="well-formed identifier"):
+        resolve_continuity_policy(
+            "full-lineage", provider="claude", parent_lineage_id="bad id", env={}
+        )
     policy = resolve_continuity_policy(
         "full-lineage",
         provider="claude",
@@ -2092,9 +2262,13 @@ def test_runtime_policy_capabilities_require_live_usage_for_worktree_admission(
         caps = spawn.runtime_policy_capabilities(provider)
         assert caps["local-native"]["available"] is True
         assert caps["local-native"]["reason"] == ""
-        assert caps["local-worktrees"]["available"] is False
+        # Environment readiness is separate from usage metering: the worktree
+        # works, and the missing meter is reported as honest "no data".
+        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-worktrees"]["reason"] == ""
         assert caps["local-native"]["usage_capability"]["supported"] is False
-        assert "child-attributable" in caps["local-worktrees"]["reason"]
+        assert caps["local-worktrees"]["metering"]["state"] == "unavailable"
+        assert "no data" in caps["local-worktrees"]["metering"]["note"]
 
 
 def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(
@@ -2391,7 +2565,9 @@ def test_provider_boundary_leaves_a_founder_environment_untouched(
         "PYTHONNOUSERSITE": "1",
     }
 
-    assert _fresh_child_environment(dict(founder), policy) == founder
+    child = _fresh_child_environment(dict(founder), policy)
+    assert {key: child[key] for key in founder} == founder
+    assert child["CLICOLOR"] == "1" and child["CLICOLOR_FORCE"] == "1"
 
 
 def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> None:
@@ -2465,3 +2641,210 @@ def test_launch_environment_is_guest_not_landlord(tmp_path: Path) -> None:
     assert "_guest_environment(host)" in source
     assert "_launch_child_path(app" in source
     assert "_LAUNCH_INHERITED_ENV" not in source
+
+
+@pytest.fixture
+def restored_interactive_seats(tmp_path, monkeypatch):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo = tmp_path / "repo"
+    _repo(repo)
+    seats = []
+    for index in range(3):
+        seats.append(
+            wc.resolve_run_workspace_identity(
+                root=repo,
+                env={},
+                runtime_session_id=f"restored-{index}",
+                runtime_state="missing",
+                socket_dir="/private-test-sockets",
+            )
+        )
+        wc.record_runtime_session_attachment(
+            workspace_id=seats[-1].workspace_id,
+            vibecrafted_session_id=seats[-1].vibecrafted_session_id,
+            workspace_instance_id=seats[-1].workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=f"restored-{index}",
+            state="missing",
+            socket_dir="/private-test-sockets",
+        )
+    for key, value in seats[-1].to_env().items():
+        monkeypatch.setenv(key, value)
+    return repo, seats
+
+
+def test_interactive_admission_binds_exact_restored_seat(restored_interactive_seats):
+    repo, seats = restored_interactive_seats
+    command = interactive_workspace_command(
+        "codex",
+        "/vc-resume",
+        "local-native",
+        "bypass",
+        repo,
+        continuity="fresh",
+        token_budget="unmetered",
+    )
+    admission = json.loads(Path(command[-1]).read_bytes())
+    for key, value in seats[-1].to_meta_fields().items():
+        assert admission[key] == value
+
+
+@pytest.mark.parametrize("ambient", ["empty", "foreign"])
+def test_interactive_admission_replay_preserves_seat_without_ambient_context(
+    restored_interactive_seats, monkeypatch, capsys, tmp_path, ambient
+):
+    from vibecrafted_core import spawn
+
+    repo, seats = restored_interactive_seats
+    command = interactive_workspace_command(
+        "codex",
+        "/vc-resume",
+        "local-native",
+        "bypass",
+        repo,
+        continuity="fresh",
+        token_budget="unmetered",
+    )
+    path = Path(command[-1])
+    admission = json.loads(path.read_bytes())
+    # Independent durable input also exercises replay against the old composer.
+    admission.update(seats[-1].to_meta_fields())
+    path.write_text(json.dumps(admission))
+    for key in seats[-1].to_env():
+        monkeypatch.delenv(key, raising=False)
+    if ambient == "foreign":
+        from vibecrafted_core import workspace_catalog as wc
+
+        foreign_root = tmp_path / "foreign"
+        _repo(foreign_root)
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+        for key, value in foreign.to_env().items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(spawn, "_resolve_agent_command", lambda *args: [sys.executable])
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *a, **k: ProviderUsageCapability("codex", False),
+    )
+    prepared = []
+    real_prepare = spawn.prepare_interactive_workspace_launch
+
+    def prepare_then_stop(**kwargs):
+        launch = real_prepare(**kwargs)
+        prepared.append(launch)
+        raise ValueError("private fixture reached provider boundary")
+
+    monkeypatch.setattr(
+        spawn, "prepare_interactive_workspace_launch", prepare_then_stop
+    )
+    assert main(command[command.index("interactive-launch") :]) == 2
+    assert "private fixture reached provider boundary" in capsys.readouterr().err
+    assert len(prepared) == 1
+    launch = prepared[0]
+    for key, value in seats[-1].to_meta_fields().items():
+        assert launch.receipt[key] == value
+
+
+@pytest.mark.parametrize(
+    "invalid", ["foreign", "partial", "unknown", "inconsistent", "unreadable", "stale"]
+)
+def test_interactive_exact_admission_refuses_invalid_seat(
+    restored_interactive_seats, monkeypatch, tmp_path, invalid
+):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo, seats = restored_interactive_seats
+    admission = seats[-1].to_meta_fields()
+    if invalid == "foreign":
+        foreign_root = tmp_path / "foreign"
+        _repo(foreign_root)
+        admission = wc.resolve_run_workspace_identity(
+            root=foreign_root, env={}
+        ).to_meta_fields()
+    elif invalid == "partial":
+        del admission["vibecrafted_session_id"]
+    elif invalid == "unknown":
+        admission["workspace_instance_id"] = wc.new_uuid7()
+    elif invalid == "inconsistent":
+        admission["vibecrafted_session_id"] = seats[0].vibecrafted_session_id
+    elif invalid == "unreadable":
+        wc.instance_path(seats[-1].workspace_instance_id).write_text("{broken")
+    elif invalid == "stale":
+        path = wc.instance_path(seats[-1].workspace_instance_id)
+        payload = json.loads(path.read_bytes())
+        payload["status"] = wc.INSTANCE_STATUS_STALE
+        path.write_text(json.dumps(payload))
+    with pytest.raises((ValueError, wc.WorkspaceCatalogError)):
+        prepare_interactive_workspace_launch(
+            provider="codex",
+            runtime="local-native",
+            permissions="bypass",
+            selected_root=repo,
+            prompt="private recovery fixture",
+            executable=sys.executable,
+            publish=False,
+            quota_policy=resolve_quota_policy("unmetered", runtime="local-native"),
+            usage_capability=ProviderUsageCapability("codex", False),
+            workspace_identity=admission,
+        )
+
+
+def test_interactive_unselected_same_build_remains_ambiguous(
+    restored_interactive_seats,
+):
+    from vibecrafted_core import workspace_catalog as wc
+
+    repo, _seats = restored_interactive_seats
+    with pytest.raises(wc.WorkspaceCatalogError, match="multiple live instances"):
+        prepare_interactive_workspace_launch(
+            provider="codex",
+            runtime="local-native",
+            permissions="bypass",
+            selected_root=repo,
+            prompt="private recovery fixture",
+            executable=sys.executable,
+            publish=False,
+            quota_policy=resolve_quota_policy("unmetered", runtime="local-native"),
+            usage_capability=ProviderUsageCapability("codex", False),
+        )
+
+
+@pytest.mark.parametrize("selection", ["ambiguous", "inconsistent"])
+def test_interactive_command_publicly_reports_catalog_refusal(
+    restored_interactive_seats, monkeypatch, capsys, selection
+):
+    repo, seats = restored_interactive_seats
+    if selection == "ambiguous":
+        for key in seats[-1].to_env():
+            monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv("VIBECRAFTED_SESSION_ID", seats[0].vibecrafted_session_id)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("private refusal fixture"))
+    assert (
+        main(
+            [
+                "interactive-command",
+                "codex",
+                "--root",
+                str(repo),
+                "--runtime",
+                "local-native",
+                "--permissions",
+                "bypass",
+                "--token-budget",
+                "unmetered",
+                "--continuity",
+                "fresh",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert (
+        "multiple live instances"
+        if selection == "ambiguous"
+        else "ownership is inconsistent"
+    ) in output.err
+    assert "Traceback" not in output.err

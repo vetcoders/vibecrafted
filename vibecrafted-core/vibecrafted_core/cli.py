@@ -68,6 +68,7 @@ AGENTS = {
     "cursor",
     "kimi",
     "copilot",
+    "omp",
     "swarm",
 }
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
@@ -120,6 +121,7 @@ SHELL_WRAPPER_VERBS = {
     "vc-observe": "observe",
     "vc-operator": "operator",
     "vc-receipt": "receipt",
+    "vc-reinstall": "reinstall",
     "vc-resume": "resume",
     "vc-resume-session": "resume-session",
     "vc-scaffold-doctor": "scaffold-doctor",
@@ -170,6 +172,7 @@ def python_owned_commands() -> frozenset[str]:
             "procs",
             "reap",
             "receipt",
+            "reinstall",
             "session-source",
             "settle",
             "ship",
@@ -209,6 +212,10 @@ def _render_core_surface_help(topic: str) -> int:
         from .relocate import main as relocate_main
 
         return _invoke_owned_main(relocate_main, ["--help"])
+    if topic == "reinstall":
+        from .reinstall_clean import main as reinstall_main
+
+        return _invoke_owned_main(reinstall_main, ["--help"])
     if topic == "claims":
         from .repository_claims import claims_cli_main
 
@@ -334,8 +341,9 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         metavar="bypass|auto|accept-edits|read-only",
         help=(
             "permission policy enforced by the agent's own CLI "
-            "(default: bypass; junie: auto); refused before launch when the "
-            "installed CLI cannot enforce it"
+            "(default: durable per-agent, then global config, else auto; bypass "
+            "only when selected); refused before launch when the installed CLI "
+            "cannot enforce it"
         ),
     )
     run.add_argument(
@@ -633,6 +641,8 @@ def _build_parser() -> argparse.ArgumentParser:
     session_source.add_argument("--session", required=True)
     session_source.add_argument("--root", required=True)
     session_source.add_argument("--id-only", action="store_true")
+    session_source.add_argument("--infer-recorded-root", action="store_true")
+    session_source.add_argument("--session-selection", type=json.loads, default=None)
     task_fork = sub.add_parser("fork-session", help="tracked native task fork")
     task_fork.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
     task_fork.add_argument("--session", required=True)
@@ -1117,6 +1127,25 @@ def _print_resume_session_receipt(payload: dict[str, Any]) -> None:
     print("===============================================================")
 
 
+def _resolve_resume_repository_selection(
+    agent: str, session: str, args: argparse.Namespace, *, label: str
+) -> tuple[str, dict[str, Any]]:
+    """An explicit repository binds; an exact native identity owns its default."""
+    explicit = bool(args.repo or args.root)
+    if explicit:
+        repository = select_repository(args.repo, args.root, label=label)
+        fallback = repository.path
+    else:
+        fallback = resolve_operator_launch_root()
+    selection = resolve_session_selection(
+        agent, session, fallback, infer_recorded_root=not explicit
+    )
+    repository = select_repository(
+        args.repo, args.root, fallback=selection["selection_root"], label=label
+    )
+    return repository.path, selection
+
+
 def _continue_launcher_named_session(
     *,
     parser: argparse.ArgumentParser,
@@ -1191,13 +1220,10 @@ def _continue_launcher_named_session(
             print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 2
     try:
-        resume_root = select_repository(
-            args.repo,
-            args.root,
-            fallback=resolve_operator_launch_root,
-            label=f"{command} --session",
-        ).path
-    except RepoSelectionError as exc:
+        resume_root, selection = _resolve_resume_repository_selection(
+            agent, session, args, label=f"{command} --session"
+        )
+    except (RepoSelectionError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if is_operator_home_root(resume_root):
@@ -1206,11 +1232,6 @@ def _continue_launcher_named_session(
             "open a workspace in Vibecrafted or pass --repo",
             file=sys.stderr,
         )
-        return 2
-    try:
-        selection = resolve_session_selection(agent, session, resume_root)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
         return 2
     resume_result = manual_resume_session(
         agent,
@@ -2397,6 +2418,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .relocate import main as relocate_main
 
         return _invoke_owned_main(relocate_main, raw_args[1:])
+    if raw_args and raw_args[0] == "reinstall":
+        from .reinstall_clean import main as reinstall_main
+
+        return _invoke_owned_main(reinstall_main, raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 
@@ -2815,13 +2840,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _print_resume_session_receipt(resume_result)
                 return 2
         try:
-            resume_root = select_repository(
-                args.repo,
-                args.root,
-                fallback=resolve_operator_launch_root,
-                label="resume-session",
-            ).path
-        except RepoSelectionError as exc:
+            resume_root, selection = _resolve_resume_repository_selection(
+                args.agent, args.agent_session_id, args, label="resume-session"
+            )
+        except (RepoSelectionError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if is_operator_home_root(resume_root):
@@ -2830,15 +2852,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "open a workspace in Vibecrafted or pass --repo",
                 file=sys.stderr,
             )
-            return 2
-        from .workflow import resolve_session_selection
-
-        try:
-            selection = resolve_session_selection(
-                args.agent, args.agent_session_id, resume_root
-            )
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
             return 2
         resume_result = manual_resume_session(
             args.agent,
@@ -2891,7 +2904,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .workflow import resolve_session_selection
 
         try:
-            result = resolve_session_selection(args.agent, args.session, args.root)
+            result = resolve_session_selection(
+                args.agent,
+                args.session,
+                args.root,
+                infer_recorded_root=args.infer_recorded_root,
+                selection=args.session_selection,
+            )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import hashlib
 import inspect
 import json
@@ -25,6 +26,7 @@ from shutil import which
 from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
+from .aicx_session_chain import SessionChain
 from .clock import utc_now_iso
 from .control_plane import (
     ControlPlaneLockBusy,
@@ -34,10 +36,21 @@ from .control_plane import (
     normalize_run_root,
     sync_state,
 )
-from .effort_overrides import _with_effort_override
-from .env_allowlist import dispatcher_identity, filter_headless_worker_env
+from .effort_overrides import _effort_override_receipt, _with_effort_override
+from .env_allowlist import (
+    dispatcher_identity,
+    filter_headless_worker_env,
+    managed_provider_environment,
+    provider_workspace_environment,
+    visible_color_environment,
+)
 from .events import append_event
-from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .execution_controls import (
+    PERMISSION_POLICIES,
+    ExecutionControls,
+    controls_from_receipt,
+    resolve_execution_controls,
+)
 from .failure_attribution import attribute_failure
 from .model_overrides import _with_model_override
 from .package_resources import skills_path
@@ -77,6 +90,7 @@ POLICY_PROVIDERS = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 # Fleet agent key → installed CLI binary when they differ (key stays the UX
 # name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
@@ -84,6 +98,8 @@ AGENT_BINARY_NAMES: dict[str, str] = {
     "cursor": "cursor-agent",
 }
 RUNTIME_POLICIES = ("local-native", "local-worktrees", "local-vm", "cloud-soon")
+# Interactive environments whose Agent runs in a Frame tab the User watches.
+USER_OBSERVED_RUNTIMES = ("local-native", "local-worktrees", "local-vm")
 # The public permission words live in execution_controls (one owner for the
 # core launcher and the shell contract); re-exported here for the policy API.
 POLICY_MODES = ("interactive", "headless")
@@ -741,6 +757,32 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
         ),
         "read-only": (("--available-tools=read",), "only the read tool is available"),
     },
+    # omp 18.11.0: --approval-mode takes always-ask|write|yolo and combines with
+    # -p/--print (verified: both flags accepted, rc 0). Tiers are capability ranks
+    # (read < write < exec): yolo auto-approves everything, write auto-approves
+    # read+write tiers (file edits) while exec-tier tools prompt, always-ask
+    # prompts for write and exec (pi-coding-agent tools/approval.ts:
+    # APPROVAL_MODE_MAX_TIER + modeApprovesTier). read-only has no mode of its
+    # own; it is enforced by the --tools whitelist (only read-tier tools exist
+    # in the session, so there is nothing left to prompt for).
+    "omp": {
+        "bypass": (
+            ("--approval-mode", "yolo"),
+            "approval mode yolo: every tool tier runs without prompts",
+        ),
+        "auto": (
+            ("--approval-mode", "write"),
+            "read+write tiers (incl. file edits) run automatically; exec-tier tools (bash etc.) prompt the operator",
+        ),
+        "accept-edits": (
+            ("--approval-mode", "write"),
+            "edits and other write-tier tools pass; exec-tier tools prompt and fail closed without an operator",
+        ),
+        "read-only": (
+            ("--tools", "read,grep,glob,find"),
+            "only read-tier tools are enabled; mutating tools are absent from the session",
+        ),
+    },
 }
 
 
@@ -783,6 +825,20 @@ _HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]]
             "only the read tool is available",
         ),
     },
+    # omp print mode accepts --approval-mode/--tools with -p (verified rc 0 on
+    # 18.11.0), so the interactive cells carry over verbatim; only the behavior
+    # text differs: a prompt in headless has no one to answer it, and omp fails
+    # closed with a model-visible refusal (verified: the run ends, no hang).
+    "omp": {
+        "auto": (
+            ("--approval-mode", "write"),
+            "read+write tiers run automatically; an exec-tier prompt fails closed headless with a model-visible refusal (no TUI to answer it)",
+        ),
+        "accept-edits": (
+            ("--approval-mode", "write"),
+            "edits and other write-tier tools pass; an exec-tier prompt fails closed headless with a model-visible refusal",
+        ),
+    },
 }
 
 
@@ -797,9 +853,14 @@ def resolve_quota_policy(
     if not raw or raw == "safe":
         return QuotaPolicy("bounded", QUOTA_PRESET_TOKENS, "safe")
     if raw in {"unlimited", "unmetered"}:
-        if mode != "interactive" or runtime != "local-native":
+        # Every local interactive environment is a Frame tab the User watches;
+        # a separate checkout or a container does not make usage metering a
+        # precondition. Missing metering is reported as "no data", never as a
+        # refusal of a working environment.
+        if mode != "interactive" or runtime not in USER_OBSERVED_RUNTIMES:
             raise ValueError(
-                f"{raw} quota is restricted to directly User-observed local-native sessions"
+                f"{raw} quota is restricted to directly User-observed interactive "
+                f"sessions ({', '.join(USER_OBSERVED_RUNTIMES)})"
             )
         return QuotaPolicy(
             raw,
@@ -865,6 +926,13 @@ def resolve_continuity_policy(
         if parent_session_id:
             raise ValueError("full-lineage never accepts a native parent session")
         lineage = parent_lineage_id or _ambient_parent_lineage(ambient)
+        if not str(lineage or "").strip():
+            # Missing lineage is a choice the User has to make, not a malformed
+            # identifier; never guess one and never downgrade to fresh.
+            raise ValueError(
+                "full-lineage needs a parent lineage: choose a parent session "
+                "(--continuity-parent <session-or-run-id>) or start with fresh memory"
+            )
         return ContinuityPolicy(
             mode=mode,
             lineage_id=_validated_continuity_id(lineage, label="parent lineage id"),
@@ -1066,7 +1134,9 @@ def _fresh_child_environment(
         for name in tuple(child):
             if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
                 child.pop(name, None)
-    return _scrub_runtime_bootstrap(child)
+    return visible_color_environment(
+        _scrub_runtime_bootstrap(managed_provider_environment(child))
+    )
 
 
 def continuity_policy_capabilities(
@@ -1243,14 +1313,31 @@ def resolve_provider_policy(
             reason="cloud runtime is coming soon",
         )
     if runtime == "local-vm":
-        return ProviderPolicy(
-            provider,
-            runtime,
-            permissions,
-            mode,
-            False,
-            reason="Docker/Colima may be present, but canonical init has no VM entrypoint",
-        )
+        # The key names a persistent local *container* (dev_container), not a
+        # VM. Policy answers only semantics; engine readiness is a capability.
+        from .dev_container import CONTAINER_PROVIDERS
+
+        if mode != "interactive":
+            return ProviderPolicy(
+                provider,
+                runtime,
+                permissions,
+                mode,
+                False,
+                reason="the local container serves interactive Agent Workspaces only",
+            )
+        if provider not in CONTAINER_PROVIDERS:
+            return ProviderPolicy(
+                provider,
+                runtime,
+                permissions,
+                mode,
+                False,
+                reason=(
+                    f"{provider} is not installed in the local container recipe "
+                    f"(it carries {', '.join(sorted(CONTAINER_PROVIDERS))})"
+                ),
+            )
     if runtime == "local-worktrees" and mode != "interactive":
         return ProviderPolicy(
             provider,
@@ -1285,6 +1372,18 @@ def resolve_provider_policy(
             False,
             reason=f"junie {permissions} is interactive-only",
         )
+    if provider == "omp" and mode == "interactive":
+        # OMP is a headless worker (print/NDJSON lane). No interactive argv or
+        # resume builder exists, so advertising an interactive cell would be a
+        # receipted lie that fails later with "unsupported provider".
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="omp is a headless-only worker: no interactive launch or resume lane",
+        )
     if (
         provider == "kimi"
         and mode == "headless"
@@ -1301,8 +1400,8 @@ def resolve_provider_policy(
             False,
             reason=(
                 f"kimi {permissions} is interactive-only: --prompt rejects the "
-                "flag and print mode never prompts (omit --permissions for the "
-                "never-ask print default)"
+                "flag and print mode never prompts; explicitly select "
+                "--permissions bypass for never-ask print mode"
             ),
         )
     if (
@@ -1371,50 +1470,318 @@ def host_substrate_capabilities() -> dict[str, bool]:
     }
 
 
+def usage_metering(usage: ProviderUsageCapability) -> dict[str, Any]:
+    """User-facing usage truth: live metering, or honest "no data"."""
+    if usage.supported:
+        return {"state": "live", "source": usage.source, "note": "live usage metering"}
+    return {
+        "state": "unavailable",
+        "source": "",
+        "note": "usage: no data (not metered for this provider)",
+        "reason": usage.reason,
+    }
+
+
 def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
-    """Report host substrate separately from canonical-launcher availability."""
+    """Environment readiness per runtime; usage metering is reported, not gating.
+
+    A separate checkout or a local container is a working environment whether
+    or not the provider exposes live usage. Only an explicitly selected token
+    limit needs metering, and that refusal lives in the quota admission.
+    """
     provider_executable = which(agent_cli_name(provider), path=agent_tool_search_path())
     provider_found = provider_executable is not None
     usage = resolve_provider_usage_capability(provider, executable=provider_executable)
+    metering = usage_metering(usage)
     substrate = host_substrate_capabilities()
     worktree_substrate = substrate["worktree_substrate"]
-    vm_found = substrate["vm"]
+    from .dev_container import container_capability
+
+    container = container_capability(provider)
+    container_usage = container_usage_capability(provider)
     return {
         "local-native": {
             "available": provider_found,
             "usage_capability": usage.as_dict(),
+            "metering": metering,
             "reason": ("" if provider_found else f"{provider} executable not found"),
         },
         "local-worktrees": {
-            # A worktree is a launch substrate, not proof that the resulting
-            # child can be admitted.  Interactive worktree launches carry a
-            # bounded quota, which requires an attributable live usage source.
-            # Keep this predicate here so every picker and launcher consumes
-            # the same admission truth.
-            "available": provider_found and worktree_substrate and usage.supported,
+            "available": provider_found and worktree_substrate,
             "substrate": worktree_substrate,
             "usage_capability": usage.as_dict(),
+            "metering": metering,
             "reason": ""
-            if provider_found and worktree_substrate and usage.supported
+            if provider_found and worktree_substrate
             else (
                 f"{provider} executable not found"
                 if not provider_found
-                else (
-                    "git/dispatch manage_worktrees unavailable"
-                    if not worktree_substrate
-                    else usage.reason
-                )
+                else "git/dispatch manage_worktrees unavailable"
             ),
         },
         "local-vm": {
-            "available": False,
-            "substrate": vm_found,
-            "reason": "no canonical VM entrypoint"
-            if vm_found
-            else "Docker/Colima is not detected",
+            **container,
+            "label": "local container",
+            "usage_capability": container_usage.as_dict(),
+            "metering": usage_metering(container_usage),
         },
         "cloud-soon": {"available": False, "reason": "coming soon"},
     }
+
+
+def container_usage_capability(provider: str) -> ProviderUsageCapability:
+    """Usage inside the local container is not attributable from the host."""
+    return ProviderUsageCapability(
+        provider,
+        False,
+        reason=(
+            "usage inside the local container is not attributable from the host; "
+            "choose no token limit"
+        ),
+    )
+
+
+# Providers whose interactive CLI can re-open one exact native conversation.
+INTERACTIVE_RESUME_PROVIDERS = frozenset(
+    {"codex", "claude", "grok", "agy", "junie", "cursor"}
+)
+
+
+def interactive_resume_support(provider: str, runtime: str) -> tuple[bool, str]:
+    """Whether resume of an exact conversation exists for this cell."""
+    if provider not in INTERACTIVE_RESUME_PROVIDERS:
+        return False, f"{provider} has no interactive resume of an exact session"
+    if runtime == "local-vm":
+        from .dev_container import CONTAINER_PROVIDERS
+
+        if provider not in CONTAINER_PROVIDERS:
+            return False, f"{provider} is not installed in the local container recipe"
+    if runtime == "cloud-soon":
+        return False, "cloud runtime is coming soon"
+    return True, ""
+
+
+def interactive_run_environment(meta: Mapping[str, Any]) -> str:
+    """The runtime policy a recorded interactive run actually executed in."""
+    if str(meta.get("runtime_policy") or "") == "local-vm" or meta.get("container"):
+        return "local-vm"
+    if str(meta.get("runtime_class") or "") == "local-worktrees" or meta.get(
+        "worktree_path"
+    ):
+        return "local-worktrees"
+    return "local-native"
+
+
+def provider_session_exists(
+    provider: str, session_id: str, *, env: Mapping[str, str]
+) -> bool:
+    """Check known provider stores without trusting historical run metadata.
+
+    Other providers retain their existing admission policy. This is existence,
+    not proof that a particular run opened or created the conversation.
+    """
+    if provider not in {"claude", "codex"}:
+        return True
+    if not session_id or "/" in session_id or "\\" in session_id:
+        return False
+    home = Path(env.get("HOME") or str(Path.home())).expanduser()
+    identity = glob.escape(session_id)
+    if provider == "claude":
+        configured = str(env.get("CLAUDE_CONFIG_DIR") or "").strip()
+        base = Path(configured).expanduser() if configured else home / ".claude"
+        store = base / "projects"
+        pattern = f"*/{identity}.jsonl"
+    else:
+        configured = str(env.get("CODEX_HOME") or "").strip()
+        base = Path(configured).expanduser() if configured else home / ".codex"
+        store = base / "sessions"
+        # Native filenames: rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl.
+        # Bound traversal to the provider's YYYY/MM/DD layout; no content read.
+        pattern = (
+            f"[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/rollout-*-{identity}.jsonl"
+        )
+    try:
+        return any(path.is_file() for path in store.glob(pattern))
+    except OSError:
+        return False
+
+
+def native_catalog_session_candidates(
+    provider: str,
+    root: str | os.PathLike[str],
+    *,
+    chain: SessionChain | None = None,
+    env: Mapping[str, str] | None = None,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Existing host conversations, independent of control-plane run proof.
+
+    AICX's owner/repo catalog can include sibling worktrees. Native resume
+    additionally requires this exact checkout, provider and existing provider
+    file. An ID discovered here never proves that a historical run opened it.
+    """
+    from .aicx_session_chain import (
+        CliSessionChain,
+        SessionChainError,
+        project_filter_for_root,
+    )
+
+    # These are the provider stores provider_session_exists actually verifies.
+    if provider not in {"claude", "codex"}:
+        return []
+    selected_root = Path(root).expanduser().resolve()
+    project = project_filter_for_root(selected_root)
+    if not project:
+        return []
+    environment = os.environ if env is None else env
+    if chain is None:
+        aicx = which("aicx", path=environment.get("PATH"))
+        if not aicx:
+            raise ValueError(
+                "native session catalog unavailable: aicx executable not found"
+            )
+        chain = CliSessionChain(aicx)
+    try:
+        listing = chain.list_sessions(
+            project=project,
+            root=selected_root,
+            agent=provider,
+            hours=24 * 30,
+            limit=limit,
+        )
+    except SessionChainError as exc:
+        raise ValueError(f"native session catalog unavailable: {exc.kind}") from exc
+    except OSError as exc:
+        raise ValueError(
+            "native session catalog unavailable: transport failed"
+        ) from exc
+    if getattr(listing, "empty_kind", "none") == "retrieval_unavailable":
+        raise ValueError("native session catalog unavailable: retrieval_unavailable")
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in listing.sessions:
+        native = row.session_id
+        if (
+            row.agent != provider
+            or not row.repo_path
+            or native in {"current", "last", "previous"}
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", native) is None
+        ):
+            continue
+        try:
+            if Path(row.repo_path).expanduser().resolve() != selected_root:
+                continue
+        except (OSError, RuntimeError):
+            continue
+        if not provider_session_exists(provider, native, env=environment):
+            continue
+        timestamp = None
+        try:
+            instant = dt.datetime.fromisoformat(row.updated_at)
+            if instant.tzinfo is not None:
+                timestamp = instant.astimezone(dt.UTC).timestamp()
+        except ValueError:
+            pass
+        candidate = {
+            "run_id": "",
+            "session_id": native,
+            "environment": "local-native",
+            "root": str(selected_root),
+            "branch": "",
+            "updated_at": row.updated_at,
+            "timestamp": timestamp,
+            "identity_source": "native_provider_catalog",
+        }
+        previous = candidates.get(native)
+        if previous is None or (
+            timestamp is not None
+            and (previous["timestamp"] is None or timestamp > previous["timestamp"])
+        ):
+            candidates[native] = candidate
+    return sorted(
+        candidates.values(),
+        key=lambda item: (
+            item["timestamp"] if item["timestamp"] is not None else float("-inf")
+        ),
+        reverse=True,
+    )
+
+
+def resumable_interactive_runs(
+    provider: str,
+    root: str | os.PathLike[str],
+    runtime: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Recorded, settled conversations this provider can re-open here.
+
+    Only runs with a provider-proven native session qualify: a requested ID or
+    an AICX guess never becomes a resume target. Known host provider stores
+    must still contain the conversation; historical proof stamps alone are unsafe.
+    Each candidate keeps the environment and checkout it ran in, so resume
+    returns to the same place.
+    """
+    from .workflow import _provider_session_for_continue, _read_json_object
+
+    try:
+        project = Path(root).expanduser().resolve()
+    except OSError:
+        return []
+    runs_root = control_plane_home() / "runtime_runs"
+    try:
+        metas = sorted(
+            runs_root.glob("*/meta.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in metas[:400]:
+        meta = _read_json_object(path)
+        if str(meta.get("agent") or "") != provider:
+            continue
+        if not (meta.get("mode") == "interactive" or meta.get("requires_pty")):
+            continue
+        if str(meta.get("status") or "") in {"active", "prepared"}:
+            continue
+        if interactive_run_environment(meta) != runtime:
+            continue
+        owner = str(meta.get("parent_root") or meta.get("root") or "")
+        try:
+            if not owner or Path(owner).resolve() != project:
+                continue
+            checkout = Path(str(meta.get("root") or owner)).resolve()
+        except OSError:
+            continue
+        if not checkout.is_dir():
+            continue
+        session = _provider_session_for_continue(meta)
+        if not session or session in seen:
+            continue
+        # local-vm owns a separate store in its container's named volume;
+        # absence from host HOME cannot disprove that conversation.
+        if runtime != "local-vm" and not provider_session_exists(
+            provider, session, env=os.environ
+        ):
+            continue
+        seen.add(session)
+        found.append(
+            {
+                "run_id": str(meta.get("run_id") or path.parent.name),
+                "session_id": session,
+                "environment": runtime,
+                "root": str(checkout),
+                "branch": str(meta.get("worktree_branch") or meta.get("branch") or ""),
+                "updated_at": str(
+                    meta.get("completed_at") or meta.get("updated_at") or ""
+                ),
+            }
+        )
+        if len(found) >= limit:
+            break
+    return found
 
 
 def interactive_policy_command(
@@ -1425,12 +1792,17 @@ def interactive_policy_command(
     *,
     provider_session_id: str | None = None,
     continuity_policy: ContinuityPolicy | None = None,
+    controls: ExecutionControls | None = None,
 ) -> list[str]:
     """Build one interactive argv from the canonical policy decision."""
+    if controls is not None:
+        if controls.provider != provider:
+            raise ValueError("admitted controls do not match interactive provider")
+        permissions = controls.permissions_effective
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
-    flags = list(decision.flags)
+    flags = list(controls.provider_flags if controls is not None else decision.flags)
     continuity = continuity_policy or ContinuityPolicy("fresh", "fresh:implicit")
     if provider == "claude":
         session_flags = (
@@ -1586,6 +1958,7 @@ def interactive_workspace_command(
     parent_lineage_id: str = "",
     *,
     model: str = "",
+    effort: str = "",
     source_file: str = "",
     base: str = "",
     worktree: str | bool | None = None,
@@ -1606,13 +1979,43 @@ def interactive_workspace_command(
     plain interpreter; a bootstrap carries its own import path and would
     override the prefix anyway.
     """
-    decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
+    from .server_config import durable_permission_selection
+
+    configured, source = durable_permission_selection(provider)
+    controls = resolve_execution_controls(
+        provider,
+        permissions=permissions,
+        configured_permissions=configured,
+        permissions_source=source,
+        mode="interactive",
+    )
+    decision = resolve_provider_policy(
+        provider, runtime, controls.permissions_effective, "interactive"
+    )
     if not decision.supported:
         raise ValueError(decision.reason)
     quota = resolve_quota_policy(token_budget, runtime=runtime)
-    capability = resolve_provider_usage_capability(provider)
+    capability = (
+        container_usage_capability(provider)
+        if runtime == "local-vm"
+        else resolve_provider_usage_capability(provider)
+    )
     if quota.kind in {"safe", "bounded"} and not capability.supported:
-        raise ValueError(capability.reason)
+        raise ValueError(
+            f"token limit {quota.selection} needs live usage metering: {capability.reason}"
+        )
+    if runtime == "local-vm" and worktree not in (None, ""):
+        from .workflow import parse_worktree_flag
+
+        if parse_worktree_flag(worktree):
+            raise ValueError(
+                "choose one environment: the local container mounts the project "
+                "checkout; a separate worktree is local-worktrees"
+            )
+    if runtime == "local-vm" and continuity == "bare-fork":
+        raise ValueError(
+            "bare-fork is not available in the local container; use fresh or full-lineage"
+        )
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
     if not operator_policy.supported:
         raise ValueError(operator_policy.reason)
@@ -1692,7 +2095,30 @@ def interactive_workspace_command(
                 )
         # An existing run owns its checkout. Matching selectors validate that
         # ownership; they must never create a second checkout during resume.
-        execution_runtime, runtime, worktree = "living-tree", "local-native", None
+        # A container run re-enters the same project container: its provider
+        # history lives in that container's volumes, not on the host.
+        recorded_policy = str(parent.get("runtime_policy") or "")
+        resumed_runtime = (
+            "local-vm"
+            if recorded_policy == "local-vm" or parent.get("container")
+            else "local-native"
+        )
+        recorded_environment = (
+            "local-vm"
+            if resumed_runtime == "local-vm"
+            else (
+                "local-worktrees"
+                if recorded_runtime == "local-worktrees"
+                else "local-native"
+            )
+        )
+        # local-native is the shell default when no environment was named.
+        if runtime not in {"local-native", recorded_environment}:
+            raise ValueError(
+                f"resume preserves its environment ({recorded_environment}); "
+                "use fork for another one"
+            )
+        execution_runtime, runtime, worktree = "living-tree", resumed_runtime, None
         parent_root = str(parent.get("root") or "")
         if root and Path(root).resolve() != Path(parent_root).resolve():
             raise ValueError("resume preserves repository; use fork")
@@ -1727,7 +2153,7 @@ def interactive_workspace_command(
         }
         base = ""  # validate current checkout without changing historical baseline
     execution = execution_runtime or (
-        "living-tree" if runtime == "local-native" else runtime
+        "living-tree" if runtime in {"local-native", "local-vm"} else runtime
     )
     spec = normalize_launch_spec(
         {
@@ -1741,10 +2167,17 @@ def interactive_workspace_command(
             "runtime_class": execution,
             "worktree": worktree,
             "model": model,
+            "effort": effort,
             "runtime": "terminal",
+            "permissions": permissions,
         },
         Path(__file__).parent,
+        admission_controls=controls,
     )
+    if spec.effort_source == "cli" and _effort_override_receipt(
+        provider, spec.effort
+    ).get("effort_override_skipped"):
+        raise ValueError(f"Effort is unavailable for provider {provider}")
     source = _source_prompt(spec)
     if native_session:
         native_session = _validated_continuity_id(
@@ -1777,8 +2210,15 @@ def interactive_workspace_command(
         "baseline_sha": spec.baseline_sha,
         "resolved_ref": spec.resolved_ref,
         "runtime_class": spec.runtime_class,
+        "runtime_policy": runtime,
+        "execution_environment": (
+            "local-container"
+            if runtime == "local-vm"
+            else ("worktree" if spec.worktree else "checkout")
+        ),
         "presentation": "visible",
         "requires_pty": True,
+        "execution_controls": controls.receipt(),
         **launch_selection_receipt(spec),
         "source_snapshot": str(source_path),
         "source_digest": spec.source_digest,
@@ -1807,12 +2247,32 @@ def interactive_workspace_command(
     admission["agent_session_id"] = bound_native
     admission["native_child_session_id"] = bound_native
     admission["native_identity_status"] = "proven" if bound_native else "unknown"
-    workspace_id = _workspace_identity_for_prompt(spec.root, admission)
-    if workspace_id:
-        admission["workspace_id"] = workspace_id
+    from .workspace_catalog import resolve_run_workspace_identity
+
+    # Bind the selected seat before continuity scrubbing or terminal handoff.
+    # The catalog owner validates inherited context against the explicit root.
+    identity = resolve_run_workspace_identity(
+        root=spec.root, env=os.environ, create_if_missing=True
+    )
+    admission.update(identity.to_meta_fields())
     if parent:
         admission["baseline_sha"] = parent.get("baseline_sha", "")
         admission["runtime_class"] = parent.get("runtime_class", "living-tree")
+        # The resumed conversation keeps its project, checkout and container.
+        admission["parent_root"] = str(
+            parent.get("parent_root") or admission["parent_root"]
+        )
+        admission["runtime_policy"] = interactive_run_environment(parent)
+        if admission["runtime_policy"] == "local-vm":
+            admission["execution_environment"] = "local-container"
+        for key in (
+            "worktree",
+            "worktree_path",
+            "worktree_branch",
+            "worktree_baseline_sha",
+        ):
+            if parent.get(key):
+                admission[key] = parent[key]
     admission_path = _write_prompt_file(
         run_dir / "admission.json", json.dumps(admission)
     )
@@ -1838,9 +2298,11 @@ def interactive_workspace_command(
         "interactive-launch",
         provider,
         "--runtime",
-        "local-native",
+        # Worktree preparation already happened above (root is the worktree);
+        # the container is prepared by the launch owner inside the Frame tab.
+        "local-vm" if runtime == "local-vm" else "local-native",
         "--permissions",
-        permissions,
+        controls.permissions_effective,
         "--token-budget",
         quota.selection,
         "--operator",
@@ -1931,6 +2393,7 @@ def prepare_interactive_workspace_launch(
     usage_capability: ProviderUsageCapability | None = None,
     provider_session_id: str | None = None,
     continuity_material: ContinuityMaterial | None = None,
+    workspace_identity: Mapping[str, Any] | None = None,
 ) -> InteractiveWorkspaceLaunch:
     """Resolve identity/root and publish truth only after launch preparation succeeds."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -1963,7 +2426,29 @@ def prepare_interactive_workspace_launch(
         WorktreeManager,
     )
     from .workflow import reserve_run_id
-    from .workspace_catalog import resolve_run_workspace_identity
+    from .workspace_catalog import read_catalog, resolve_run_workspace_identity
+
+    identity_fields = {
+        "workspace_id": "VIBECRAFTED_WORKSPACE_ID",
+        "vibecrafted_session_id": "VIBECRAFTED_SESSION_ID",
+        "workspace_instance_id": "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
+    }
+    selected_identity = dict(workspace_identity or {})
+    exact_seat = any(
+        selected_identity.get(key)
+        for key in ("vibecrafted_session_id", "workspace_instance_id")
+    )
+    identity_env = {}
+    if exact_seat:
+        if not all(selected_identity.get(key) for key in identity_fields):
+            raise ValueError("interactive workspace identity is incomplete")
+        record = read_catalog().workspaces.get(selected_identity["workspace_id"])
+        if record is None or Path(record.canonical_root).resolve() != parent:
+            raise ValueError("interactive workspace identity belongs to another root")
+        identity_env = {
+            env_key: str(selected_identity[key])
+            for key, env_key in identity_fields.items()
+        }
 
     effective_run_id = run_id or reserve_run_id("init")
     geometry: WorktreeGeometry | None = None
@@ -1979,9 +2464,14 @@ def prepare_interactive_workspace_launch(
 
     try:
         identity = resolve_run_workspace_identity(
-            root=parent, env={}, create_if_missing=True
+            root=parent, env=identity_env, create_if_missing=True
         )
-        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        if exact_seat and any(
+            identity.to_meta_fields()[key] != selected_identity[key]
+            for key in identity_fields
+        ):
+            raise ValueError("interactive workspace identity changed before launch")
+        now_iso = dt.datetime.now(dt.UTC).isoformat()
         run_dir = control_plane_home() / "runtime_runs" / effective_run_id
         prompt_path = run_dir / "prompt.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2135,6 +2625,8 @@ class _ClaudeTranscriptUsage:
         env: dict[str, str],
         run_id: str = "",
         run_root: str = "",
+        resume: bool = False,
+        fork_parent_session_id: str = "",
     ) -> None:
         configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
         base = (
@@ -2161,23 +2653,65 @@ class _ClaudeTranscriptUsage:
         self.seen_message_ids: set[str] = set()
         self.totals = {field: 0 for field in self._FIELDS}
         self.foreign_workspace_events = 0
-        self._reject_existing_source()
+        self.baseline_size = 0
+        self.baseline_digest = ""
+        self.validated_source_state: tuple[int, int, int] | None = None
+        self.inherited_events: dict[str, str] = {}
+        self.fork_parent_session_id = fork_parent_session_id
+        self.resume = resume
+        self.confirmed_session_id = ""
+        if resume and fork_parent_session_id:
+            raise ValueError("resume and fork usage boundaries are mutually exclusive")
+        if fork_parent_session_id:
+            if fork_parent_session_id == provider_session_id:
+                raise ValueError("fork child must differ from parent session")
+            parent = self._source_path(fork_parent_session_id)
+            if parent is None:
+                raise ValueError("fork parent usage source is missing")
+            for event in self._history(parent, fork_parent_session_id):
+                if isinstance(event.get("message"), dict) and isinstance(
+                    event["message"].get("usage"), dict
+                ):
+                    key = event.get("uuid")
+                    if not isinstance(key, str) or not key:
+                        raise ValueError("fork history has no attributable event UUID")
+                    self.inherited_events[key] = self._inherited_digest(event)
+        if resume:
+            if not self._bind_path():
+                raise ValueError("resume usage source is missing")
+            assert self.path is not None
+            data = self.path.read_bytes()
+            for event in self._history(self.path, provider_session_id, data=data):
+                message = event.get("message")
+                if isinstance(message, dict) and isinstance(message.get("id"), str):
+                    self.seen_message_ids.add(message["id"])
+                    if isinstance(message.get("usage"), dict):
+                        key = event.get("uuid")
+                        if not isinstance(key, str) or not key:
+                            raise ValueError(
+                                "resume history has no attributable event UUID"
+                            )
+                        self.inherited_events[key] = self._inherited_digest(
+                            event, include_usage=True
+                        )
+            # Historical message IDs prevent replay, but are not this run's usage.
+            self.historical_message_ids = self.seen_message_ids
+            self.seen_message_ids = set()
+            self.offset = self.baseline_size = len(data)
+            self.baseline_digest = hashlib.sha256(data).hexdigest()
+        else:
+            self.historical_message_ids: set[str] = set()
+            self._reject_existing_source()
 
     def _matching_paths(self) -> list[Path]:
         if not self.projects_root.is_dir():
             return []
         return list(self.projects_root.rglob(f"{self.provider_session_id}.jsonl"))
 
-    def _reject_existing_source(self) -> None:
-        if self._matching_paths():
-            raise ValueError(
-                "provider session usage source already exists; refusing stale or reused session identity"
-            )
-
-    def _bind_path(self) -> bool:
-        matches = self._matching_paths()
+    def _source_path(self, session_id: str) -> Path | None:
+        matches = list(self.projects_root.rglob(f"{session_id}.jsonl"))
         if not matches:
-            return False
+            return None
         if len(matches) != 1:
             raise RuntimeError("multiple provider usage sources claim one session id")
         candidate = matches[0]
@@ -2186,9 +2720,53 @@ class _ClaudeTranscriptUsage:
         resolved = candidate.resolve(strict=True)
         if not resolved.is_relative_to(self.projects_root):
             raise RuntimeError("provider usage source escaped provider projects root")
-        stat = resolved.stat()
         if not resolved.is_file():
             raise RuntimeError("provider usage source is not a regular file")
+        return resolved
+
+    @staticmethod
+    def _history(
+        path: Path, session_id: str, *, data: bytes | None = None
+    ) -> list[dict[str, Any]]:
+        data = path.read_bytes() if data is None else data
+        if data and not data.endswith(b"\n"):
+            raise ValueError(
+                "continuation usage source has an incomplete JSONL boundary"
+            )
+        events = []
+        for line in data.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise TypeError("continuation history must contain JSON objects")
+            if event.get("sessionId") not in (None, session_id):
+                raise ValueError("continuation history belongs to a foreign session")
+            events.append(event)
+        return events
+
+    @staticmethod
+    def _inherited_digest(event: dict[str, Any], *, include_usage: bool = False) -> str:
+        # Claude rewrites sessionId/slug/parentUuid and may recompute historical
+        # usage. UUID + immutable message content/version/cwd prove inheritance.
+        message = {
+            key: value
+            for key, value in event["message"].items()
+            if include_usage or key != "usage"
+        }
+        payload = {key: event.get(key) for key in ("uuid", "type", "version", "cwd")}
+        payload["message"] = message
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def _reject_existing_source(self) -> None:
+        if self._matching_paths():
+            raise ValueError(
+                "provider session usage source already exists; refusing stale or reused session identity"
+            )
+
+    def _bind_path(self) -> bool:
+        resolved = self._source_path(self.provider_session_id)
+        if resolved is None:
+            return False
+        stat = resolved.stat()
         self.path = resolved
         self.identity = (stat.st_dev, stat.st_ino)
         return True
@@ -2197,22 +2775,44 @@ class _ClaudeTranscriptUsage:
         if self.path is None and not self._bind_path():
             return self.as_dict()
         assert self.path is not None
+        if self.path.is_symlink():
+            raise RuntimeError("provider usage source must not be a symlink")
         stat = self.path.stat()
         if self.identity != (stat.st_dev, stat.st_ino):
             raise RuntimeError("provider usage source identity changed during the run")
         if stat.st_size < self.offset:
             raise RuntimeError("provider usage source was truncated during the run")
-        with self.path.open("r", encoding="utf-8") as handle:
+        with self.path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if self.identity != (opened.st_dev, opened.st_ino):
+                raise RuntimeError(
+                    "provider usage source identity changed during the run"
+                )
+            if (
+                self.baseline_digest
+                and self.validated_source_state
+                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                and hashlib.sha256(handle.read(self.baseline_size)).hexdigest()
+                != self.baseline_digest
+            ):
+                raise RuntimeError(
+                    "provider usage source history changed during the run"
+                )
+            self.validated_source_state = (
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            )
             handle.seek(self.offset)
             while True:
                 line_start = handle.tell()
                 line = handle.readline()
                 if not line:
                     break
-                if not line.endswith("\n"):
+                if not line.endswith(b"\n"):
                     handle.seek(line_start)
                     break
-                self._consume_line(line)
+                self._consume_line(line.decode("utf-8"))
             self.offset = handle.tell()
         return self.as_dict()
 
@@ -2224,8 +2824,31 @@ class _ClaudeTranscriptUsage:
         if not isinstance(event, dict):
             raise TypeError("provider usage event must be a JSON object")
         message = event.get("message")
+        inherited = self.inherited_events.get(event.get("uuid"))
+        if inherited is not None:
+            if event.get("sessionId") != self.provider_session_id and not (
+                self.fork_parent_session_id
+                and event.get("sessionId") == self.fork_parent_session_id
+            ):
+                raise RuntimeError(
+                    "provider inherited event belongs to a foreign session"
+                )
+            if (
+                not isinstance(message, dict)
+                or self._inherited_digest(event, include_usage=self.resume) != inherited
+            ):
+                raise RuntimeError(
+                    "provider continuation inherited event content changed"
+                )
+            if event.get("sessionId") == self.provider_session_id:
+                self.confirmed_session_id = self.provider_session_id
+            return
         if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
             return
+        if message.get("id") in self.historical_message_ids:
+            raise RuntimeError(
+                "provider historical message has an unverified replay identity"
+            )
         if event.get("sessionId") != self.provider_session_id:
             raise RuntimeError("provider usage event belongs to a foreign session")
         event_cwd = event.get("cwd")
@@ -2251,9 +2874,33 @@ class _ClaudeTranscriptUsage:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RuntimeError(f"provider usage field {field_name} is invalid")
             values[field_name] = value
+        self.confirmed_session_id = self.provider_session_id
         self.seen_message_ids.add(message_id)
         for field_name, value in values.items():
             self.totals[field_name] += value
+
+    def confirm_fork_receipt(self, receipt: dict[str, Any]) -> bool:
+        if (
+            not receipt.get("native_fork")
+            or not self.confirmed_session_id
+            or receipt.get("native_identity_status") == "confirmed"
+        ):
+            return False
+        child_id = self.confirmed_session_id
+        receipt.update(
+            provider_session_id=child_id,
+            agent_session_id=child_id,
+            native_child_session_id=child_id,
+            native_identity_status="confirmed",
+            native_identity_source="provider-session-usage-event",
+        )
+        print(
+            f"Native fork confirmed: run_id={self.run_id} "
+            f"source_session_id={self.fork_parent_session_id} agent_session_id={child_id}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return True
 
     def _cwd_is_own(self, event_cwd: str) -> bool:
         """Count cwd inside effective_root or this run's control-plane directory."""
@@ -2295,6 +2942,22 @@ def launch_interactive_workspace(
     from .workflow import reserve_run_id
 
     admission = dict(admission or {})
+    controls = controls_from_receipt(admission.get("execution_controls") or {})
+    if controls is None:
+        from .server_config import durable_permission_selection
+
+        configured, source = durable_permission_selection(provider)
+        controls = resolve_execution_controls(
+            provider,
+            permissions=permissions,
+            configured_permissions=configured,
+            permissions_source=source,
+            mode="interactive",
+        )
+    if controls.provider != provider:
+        raise ValueError("admitted controls do not match interactive provider")
+    permissions = controls.permissions_effective
+    admission["execution_controls"] = controls.receipt()
     run_id = str(admission.get("run_id") or reserve_run_id("init"))
     try:
         continuity_policy = resolve_continuity_policy(
@@ -2311,7 +2974,7 @@ def launch_interactive_workspace(
             prompt=prompt,
         )
     except ValueError as exc:
-        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_iso = dt.datetime.now(dt.UTC).isoformat()
         failed = {
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -2358,7 +3021,9 @@ def launch_interactive_workspace(
             admission=admission,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
-    child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
+    child_env = provider_workspace_environment(
+        _fresh_child_environment(os.environ.copy(), continuity_policy), provider
+    )
     parent_id, proven_native = disjoint_session_identities(
         parent_session_id=str(
             continuity_policy.parent_provider_session_id
@@ -2378,6 +3043,7 @@ def launch_interactive_workspace(
         permissions,
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
+        controls=controls,
     )
     if (
         continuity_policy.mode == "bare-fork"
@@ -2418,8 +3084,21 @@ def launch_interactive_workspace(
         ),
         str(admission.get("effort_requested") or ""),
     )
-    resolved = _resolve_agent_command(provider, command, child_env)
-    capability = resolve_provider_usage_capability(provider, executable=resolved[0])
+    container_runtime = runtime == "local-vm"
+    if container_runtime:
+        from .dev_container import CONTAINER_PROVIDERS, docker_cli
+
+        if continuity_policy.mode == "bare-fork":
+            raise ValueError("bare-fork is not available in the local container")
+        # The provider binary lives in the container; the host only needs the
+        # container CLI. Engine/daemon truth is re-probed by the preparation.
+        resolved = [CONTAINER_PROVIDERS[provider], *command[1:]]
+        capability = container_usage_capability(provider)
+        launch_executable = docker_cli(child_env) or "docker"
+    else:
+        resolved = _resolve_agent_command(provider, command, child_env)
+        capability = resolve_provider_usage_capability(provider, executable=resolved[0])
+        launch_executable = resolved[0]
     # The same admission the composer and the preparation apply (80742a4c): a
     # measured budget needs a usage side channel; an unmetered declaration does
     # not. This owner kept the unconditional refusal, so every non-Claude
@@ -2434,12 +3113,13 @@ def launch_interactive_workspace(
         selected_root=root,
         prompt=continuity_material.prompt,
         run_id=run_id,
-        executable=resolved[0],
+        executable=launch_executable,
         publish=False,
         quota_policy=quota,
         usage_capability=capability,
         provider_session_id=provider_session_id,
         continuity_material=continuity_material,
+        workspace_identity=admission,
     )
     launch.receipt.update(admission)
     # A requested ID is not a provider acknowledgement. Codex fork does not
@@ -2474,6 +3154,8 @@ def launch_interactive_workspace(
                 provider_version=capability.provider_version,
                 env=child_env,
                 run_id=launch.run_id,
+                resume=bool(native_session),
+                fork_parent_session_id=(parent_id if native_fork else ""),
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -2530,7 +3212,7 @@ def launch_interactive_workspace(
         # Keep the selected executable, permission/model flags and transport.
         child_id = identity["provider_session_id"]
         resume_command = interactive_policy_command(
-            provider, command[-1], runtime, permissions
+            provider, command[-1], runtime, permissions, controls=controls
         )
         if admission.get("skill") == "fork":
             # The public bare fork has no task input. Open the native child
@@ -2556,6 +3238,19 @@ def launch_interactive_workspace(
             file=sys.stderr,
             flush=True,
         )
+    container_target = None
+    if container_runtime:
+        prepared = _prepare_container_launch(
+            launch,
+            provider=provider,
+            permissions=permissions,
+            command=resolved,
+            child_env=child_env,
+            continuity_material=continuity_material,
+        )
+        if isinstance(prepared, int):
+            return prepared
+        resolved, container_target = prepared
     source_secret = prompt
     if admission.get("source_snapshot"):
         source_secret = Path(admission["source_snapshot"]).read_bytes().decode("utf-8")
@@ -2563,6 +3258,7 @@ def launch_interactive_workspace(
     capture = InteractiveTranscriptCapture(transcript, source_secret)
     launch.receipt["transcript"] = str(transcript)
     launch.receipt["latest_transcript"] = str(transcript)
+    spawned_epoch = time.time()
     try:
         child = subprocess.Popen(
             resolved,
@@ -2586,7 +3282,7 @@ def launch_interactive_workspace(
         )
         raise
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     receipt = {
         **launch.receipt,
         "updated_at": now_iso,
@@ -2605,17 +3301,29 @@ def launch_interactive_workspace(
             "warning": operator_policy.warning,
         },
     }
+    print(
+        f"provider started: run_id={launch.run_id} provider={provider} pid={child.pid}",
+        file=sys.stderr,
+        flush=True,
+    )
     received_signal: list[int] = []
     previous_handlers: dict[int, Any] = {}
 
     def _forward_owner_signal(signum: int, _frame: Any) -> None:
-        if not received_signal:
+        first = not received_signal
+        if first:
             received_signal.append(signum)
         if child.poll() is None:
             try:
                 child.send_signal(signum)
             except ProcessLookupError:
                 pass
+        if first and container_target is not None:
+            from .dev_container import terminate_provider_detached
+
+            # A closed tab kills this owner moments later; the provider in
+            # the container must not depend on this process surviving.
+            terminate_provider_detached(container_target, launch.run_id, env=child_env)
 
     if threading.current_thread() is threading.main_thread():
         for signum in (
@@ -2627,6 +3335,21 @@ def launch_interactive_workspace(
                 continue
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, _forward_owner_signal)
+        if container_runtime and hasattr(signal, "SIGWINCH"):
+            # `docker exec -t` reads the size from its stdout (the capture
+            # PTY) when SIGWINCH arrives; the capture copies the pane size on
+            # its own clock. Copy first, then re-signal the CLI, so the
+            # container never keeps a stale geometry after a resize.
+            def _forward_resize(_signum: int, _frame: Any) -> None:
+                capture.sync_size()
+                if child.poll() is None:
+                    try:
+                        child.send_signal(signal.SIGWINCH)
+                    except ProcessLookupError:
+                        pass
+
+            previous_handlers[signal.SIGWINCH] = signal.getsignal(signal.SIGWINCH)
+            signal.signal(signal.SIGWINCH, _forward_resize)
 
     # Publish the mandatory roles immediately after successful child creation.
     # The qualified process fingerprints travel with that first publication:
@@ -2654,9 +3377,13 @@ def launch_interactive_workspace(
         while True:
             current_returncode = child.poll()
             measured_usage = usage_reader.poll()
+            if isinstance(
+                usage_reader, _ClaudeTranscriptUsage
+            ) and usage_reader.confirm_fork_receipt(receipt):
+                _write_meta(launch.meta_path, receipt)
             if measured_usage != receipt["measured_usage"]:
                 receipt["measured_usage"] = measured_usage
-                receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                 _write_meta(launch.meta_path, receipt)
             # Owned recovery of a deferred ACTIVE publication: same owner,
             # same poll loop, no observer required while the provider idles.
@@ -2687,6 +3414,12 @@ def launch_interactive_workspace(
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+        if container_target is not None:
+            from .dev_container import terminate_provider
+
+            receipt["container_provider_teardown"] = terminate_provider(
+                container_target, launch.run_id, env=child_env
+            )
         _terminalize_interactive_launch(
             launch,
             receipt,
@@ -2738,7 +3471,10 @@ def launch_interactive_workspace(
     else:
         status = "failed"
         terminal_reason = "provider_exit_nonzero"
-    _terminalize_interactive_launch(
+    # A closed tab may hard-kill this owner shortly after its hangup: publish
+    # the terminal state first, then end the container provider and bind the
+    # provider's own session evidence as a follow-up write.
+    terminal = _terminalize_interactive_launch(
         launch,
         receipt,
         status=status,
@@ -2746,7 +3482,335 @@ def launch_interactive_workspace(
         terminal_reason=terminal_reason,
         exit_signal=abs(provider_returncode) if provider_returncode < 0 else None,
     )
+    _settle_interactive_aftermath(
+        launch,
+        terminal,
+        provider=provider,
+        child_env=child_env,
+        container_target=container_target,
+        since=spawned_epoch,
+    )
     return shell_status
+
+
+def _ask_container_retry(stage: str) -> bool:
+    """Ask the User in the Agent tab whether to retry a failed preparation."""
+    stream = sys.stdin
+    if stream is None or not stream.isatty():
+        return False
+    print(
+        f"[r] retry {stage} · [q] cancel this Agent tab: ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        answer = stream.readline()
+    except (KeyboardInterrupt, OSError):
+        return False
+    return answer.strip().lower() in {"r", "retry", "y", "yes"}
+
+
+def _interactive_run_owner_alive(run_id: str) -> bool:
+    """Whether a recorded interactive run still has its owner process.
+
+    The qualified owner receipt (start token, command hash, pgid) decides when
+    present: a reused PID is not the owner. Without a usable receipt the
+    numeric PID is the conservative answer -- a reused PID can keep an orphan
+    alive until the next sweep, but never ends a live Agent.
+    """
+    meta = _read_meta(control_plane_home() / "runtime_runs" / run_id / "meta.json")
+    if not meta or meta.get("liveness") == "terminal":
+        return False
+    try:
+        owner = int(meta.get("owner_pid") or meta.get("launcher_pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if owner <= 0:
+        return False
+    receipt = meta.get("owner_identity")
+    if isinstance(receipt, Mapping):
+        from .process_control import validate_process_identity
+
+        try:
+            current, reason, _identity = validate_process_identity(
+                receipt,
+                expected_pid=owner,
+                expected_pgid=None,
+                expected_run_id=run_id,
+            )
+        except (OSError, RuntimeError, ValueError):
+            current, reason = False, "process_identity_unavailable"
+        # The validator compares start token and command before the run-id
+        # env evidence: a run-id mismatch is still the same process (a pane can
+        # carry another ambient run id), so it is the owner, alive.
+        if current or reason == "process_run_id_mismatch":
+            return True
+        if reason in {"process_identity_gone", "process_identity_mismatch"}:
+            return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _prepare_container_launch(
+    launch: InteractiveWorkspaceLaunch,
+    *,
+    provider: str,
+    permissions: str,
+    command: list[str],
+    child_env: dict[str, str],
+    continuity_material: ContinuityMaterial,
+) -> tuple[list[str], Any] | int:
+    """Ready the project's container in front of the User, then wrap the argv.
+
+    Every stage prints into this Agent tab before the provider starts: the
+    image (built only when the recipe digest changed), the container start, the
+    workspace mount. A failure keeps its exact cause and offers retry or
+    cancel; nothing falls back to running the provider on the host.
+    """
+    from . import dev_container
+
+    def log(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    log(
+        f"Preparing the local container for {provider} · "
+        f"{Path(launch.parent_root).name} — a Docker container, not a VM; "
+        f"the project is mounted at {dev_container.WORKDIR}."
+    )
+    while True:
+        try:
+            try:
+                target = dev_container.ensure_container(
+                    launch.effective_root, env=child_env, log=log
+                )
+            except KeyboardInterrupt as interrupt:
+                raise dev_container.ContainerCancelled() from interrupt
+            break
+        except dev_container.ContainerCancelled as exc:
+            _terminalize_interactive_launch(
+                launch,
+                launch.receipt,
+                status="cancelled",
+                exit_code=130,
+                terminal_reason="container_prepare_cancelled",
+                error=str(exc),
+            )
+            log("Local container preparation cancelled; nothing was started.")
+            return 130
+        except dev_container.ContainerError as exc:
+            log(f"\nLocal container is not ready ({exc.stage}): {exc}")
+            if _ask_container_retry(exc.stage):
+                continue
+            _terminalize_interactive_launch(
+                launch,
+                launch.receipt,
+                status="failed",
+                exit_code=1,
+                terminal_reason=f"container_{exc.stage}_failed",
+                error=str(exc),
+            )
+            return 1
+    swept = dev_container.sweep_orphan_providers(
+        target, is_live=_interactive_run_owner_alive, env=child_env
+    )
+    if swept:
+        launch.receipt["container_orphans_ended"] = swept
+        log(
+            f"Ended {len(swept)} Agent(s) left running by closed tabs: {', '.join(swept)}"
+        )
+    host_prompt = str(launch.meta_path.with_name("prompt.md"))
+    text = Path(host_prompt).read_text(encoding="utf-8")
+    try:
+        for host_file, name in (
+            (continuity_material.context_path, "continuity-pack.md"),
+            (continuity_material.loop_state_path, "current-loop.md"),
+        ):
+            if host_file:
+                staged = dev_container.stage_text(
+                    target,
+                    launch.run_id,
+                    name,
+                    Path(host_file).read_text(encoding="utf-8"),
+                    env=child_env,
+                )
+                text = text.replace(host_file, staged)
+        text = text.replace(launch.effective_root, dev_container.WORKDIR)
+        container_prompt = dev_container.stage_text(
+            target, launch.run_id, "prompt.md", text, env=child_env
+        )
+    except (OSError, dev_container.ContainerError) as exc:
+        _terminalize_interactive_launch(
+            launch,
+            launch.receipt,
+            status="failed",
+            exit_code=1,
+            terminal_reason="container_stage_failed",
+            error=str(exc),
+        )
+        log(f"Cannot hand the task to the container: {exc}")
+        return 1
+    argv = [arg.replace(host_prompt, container_prompt) for arg in command]
+    extra = {"VIBECRAFTED_RUN_ID": launch.run_id}
+    if provider == "claude" and permissions == "bypass":
+        # Claude refuses its bypass flag as root outside a declared sandbox;
+        # the container is that sandbox.
+        extra["IS_SANDBOX"] = "1"
+    wrapped = dev_container.exec_argv(
+        target,
+        argv,
+        run_id=launch.run_id,
+        pass_names=dev_container.credential_names(provider, child_env),
+        extra_env=extra,
+    )
+    launch.receipt.update(
+        container=target.receipt(),
+        execution_environment="local-container",
+        provider_cwd=dev_container.WORKDIR,
+        container_prompt=container_prompt,
+    )
+    log(f"Starting {provider} in {target.container_name}…")
+    return wrapped, target
+
+
+def _prove_host_native_session(
+    provider: str,
+    *,
+    requested: str,
+    effective_root: str,
+    env: Mapping[str, str],
+    since: float,
+) -> str:
+    """Provider-owned on-disk evidence of the conversation this run created."""
+    if provider == "claude" and requested:
+        return (
+            requested if provider_session_exists(provider, requested, env=env) else ""
+        )
+    if provider == "codex":
+        from .compact_hooks import session_meta_from_jsonl
+
+        home = Path(env.get("HOME") or str(Path.home())).expanduser()
+        codex_home = Path(
+            str(env.get("CODEX_HOME") or "").strip() or home / ".codex"
+        ).expanduser()
+        sessions = codex_home / "sessions"
+        try:
+            target_root = str(Path(effective_root).resolve())
+        except OSError:
+            return ""
+        found: set[str] = set()
+        day = dt.datetime.fromtimestamp(since - 86400, dt.UTC).date()
+        today = dt.datetime.now(dt.UTC).date()
+        while day <= today + dt.timedelta(days=1):
+            folder = sessions / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+            day += dt.timedelta(days=1)
+            if not folder.is_dir():
+                continue
+            for path in folder.glob("rollout-*.jsonl"):
+                try:
+                    if path.stat().st_mtime < since - 1:
+                        continue
+                except OSError:
+                    continue
+                meta = session_meta_from_jsonl(path)
+                if meta.get("cwd") == target_root and meta.get("id"):
+                    found.add(meta["id"])
+        return found.pop() if len(found) == 1 else ""
+    return ""
+
+
+def _record_native_identity_after_exit(
+    receipt: dict[str, Any],
+    *,
+    provider: str,
+    run_id: str,
+    effective_root: str,
+    child_env: Mapping[str, str],
+    container_target: Any | None,
+    since: float,
+) -> None:
+    """Bind the run to its provider conversation only on provider-owned evidence.
+
+    A requested ``--session-id`` is not an acknowledgement; the provider's own
+    session file is. Exactly one match or nothing -- never a guess -- so a
+    later resume returns to the right conversation in the right environment.
+    """
+    if receipt.get("native_fork") or str(receipt.get("agent_session_id") or ""):
+        return
+    requested = str(
+        receipt.get("provider_session_requested")
+        or receipt.get("provider_session_id")
+        or ""
+    )
+    try:
+        if container_target is not None:
+            from .dev_container import prove_native_session
+
+            identity = prove_native_session(
+                container_target,
+                provider,
+                run_id,
+                requested=requested,
+                env=child_env,
+            )
+            source = "container-provider-session-file"
+        else:
+            identity = _prove_host_native_session(
+                provider,
+                requested=requested,
+                effective_root=effective_root,
+                env=child_env,
+                since=since,
+            )
+            source = "provider-session-file"
+    except (OSError, ValueError, RuntimeError):
+        return
+    if not identity:
+        return
+    receipt.update(
+        agent_session_id=identity,
+        native_child_session_id=identity,
+        provider_session_id=identity,
+        native_identity_status="proven",
+        native_identity_source=source,
+    )
+
+
+def _settle_interactive_aftermath(
+    launch: InteractiveWorkspaceLaunch,
+    terminal: dict[str, Any],
+    *,
+    provider: str,
+    child_env: dict[str, str],
+    container_target: Any | None,
+    since: float,
+) -> None:
+    """Container teardown and native-session evidence after the terminal write."""
+    settled = dict(terminal)
+    if container_target is not None:
+        from .dev_container import terminate_provider
+
+        # The tab owns the provider: whatever ended the host-side client
+        # (exit, closed tab, signal), nothing keeps running in the container.
+        settled["container_provider_teardown"] = terminate_provider(
+            container_target, launch.run_id, env=child_env
+        )
+    _record_native_identity_after_exit(
+        settled,
+        provider=provider,
+        run_id=launch.run_id,
+        effective_root=launch.effective_root,
+        child_env=child_env,
+        container_target=container_target,
+        since=since,
+    )
+    if settled != terminal:
+        _write_meta(launch.meta_path, settled)
 
 
 def _launch_supervised_interactive_workspace(
@@ -2768,7 +3832,17 @@ def _launch_supervised_interactive_workspace(
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     continuity_policy = continuity_material.policy
     base_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    child_session_id = str(uuid.uuid4())
+    parent_id, proven_native = disjoint_session_identities(
+        parent_session_id=str(
+            continuity_policy.parent_provider_session_id
+            or admission.get("parent_session_id")
+            or ""
+        ),
+        native_child_session_id=str(admission.get("agent_session_id") or ""),
+    )
+    native_session = proven_native if provider == "claude" else ""
+    native_fork = provider == "claude" and continuity_policy.mode == "bare-fork"
+    child_session_id = native_session or str(uuid.uuid4())
     child_command = interactive_policy_command(
         provider,
         f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
@@ -2777,6 +3851,13 @@ def _launch_supervised_interactive_workspace(
         provider_session_id=child_session_id,
         continuity_policy=continuity_policy,
     )
+    if native_session:
+        if "--session-id" in child_command:
+            index = child_command.index("--session-id")
+            del child_command[index : index + 2]
+        child_command[1:1] = ["--resume", native_session]
+    if native_fork and admission.get("skill") == "fork":
+        child_command.pop()
     child_command = _with_model_override(
         provider, child_command, str(admission.get("model_effective") or "")
     )
@@ -2801,6 +3882,7 @@ def _launch_supervised_interactive_workspace(
         usage_capability=child_capability,
         provider_session_id=child_session_id,
         continuity_material=continuity_material,
+        workspace_identity=admission,
     )
     if child_capability.supported and provider == "claude":
         try:
@@ -2810,6 +3892,10 @@ def _launch_supervised_interactive_workspace(
                 provider_version=child_capability.provider_version,
                 env=base_env,
                 run_id=launch.run_id,
+                resume=bool(native_session),
+                fork_parent_session_id=(
+                    continuity_policy.parent_provider_session_id if native_fork else ""
+                ),
             )
         except Exception:
             _cleanup_unspawned_interactive_launch(launch)
@@ -2841,7 +3927,7 @@ def _launch_supervised_interactive_workspace(
         _cleanup_unspawned_interactive_launch(launch)
         raise
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     relation = {
         "relation_id": relation_id,
         "operator_run_id": operator_run_id,
@@ -2849,14 +3935,6 @@ def _launch_supervised_interactive_workspace(
         "state": "reserved",
         "protocol": "operator-protocol-jsonl-v1",
     }
-    parent_id, proven_native = disjoint_session_identities(
-        parent_session_id=str(
-            continuity_policy.parent_provider_session_id
-            or admission.get("parent_session_id")
-            or ""
-        ),
-        native_child_session_id=str(admission.get("agent_session_id") or ""),
-    )
     child_receipt = {
         **launch.receipt,
         **admission,
@@ -2873,6 +3951,15 @@ def _launch_supervised_interactive_workspace(
         "native_identity_status": "proven" if proven_native else "unknown",
         "provider_session_requested": child_session_id,
     }
+    if native_fork:
+        child_receipt.update(
+            native_fork=True,
+            fork_source_session_id=continuity_policy.parent_provider_session_id,
+            native_identity_status="pending",
+            provider_session_id="",
+            agent_session_id="",
+            native_child_session_id="",
+        )
     operator_receipt = {
         **launch.receipt,
         "created_at": now_iso,
@@ -3006,12 +4093,18 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
         "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
     }
+    child_env = provider_workspace_environment(child_env, provider)
     try:
         # The User-facing child keeps the exact inherited descriptors and TTY.
         child = subprocess.Popen(
             child_resolved,
             cwd=launch.effective_root,
             env=child_env,
+        )
+        print(
+            f"provider started: run_id={launch.run_id} provider={provider} pid={child.pid}",
+            file=sys.stderr,
+            flush=True,
         )
     except (OSError, ValueError) as exc:
         operator_code = _stop_owned_process(operator_child)
@@ -3059,7 +4152,7 @@ def _launch_supervised_interactive_workspace(
         )
         return 1
 
-    active_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    active_at = dt.datetime.now(dt.UTC).isoformat()
     active_relation = {**relation, "state": "active"}
     child_receipt.update(
         updated_at=active_at,
@@ -3190,11 +4283,13 @@ def _launch_supervised_interactive_workspace(
         while True:
             current_returncode = child.poll()
             measured_usage = usage_reader.poll()
+            if isinstance(
+                usage_reader, _ClaudeTranscriptUsage
+            ) and usage_reader.confirm_fork_receipt(child_receipt):
+                _write_meta(launch.meta_path, child_receipt)
             if measured_usage != child_receipt["measured_usage"]:
                 child_receipt["measured_usage"] = measured_usage
-                child_receipt["updated_at"] = dt.datetime.now(
-                    dt.timezone.utc
-                ).isoformat()
+                child_receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                 _write_meta(launch.meta_path, child_receipt)
             child_projection.pump()
             operator_projection.pump()
@@ -3216,12 +4311,10 @@ def _launch_supervised_interactive_workspace(
                             "child_status": child_receipt["status"],
                             "child_worker_pid": child.pid,
                             "measured_usage": child_receipt["measured_usage"],
-                            "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "observed_at": dt.datetime.now(dt.UTC).isoformat(),
                         },
                     }
-                    operator_receipt["updated_at"] = dt.datetime.now(
-                        dt.timezone.utc
-                    ).isoformat()
+                    operator_receipt["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
                     _write_meta(operator_meta_path, operator_receipt)
                 elif current_returncode is None:
                     stop_actor_run_id = operator_run_id
@@ -3306,6 +4399,14 @@ def _launch_supervised_interactive_workspace(
         terminal_reason = (
             f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
         )
+    elif (
+        provider_returncode == 0
+        and native_fork
+        and child_receipt.get("native_identity_status") != "confirmed"
+    ):
+        status = "failed"
+        terminal_reason = "native_fork_identity_unconfirmed"
+        shell_status = 1
     elif provider_returncode == 0:
         status = "completed"
         terminal_reason = "provider_exit_zero"
@@ -3358,9 +4459,7 @@ def _launch_supervised_interactive_workspace(
                                 "child_status": child_terminal["status"],
                                 "child_worker_pid": child.pid,
                                 "measured_usage": child_terminal["measured_usage"],
-                                "observed_at": dt.datetime.now(
-                                    dt.timezone.utc
-                                ).isoformat(),
+                                "observed_at": dt.datetime.now(dt.UTC).isoformat(),
                             },
                         }
                         _write_meta(operator_meta_path, operator_receipt)
@@ -3377,7 +4476,7 @@ def _launch_supervised_interactive_workspace(
     operator_log.close()
     settled_worktree_cleanup = _cleanup_settled_interactive_launch(launch)
     child_terminal["settled_worktree_cleanup"] = settled_worktree_cleanup
-    child_terminal["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    child_terminal["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
     _write_meta(launch.meta_path, child_terminal)
     if settled_worktree_cleanup != "not-applicable":
         append_event(
@@ -3525,7 +4624,7 @@ def _terminalize_related_receipt(
     error: str = "",
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    completed_at = dt.datetime.now(dt.UTC).isoformat()
     terminal = {
         **receipt,
         "updated_at": completed_at,
@@ -4031,7 +5130,7 @@ def _terminalize_interactive_launch(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically terminalize the same interactive receipt and event identity."""
-    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    completed_at = dt.datetime.now(dt.UTC).isoformat()
     terminal = {
         **receipt,
         "updated_at": completed_at,
@@ -4113,6 +5212,7 @@ MODEL_ENV_VARS = (
     "CODEX_MODEL",
     "GEMINI_MODEL",
     "GROK_MODEL",
+    "OMP_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 
@@ -4175,10 +5275,13 @@ def _headless_policy_flags(
 ) -> tuple[list[str], str]:
     """Provider flags + effective permission word for one headless launch.
 
-    Without explicit controls this is the historical default (bypass; auto for
-    junie). With controls, the resolved argv from execution_controls is used
+    With explicit controls, the resolved argv from execution_controls is used
     verbatim — the resolver already refused anything the provider cannot
-    enforce, so nothing here approximates a requested restriction.
+    enforce, so nothing here approximates a requested restriction. Without
+    controls this consumes the same shared decision as the typed lane: durable
+    config opt-in (server_config.durable_permission_selection) over the fleet
+    default ``auto`` (Founder decision 13716da4a2b8af7049ea1565) — never a
+    per-provider bypass fallback.
     """
     if controls is not None:
         if controls.provider != agent:
@@ -4186,8 +5289,12 @@ def _headless_policy_flags(
                 f"execution controls resolved for {controls.provider}, not {agent}"
             )
         return list(controls.provider_flags), controls.permissions_effective
+    from .execution_controls import default_permissions
+    from .server_config import durable_permission_selection
+
+    configured_word, _source = durable_permission_selection(agent)
     policy = resolve_provider_policy(
-        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
+        agent, "local-native", configured_word or default_permissions(agent), "headless"
     )
     if not policy.supported:
         raise ValueError(policy.reason)
@@ -4288,6 +5395,10 @@ def _default_command(
             "-p",
             prompt,
         ]
+    if agent == "omp":
+        # omp accepts the prompt as a positional argv message too; the stdin
+        # lane (_stdin_command) stays primary so prompts never hit ps(1).
+        return ["omp", "-p", "--mode", "json", *flags, prompt]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -4400,6 +5511,17 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "--no-auto-update",
             "--output-format",
             "json",
+        ]
+    if agent == "omp":
+        # omp print mode consumes the prompt from stdin when no positional
+        # message is given (verified 18.11.0: `echo … | omp -p` rc 0), so the
+        # private stdin contract fits natively — argv carries flags only.
+        return [
+            "omp",
+            "-p",
+            "--mode",
+            "json",
+            *flags,
         ]
     raise ValueError(f"unsupported agent: {agent}")
 
@@ -4691,12 +5813,14 @@ def _parse_dt(value: object) -> dt.datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = value.replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(normalized_timestamp)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.astimezone(dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return parsed.astimezone(dt.UTC)
 
 
 def _resolve_duration(
@@ -4743,6 +5867,7 @@ def write_meta(
     loop_nr: str | int = 0,
     skill_code: str = "",
     framework_version: str = "",
+    execution_controls: str = "",
 ) -> Path:
     """Write initial launcher meta.json."""
     meta = Path(meta_path)
@@ -4754,7 +5879,7 @@ def write_meta(
     except (ValueError, TypeError):
         loop_nr_value = loop_nr
 
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
     payload: dict[str, Any] = {
         "created_at": now_iso,
         "updated_at": now_iso,
@@ -4781,6 +5906,13 @@ def write_meta(
     if requested:
         payload["model_requested"] = requested
 
+    if execution_controls:
+        controls = controls_from_receipt(json.loads(execution_controls))
+        if controls is None or controls.provider != agent:
+            raise ValueError(
+                "execution controls receipt does not match launcher provider"
+            )
+        payload["execution_controls"] = controls.receipt()
     # Cut A: durable workspace identity on every new run meta (best-effort).
     try:
         from .workspace_catalog import resolve_run_workspace_identity
@@ -4848,7 +5980,7 @@ def finish_meta(
     if launcher_claim_digest:
         payload["claim_digest"] = launcher_claim_digest
 
-    completed_at = dt.datetime.now(dt.timezone.utc)
+    completed_at = dt.datetime.now(dt.UTC)
     started_dt = _parse_dt(payload.get("created_at") or payload.get("updated_at"))
     duration_s = (
         round((completed_at - started_dt).total_seconds(), 3)
@@ -5198,9 +6330,7 @@ def finalize_artifacts(
     )
     flat_tokens = usage.flat()
     cost = _extract_cost(combined_text)
-    completed_at = (
-        payload.get("completed_at") or dt.datetime.now(dt.timezone.utc).isoformat()
-    )
+    completed_at = payload.get("completed_at") or dt.datetime.now(dt.UTC).isoformat()
     artifact_time = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     root = payload.get("root") or os.getcwd()
     resume_hint = (
@@ -5312,7 +6442,7 @@ def finalize_artifacts(
     if payload.get("model_requested"):
         payload["artifact_footer"]["model_requested"] = payload.get("model_requested")
     payload.setdefault("completed_at", completed_at)
-    payload["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    payload["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
 
     target_meta = Path(str(payload.get("meta") or meta))
     target_meta.write_text(
@@ -5745,6 +6875,7 @@ def _build_parser() -> argparse.ArgumentParser:
     write.add_argument("--loop-nr", default="0")
     write.add_argument("--skill-code", default="")
     write.add_argument("--framework-version", default="")
+    write.add_argument("--execution-controls", default="")
 
     finalize = sub.add_parser(
         "finalize-artifacts",
@@ -5782,7 +6913,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--runtime", choices=RUNTIME_POLICIES, default="local-native"
     )
     interactive_command.add_argument(
-        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+        "--permissions", choices=PERMISSION_POLICIES, default=""
     )
     interactive_command.add_argument("--token-budget", default="safe")
     interactive_command.add_argument(
@@ -5796,6 +6927,7 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument("--root", required=True)
     interactive_command.add_argument("--file", default="")
     interactive_command.add_argument("--model", default="")
+    interactive_command.add_argument("--effort", default="")
     interactive_command.add_argument("--base", default="")
     interactive_command.add_argument("--execution-runtime", default="")
     interactive_command.add_argument("--worktree", default="")
@@ -5815,7 +6947,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--runtime", choices=RUNTIME_POLICIES, default="local-native"
     )
     interactive_launch.add_argument(
-        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+        "--permissions", choices=PERMISSION_POLICIES, default=""
     )
     interactive_launch.add_argument("--root", required=True)
     interactive_launch.add_argument("--prompt", default="")
@@ -5834,6 +6966,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     handoff.add_argument("--command", dest="launch_command", required=True)
     handoff.add_argument("--root-only", action="store_true")
+    handoff.add_argument("--run-id-only", action="store_true")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -5856,6 +6989,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.root_only:
             print(selected.root)
             return 0
+        if args.run_id_only:
+            admission = json.loads(
+                Path(selected.admission_file).read_text(encoding="utf-8")
+            )
+            run_id = str(admission.get("run_id") or "")
+            if not run_id:
+                raise ValueError("admitted interactive command has no run id")
+            print(run_id)
+            return 0
         # Re-enter the canonical owner in this interpreter. The command's
         # executable/environment prefix is descriptive, never executable input.
         return main(launch_args)
@@ -5877,6 +7019,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             loop_nr=args.loop_nr,
             skill_code=args.skill_code,
             framework_version=args.framework_version,
+            execution_controls=args.execution_controls,
         )
         return 0
     if args.command == "finish-meta":
@@ -5909,6 +7052,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "interactive-command":
         from .workflow import read_prompt_stream
+        from .workspace_catalog import WorkspaceCatalogError
 
         prompt = read_prompt_stream(sys.stdin)
         try:
@@ -5924,6 +7068,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.parent_session,
                 args.continuity_parent,
                 model=args.model,
+                effort=args.effort,
                 source_file=args.file,
                 base=args.base,
                 execution_runtime=args.execution_runtime,
@@ -5935,7 +7080,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 resume_last=args.resume_last,
                 session_selection=args.session_selection,
             )
-        except ValueError as exc:
+        except (ValueError, WorkspaceCatalogError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
         print(shlex.join(command))

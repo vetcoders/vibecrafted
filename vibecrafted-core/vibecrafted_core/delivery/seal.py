@@ -21,7 +21,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -176,8 +176,7 @@ def issue_seal(
     return DeliverySeal(
         schema=SEAL_VERSION,
         seal_id=resolved_seal_id,
-        issued_at=issued_at
-        or datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        issued_at=issued_at or datetime.now(UTC).isoformat(timespec="milliseconds"),
         issuer=issuer.strip(),
         run_id=components.run_id,
         lifecycle_id=components.lifecycle_id,

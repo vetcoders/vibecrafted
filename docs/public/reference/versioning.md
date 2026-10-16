@@ -101,7 +101,8 @@ newest first. House rules visible in recent entries:
 
 ```bash
 open https://github.com/vetcoders/vibecrafted/releases/latest
-# Download and verify Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg, then open it.
+# When the release attaches Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg,
+# verify it against its .dmg.sha256, then open it. Otherwise use the bootstrap.
 vibecrafted doctor      # audits the installed generation
 vibecrafted --version   # version + build provenance
 ```

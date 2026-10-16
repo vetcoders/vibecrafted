@@ -42,6 +42,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import plistlib
 import shlex
 import subprocess
 import sys
@@ -49,6 +50,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import framework_python_delegate
 
 # --import-mode=importlib: the shared fixture module is loaded by file.
 _GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
@@ -314,6 +316,7 @@ def _fake_generation(
         "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
         " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', ''),"
         " 'created': os.environ.get('VIBECRAFTED_START_CREATED_SESSION', '')}))\n"
+        f"open({str(capture) + '.calls'!r}, 'a').write('1\\n')\n"
         f"sys.exit({terminal_exit})\n",
     )
     for verb in front_doors:
@@ -1655,8 +1658,11 @@ def test_public_resume_success_path_one_aicx_one_provider_canonical_ids(
         for line in frame_log.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    provider_tabs = [c for c in calls if "new-tab" in c and BOUND_SESSION in c]
-    assert len(provider_tabs) == 1, calls
+    assert not _retired_tabs(calls), calls
+    panes = _interactive_panes(calls, BOUND_SESSION)
+    assert len(panes) == 1, calls
+    assert len(_interactive_panes(calls)) == 1, calls
+    _assert_titled_scripted_pane(panes[0], repo=project_dir.name, root=project_dir)
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
@@ -2032,10 +2038,29 @@ def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
     assert launch is None, "the owned terminal child opened another terminal"
 
 
-def test_start_refuses_an_existing_project_before_terminal_entry(
+def test_start_opens_an_existing_project_without_creating_it_again(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inherited targeting metadata does not turn create-only start into resume."""
+    """A live session enters through the terminal without a new create marker."""
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = _commit_fixture_repo(tmp_path / "mlx-batch-runner")
+    socket_dir = str(tmp_path / "frame-sockets")
+    # A live engine name alone cannot authorize entry. Seed the actual WES
+    # owner, just as an earlier successful start would have recorded it.
+    with monkeypatch.context() as seed_env:
+        seed_env.setenv("VIBECRAFTED_HOME", str(tmp_path / "home/.vibecrafted"))
+        identity = wc.resolve_run_workspace_identity(root=project, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=identity.workspace_id,
+            workspace_instance_id=identity.workspace_instance_id,
+            vibecrafted_session_id=identity.vibecrafted_session_id,
+            runtime="vc-frame",
+            runtime_session_id="mlx-batch-runner",
+            socket_dir=socket_dir,
+            state="live",
+        )
     live = tmp_path / "live-sessions.txt"
     live.write_text("mlx-batch-runner\n", encoding="utf-8")
     result, launch = _run_entry(
@@ -2044,13 +2069,15 @@ def test_start_refuses_an_existing_project_before_terminal_entry(
         extra_env={
             "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
             "VC_FRAME_LIVE": str(live),
+            "VC_FRAME_SOCKET_DIR": socket_dir,
         },
-        expect_launch=False,
+        expect_launch=True,
     )
 
-    assert launch is None, "a create-only collision opened a terminal"
-    assert result.returncode == 3, result.stderr
-    assert "already exists" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert launch is not None
+    assert launch["created"] == "", launch
+    assert _working_directory(launch) == tmp_path / "mlx-batch-runner"
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex"])
@@ -2154,6 +2181,42 @@ def test_real_tty_is_not_rerouted(tmp_path: Path) -> None:
     assert "NEEDS" not in result.stdout
 
 
+@pytest.mark.parametrize("with_env_prefix", [False, True])
+def test_primary_shell_preserves_explicit_interpreter_argv(
+    tmp_path: Path, with_env_prefix: bool
+) -> None:
+    capture = tmp_path / "explicit-argv.json"
+    payload = ["private value with spaces", "literal $HOME; $(false)", "--model"]
+    program = (
+        "import json, os, sys; "
+        "open(sys.argv[1], 'w').write(json.dumps("
+        "{'argv': sys.argv[2:], 'marker': os.environ.get('HANDOFF_MARKER')}))"
+    )
+    argv = [sys.executable, "-I", "-c", program, str(capture), *payload]
+    if with_env_prefix:
+        argv = ["/usr/bin/env", "HANDOFF_MARKER=exact", *argv]
+    result = subprocess.run(
+        ["bash", str(PRIMARY_SHELL), *argv],
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "VIBECRAFTED_QUIET_START": "1",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=15,
+    )
+    assert capture.exists(), (
+        f"explicit command was lost: {result.returncode} {result.stderr}"
+    )
+    observed = json.loads(capture.read_text())
+    assert observed["argv"] == payload
+    assert observed["marker"] == ("exact" if with_env_prefix else None)
+
+
 def test_primary_shell_routes_every_product_verb(tmp_path: Path) -> None:
     """The terminal wrapper used to drop the argv of anything but vc-start."""
     capture = tmp_path / "verb.txt"
@@ -2179,6 +2242,155 @@ def test_primary_shell_routes_every_product_verb(tmp_path: Path) -> None:
         "--runtime",
         "terminal",
     ]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    "declaration,ambient,override",
+    [
+        ("--session", "", ""),
+        ("--session", "SPAWN_ROOT", ""),
+        ("--session", "VIBECRAFTED_ROOT", ""),
+        ("positional", "", ""),
+        ("literal", "", ""),
+        ("--session", "SPAWN_ROOT", "../worker-checkout"),
+    ],
+)
+def test_exact_resume_checkout_is_pinned_before_terminal_and_primary_shell(
+    tmp_path: Path, shell: str, declaration: str, ambient: str, override: str
+) -> None:
+    native = "00000000-0000-4000-8000-000000000001"
+    checkout = _commit_fixture_repo(tmp_path / "worker-checkout")
+    meta = tmp_path / "home/.vibecrafted/control_plane/runtime_runs/source/meta.json"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": "source",
+                "agent": "claude",
+                "agent_session_id": native,
+                "root": str(checkout),
+            }
+        )
+    )
+    session_arg = {"--session": "--session ", "positional": "", "literal": "-- "}[
+        declaration
+    ] + native
+    root_arg = f" --root {shlex.quote(override)}" if override else ""
+    result, launch = _run_entry(
+        tmp_path,
+        f"vc-resume claude {session_arg}{root_arg}",
+        shell=shell,
+        extra_env={ambient: str(tmp_path / "mlx-batch-runner")} if ambient else None,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert launch is not None
+    assert _working_directory(launch) == checkout
+    hosted = _hosted_argv(launch)
+    args = _resume_front_door_args(hosted)
+    if declaration == "--session":
+        assert _flag_value(args, "--session") == native
+    else:
+        assert native in args
+    assert Path(_flag_value(args, "--root")) == checkout
+    selection = json.loads(_flag_value(args, "--session-selection"))
+    assert selection["selection_root"] == str(checkout)
+    assert selection["agent_session_id"] == native
+    if declaration == "literal":
+        assert args.index("--session-selection") < args.index("--")
+        assert args.index("--root") < args.index("--")
+    assert _parent_aicx_calls(tmp_path) == []
+
+    # Cross the actual primary-shell selector with an owned product sentinel,
+    # not a provider or a second terminal host. The public vector must survive.
+    captured = tmp_path / "primary-reentry.json"
+    front_door = _write(
+        Path(hosted[1]),
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        f"open({str(captured)!r}, 'w').write(json.dumps({{'cwd': os.getcwd(), 'argv': sys.argv[1:]}}))\n",
+    )
+    env = {k: v for k, v in os.environ.items() if k not in PUBLIC_ENTRY_ISOLATE_ENV}
+    env.update(
+        HOME=str(tmp_path / "home"),
+        VIBECRAFTED_HOME=str(tmp_path / "home/.vibecrafted"),
+    )
+    child = subprocess.run(
+        ["bash", str(PRIMARY_SHELL), str(front_door), *args],
+        check=False,
+        cwd=checkout,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    payload = json.loads(captured.read_text())
+    assert Path(payload["cwd"]) == checkout
+    assert payload["argv"] == args
+    assert json.loads((tmp_path / "terminal-launch.json").read_text()) == launch
+    assert (tmp_path / "terminal-launch.json.calls").read_text().splitlines() == ["1"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["explicit", "missing", "conflicting", "provider", "unknown"]
+)
+def test_exact_resume_checkout_refusal_precedes_terminal(
+    tmp_path: Path, failure: str
+) -> None:
+    native = "00000000-0000-4000-8000-000000000001"
+    checkout = tmp_path / "worker-checkout"
+    if failure != "missing":
+        _commit_fixture_repo(checkout)
+    if failure != "unknown":
+        meta = (
+            tmp_path / "home/.vibecrafted/control_plane/runtime_runs/source/meta.json"
+        )
+        meta.parent.mkdir(parents=True)
+        meta.write_text(
+            json.dumps(
+                {
+                    "run_id": "source",
+                    "agent": "codex" if failure == "provider" else "claude",
+                    "agent_session_id": native,
+                    "root": str(checkout),
+                }
+            )
+        )
+        if failure == "conflicting":
+            other = meta.parent.parent / "other/meta.json"
+            other.parent.mkdir()
+            other.write_text(
+                json.dumps(
+                    {
+                        "run_id": "other",
+                        "agent": "claude",
+                        "agent_session_id": native,
+                        "root": str(tmp_path / "sibling"),
+                    }
+                )
+            )
+    override = (
+        f" --root {shlex.quote(str(tmp_path / 'mlx-batch-runner'))}"
+        if failure == "explicit"
+        else ""
+    )
+    result, launch = _run_entry(
+        tmp_path,
+        f"vc-resume claude --session {native}{override}",
+        expect_launch=False,
+    )
+    assert result.returncode != 0
+    assert launch is None, "a refused native session must not open a terminal first"
+    expected = {
+        "explicit": "different repository checkout",
+        "missing": "not an existing directory",
+        "conflicting": "conflicting recorded session checkouts",
+        "provider": "recorded=codex requested=claude",
+        "unknown": "no recorded repository checkout",
+    }[failure]
+    assert expected in result.stderr
+    assert _parent_aicx_calls(tmp_path) == []
 
 
 # --------------------------------------------------------------------------
@@ -2264,6 +2476,35 @@ def _first_index(calls: list[list[str]], needle: str) -> int:
     return -1
 
 
+def _interactive_panes(
+    calls: list[list[str]], session: str | None = None
+) -> list[list[str]]:
+    """The provider surface of an interactive launch: a `new-pane --floating`
+    (the Agents surface), optionally addressed to exactly one session. A
+    `new-tab` is the retired projection and is asserted absent separately."""
+    return [
+        argv
+        for argv in calls
+        if "new-pane" in argv
+        and "--floating" in argv
+        and (session is None or argv[:2] == ["--session", session])
+    ]
+
+
+def _retired_tabs(calls: list[list[str]]) -> list[list[str]]:
+    return [argv for argv in calls if "new-tab" in argv and "--help" not in argv]
+
+
+def _assert_titled_scripted_pane(
+    pane: list[str], *, repo: str, root: Path, agent: str = "codex"
+) -> None:
+    """Correctly named (`<repo> · <agent> · <model>`, model unknown without an
+    override), launched in the exact root, with its own launch script."""
+    assert pane[pane.index("--name") + 1] == f"{repo} · {agent} · unknown", pane
+    assert Path(pane[pane.index("--cwd") + 1]).resolve() == root.resolve(), pane
+    assert Path(pane[pane.index("--") + 1]).is_file(), pane
+
+
 def _foreground_attach_index(calls: list[list[str]]) -> int:
     """Index of the blocking handover, which is `attach <session>` and nothing else.
 
@@ -2289,15 +2530,17 @@ def test_provider_tab_is_created_before_the_foreground_attach(
     result, calls = _run_child_resume(tmp_path)
 
     created = _first_index(calls, "--new-session-with-layout")
-    new_tab = _first_index(calls, "new-tab")
+    panes = _interactive_panes(calls)
     attach = _foreground_attach_index(calls)
 
     assert created >= 0, f"the project session was never created: {calls}"
-    assert new_tab >= 0, f"no provider tab was created: {calls}\n{result.stdout}"
+    assert len(panes) == 1, f"expected one provider pane: {calls}\n{result.stdout}"
+    assert not _retired_tabs(calls), calls
     assert attach >= 0, f"the terminal was never handed over: {calls}"
-    assert created < new_tab < attach, (
+    new_pane = calls.index(panes[0])
+    assert created < new_pane < attach, (
         "wrong order -- the foreground attach must be the LAST act: "
-        f"created={created} new_tab={new_tab} attach={attach} calls={calls}"
+        f"created={created} new_pane={new_pane} attach={attach} calls={calls}"
     )
 
 
@@ -2593,10 +2836,19 @@ def test_child_creates_exactly_one_tab_and_one_aicx_pack(tmp_path: Path) -> None
     """Exactly once: no duplicated AICX composition, no second provider launch."""
     _result, calls = _run_child_resume(tmp_path)
 
-    tabs = [argv for argv in calls if "new-tab" in argv and "--help" not in argv]
+    panes = _interactive_panes(calls)
     attaches = [argv for argv in calls if argv[:1] == ["attach"]]
-    assert len(tabs) == 1, f"expected exactly one provider tab, got {tabs}"
+    assert not _retired_tabs(calls), calls
+    assert len(panes) == 1, f"expected exactly one provider pane, got {panes}"
     assert len(attaches) == 1, f"expected exactly one handover, got {attaches}"
+    # The pane lands in the very session that was created and then attached.
+    created = calls[_first_index(calls, "--new-session-with-layout")]
+    session = created[-1]
+    assert panes[0][:2] == ["--session", session], (panes, created)
+    assert attaches[0] == ["attach", session], attaches
+    _assert_titled_scripted_pane(
+        panes[0], repo="mlx-batch-runner", root=tmp_path / "mlx-batch-runner"
+    )
 
     aicx = tmp_path / "aicx-called.txt"
     assert aicx.exists(), "the child must assemble the continuity pack"
@@ -2913,6 +3165,154 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     assert _parent_aicx_calls(tmp_path) == []
 
 
+def _terminal_path_fence(
+    entry: Path, host: Path, witnesses: tuple[Path, ...] = ()
+) -> list[str]:
+    """Only the copied entry, recording host and their interpreters may exec."""
+    if sys.platform != "darwin":
+        return [str(entry)]
+    sandbox = Path("/usr/bin/sandbox-exec")
+    assert sandbox.is_file(), "no enforceable child-only macOS execution fence"
+    allowed = {
+        entry.resolve(),
+        host.resolve(),
+        # Darwin admission checks X_OK on the generation witness as well.
+        # Seatbelt applies process-exec to that check, before any exec occurs.
+        (entry.parent.parent / "libexec/vc-terminal").resolve(),
+        Path(sys.executable).resolve(),
+        Path("/bin/bash"),
+        Path("/usr/bin/uname"),
+        Path("/usr/libexec/PlistBuddy"),
+        *(path.resolve() for path in witnesses),
+    }
+    # Homebrew's python3.x trampoline posix_spawns exactly this Framework app.
+    if framework_python := framework_python_delegate():
+        allowed.add(framework_python)
+    literals = " ".join(
+        f"(literal {json.dumps(str(path))})" for path in sorted(allowed)
+    )
+    profile = (
+        f"(version 1)(allow default)(deny process-exec)(allow process-exec {literals})"
+    )
+    return [str(sandbox), "-p", profile, str(entry)]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS execution sandbox")
+def test_terminal_path_fence_admits_only_the_exact_framework_delegate(
+    tmp_path: Path,
+) -> None:
+    delegate = framework_python_delegate()
+    entry = tmp_path / "entry"
+    _write(entry, "#!/bin/bash\n")
+    profile = _terminal_path_fence(entry, entry)[2]
+    if delegate is None:
+        pytest.skip("interpreter is not a macOS Framework build")
+    assert profile.count(json.dumps(str(delegate))) == 1
+    assert delegate.is_relative_to(Path(sys.base_prefix).resolve())
+    assert "/Applications" not in profile and "(subpath" not in profile
+    # The trampoline itself must really exec under this very fence.
+    probe = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            profile,
+            str(Path(sys.executable).resolve()),
+            "-c",
+            "print('framework-ok')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.returncode == 0 and probe.stdout.strip() == "framework-ok", (
+        probe.stderr
+    )
+    # Foreign denied-exec control: an executable outside the fence stays refused.
+    foreign = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert foreign.returncode != 0
+    assert "Operation not permitted" in foreign.stderr
+
+
+def _terminal_path_bind_bundle(source: str, bundle: Path) -> str:
+    """Bind both fixed-host checks in the test copy; fail on source drift."""
+    bindings = {
+        'local candidate="${1:-}" bundle=/Applications/Vibecrafted.app': f'local candidate="${{1:-}}" bundle={shlex.quote(str(bundle))}',
+        'local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal': f'local fallback="$1" candidate={shlex.quote(str(bundle / "Contents/MacOS/vc-terminal"))}',
+    }
+    for original, replacement in bindings.items():
+        assert source.count(original) == 1, (
+            f"fixed-host fixture binding drift: {original}"
+        )
+        source = source.replace(original, replacement, 1)
+    return source
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS execution sandbox")
+def test_terminal_path_fence_controls(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed-canary"
+    refused = tmp_path / "refused-canary"
+    for path in (allowed, refused):
+        _write(path, "#!/bin/bash\nprintf controlled-canary\n")
+    command = _terminal_path_fence(allowed, allowed)
+    positive = subprocess.run(
+        command, capture_output=True, text=True, timeout=10, check=False
+    )
+    assert positive.returncode == 0, positive.stderr
+    assert positive.stdout == "controlled-canary"
+    command[-1] = str(refused)
+    negative = subprocess.run(
+        command, capture_output=True, text=True, timeout=10, check=False
+    )
+    assert negative.returncode != 0
+    assert "Operation not permitted" in negative.stderr
+    assert negative.stdout == ""
+    # The fence also survives a permitted shell execing an absolute child.
+    child = subprocess.run(
+        [*command[:-1], "/bin/bash", "-c", 'exec "$1"', "canary", str(refused)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert child.returncode != 0
+    assert "Operation not permitted" in child.stderr
+    assert child.stdout == ""
+    # Admission's -x check must refuse the same path without executing it.
+    admission = subprocess.run(
+        [
+            *command[:-1],
+            "/bin/bash",
+            "-c",
+            '[[ -x "$1" && ! -x "$2" ]]',
+            "canary",
+            str(allowed),
+            str(refused),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert admission.returncode == 0, admission.stderr
+
+
+def test_terminal_path_bundle_binding_fails_closed(tmp_path: Path) -> None:
+    source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
+    for changed in (
+        source.replace("bundle=/Applications", "bundle=/changed"),
+        source + source,
+    ):
+        with pytest.raises(AssertionError, match="fixture binding drift"):
+            _terminal_path_bind_bundle(changed, tmp_path / "private app")
+
+
 def _run_terminal_path_entry(
     tmp_path: Path,
     *,
@@ -2920,31 +3320,83 @@ def _run_terminal_path_entry(
     inherited_path: str,
     declare_runtime_home: bool = True,
     inherited_runtime_root: Path | None = None,
+    argv: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Run the physical terminal entry against a host that records its child env."""
     home = tmp_path / "home"
     generation = runtime_home / "releases" / "4.3.1+gSELECTED"
     capture = tmp_path / "terminal-path.json"
     entry = generation / "scripts" / "vc-terminal-product-entry.sh"
-    _write(
-        entry,
-        (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
-            encoding="utf-8"
-        ),
+    source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
     )
+    bundle = tmp_path / "private applications/Vibecrafted.app"
+    host = generation / "libexec/vc-terminal"
+    if sys.platform == "darwin":
+        source = _terminal_path_bind_bundle(source, bundle)
+        host = bundle / "Contents/MacOS/vc-terminal"
+        _write(
+            bundle / "Contents/Info.plist",
+            plistlib.dumps(
+                {
+                    "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                    "CFBundleExecutable": "Vibecrafted",
+                }
+            ).decode(),
+        )
+        # The private bundle host passes the same single-host admission.
+        _write(
+            generation / "vibecrafted-core/vibecrafted_core/terminal_host.py",
+            (
+                REPO_ROOT / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+            ).read_text(encoding="utf-8"),
+        )
+        (generation / "bin").mkdir(parents=True, exist_ok=True)
+        if not (generation / "bin/python3").exists():
+            (generation / "bin/python3").symlink_to(sys.executable)
+    _write(entry, source)
     _write(home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[window]\n")
     _write(
-        generation / "libexec/vc-terminal",
+        host,
         f"#!{sys.executable}\n"
-        "import json, os, shutil\n"
+        "import json, os, shutil, sys\n"
         f"open({str(capture)!r}, 'w').write(json.dumps({{\n"
         "  'path': os.environ.get('PATH', ''),\n"
         "  'founder_tool': shutil.which('founder-tool'),\n"
         "  'runtime_home': os.environ.get('VIBECRAFTED_RUNTIME_HOME'),\n"
         "  'runtime_root': os.environ.get('VIBECRAFTED_RUNTIME_ROOT'),\n"
         "  'runtime_bin': os.environ.get('VIBECRAFTED_RUNTIME_BIN'),\n"
+        "  'root': os.environ.get('VIBECRAFTED_ROOT'),\n"
+        "  'host': os.environ.get('VIBECRAFTED_TERMINAL_HOST'),\n"
+        "  'self': sys.argv[0],\n"
+        "  'argv': sys.argv[1:],\n"
+        "  'pythonpath': os.environ.get('PYTHONPATH'),\n"
+        "  'pythonhome': os.environ.get('PYTHONHOME'),\n"
         "}))\n",
     )
+    if sys.platform == "darwin":
+        # Admission pairs the bundle host with the generation's own terminal by
+        # verified code identity: identical recording bytes, one ad-hoc
+        # signature. The executed path (`self`) still proves the bundle won.
+        paired = _write(
+            generation / "libexec/vc-terminal", host.read_text(encoding="utf-8")
+        )
+        for path in (paired, host):
+            assert not path.resolve().is_relative_to(Path("/Applications"))
+            subprocess.run(
+                [
+                    "/usr/bin/codesign",
+                    "--force",
+                    "-s",
+                    "-",
+                    "-i",
+                    "io.vetcoders.vibecrafted.vc-terminal-fixture",
+                    str(path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
     env = os.environ.copy()
     for name in (
         "VIBECRAFTED_RUNTIME_HOME",
@@ -2954,18 +3406,66 @@ def _run_terminal_path_entry(
         "VIBECRAFTED_PYTHON",
         "VIBECRAFTED_VC_FRAME_BIN",
         "VIBECRAFTED_TERMINAL_HOST",
+        "PYTHONPATH",
+        "PYTHONHOME",
     ):
         env.pop(name, None)
-    env.update({"HOME": str(home), "PATH": inherited_path})
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": inherited_path,
+            "VIBECRAFTED_HOME": str(tmp_path / "isolated-vibecrafted"),
+        }
+    )
     if declare_runtime_home:
         env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
     if inherited_runtime_root is not None:
         env["VIBECRAFTED_RUNTIME_ROOT"] = str(inherited_runtime_root)
+    # shutil.which also uses X_OK. Admit only the two existing private PATH
+    # witnesses, checking their bytes rather than allowing inherited PATH dirs.
+    witnesses = []
+    for directory in ("founder bin", "founder-bin"):
+        witness = tmp_path / directory / "founder-tool"
+        if witness.exists():
+            assert not witness.is_symlink()
+            assert witness.read_text() == "#!/bin/sh\nprintf founder-tool\n"
+            witnesses.append(witness)
     result = subprocess.run(
-        [str(entry)], capture_output=True, text=True, env=env, check=False
+        [*_terminal_path_fence(entry, host, tuple(witnesses)), *argv],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(capture.read_text(encoding="utf-8"))
+
+
+def test_terminal_path_entry_records_private_host_and_exact_argv(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime home"
+    argv = ("--title", "space ' quote", "-e", "/private/record-only", "--root", "a b")
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path="/usr/bin:/bin", argv=argv
+    )
+    generation = runtime_home / "releases/4.3.1+gSELECTED"
+    host = (
+        tmp_path / "private applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-terminal"
+    )
+    assert receipt["host"] == str(host)
+    assert receipt["self"] == str(host)
+    assert receipt["root"] == receipt["runtime_root"] == str(generation)
+    assert receipt["argv"] == [
+        "--config-file",
+        str(tmp_path / "home/.config/vibecrafted/vc-terminal/vc-terminal.toml"),
+        *argv,
+    ]
+    assert receipt["pythonpath"] is None
+    assert receipt["pythonhome"] is None
 
 
 def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(

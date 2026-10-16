@@ -409,6 +409,41 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     assert "api.github.com" not in capture.read_text(encoding="utf-8")
 
 
+def _write_supplied_pack_candidate(source_dir: Path) -> None:
+    """Candidate whose Makefile must stay unused when a pack is supplied.
+
+    The supplied-pack route runs the two steps of the Makefile `install` recipe
+    directly; a make invocation here would mean a minimal host (no make) fails.
+    """
+    (source_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    (source_dir / "Makefile").write_text(
+        "install install-auto:\n\t@echo 'make must not run' >&2; exit 97\n",
+        encoding="utf-8",
+    )
+    _write_executable(
+        source_dir / "scripts" / "install-runtime-pack.sh",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$@" > "$PACK_CAPTURE"\n'
+        'printf "%s\\n" "$VIBECRAFTED_RUNTIME_PACK" > "$PACK_CAPTURE.pack"\n',
+    )
+    _write_executable(
+        source_dir / "scripts" / "install-foundations.sh",
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$FOUNDATIONS_CAPTURE"\n',
+    )
+
+
+def _path_without_make(tmp_path: Path, fake_bin: Path) -> str:
+    """PATH of the host's system tools minus make: the minimal public host."""
+    tools = tmp_path / "tools-no-make"
+    tools.mkdir()
+    for directory in ("/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+        for entry in Path(directory).iterdir():
+            if entry.name in {"make", "gmake"} or (tools / entry.name).exists():
+                continue
+            (tools / entry.name).symlink_to(entry)
+    return f"{fake_bin}:{tools}"
+
+
 RELEASE_BASE = "https://release.invalid/v9.9.9"
 RELEASE_ARCHIVE = "vibecrafted-v9.9.9.tar.gz"
 
@@ -455,11 +490,7 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     pack_capture = tmp_path / "pack-installer-args.txt"
     source_dir = tmp_path / "source"
     (source_dir / "scripts").mkdir(parents=True)
-    (source_dir / "Makefile").write_text("install:\n\t@echo ok\n", encoding="utf-8")
-    _write_executable(
-        source_dir / "scripts" / "install-runtime-pack.sh",
-        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$PACK_CAPTURE"\n',
-    )
+    _write_supplied_pack_candidate(source_dir)
     _write_distribution_manifest_stub(source_dir, stage_marker=stage_marker)
 
     server = tmp_path / "server"
@@ -500,6 +531,7 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     env["CURL_CAPTURE"] = str(capture)
     env["FAKE_RELEASE_ROOT"] = str(server)
     env["PACK_CAPTURE"] = str(pack_capture)
+    env["FOUNDATIONS_CAPTURE"] = str(tmp_path / "foundations-args.txt")
 
     result = subprocess.run(
         ["bash", str(INSTALL_SH), "--yes"],
@@ -520,6 +552,9 @@ def test_channel_archive_checksum_is_matched_by_release_name(
             "--expected-source-revision",
             "0123456789abcdef0123456789abcdef01234567",
         ]
+        assert (tmp_path / "foundations-args.txt").read_text(
+            encoding="utf-8"
+        ).splitlines() == ["loctree", "aicx", "prview", "screenscribe"]
         return
 
     expected = {
@@ -1514,4 +1549,240 @@ def test_fixture_required_files_track_canonical_bootstrap_manifest() -> None:
     )
     assert not manifest_missing, (
         f"FIXTURE_REQUIRED_FILES drifted from distribution_manifest.py REQUIRED_FILES: {manifest_missing}"
+    )
+
+
+def _supplied_pack_fixture(tmp_path: Path) -> dict[str, Path]:
+    source_dir = tmp_path / "source"
+    (source_dir / "scripts" / "installer").mkdir(parents=True)
+    _write_supplied_pack_candidate(source_dir)
+    _write_distribution_manifest_stub(source_dir)
+    archive = tmp_path / "vibecrafted-bootstrap.tar.gz"
+    _write_v2_archive(source_dir, archive, "vibecrafted-main")
+    pack = tmp_path / "Pack.tar.gz"
+    for name in ("", ".sha256", ".sig"):
+        Path(f"{pack}{name}").write_text("fixture pack\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    home = tmp_path / "home"
+    fake_bin.mkdir()
+    home.mkdir()
+    return {"archive": archive, "pack": pack, "bin": fake_bin, "home": home}
+
+
+def _supplied_pack_env(tmp_path: Path, fixture: dict[str, Path]) -> dict[str, str]:
+    env = os.environ.copy()
+    home = fixture["home"]
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = _path_without_make(tmp_path, fixture["bin"])
+    env["PACK_CAPTURE"] = str(tmp_path / "pack-installer-args.txt")
+    env["FOUNDATIONS_CAPTURE"] = str(tmp_path / "foundations-args.txt")
+    return env
+
+
+@pytest.mark.parametrize("explicit_target", [[], ["install"]])
+def test_install_sh_supplied_pack_installs_without_make(
+    tmp_path: Path, explicit_target: list[str]
+) -> None:
+    """A supplied signed pack must not need make: the public Runtime Pack
+    route's preflight excludes it, and the host here has none (PR 112 review)."""
+    fixture = _supplied_pack_fixture(tmp_path)
+    env = _supplied_pack_env(tmp_path, fixture)
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--yes",
+            "--archive-file",
+            str(fixture["archive"]),
+            "--runtime-pack-file",
+            str(fixture["pack"]),
+            *explicit_target,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "make: command not found" not in result.stderr
+    assert (tmp_path / "pack-installer-args.txt").read_text().splitlines() == [
+        "--expected-source-revision",
+        "0123456789abcdef0123456789abcdef01234567",
+    ]
+    assert (tmp_path / "pack-installer-args.txt.pack").read_text().strip() == str(
+        fixture["pack"]
+    )
+    assert (tmp_path / "foundations-args.txt").read_text().splitlines() == [
+        "loctree",
+        "aicx",
+        "prview",
+        "screenscribe",
+    ]
+
+
+def test_install_sh_pack_route_failure_is_the_installers_verdict(
+    tmp_path: Path,
+) -> None:
+    """The direct route keeps the candidate installer's exit status."""
+    fixture = _supplied_pack_fixture(tmp_path)
+    env = _supplied_pack_env(tmp_path, fixture)
+    # Replace the staged pack installer with one that refuses.
+    source_dir = tmp_path / "source"
+    _write_executable(
+        source_dir / "scripts" / "install-runtime-pack.sh",
+        "#!/usr/bin/env bash\necho 'pack refused' >&2\nexit 23\n",
+    )
+    _write_distribution_manifest_stub(source_dir)
+    _write_v2_archive(source_dir, fixture["archive"], "vibecrafted-main")
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--yes",
+            "--archive-file",
+            str(fixture["archive"]),
+            "--runtime-pack-file",
+            str(fixture["pack"]),
+            "install",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 23, result.stdout + result.stderr
+    assert "pack refused" in result.stderr
+    assert not (tmp_path / "foundations-args.txt").exists()
+
+
+def test_install_sh_attended_tui_carries_the_chosen_pack(tmp_path: Path) -> None:
+    """The attended TUI runs the manifest's bare `make install`; it must install
+    the pack the bootstrap verified, not silently build from source."""
+    fixture = _supplied_pack_fixture(tmp_path)
+    capture = tmp_path / "uv-env.txt"
+    _write_executable(
+        fixture["bin"] / "uv",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n%s\\n" "${RUNTIME_PACK:-}" '
+        '"${RUNTIME_PACK_EXPECTED_SOURCE_REVISION:-}" > "$UV_CAPTURE"\n',
+    )
+    env = _supplied_pack_env(tmp_path, fixture)
+    # make is genuinely required here (the manifest phase), so the attended
+    # route keeps the host's make; only uv is stubbed.
+    env["PATH"] = f"{fixture['bin']}:/usr/bin:/bin:/usr/sbin:/sbin"
+    command = " ; ".join(
+        f"export {key}={shlex.quote(value)}"
+        for key, value in {
+            "HOME": env["HOME"],
+            "XDG_CONFIG_HOME": env["XDG_CONFIG_HOME"],
+            "VIBECRAFTED_HOME": env["VIBECRAFTED_HOME"],
+            "PATH": env["PATH"],
+            "UV_CAPTURE": str(capture),
+        }.items()
+    ) + (
+        f" ; bash {shlex.quote(str(INSTALL_SH))} --yes"
+        f" --archive-file {shlex.quote(str(fixture['archive']))}"
+        f" --runtime-pack-file {shlex.quote(str(fixture['pack']))}"
+    )
+    exit_code, output = _run_with_tty(command)
+    assert exit_code == 0, output
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        str(fixture["pack"]),
+        "0123456789abcdef0123456789abcdef01234567",
+    ]
+
+
+def test_install_sh_attended_tui_without_make_refuses_before_download(
+    tmp_path: Path,
+) -> None:
+    fixture = _supplied_pack_fixture(tmp_path)
+    env = _supplied_pack_env(tmp_path, fixture)
+    command = " ; ".join(
+        f"export {key}={shlex.quote(value)}"
+        for key, value in {
+            "HOME": env["HOME"],
+            "XDG_CONFIG_HOME": env["XDG_CONFIG_HOME"],
+            "VIBECRAFTED_HOME": env["VIBECRAFTED_HOME"],
+            "PATH": env["PATH"],
+        }.items()
+    ) + (
+        f" ; bash {shlex.quote(str(INSTALL_SH))} --yes"
+        f" --archive-file {shlex.quote(str(fixture['archive']))}"
+        f" --runtime-pack-file {shlex.quote(str(fixture['pack']))}"
+    )
+    exit_code, output = _run_with_tty(command)
+    assert exit_code != 0
+    assert "missing required tools: make" in output
+
+
+def test_pack_route_mirrors_the_makefile_install_recipe() -> None:
+    """install_selected_runtime_pack must stay the recipe's two steps."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    recipe = makefile.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+    script = INSTALL_SH.read_text(encoding="utf-8")
+    route = script.split("install_selected_runtime_pack() {", 1)[1].split("\n}\n", 1)[0]
+    assert "bash scripts/install-runtime-pack.sh" in route
+    assert '--expected-source-revision "$expected_revision"' in route
+    assert (
+        "bash scripts/install-runtime-pack.sh"
+        in recipe.replace(
+            '"$(RUNTIME_PACK_INSTALLER)"', "scripts/install-runtime-pack.sh"
+        )
+        or "RUNTIME_PACK_INSTALLER" in recipe
+    )
+    assert (
+        "bash scripts/install-foundations.sh loctree aicx prview screenscribe" in recipe
+    )
+    assert (
+        "bash scripts/install-foundations.sh loctree aicx prview screenscribe" in route
+    )
+
+
+def test_install_sh_gui_hands_the_chosen_pack_to_the_gui_installer(
+    tmp_path: Path,
+) -> None:
+    """--gui branches before the TUI/make routes; the verified pack must still
+    reach the GUI installer, and no make is required for that advertised route."""
+    fixture = _supplied_pack_fixture(tmp_path)
+    capture = tmp_path / "gui-argv.txt"
+    (tmp_path / "source" / "scripts" / "installer_gui.py").write_text(
+        "import os, sys\n"
+        "open(os.environ['GUI_CAPTURE'], 'w').write('\\n'.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    source_dir = tmp_path / "source"
+    _write_distribution_manifest_stub(source_dir)
+    _write_v2_archive(source_dir, fixture["archive"], "vibecrafted-main")
+    env = _supplied_pack_env(tmp_path, fixture)
+    env["GUI_CAPTURE"] = str(capture)
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--yes",
+            "--gui",
+            "--archive-file",
+            str(fixture["archive"]),
+            "--runtime-pack-file",
+            str(fixture["pack"]),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert argv[argv.index("--runtime-pack") + 1] == str(fixture["pack"])
+    assert (
+        argv[argv.index("--expected-source-revision") + 1]
+        == "0123456789abcdef0123456789abcdef01234567"
     )

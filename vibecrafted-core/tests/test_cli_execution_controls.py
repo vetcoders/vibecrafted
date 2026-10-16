@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from vibecrafted_core import workflow
+from vibecrafted_core.continuity.capabilities import ProbeResult
+from vibecrafted_core.execution_controls import resolve_execution_controls
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
 # Claude Code's documented hard gate (see execution_controls.SANDBOX_EVIDENCE).
@@ -219,7 +222,8 @@ def test_founder_command_enforces_auto_permissions_and_sandbox(world: _World) ->
     assert meta["model_requested"] == "claude-fable-5-1"
 
 
-def test_omitting_the_flags_keeps_the_historical_default(world: _World) -> None:
+def test_omitting_the_flags_resolves_the_auto_default(world: _World) -> None:
+    """Fleet doctrine (Founder 13716da4a2b8af7049ea1565): no flags = auto."""
     result = world.launch(
         "workflow", "claude", "--repo", str(world.repo), "--prompt", "default run"
     )
@@ -229,15 +233,16 @@ def test_omitting_the_flags_keeps_the_historical_default(world: _World) -> None:
     assert receipt["accepted"] is True
     assert "worktree" not in receipt
     worker = receipt["worker_command"]
-    assert worker[-2:] == ["--permission-mode", "bypassPermissions"]
+    assert worker[-2:] == ["--permission-mode", "auto"]
     assert "--settings" not in worker
     controls = receipt["execution_controls"]
     assert controls["permissions_requested"] == ""
-    assert controls["permissions_effective"] == "bypass"
+    assert controls["permissions_effective"] == "auto"
+    assert controls["permissions_source"] == "default"
     assert controls["sandbox_requested"] == ""
     assert controls["sandbox_effective"] == "provider-default"
     argv = _await_argv(world.argv_file)
-    assert argv[-2:] == ["--permission-mode", "bypassPermissions"]
+    assert argv[-2:] == ["--permission-mode", "auto"]
     assert "--settings" not in argv
 
 
@@ -382,6 +387,31 @@ def test_agy_sandbox_false_is_refused_before_the_provider_launches(
     assert not runs.exists() or not any(runs.iterdir())
 
 
+def test_omp_workflow_launch_records_the_resolved_argv(tmp_path: Path) -> None:
+    """omp worker end to end through the typed lane, provider stubbed.
+
+    The default launch resolves the fleet auto doctrine onto omp's native
+    write tier; argv carries flags only, the prompt rides stdin.
+    """
+    world = _World(tmp_path, provider="omp")
+    result = world.launch("workflow", "omp", "--repo", str(world.repo), "-p", "x")
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["accepted"] is True
+    assert receipt["worker_command"][1:] == [
+        "-p",
+        "--mode",
+        "json",
+        "--approval-mode",
+        "write",
+    ]
+    controls = receipt["execution_controls"]
+    assert controls["permissions_effective"] == "auto"
+    assert controls["permissions_source"] == "default"
+    argv = _await_argv(world.argv_file)
+    assert argv == ["-p", "--mode", "json", "--approval-mode", "write"]
+
+
 def test_codex_auto_uses_the_exec_surface(tmp_path: Path) -> None:
     world = _World(tmp_path, provider="codex")
     result = world.launch(
@@ -410,8 +440,18 @@ def test_codex_auto_uses_the_exec_surface(tmp_path: Path) -> None:
 
 def test_codex_bypass_with_sandbox_true_keeps_the_sandbox(tmp_path: Path) -> None:
     world = _World(tmp_path, provider="codex")
+    # bypass is an explicit opt-in (doctrine 13716da4a2b8af7049ea1565).
     result = world.launch(
-        "workflow", "codex", "--sandbox", "true", "--repo", str(world.repo), "-p", "x"
+        "workflow",
+        "codex",
+        "--permissions",
+        "bypass",
+        "--sandbox",
+        "true",
+        "--repo",
+        str(world.repo),
+        "-p",
+        "x",
     )
     assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)
@@ -469,11 +509,16 @@ def test_help_surface_documents_the_controls(world: _World) -> None:
     result = _cli(["help", "workflow"], cwd=world.outside, env=world.env)
     assert result.returncode == 0, result.stderr
     assert "--permissions <policy>" in result.stdout
+    # Auto-first: the help never advertises bypass as the default.
+    assert "default: per-agent/global config, else auto" in result.stdout
+    assert "default: bypass" not in result.stdout
     assert "--sandbox [true|false]" in result.stdout
     assert "--permissions auto --sandbox true" in result.stdout
     argparse_help = _cli(["workflow", "--help"], cwd=world.outside, env=world.env)
     assert argparse_help.returncode == 0
     assert "--permissions" in argparse_help.stdout
+    assert "else auto" in " ".join(argparse_help.stdout.split())
+    assert "default: bypass" not in argparse_help.stdout
     assert "--sandbox" in argparse_help.stdout
 
 
@@ -495,3 +540,57 @@ def test_human_receipt_prints_requested_and_effective(world: _World) -> None:
     assert result.returncode == 0, result.stderr
     assert "permissions: read-only  (requested: read-only)" in result.stdout
     assert "sandbox:    provider-default  (requested: (default))" in result.stdout
+
+
+def test_native_resume_keeps_admitted_policy_in_provider_argv_and_receipt(
+    world: _World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing durable config cannot escalate a resumed read-only session."""
+    native_id = "admitted-native-session"
+    source = _runtime_runs(world.env) / "work-admitted" / "meta.json"
+    source.parent.mkdir(parents=True)
+    admitted = resolve_execution_controls("claude", permissions="read-only")
+    source.write_text(
+        json.dumps(
+            {
+                "run_id": "work-admitted",
+                "agent": "claude",
+                "agent_session_id": native_id,
+                "root": str(world.repo),
+                "execution_controls": admitted.receipt(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('permissions = "bypass"\n', encoding="utf-8")
+    for key in ("VIBECRAFTED_HOME", "PATH", "HOME"):
+        monkeypatch.setenv(key, world.env[key])
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent.parent))
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: ProbeResult(
+            agent=agent,
+            state="confirmed",
+            executable=str(world.bin / "claude"),
+            version="fixture",
+        ),
+    )
+    result = workflow.manual_resume_session(
+        "claude",
+        native_id,
+        CORE_ROOT,
+        prompt="continue without mutations",
+        root=world.repo,
+    )
+    assert result["accepted"] is True, result
+    argv = _await_argv(world.argv_file)
+    assert argv[argv.index("--resume") + 1] == native_id
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in argv
+    receipt = json.loads(
+        (_runtime_runs(world.env) / result["run_id"] / "meta.json").read_text()
+    )["execution_controls"]
+    assert receipt == admitted.receipt()

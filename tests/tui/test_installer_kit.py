@@ -235,6 +235,13 @@ def test_detached_kit_installs_signed_pack(tmp_path: Path, key_mode: str) -> Non
         assert result.returncode != 0
         assert "signature verification failed" in result.stderr
         assert not active.exists()
+    elif platform.system() == "Darwin":
+        # A trusted standalone carrier cannot publish an unusable GUI front
+        # door. The paired matching fixed app is a separate Founder handoff.
+        assert result.returncode != 0
+        assert "pending paired notarized app handoff" in result.stdout + result.stderr
+        assert not active.exists()
+        assert not (home / ".local/bin/vibecrafted").exists()
     else:
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert active.is_file(), result.stdout

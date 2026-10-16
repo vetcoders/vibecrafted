@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 
 def test_pyproject_publishes_vibecrafted_distribution_with_package_data() -> None:
@@ -38,7 +37,7 @@ def test_package_carries_runtime_skills_and_command_deck() -> None:
         package_root / "runtime" / "telemetry" / "kimi-monitor" / "kimi_monitor.py"
     ).is_file()
     assert (package_root / "runtime" / "telemetry" / "fleet_engine.py").is_file()
-    for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor"):
+    for agent in ("codex", "claude", "grok", "junie", "copilot", "cursor", "omp"):
         assert (
             package_root
             / "runtime"

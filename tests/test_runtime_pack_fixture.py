@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
+import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -21,8 +24,134 @@ import pytest
 
 from scripts import vetcoders_install as installer
 from tests._runtime_pack_fixture import (
+    fixed_terminal_fixture,
+    private_child_command,
     seed_runtime_pack,
 )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt exec policy")
+@pytest.mark.parametrize("tool", ["perl", "shasum"])
+def test_private_child_admits_selected_tool_variant(tmp_path, monkeypatch, tool):
+    tools = tmp_path / "selected-tools"
+    tools.mkdir()
+    executable = tools / tool
+    shutil.copyfile(f"/usr/bin/{tool}", executable)
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:/usr/bin:/bin")
+    data = tmp_path / "data"
+    data.write_text("fixture-data")
+    argv = (
+        [str(executable), "-e", "print qq(tool-ok\\n)"]
+        if tool == "perl"
+        else [str(executable), "-a", "256", str(data)]
+    )
+    result = subprocess.run(
+        private_child_command(argv),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("tool-ok" if tool == "perl" else str(data)) in result.stdout
+
+
+# `kill -0` is itself a signal and denied under the fence, so liveness is read
+# from a marker the descendant writes only if it was NOT stopped in time.
+_SIGNAL_PROBE = (
+    '( sleep 1; : > "$1" ) >/dev/null 2>&1 & child=$!; '
+    'kill -TERM "$child" 2>/dev/null; rc=$?; sleep 1.6; '
+    'if [ -e "$1" ]; then alive=1; else alive=0; fi; '
+    'printf "%s %s\\n" "$rc" "$alive"'
+)
+
+
+def _probe_own_descendant(
+    tmp_path: Path, same_sandbox_signals: bool
+) -> tuple[int, int]:
+    marker = tmp_path / f"descendant-ran-{int(same_sandbox_signals)}"
+    result = subprocess.run(
+        private_child_command(
+            ["/bin/bash", "-c", _SIGNAL_PROBE, "probe", str(marker)],
+            same_sandbox_signals=same_sandbox_signals,
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    kill_rc, alive = result.stdout.split()
+    return int(kill_rc), int(alive)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt signal policy")
+def test_private_child_signals_are_hard_denied_by_default(tmp_path: Path) -> None:
+    """Existing callers keep the global hard deny: not even a child of its own."""
+    kill_rc, alive = _probe_own_descendant(tmp_path, False)
+    assert kill_rc != 0
+    assert alive == 1
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt signal policy")
+def test_private_child_opt_in_signals_only_its_own_descendant(tmp_path: Path) -> None:
+    """Opted in, the kernel lets the fenced child stop its own inert descendant,
+    while an unrelated private process outside the sandbox receives nothing."""
+    kill_rc, alive = _probe_own_descendant(tmp_path, True)
+    assert (kill_rc, alive) == (0, 0)
+
+    receipt = tmp_path / "outside-received-signal"
+    ready = tmp_path / "outside-ready"
+    outside = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, signal, sys, time\n"
+                "receipt, ready = map(pathlib.Path, sys.argv[1:3])\n"
+                "signal.signal(signal.SIGTERM, lambda *_: receipt.write_text('seen'))\n"
+                "ready.write_text('up')\n"
+                "time.sleep(20)\n"
+            ),
+            str(receipt),
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        attempt = subprocess.run(
+            private_child_command(
+                [
+                    "/bin/bash",
+                    "-c",
+                    f'kill -TERM {outside.pid} 2>/dev/null; echo "$?"',
+                ],
+                same_sandbox_signals=True,
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        time.sleep(0.3)
+        assert attempt.stdout.strip() != "0"
+        assert not receipt.exists()
+        assert outside.poll() is None
+    finally:
+        outside.kill()
+        outside.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt policy")
+def test_private_child_signal_opt_in_keeps_network_and_applications_fences() -> None:
+    profile = private_child_command(["/bin/true"], same_sandbox_signals=True)[2]
+    assert "(deny network*)" in profile
+    assert "(deny mach-lookup)" in profile
+    assert '(deny file-read* file-write* (subpath "/Applications"))' in profile
+    assert "(allow signal (target same-sandbox))" in profile
+    assert "(allow signal" not in private_child_command(["/bin/true"])[2]
 
 
 def test_seed_runtime_pack_includes_offline_synthetic_foundation_installer_and_roots(
@@ -94,6 +223,7 @@ def test_missing_foundations_installer_fails_unless_explicitly_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Missing foundations installer fails install; skip_foundations allows bypass."""
+    fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
     home = tmp_path / "home"
     home.mkdir()
     runtime_home = home / ".local" / "share" / "vibecrafted"

@@ -293,6 +293,42 @@ def test_wrapper_exists_executable_and_carries_the_product_pins() -> None:
     assert "is_product_session_name" not in text
 
 
+@pytest.mark.parametrize("start", [False, True])
+def test_frame_birth_drops_only_provider_identity_keys(tmp_path: Path, start: bool):
+    from vibecrafted_core.env_allowlist import INHERITED_PROVIDER_IDENTITY_KEYS
+
+    generation = _stage_generation(tmp_path, with_start=start)
+    retained = {
+        "CODEX_HOME": "/fixture-codex",
+        "CLAUDE_CONFIG_DIR": "/fixture-claude",
+        "OPENAI_API_KEY": "fixture-openai",
+        "ANTHROPIC_API_KEY": "fixture-anthropic",
+        "CODEX_CI": "fixture-harness",
+        "CLAUDE_CODE_MESSAGING_SOCKET": "/fixture-bus",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "fixture-bus-token",
+        "FOUNDER_SHELL_SETTING": "fixture-setting",
+    }
+    recorder = "#!/bin/sh\n{\n"
+    for key in INHERITED_PROVIDER_IDENTITY_KEYS:
+        recorder += f"printf '{key}=%s\\n' \"${{{key}+present}}\"\n"
+    for key, value in retained.items():
+        recorder += f'[ "${{{key}-}}" = {installer.shlex_quote(value)} ] || exit 8\n'
+    recorder += f"}} > {installer.shlex_quote(str(generation.record))}\n"
+    target = generation.root / "bin/vc-start" if start else generation.engine
+    target.write_text(recorder, encoding="utf-8")
+    result = _run_wrapper(
+        generation,
+        *([] if start else ["--session", "fixture-frame"]),
+        env={
+            **retained,
+            **dict.fromkeys(INHERITED_PROVIDER_IDENTITY_KEYS, "fixture-parent"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _read_record(generation.record)
+    assert all(fields[key] == "" for key in INHERITED_PROVIDER_IDENTITY_KEYS)
+
+
 def test_wrapper_accepts_a_real_native_engine_without_any_file_shim(
     tmp_path: Path,
 ) -> None:
@@ -670,7 +706,7 @@ def test_wrapper_keeps_an_explicit_socket_override(tmp_path: Path) -> None:
 
 
 def test_wrapper_without_arguments_enters_the_product_start(tmp_path: Path) -> None:
-    """The framework Start here surface stays reachable through the generation."""
+    """The framework Launchpad surface stays reachable through the generation."""
     generation = _stage_generation(tmp_path, engine="native", with_start=True)
     proc = _run_wrapper(generation)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)

@@ -18,7 +18,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    if app.config.view.is_home() && app.observe.home.surface != HomeSurface::Panels {
+    if app.refresh.projection != crate::refresh::ProjectionLoadState::Ready {
+        let (title, detail) = match &app.refresh.projection {
+            crate::refresh::ProjectionLoadState::Loading => (
+                "Loading workspace state…",
+                "Press r to retry or q to close. Controls become available when loading finishes."
+                    .to_string(),
+            ),
+            crate::refresh::ProjectionLoadState::Unavailable(error) => (
+                "Workspace state unavailable",
+                format!("{error}\nPress r to retry or q to close."),
+            ),
+            crate::refresh::ProjectionLoadState::Ready => unreachable!(),
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{title}\n\n{detail}"))
+                .wrap(Wrap { trim: true })
+                .block(Block::default().borders(Borders::ALL).title(" Voc ")),
+            frame.area(),
+        );
+    } else if app.config.view.is_home() && app.observe.home.surface != HomeSurface::Panels {
         draw_home_shell(frame, app);
     } else {
         let root = frame.area();
@@ -2310,6 +2329,27 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    #[test]
+    fn loading_and_unavailable_are_distinct_from_loaded_empty_state() {
+        let mut app = sample_app();
+        app.runs.clear();
+        app.refresh.projection = crate::refresh::ProjectionLoadState::Loading;
+        let loading = render_to_string(&app);
+        assert!(loading.contains("Loading workspace state"));
+        assert!(!loading.contains("0 runs"));
+        app.refresh.projection =
+            crate::refresh::ProjectionLoadState::Unavailable("permission denied".into());
+        let unavailable = render_to_string(&app);
+        assert!(unavailable.contains("Workspace state unavailable"));
+        assert!(unavailable.contains("permission denied"));
+        assert!(unavailable.contains("Press r to retry"));
+        app.refresh.projection = crate::refresh::ProjectionLoadState::Ready;
+        let empty = render_to_string(&app);
+        assert!(!empty.contains("Loading workspace state"));
+        assert!(!empty.contains("Workspace state unavailable"));
+        assert_ne!(empty, loading);
     }
 
     fn render_home_size(app: &App, width: u16, height: u16) -> String {

@@ -32,7 +32,9 @@ VIEWER_TOKEN = "a" * 32
 
 
 def test_product_workspace_tabs_are_never_gc_candidates() -> None:
-    assert PROTECTED_TAB_NAMES == {"Start here", "Agents", "Shell", "Voc"}
+    # Voc is the compact-bar button beside Composer, not a tab (decyzja
+    # Macieja 2026-10-10) — a protected "Voc" only embalmed zombie tabs.
+    assert PROTECTED_TAB_NAMES == {"Launchpad", "Start here", "Agents", "Shell"}
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -814,13 +816,16 @@ def test_gc_cli_rejects_bucket_limit_without_a_value() -> None:
     assert result.stderr.strip() == "--bucket-tab-limit requires a value"
 
 
-def test_protected_origin_tab_is_never_a_cleanup_candidate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["Launchpad", "Start here", "Shell"])
+def test_protected_origin_tab_is_never_a_cleanup_candidate(
+    tmp_path: Path, name: str
+) -> None:
     cp = tmp_path / "control_plane"
-    durable_run(cp, "Voc")
+    durable_run(cp, name)
     proofs = durable_transfer_proofs(cp)
     origin = live_tab(
         session="vibecrafted",
-        name="Voc",
+        name=name,
         tab_id=7,
         session_incarnation="origin-incarnation",
         tab_instance_id=ORIGIN_INSTANCE,

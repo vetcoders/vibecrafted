@@ -194,6 +194,37 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         ),
         notes="GitHub Copilot CLI 1.0.89-7 prompt-mode and native --resume with piped stdin probed 2026-09-29; result.sessionId remained stable",
     ),
+    "omp": ProviderCapability(
+        agent="omp",
+        execution=EXECUTABLE,
+        session_id_shape=_SESSION_TOKEN,
+        session_id_sources=("jsonl_session_event", "run_meta"),
+        interactive_resume=UNSUPPORTED,
+        noninteractive_resume=SUPPORTED,
+        native_fork=UNSUPPORTED,
+        fork_runtime_restrictions="omp exposes --resume but no native fork command",
+        prompt_transport="stdin",
+        session_identity_event=(
+            "`omp -p --mode json` NDJSON leading `session` event (`id`)"
+        ),
+        cwd_safety="runs in invocation cwd; --cwd exists and the adapter does not use it",
+        resume_preserves_cache=None,
+        forbidden_flags=(),
+        probe_recipe=ProbeRecipe(
+            cli="omp",
+            required_markers=("--resume", "--mode", "--approval-mode"),
+        ),
+        notes=(
+            "headless-only worker: no interactive launch/resume builder exists "
+            "(spawn.interactive_policy_command rejects omp), so interactive "
+            "resume is not advertised. "
+            "omp 18.11.0 probed 2026-10-15: stdin prompt lane (`echo … | omp -p` "
+            "rc 0), --mode json NDJSON with a leading session event, "
+            "--approval-mode/--tools combine with -p (rc 0), and an approval "
+            "prompt in print mode fails closed with a model-visible refusal "
+            "(no hang). No native fork surface found in --help"
+        ),
+    ),
     "gemini": ProviderCapability(
         agent="gemini",
         execution=EVIDENCE_ONLY,

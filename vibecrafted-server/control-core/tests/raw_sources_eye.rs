@@ -290,3 +290,133 @@ fn stale_launch_sidecar_leaves_live_even_without_stamps() {
     );
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn cached_raw_paths_preserve_in_place_changes_deletions_time_and_archive_truth() {
+    let home = temp_home("cached-paths");
+    let now = Utc::now();
+    let lock = write_lock(&home, "cached-lock", Some(&iso_ago(now, 30)));
+    let meta = write_meta(
+        &home,
+        "cached-meta",
+        json!({"run_id":"cached-meta", "agent":"codex", "status":"running", "root":"/repo", "started_at":iso_ago(now, 30), "updated_at":iso_ago(now, 30)}),
+    );
+    write_marbles(&home, "cached-marbles", "promise", &iso_ago(now, 30));
+    let plane = ControlPlane::new(&home);
+    let sources = plane.discover_raw_sources();
+    let assert_same = |at| {
+        assert_eq!(
+            format!("{:?}", plane.compute_view_with_raw_sources(at, &sources)),
+            format!("{:?}", plane.compute_view(at)),
+            "cached names must preserve the canonical projection"
+        );
+    };
+    assert_same(now);
+    fs::write(&meta, json!({"run_id":"cached-meta", "agent":"codex", "status":"completed", "root":"/repo", "started_at":iso_ago(now, 30), "finished_at":now.to_rfc3339()}).to_string()).unwrap();
+    assert_same(now);
+    fs::remove_file(&lock).unwrap();
+    assert_same(now);
+    let archive = home.join("control_plane/runs/.archived");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(archive.join("cached-meta.json"), "{}").unwrap();
+    assert_same(now);
+    assert!(
+        !plane
+            .compute_view_with_raw_sources(now, &sources)
+            .recent_runs
+            .iter()
+            .any(|r| r.run_id == "cached-meta")
+    );
+    // No writes: advancing the clock still expires raw-only liveness.
+    let later = now + Duration::seconds(control_core::RUN_STALL_SECONDS + 1);
+    assert_same(later);
+    assert!(!is_live(
+        &plane.compute_view_with_raw_sources(later, &sources),
+        "cached-marbles"
+    ));
+    // A new deep raw path appears only after rediscovery, then agrees fully.
+    write_meta(
+        &home,
+        "deep-new",
+        json!({"run_id":"deep-new", "status":"running", "agent":"codex", "root":"/new", "started_at":now.to_rfc3339()}),
+    );
+    let sources = plane.discover_raw_sources();
+    assert_eq!(
+        format!("{:?}", plane.compute_view_with_raw_sources(now, &sources)),
+        format!("{:?}", plane.compute_view(now))
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_raw_paths_reprobe_process_exit_without_filesystem_writes() {
+    let home = temp_home("cached-pid");
+    let now = Utc::now();
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    // Stale timestamps mean the live PID is the only reason this stays Live.
+    write_meta(
+        &home,
+        "cached-pid",
+        json!({"run_id":"cached-pid", "agent":"codex", "status":"running", "root":"/repo", "worker_pid":child.id(), "started_at":iso_ago(now, MONTH), "updated_at":iso_ago(now, MONTH)}),
+    );
+    let plane = ControlPlane::new(&home);
+    let sources = plane.discover_raw_sources();
+    let live = plane.compute_view_with_raw_sources(now, &sources);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        is_live(&live, "cached-pid"),
+        "live PID must be probed on cached paths"
+    );
+    let dead = plane.compute_view_with_raw_sources(now, &sources);
+    assert!(!is_live(&dead, "cached-pid"));
+    assert_eq!(
+        format!("{dead:?}"),
+        format!("{:?}", plane.compute_view(now))
+    );
+    fs::remove_dir_all(home).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_raw_paths_keep_symlink_replacements_out_of_the_projection() {
+    use std::os::unix::fs::symlink;
+    let home = temp_home("cached-symlinks");
+    let now = Utc::now();
+    let original = write_meta(
+        &home,
+        "original",
+        json!({"run_id":"original", "status":"running", "agent":"codex", "root":"/repo", "started_at":now.to_rfc3339()}),
+    );
+    let outside = home.join("external");
+    fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("external.meta.json");
+    fs::write(&target, json!({"run_id":"external", "status":"running", "agent":"codex", "root":"/external", "started_at":now.to_rfc3339()}).to_string()).unwrap();
+    let plane = ControlPlane::new(&home);
+    let sources = plane.discover_raw_sources();
+    fs::remove_file(&original).unwrap();
+    symlink(&target, &original).unwrap();
+    assert_eq!(
+        format!("{:?}", plane.compute_view_with_raw_sources(now, &sources)),
+        format!("{:?}", plane.compute_view(now))
+    );
+    fs::remove_file(&original).unwrap();
+    // Replacing an ancestor directory must not permit cached child paths to
+    // read the external directory either.
+    fs::copy(&target, &original).unwrap();
+    let sources = plane.discover_raw_sources();
+    let parent = original.parent().unwrap();
+    let replacement = outside.join(original.file_name().unwrap());
+    fs::copy(&target, replacement).unwrap();
+    fs::remove_dir_all(parent).unwrap();
+    symlink(&outside, parent).unwrap();
+    assert_eq!(
+        format!("{:?}", plane.compute_view_with_raw_sources(now, &sources)),
+        format!("{:?}", plane.compute_view(now))
+    );
+    fs::remove_dir_all(home).ok();
+}

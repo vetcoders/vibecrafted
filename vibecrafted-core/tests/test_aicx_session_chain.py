@@ -227,7 +227,7 @@ def test_resume_pack_never_selects_native_even_with_same_agent(
         context_file=tmp_path / "pack.md",
         meta_file=tmp_path / "pack.meta.json",
         chain=MemoryChain([live]),
-        now=dt.datetime(2026, 8, 17, 12, 0, tzinfo=dt.timezone.utc),
+        now=dt.datetime(2026, 8, 17, 12, 0, tzinfo=dt.UTC),
     )
     assert pack.mode == "new_session"
     assert pack.session_id == ""
@@ -740,7 +740,7 @@ def test_whole_pack_including_frame_never_exceeds_the_character_cap(
     """Header, notices, links and the instruction are inside the 18k budget."""
     assert MAX_PACK_CHARS == 18_000
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
-    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.UTC)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -779,7 +779,7 @@ def test_an_oversized_pack_still_carries_content_not_only_a_pointer(
     tmp_path: Path,
 ) -> None:
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
-    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.UTC)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -826,7 +826,7 @@ def test_the_budget_leaves_room_for_evidence_under_a_huge_mission(
 ) -> None:
     """A large mission must not starve the catalog and continuity sections."""
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
-    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.UTC)
     pack = assemble_resume_continuity_pack(
         agent="claude",
         root=repo,
@@ -849,7 +849,7 @@ def test_the_budget_leaves_room_for_evidence_under_a_huge_mission(
 def test_every_provider_gets_the_same_assembly(tmp_path: Path) -> None:
     """Continuity is repo truth; only the agent name may differ."""
     repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
-    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc)
+    stamp = dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.UTC)
     bodies: dict[str, str] = {}
     for provider in ("claude", "codex", "gemini", "junie", "grok"):
         pack = assemble_resume_continuity_pack(

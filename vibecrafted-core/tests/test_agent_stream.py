@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import pytest
 from vibecrafted_core.agent_stream import AgentStreamParser, resolve_default_model
 from vibecrafted_core.telemetry import estimate_cost_usd
 
@@ -246,6 +249,73 @@ def test_resolve_default_model_reads_codex_config(tmp_path, monkeypatch) -> None
         )
         == "gpt-5.3-codex"
     )
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        "claude",
+        "codex",
+        "gemini",
+        "grok",
+        "junie",
+        "agy",
+        "kimi",
+        "copilot",
+        "cursor",
+        "omp",
+    ],
+)
+def test_default_model_uses_only_selected_provider_environment(agent) -> None:
+    env = {
+        name.upper() + "_MODEL": name + "-model"
+        for name in (
+            "claude",
+            "codex",
+            "gemini",
+            "grok",
+            "junie",
+            "agy",
+            "kimi",
+            "copilot",
+            "cursor",
+            "omp",
+        )
+    }
+    assert resolve_default_model(agent, env=env) == agent + "-model"
+    env["VIBECRAFTED_PARENT_MODEL"] = "generic-override"
+    assert resolve_default_model(agent, env=env) == "generic-override"
+    assert (
+        resolve_default_model(agent, command=[agent, "--model=explicit"], env=env)
+        == "explicit"
+    )
+
+
+def test_default_model_empty_environment_is_not_ambient(monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDE_MODEL", "ambient")
+    assert resolve_default_model("claude", env={}) == ""
+
+
+def test_stream_filter_keeps_provider_default_under_foreign_environment(
+    monkeypatch,
+) -> None:
+    from io import BytesIO
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    monkeypatch.delenv("VIBECRAFTED_PARENT_MODEL", raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", "foreign")
+    monkeypatch.setenv("CODEX_MODEL", "selected")
+    out = BytesIO()
+    assert (
+        filter_stream(
+            "codex",
+            stdin=BytesIO(b'{"type":"thread.started","thread_id":"t"}\n'),
+            stdout=out,
+        )
+        == 0
+    )
+    assert "model: selected" in out.getvalue().decode()
 
 
 def test_cost_estimates_lock_user_reported_grok_and_codex_regressions() -> None:
@@ -541,3 +611,279 @@ def test_tool_burst_collapses_instead_of_empty_timestamps(monkeypatch) -> None:
     assert len(tool_lines[0]) <= 60
     assert tool_lines[0].startswith("[")
     assert "grep" in tool_lines[0]
+
+
+def test_agent_stream_parser_renders_omp_mode_json_events() -> None:
+    """18.11.0 printableEvent: partial start, deltas, authoritative end."""
+    parser = AgentStreamParser("omp")
+
+    banner = parser.feed_line(
+        b'{"type":"session","version":3,"id":"01abc-234","timestamp":"2026-10-15T04:18:55Z","cwd":"/tmp"}\n'
+    )
+    assert "01abc-234" in banner
+    assert parser.session_id == "01abc-234"
+    assert parser.resume_command("/repo") == "cd /repo && omp --resume 01abc-234"
+
+    assert (
+        parser.feed_line(
+            b'{"type":"message_start","message":{"role":"assistant","provider":"kimi-code",'
+            b'"model":"k3","content":[],"usage":{"input":0,"output":0,"cacheRead":0,'
+            b'"cacheWrite":0,"cost":{"total":0}}}}\n'
+        )
+        == ""
+    )
+    assert parser.model_id == "kimi-code/k3"
+    assert parser.usage_events == 0
+    assert parser.cost_usd is None
+
+    thinking = parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}\n'
+    )
+    assert "hmm" in thinking
+    assert (
+        parser.feed_line(
+            b'{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}\n'
+        )
+        == ""
+    )
+    delta = parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"do"}}\n'
+    )
+    delta += parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"ne"}}\n'
+    )
+    assert delta == "done"
+    parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"done"}}\n'
+    )
+    parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"stop"}}\n'
+    )
+    assert parser.usage_events == 0
+    assert (
+        parser.feed_line(
+            b'{"type":"message_end","message":{"role":"assistant","provider":"kimi-code",'
+            b'"model":"k3","content":[{"type":"text","text":"done"}],"stopReason":"stop",'
+            b'"usage":{"input":100,"output":11,"cacheRead":20,"cacheWrite":5,'
+            b'"cost":{"total":0.12}}}}\n'
+        )
+        == ""
+    )  # The full message must not render the streamed answer twice.
+    assert parser.tokens_input == 100
+    assert parser.tokens_output == 11
+    assert parser.tokens_cached_input == 20
+    assert parser.tokens_cache_write == 5
+    assert parser.usage_events == 1
+    assert parser.cost_usd == 0.12
+    assert parser.cost_source == "provider_reported"
+    assert parser.final_response == "done"
+
+
+def test_agent_stream_parser_omp_accumulates_completed_tool_turns_only() -> None:
+    """Starts may already carry usage; lifecycle copies are not new messages."""
+    parser = AgentStreamParser("omp")
+    first = {
+        "role": "assistant",
+        "provider": "kimi-code",
+        "model": "k3",
+        "content": [
+            {"type": "text", "text": "checking"},
+            {
+                "type": "toolCall",
+                "id": "t1",
+                "name": "bash",
+                "arguments": {"command": "echo hi"},
+            },
+        ],
+        "stopReason": "toolUse",
+        "usage": {
+            "input": 100,
+            "output": 11,
+            "cacheRead": 20,
+            "cacheWrite": 5,
+            "cost": {"total": 0.12},
+        },
+    }
+    final = {
+        "role": "assistant",
+        "provider": "kimi-code",
+        "model": "k3",
+        "content": [{"type": "text", "text": "all done"}],
+        "stopReason": "stop",
+        "usage": {
+            "input": 150,
+            "output": 7,
+            "cacheRead": 40,
+            "cacheWrite": 3,
+            "cost": {"total": 0.08},
+        },
+    }
+    tool_result = {
+        "role": "toolResult",
+        "toolCallId": "t1",
+        "toolName": "bash",
+        "content": [{"type": "text", "text": "hi"}],
+        "isError": False,
+        # Tool-owned nested telemetry must not enter assistant accounting.
+        "details": {"usage": {"input_tokens": 900, "output_tokens": 900}},
+    }
+    events = [
+        {
+            "type": "message_start",
+            "message": {
+                **first,
+                "usage": {
+                    "input": 40,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "cost": {"total": 0.01},
+                },
+            },
+        },
+        {"type": "message_end", "message": first},
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "t1",
+            "toolName": "bash",
+            "args": {"command": "echo hi"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "t1",
+            "toolName": "bash",
+            "result": {
+                "content": tool_result["content"],
+                "details": tool_result["details"],
+            },
+            "isError": False,
+        },
+        {"type": "message_start", "message": tool_result},
+        {"type": "message_end", "message": tool_result},
+        {"type": "turn_end", "message": first, "toolResults": [tool_result]},
+        {"type": "message_start", "message": final},
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "done", "reason": "stop"},
+        },
+        {"type": "message_end", "message": final},
+        {"type": "turn_end", "message": final, "toolResults": []},
+        {"type": "agent_end", "messages": [first, tool_result, final]},
+    ]
+    rendered = "".join(
+        parser.feed_line((json.dumps(event) + "\n").encode()) for event in events
+    )
+    assert rendered.count("checking") == 1
+    assert rendered.count("all done") == 1
+    assert "bash" in rendered and "echo" in rendered
+    assert rendered.index("bash") < rendered.index("all done")
+    assert parser.tokens_input == 250
+    assert parser.tokens_output == 18
+    assert parser.tokens_cached_input == 60
+    assert parser.tokens_cache_write == 8
+    assert parser.usage_events == 2
+    assert parser.cost_usd == pytest.approx(0.20)
+    assert parser.cost_source == "provider_reported"
+    assert parser.final_response == "all done"
+
+    error = parser.feed_line(
+        b'{"type":"tool_execution_end","toolCallId":"t2","toolName":"bash","isError":true}\n'
+    )
+    assert "bash failed" in error
+
+
+@pytest.mark.parametrize("stop_reason", ["error", "aborted"])
+def test_agent_stream_parser_omp_accounts_error_finalization(stop_reason: str) -> None:
+    """Printable error deltas contain no payload; the end still owns usage."""
+    parser = AgentStreamParser("omp")
+    parser.feed_line(
+        b'{"type":"message_start","message":{"role":"assistant","content":[],"usage":{"input":0,"output":0}}}\n'
+    )
+    parser.feed_line(
+        b'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"partial"}}\n'
+    )
+    parser.feed_line(
+        (
+            json.dumps(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "error", "reason": stop_reason},
+                }
+            )
+            + "\n"
+        ).encode()
+    )
+    message = {
+        "role": "assistant",
+        "provider": "kimi-code",
+        "model": "k3",
+        "content": [{"type": "text", "text": "partial"}],
+        "stopReason": stop_reason,
+        "errorMessage": "provider stream closed",
+        "usage": {
+            "input": 100,
+            "output": 11,
+            "cacheRead": 20,
+            "cacheWrite": 5,
+            "cost": {"total": 0.12},
+        },
+    }
+    rendered = parser.feed_line(
+        (json.dumps({"type": "message_end", "message": message}) + "\n").encode()
+    )
+    assert "provider stream closed" in rendered
+    assert "partial" not in rendered
+    for event in (
+        {"type": "turn_end", "message": message, "toolResults": []},
+        {"type": "agent_end", "messages": [message]},
+    ):
+        assert parser.feed_line((json.dumps(event) + "\n").encode()) == ""
+    assert parser.model_id == "kimi-code/k3"
+    assert parser.tokens_input == 100
+    assert parser.tokens_output == 11
+    assert parser.tokens_cached_input == 20
+    assert parser.tokens_cache_write == 5
+    assert parser.usage_events == 1
+    assert parser.cost_usd == 0.12
+    assert parser.final_response == "partial"
+
+
+def test_agent_stream_parser_omp_empty_error_does_not_keep_previous_answer() -> None:
+    parser = AgentStreamParser("omp")
+    parser.feed_line(
+        b'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"checking"}],'
+        b'"stopReason":"toolUse","usage":{"input":10,"output":2}}}\n'
+    )
+    # A terminal error can be synthesized without a message_start.
+    rendered = parser.feed_line(
+        b'{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error",'
+        b'"errorMessage":"request failed","usage":{"input":0,"output":0,"cacheRead":0,'
+        b'"cacheWrite":0,"cost":{"total":0}}}}\n'
+    )
+    assert "request failed" in rendered
+    assert parser.final_response == ""
+    assert parser.tokens_input == 10
+    assert parser.tokens_output == 2
+    assert parser.tokens_cache_write == 0
+    assert parser.usage_events == 2
+    assert parser.cost_usd == 0.0
+    assert parser.cost_source == "provider_reported"
+
+
+def test_filter_stream_writes_omp_authoritative_last_message(tmp_path) -> None:
+    import io
+
+    from vibecrafted_core.agent_stream import filter_stream
+
+    stream = io.BytesIO(
+        b'{"type":"message_start","message":{"role":"assistant","content":[]}}\n'
+        b'{"type":"message_end","message":{"role":"assistant","content":'
+        b'[{"type":"thinking","thinking":"private"},{"type":"text","text":"final"},'
+        b'{"type":"text","text":"answer"}],"stopReason":"stop",'
+        b'"usage":{"input":100,"output":11}}}\n'
+    )
+    out = io.BytesIO()
+    last = tmp_path / "last-message.md"
+    assert filter_stream("omp", stdin=stream, stdout=out, last_message_file=last) == 0
+    assert last.read_text(encoding="utf-8") == "final\nanswer"
+    assert out.getvalue() == b"final\nanswer"

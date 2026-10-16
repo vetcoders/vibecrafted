@@ -910,6 +910,7 @@ def _managed_pair_snapshot(paths: SupervisorPaths) -> dict[str, int | None]:
     snapshot: dict[str, int | None] = {
         "server_pid": None,
         "guardian_pid": None,
+        "guardian_owner_pid": None,
     }
     for role in ("server", "guardian"):
         raw_pid = _read_owned_text(paths.server_dir / f"{role}.pid")
@@ -929,6 +930,10 @@ def _managed_pair_snapshot(paths: SupervisorPaths) -> dict[str, int | None]:
             and _process_alive(pid)
         ):
             snapshot[f"{role}_pid"] = pid
+    if (paths.server_dir / "guardian.execution.json").exists():
+        snapshot["guardian_pid"] = None
+        if embedded_guardian_healthy(paths):
+            snapshot["guardian_owner_pid"] = probe_supervisor(paths).pid
     return snapshot
 
 
@@ -938,6 +943,8 @@ def _managed_pair_healthy(snapshot: dict[str, int | None]) -> bool:
 
     server_pid = snapshot.get("server_pid")
     guardian_pid = snapshot.get("guardian_pid")
+    if snapshot.get("guardian_owner_pid") is not None:
+        guardian_pid = snapshot["guardian_owner_pid"]
     return (
         isinstance(server_pid, int)
         and not isinstance(server_pid, bool)
@@ -1543,6 +1550,144 @@ def rotate_supervisor_stderr_log(path: Path, *, now: float | None = None) -> boo
     return True
 
 
+class EmbeddedGuardian:
+    """Guardian's durable logic executes in this owner, never a daemon child."""
+
+    def __init__(self, config: SupervisorConfig, stop_event: threading.Event) -> None:
+        self.config = config
+        self.stop_event = stop_event
+        self.ready = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.error: str | None = None
+        self.nonce = os.urandom(32).hex()
+        self.worker: Any = None
+        self._projection_lock = threading.Lock()
+
+    def _set_ready(self, value: bool) -> None:
+        with self._projection_lock:
+            if value:
+                self.ready.set()
+            else:
+                self.ready.clear()
+            self._publish_locked()
+
+    def start(self) -> None:
+        if self.thread is not None and self.thread.is_alive():
+            return
+        self.error = None
+        self.ready.clear()
+
+        def run() -> None:
+            from .guardian import main as guardian_main
+
+            try:
+                result = guardian_main(
+                    [
+                        "--server-url",
+                        self.config.public_url or self.config.endpoint,
+                        "--state",
+                        str(
+                            self.config.paths.home / "control_plane/guardian/state.json"
+                        ),
+                        "--lock",
+                        str(
+                            self.config.paths.home
+                            / "control_plane/guardian/guardian.lock"
+                        ),
+                        "--connect-timeout",
+                        "30",
+                        "--recovery-timeout",
+                        "5",
+                    ],
+                    stop_event=self.stop_event,
+                    ready_callback=lambda: self._set_ready(True),
+                    disconnected_callback=lambda: self._set_ready(False),
+                    worker_callback=lambda worker: setattr(self, "worker", worker),
+                )
+                if not self.stop_event.is_set():
+                    self.error = f"guardian exited {result}"
+            except Exception as exc:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "vc-server-supervisor: Guardian execution failed"
+                )
+                self.error = f"guardian failed: {type(exc).__name__}"
+            finally:
+                self._set_ready(False)
+
+        self.thread = threading.Thread(
+            target=run, name="vc-server-supervisor-guardian", daemon=True
+        )
+        self.thread.start()
+
+    def publish(self) -> bool:
+        with self._projection_lock:
+            return self._publish_locked()
+
+    def _publish_locked(self) -> bool:
+        healthy = bool(self.thread and self.thread.is_alive() and self.ready.is_set())
+        _atomic_json(
+            self.config.paths.server_dir / "guardian.execution.json",
+            {
+                "schema": "vibecrafted.supervisor-guardian.v1",
+                "execution": "supervisor-thread",
+                "owner_pid": os.getpid(),
+                "nonce": self.nonce,
+                "ready": healthy,
+                "observed_at": time.time(),
+                "expires_at": time.time()
+                + min(60.0, max(10.0, self.config.interval * 2)),
+                "server_url": self.config.public_url or self.config.endpoint,
+                "error": self.error,
+            },
+        )
+        return healthy
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.worker is not None:
+            self.worker.interrupt_io()
+        if self.thread is not None:
+            self.thread.join(timeout=8)
+            if self.thread.is_alive():
+                raise SupervisorError(
+                    "Guardian did not stop within its bounded IO deadline"
+                )
+        self.publish()
+
+
+def embedded_guardian_healthy(
+    paths: SupervisorPaths, *, server_url: str | None = None
+) -> bool:
+    """Fresh projection bound to the live supervisor lease, no fake Guardian PID."""
+    raw = _read_owned_text(paths.server_dir / "guardian.execution.json")
+    if raw is None:
+        return False
+    try:
+        payload = json.loads(raw)
+        observed = payload.get("observed_at")
+        expires = payload.get("expires_at")
+        probe = probe_supervisor(paths)
+        return bool(
+            payload.get("schema") == "vibecrafted.supervisor-guardian.v1"
+            and payload.get("execution") == "supervisor-thread"
+            and probe.live
+            and probe.verified
+            and probe.role == "supervisor"
+            and payload.get("owner_pid") == probe.pid
+            and payload.get("ready") is True
+            and isinstance(observed, (int, float))
+            and isinstance(expires, (int, float))
+            and 0 <= time.time() - observed <= 60
+            and observed < expires <= observed + 60.1
+            and time.time() <= expires
+            and (server_url is None or payload.get("server_url") == server_url)
+        )
+    except (ValueError, TypeError, AttributeError, SupervisorError):
+        return False
+
+
 def run_supervisor(
     config: SupervisorConfig,
     *,
@@ -1582,12 +1727,18 @@ def run_supervisor(
     last_error: str | None = None
     last_exit_code: int | None = None
     child_environment = _child_environment(config.paths)
+    child_environment["VIBECRAFTED_GUARDIAN_EXECUTION"] = "supervisor-thread"
 
     with _SupervisorLease(
         config.paths,
         service_managed=service_managed,
         identity=runtime_identity,
     ):
+        guardian = EmbeddedGuardian(config, event)
+        guardian.start()
+        from .housekeeping_schedule import SupervisorHousekeeping
+
+        housekeeping = SupervisorHousekeeping(config, background=True, stop_event=event)
         managed_pair = _managed_pair_snapshot(config.paths)
         _atomic_json(
             config.paths.receipt_file,
@@ -1608,6 +1759,9 @@ def run_supervisor(
         )
         try:
             while not event.is_set():
+                guardian.start()
+                guardian.publish()
+                housekeeping.tick()
                 try:
                     _launcher_sha256(
                         config.launcher,
@@ -1707,7 +1861,9 @@ def run_supervisor(
                     consecutive_failures += 1
                     total_failures += 1
                     last_failure_at = _utc_now()
-                    if return_code == 0:
+                    if return_code == 0 and getattr(guardian, "error", None):
+                        last_error = guardian.error
+                    elif return_code == 0:
                         if managed_pair_live:
                             last_error = (
                                 "server start returned success without canonical "
@@ -1745,6 +1901,8 @@ def run_supervisor(
                 )
                 event.wait(delay)
         finally:
+            guardian.stop()
+            housekeeping.stop()
             managed_pair = _managed_pair_snapshot(config.paths)
             try:
                 _atomic_json(
@@ -1901,6 +2059,30 @@ def install_service(
         config,
         supervisor_binary=supervisor_binary,
     )
+    from .server_config import load_housekeeping_config
+
+    housekeeping = load_housekeeping_config(
+        config.config_file, operator_home=config.paths.operator_home
+    )
+    if housekeeping.enabled:
+        from .housekeeping_schedule import (
+            HousekeepingSchedulePaths,
+            install_housekeeping_schedule,
+        )
+
+        script = (
+            Path(__file__).resolve().parents[2] / "scripts/vibecrafted_housekeeping.py"
+        )
+        if script.is_file():
+            install_housekeeping_schedule(
+                housekeeping,
+                HousekeepingSchedulePaths.create(
+                    vibecrafted_home=config.paths.home,
+                    operator_home=config.paths.operator_home,
+                    script_path=script,
+                ),
+                activate=False,
+            )
     return _atomic_private_write(config.paths.launch_agent_file, rendered)
 
 
@@ -2292,6 +2474,11 @@ def _managed_pair_in_process_healthy(
 
     server_pid = snapshot.get("server_pid")
     guardian_pid = snapshot.get("guardian_pid")
+    if snapshot.get("guardian_owner_pid"):
+        rendered_host = f"[{host}]" if ":" in host else host
+        return embedded_guardian_healthy(
+            paths, server_url=f"http://{rendered_host}:{port}"
+        ) and _server_http_healthy(host, port, timeout=timeout)
     if not server_pid or not guardian_pid:
         return False
 
@@ -2368,6 +2555,8 @@ def _pair_healthy(
         paths, host=host, port=port, timeout=min(timeout, 2.0)
     ):
         return True
+    if paths is not None and (paths.server_dir / "guardian.execution.json").exists():
+        return False
 
     argv = [str(launcher), "server", "supervisor-pair-health"]
     if stop_event is not None:

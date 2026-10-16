@@ -377,6 +377,39 @@ def test_grok_fork_never_restores_code_or_moves_to_a_worktree(world: _World) -> 
     assert admission["skill"] == "fork"
 
 
+def test_interactive_fork_defaults_to_a_titled_float(world: _World) -> None:
+    """The bare fork is an interactive Agent: it floats above the current
+    content by default and is titled with the provider and the model that
+    were actually asked for -- `unknown` when no model was declared."""
+    declared = world.fork(
+        "claude",
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--model",
+        "claude-test-9",
+    )
+    assert declared.returncode == 0, declared.stderr
+    pane = world.pane()
+    assert "new-pane" in pane and "--floating" in pane, pane
+    assert "--direction" not in pane, pane
+    assert pane[pane.index("--name") + 1] == (
+        f"{world.repo.name} · claude · claude-test-9"
+    ), pane
+    assert "pane:      floating" in declared.stdout
+
+    world.capture.unlink()
+    undeclared = world.fork(
+        "claude", "--session", OTHER_SESSION, "--repo", str(world.repo)
+    )
+    assert undeclared.returncode == 0, undeclared.stderr
+    pane = world.pane()
+    assert pane[pane.index("--name") + 1] == (
+        f"{world.repo.name} · claude · unknown"
+    ), pane
+
+
 def test_claude_fork_right_placement_uses_direction_right(world: _World) -> None:
     result = world.fork(
         "claude",

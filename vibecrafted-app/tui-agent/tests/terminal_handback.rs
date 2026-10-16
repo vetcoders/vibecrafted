@@ -68,6 +68,10 @@ struct Console {
 
 impl Console {
     fn launch() -> Self {
+        Self::launch_with_startup_probe(None)
+    }
+
+    fn launch_with_startup_probe(source_delay_ms: Option<u64>) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
         let home = root.path().join("home");
         let vibecrafted_home = home.join(".vibecrafted");
@@ -107,6 +111,15 @@ impl Console {
         fs::write(&deck, DECK).unwrap();
         fs::set_permissions(&deck, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(deck_dir.join("mode"), "ok").unwrap();
+        if source_delay_ms.is_some() {
+            let aicx = deck_dir.join("aicx");
+            fs::write(
+                &aicx,
+                "#!/bin/sh\nprintf called > \"$(dirname \"$0\")/aicx-called\"\nexec /bin/sleep 10\n",
+            )
+            .unwrap();
+            fs::set_permissions(&aicx, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let (master, slave) = open_pty(ROWS, COLS);
         let screen = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 0)));
@@ -154,6 +167,11 @@ impl Console {
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
+        if let Some(delay_ms) = source_delay_ms {
+            command
+                .env("VOC_SOURCE_DELAY_MS", delay_ms.to_string())
+                .env("PATH", format!("{}:/usr/bin:/bin", deck_dir.display()));
+        }
         // SAFETY: only async-signal-safe calls run between fork and exec. The
         // console gets its own session with the pseudo-terminal as controlling
         // terminal, as it would under a real terminal emulator.
@@ -186,6 +204,12 @@ impl Console {
     fn board(&self) -> Vec<String> {
         let mut rows = self.rows();
         rows.pop();
+        // A cell erased by a full repaint and an explicit space left by the
+        // loading frame look identical on the physical terminal. VT100 keeps
+        // those representations distinct at the end of a row.
+        for row in &mut rows {
+            *row = row.trim_end_matches(' ').to_string();
+        }
         rows
     }
 
@@ -314,6 +338,35 @@ impl Console {
             thread::sleep(POLL);
         }
         panic!("voc did not exit after q");
+    }
+}
+
+#[test]
+fn first_draw_and_quit_do_not_wait_for_initial_scan_or_aicx() {
+    let mut console = Console::launch_with_startup_probe(Some(60_000));
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !console.contents().contains("Loading workspace state") {
+        assert!(
+            Instant::now() < deadline,
+            "first draw waited for startup IO; screen:\n{}",
+            console.contents()
+        );
+        thread::sleep(POLL);
+    }
+    assert!(!console.deck_dir.join("aicx-called").exists());
+    assert!(!console.contents().contains("active-codex"));
+    console.send(b"q");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = console.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "quit waited for the initial scan"
+        );
+        thread::sleep(POLL);
     }
 }
 

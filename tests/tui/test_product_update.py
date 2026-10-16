@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
 import pwd
@@ -15,6 +16,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -467,6 +469,11 @@ def test_product_update_source_and_physical_gate_routes() -> None:
         workflow = (REPO_ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
         )
+        if filename != "portable.yml":
+            assert "uses: ./.github/workflows/source-gate.yml" in workflow
+            workflow = (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(
+                encoding="utf-8"
+            )
         assert "run: make test\n" not in workflow
         job_budget = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
         installer_budget = re.search(
@@ -917,6 +924,180 @@ def _unsigned_app(path: Path, marker: str) -> Path:
     return path
 
 
+def _update_owner_functions(*names: str) -> str:
+    """Execute the production owner's functions with a private installer seam.
+
+    Signature/admission and app replacement stay covered by the physical gate;
+    this fixture proves helper selection, carrier lookup and recovery ordering.
+    """
+    source = HELPER.read_text(encoding="utf-8")
+    bodies = []
+    for name in names:
+        start = source.index(f"{name}() {{")
+        end = source.index("\n}\n", start) + 3
+        bodies.append(source[start:end])
+    return "\n".join(bodies)
+
+
+@pytest.mark.parametrize(
+    "metadata_reader",
+    ["private"] + (["native"] if Path("/usr/bin/plutil").is_file() else []),
+)
+@pytest.mark.parametrize("mode", ["complete", "recover_fixed", "recover_historical"])
+@pytest.mark.parametrize(
+    "damage", ["none", "missing", "symlink", "not_executable", "unknown_authority"]
+)
+def test_update_owner_executes_exact_existing_terminal_handoff(
+    tmp_path: Path, mode: str, damage: str, metadata_reader: str
+) -> None:
+    root = tmp_path.resolve()
+    source = root / "prior.app"
+    destination = root / "Vibecrafted.app"
+    app = destination if mode == "complete" else source
+    terminal_relative = (
+        "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+        if mode == "recover_historical"
+        else "Contents/MacOS/vc-terminal"
+    )
+    terminal = app / terminal_relative
+    frame = app / "Contents/Helpers/vc-frame"
+    for helper in (terminal, frame):
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+    manifest = app / "Contents/Resources/product-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"launch_contract": {"program": terminal_relative}}))
+    pack_dir = app / "Contents/Resources/runtime-pack"
+    pack_dir.mkdir(parents=True)
+    pack = pack_dir / "Vibecrafted_RuntimePack_fixture.tar.gz"
+    with tarfile.open(pack, "w:gz") as archive:
+        data = b"prior-generation\n"
+        member = tarfile.TarInfo("VibecraftedRuntime/VERSION")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    for suffix in (".sig", ".sha256"):
+        Path(str(pack) + suffix).write_text("fixture carrier locator only\n")
+    capture = root / "installer-argv.json"
+    published = root / "published"
+    published.write_text("candidate-generation")
+    installer = pack_dir / "install-runtime-pack.sh"
+    installer.write_text(
+        "#!/bin/bash\n# --allow-older-runtime\nexec "
+        + shlex.quote(sys.executable)
+        + " -c "
+        + shlex.quote(
+            "import json,os,sys; from pathlib import Path; "
+            "a=sys.argv[1:]; terminal=Path(a[a.index('--terminal-host')+1]); "
+            "frame=Path(a[a.index('--frame-helper')+1]); "
+            "assert terminal.is_file() and not terminal.is_symlink() and os.access(terminal,os.X_OK); "
+            "assert frame.is_file() and os.access(frame,os.X_OK); "
+            "Path(os.environ['HANDOFF_ARGV']).write_text(json.dumps(a)); "
+            "Path(os.environ['HANDOFF_PUBLISHED']).write_text('prior-generation')"
+        )
+        + ' "$@"\n'
+    )
+    installer.chmod(0o755)
+    if damage == "missing":
+        terminal.unlink()
+        if mode == "recover_fixed":
+            # A stale nested helper cannot substitute for the current signed
+            # product's declared fixed host, even if it remains executable.
+            legacy = app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+            legacy.parent.mkdir(parents=True)
+            shutil.copy2(frame, legacy)
+    elif damage == "symlink":
+        terminal.unlink()
+        terminal.symlink_to(frame)
+    elif damage == "not_executable":
+        terminal.chmod(0o644)
+    elif damage == "unknown_authority":
+        if mode == "complete":
+            terminal.unlink()
+        else:
+            manifest.write_text(
+                json.dumps({"launch_contract": {"program": "Contents/MacOS/unknown"}})
+            )
+    functions = _update_owner_functions(
+        "path_has_dotdot",
+        "assert_no_symlink_components",
+        "pack_payload_in_dir",
+        "locate_prior_pack",
+        "prior_pack_generation",
+        "restore_prior_runtime",
+        "complete_replacement",
+    )
+    if metadata_reader == "private":
+        # This test owns locator/handoff semantics, not Apple's JSON reader.
+        # Run a strict file-backed reader on every OS; Darwin additionally
+        # runs the identical cases with the actual plutil above.
+        reader = root / "plutil"
+        reader.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            "from pathlib import Path\n"
+            "assert sys.argv[1:6] == ['-extract', 'launch_contract.program', 'raw', '-o', '-']\n"
+            "value = json.loads(Path(sys.argv[6]).read_text())['launch_contract']['program']\n"
+            "assert isinstance(value, str)\nprint(value)\n"
+        )
+        reader.chmod(0o755)
+        assert functions.count("/usr/bin/plutil") == 1
+        functions = functions.replace("/usr/bin/plutil", shlex.quote(str(reader)))
+    shell = (
+        "set -euo pipefail\n"
+        + functions
+        + r"""
+SOURCE="$1"; DESTINATION="$2"; TEST_INSTALLER="$3"; PRIOR_GENERATION=""; PRIOR_PACK=""
+without_update_lock_fd() { "$@"; }
+resolve_pack_installer() { printf '%s' "$TEST_INSTALLER"; }
+observe_published_generation() { cat "$HANDOFF_PUBLISHED"; }
+write_journal() { printf '%s\n' "$1" >> "$HANDOFF_PHASES"; }
+write_admission() { printf '%s\n' "$1" >> "$HANDOFF_PHASES"; }
+fail_after_if() { :; }
+if [[ "$4" == complete ]]; then complete_replacement; else restore_prior_runtime; fi
+"""
+    )
+    phases = root / "phases"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            shell,
+            "owner-handoff",
+            str(source),
+            str(destination),
+            str(installer),
+            mode,
+        ],
+        env=_helper_env(
+            HANDOFF_ARGV=str(capture),
+            HANDOFF_PUBLISHED=str(published),
+            HANDOFF_PHASES=str(phases),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if damage != "none":
+        assert result.returncode != 0, result.stdout
+        assert not capture.exists()
+        assert published.read_text() == "candidate-generation"
+        return
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(capture.read_text())
+    assert argv[argv.index("--terminal-host") + 1] == str(terminal)
+    assert argv[argv.index("--frame-helper") + 1] == str(frame)
+    assert argv[argv.index("--pack") + 1] == str(pack)
+    assert argv[argv.index("--app-root") + 1] == str(app)
+    assert ("--allow-older-runtime" in argv) == (mode != "complete")
+    if mode != "complete":
+        assert phases.read_text().splitlines() == [
+            "runtime_recovering",
+            "runtime_restored",
+        ]
+        assert published.read_text() == "prior-generation"
+
+
 def _helper_env(**extra: str) -> dict[str, str]:
     env = os.environ.copy()
     for key in _FRAME_IDENTITY_ENV:
@@ -1275,7 +1456,18 @@ def _assert_shared_recovered_tuple(
 
 
 def _app_helpers(dest: Path) -> tuple[Path, Path]:
-    terminal = dest / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    # These physical fixtures have already passed signed artifact admission.
+    # Preserve the authenticated historical product's geometry for rollback.
+    manifest = json.loads(
+        (dest / "Contents/Resources/product-manifest.json").read_text()
+    )
+    program = manifest["launch_contract"]["program"]
+    assert program in {
+        "Contents/MacOS/vc-terminal",
+        "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
+    }
+    terminal = dest / program
+    assert terminal.is_file() and os.access(terminal, os.X_OK)
     frame = dest / "Contents/Helpers/vc-frame"
     return terminal, frame
 

@@ -463,10 +463,11 @@ def test_workflow_session_calls_manual_resume_and_never_launch_workflow(
     monkeypatch.setattr(
         cli,
         "resolve_session_selection",
-        lambda agent, token, root: {
+        lambda agent, token, root, **kwargs: {
             "agent_session_id": token,
             "session_selector": token,
             "identity_source": "explicit_session",
+            "selection_root": str(root),
         },
     )
     monkeypatch.setattr(
@@ -1236,6 +1237,50 @@ def test_root_cli_agent_observe_head_prints_first_lines(
     assert "line 2" in out
     assert "line 3" in out
     assert "line 4" not in out
+
+
+def test_root_cli_agent_observe_describes_run_when_control_core_is_unavailable(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    """Server and control-observe down: identity is shown, state is not invented."""
+    from vibecrafted_core import control_plane, server_observation
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_dir = home / "control_plane" / "runtime_runs" / "impl-down"
+    run_dir.mkdir(parents=True)
+    (run_dir / "transcript.log").write_text("canonical line\n", encoding="utf-8")
+
+    def _boom(*_args, **_kwargs):
+        raise TimeoutError("observe timeout")
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+    monkeypatch.delenv("VIBECRAFTED_CONTROL_OBSERVE", raising=False)
+    monkeypatch.delenv("VIBECRAFTED_ROOT", raising=False)
+    monkeypatch.setattr(server_observation.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        control_plane,
+        "lookup_run",
+        lambda _run_id: {
+            "run_id": "impl-down",
+            "agent": "kimi",
+            "root": "/repo",
+            "state": "running",
+            "liveness": "pid_alive",
+        },
+    )
+
+    assert cli.main(["kimi", "observe", "--run-id", "impl-down", "--tail", "5"]) == 0
+
+    out = capsys.readouterr().out
+    assert "agent:      kimi" in out
+    assert "root:       /repo" in out
+    assert "state:      \n" in out
+    assert "liveness:   \n" in out
+    assert "note:       control-core observe unavailable" in out
+    assert "running" not in out and "pid_alive" not in out
+    assert "canonical line" in out
 
 
 def test_root_cli_agent_observe_rejects_conflicting_windows(monkeypatch) -> None:

@@ -28,7 +28,7 @@ spawn_generate_launcher() {
   q_python="$(spawn_shell_quote "$(command -v "$(spawn_python_bin)")")"
   q_root="$(spawn_shell_quote "${SPAWN_ROOT:-}")"
   q_agent="$(spawn_shell_quote "${SPAWN_AGENT:-}")"
-  q_model="$(spawn_shell_quote "$(spawn_read_meta_field "$meta_path" "model")")"
+  q_model="$(spawn_shell_quote "$(spawn_clean_model "$(spawn_read_meta_field "$meta_path" "model")")")"
   q_prompt_id="$(spawn_shell_quote "${SPAWN_PROMPT_ID:-}")"
   q_run_id="$(spawn_shell_quote "${SPAWN_RUN_ID:-}")"
   q_run_lock="$(spawn_shell_quote "${SPAWN_RUN_LOCK:-}")"
@@ -105,6 +105,7 @@ if [[ -n "$pre_hook" ]]; then
 spawn_export_frontier_sidecars
 export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
 spawn_prepend_agent_tool_paths
+spawn_pin_runtime_python
 if [[ "${SPAWN_SKILL_NAME:-}" == "research" || "${SPAWN_SKILL_CODE:-}" == "rsch" || "${VIBECRAFTED_RESEARCH_MODE:-0}" == "1" ]]; then
   export VIBECRAFTED_RESEARCH_MODE=1
   export VIBECRAFTED_NO_GIT_WRITES=1

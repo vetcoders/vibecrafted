@@ -49,10 +49,12 @@ pub mod usage;
 pub mod usage_agy;
 pub mod usage_claude;
 pub mod usage_codex;
+pub mod usage_collect;
 pub mod usage_cursor;
 pub mod usage_grok;
 pub mod usage_junie;
 pub mod usage_kimi;
+pub mod usage_local;
 pub mod workspace;
 
 pub use events::{
@@ -85,8 +87,9 @@ pub use scaffold_verifiers::{
     execute_brief_verifiers, execute_brief_verifiers_in_repo, extract_brief_verifier_commands,
 };
 pub use usage::{
-    USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension, UsageDimensions,
-    UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens, UsageTotals,
+    PROVIDER_POOLS, USAGE_PROVIDER_ADAPTERS, USAGE_REPORT_SCHEMA, UsageCost, UsageDimension,
+    UsageDimensions, UsageFilter, UsageReport, UsageReportFilter, UsageRun, UsageTokens,
+    UsageTotals, provider_pool,
 };
 pub use usage_agy::{
     AgyAdapterDiagnostics, AgyEstimatedCost, AgyEstimatedTokens, AgyFileError, AgyModelRate,

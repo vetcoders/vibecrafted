@@ -10,6 +10,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -17,12 +18,79 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import (
+    bind_private_child_installer,
+    fixed_terminal_fixture,
+    private_child_command,
+    private_native_copy,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 
 from scripts import vetcoders_install as installer
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/vc-app-update.sh"
+
+
+@pytest.mark.parametrize("diagnostic_size", [0, 1024 * 1024])
+@pytest.mark.parametrize(
+    "identifier,team,verify_rc,display_rc,accepted",
+    [
+        ("io.vetcoders.vibecrafted", "not set", 0, 0, True),
+        ("ioXvetcodersXvibecrafted", "not set", 0, 0, False),
+        ("io.vetcoders.vibecrafted", "foreign", 0, 0, False),
+        ("", "not set", 0, 0, False),
+        ("io.vetcoders.vibecrafted", "not set", 1, 0, False),
+        ("io.vetcoders.vibecrafted", "not set", 0, 1, False),
+    ],
+)
+def test_signed_identity_reads_complete_codesign_display(
+    tmp_path, identifier, team, verify_rc, display_rc, accepted, diagnostic_size
+):
+    # Exercise the production readers with more than a pipe buffer of output.
+    # Early grep/awk exit used to SIGPIPE the writer under pipefail (v4.3.3).
+    display = tmp_path / "codesign-display"
+    display.write_text(
+        f"Identifier={identifier}\nTeamIdentifier={team}\nCDHash=abc123\n"
+        + "diagnostic="
+        + "x" * diagnostic_size
+        + "\n"
+    )
+    helper = HELPER.read_text()
+    readers = helper[
+        helper.index("verify_signed_app() {") : helper.index("app_identity_token() {")
+    ]
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            """set -euo pipefail
+EXPECTED_IDENTIFIER=io.vetcoders.vibecrafted
+EXPECTED_TEAM='not set'
+without_update_lock_fd() {
+  if [[ "$2" == --verify ]]; then return "$VERIFY_RC"; fi
+  cat "$DISPLAY_FILE"
+  return "$DISPLAY_RC"
+}
+"""
+            + readers
+            + "\nverify_signed_app fixture.app\napp_cdhash fixture.app\n",
+        ],
+        env={
+            **os.environ,
+            "DISPLAY_FILE": str(display),
+            "VERIFY_RC": str(verify_rc),
+            "DISPLAY_RC": str(display_rc),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == accepted, result.stderr
+    if accepted:
+        assert result.stdout.strip() == "abc123"
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -31,9 +99,34 @@ def write_json(path: Path, value: dict) -> None:
 
 
 @pytest.fixture
-def lane(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     if not Path("/usr/bin/codesign").exists():
         pytest.skip("requires macOS strict codesign")
+    fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
+    # Seatbelt refuses the system setuid ps. Run the authentic selected ps code
+    # bytes (whole file, else the host-native thin slice) from a private,
+    # locally ad-hoc-signed copy without privilege, retaining the real census.
+    # The helper accepts a copy only after a real exec of the census command.
+    private_ps = private_native_copy(
+        Path("/bin/ps"),
+        tmp_path / "ps",
+        ("-axo", "pid=,command="),
+        sign_command=lambda command: private_child_command(
+            command, allowed=(Path("/usr/bin/codesign"),)
+        ),
+    )
+    helper_source = HELPER.read_text()
+    assert helper_source.count("/bin/ps") == 2
+    helper = tmp_path / "vc-app-update.sh"
+    helper.write_text(helper_source.replace("/bin/ps", str(private_ps)))
+    monkeypatch.setattr(sys.modules[__name__], "HELPER", helper)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(
+            installer._FIXED_TERMINAL_HOST, fixture_root=tmp_path
+        ),
+    )
     parent = tmp_path / "Applications"
     parent.mkdir()
     env = {"PATH": os.environ["PATH"]}
@@ -48,6 +141,55 @@ def lane(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return parent, env
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
+def test_private_native_copy_runs_real_census_and_fails_loud(tmp_path: Path) -> None:
+    """Falsifiable canary for hosted macOS 15 copied-native failures."""
+    ps = private_native_copy(
+        Path("/bin/ps"), tmp_path / "ps", ("-axo", "pid=,command=")
+    )
+    census = subprocess.run(
+        [str(ps), "-axo", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert census.returncode == 0, census.stderr
+    assert str(os.getpid()) in {line.split()[0] for line in census.stdout.splitlines()}
+    assert not list(tmp_path.glob(".native-copy-*"))
+    # Negative control: a probe no candidate can satisfy reports every attempt
+    # and leaves no destination behind.
+    with pytest.raises(AssertionError, match="no runnable private copy") as refused:
+        private_native_copy(Path("/bin/ps"), tmp_path / "ps-never", ("--no-such-flag",))
+    assert "whole-file: rc=" in str(refused.value)
+    assert not (tmp_path / "ps-never").exists()
+    assert not list(tmp_path.glob(".native-copy-*"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
+def test_private_native_copy_never_replaces_existing_destination(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "existing"
+    sentinel.write_bytes(b"keep me")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"foreign")
+    link = tmp_path / "link"
+    link.symlink_to(outside)
+    for target in (sentinel, link):
+        with pytest.raises(AssertionError, match="refusing to replace"):
+            private_native_copy(Path("/bin/ps"), target, ("-axo", "pid=,command="))
+    for refused_target in (Path("/bin/ps"), Path("/Applications/vc-never-created")):
+        with pytest.raises(AssertionError, match="refusing"):
+            private_native_copy(
+                Path("/bin/ps"), refused_target, ("-axo", "pid=,command=")
+            )
+    assert not Path("/Applications/vc-never-created").exists()
+    assert sentinel.read_bytes() == b"keep me"
+    assert link.is_symlink() and outside.read_bytes() == b"foreign"
+    assert not list(tmp_path.glob(".native-copy-*"))
+
+
 def app(path: Path, number: int) -> Path:
     resources = path / "Contents/Resources"
     resources.mkdir(parents=True)
@@ -55,6 +197,21 @@ def app(path: Path, number: int) -> Path:
     executable.parent.mkdir()
     executable.write_text(f"#!/bin/sh\nexit {number}\n")
     executable.chmod(0o755)
+    # Complete replacement now requires the flat Terminal and Frame tuple.
+    # Borrow harmless native bytes; this fixture never starts either engine.
+    for relative in ("Contents/MacOS/vc-terminal", "Contents/Helpers/vc-frame"):
+        engine = path / relative
+        engine.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile("/usr/bin/true", engine)
+        engine.chmod(0o755)
+        subprocess.run(
+            private_child_command(
+                ["/usr/bin/codesign", "--force", "--sign", "-", str(engine)],
+                allowed=(Path("/usr/bin/codesign"),),
+            ),
+            check=True,
+            capture_output=True,
+        )
     with (path / "Contents/Info.plist").open("wb") as handle:
         plistlib.dump(
             {
@@ -83,17 +240,58 @@ def app(path: Path, number: int) -> Path:
     core = resources / "runtime/vibecrafted-core/vibecrafted_core"
     core.mkdir(parents=True)
     shutil.copy(ROOT / "vibecrafted-core/vibecrafted_core/runtime_paths.py", core)
+    bind_private_child_installer(
+        resources / "runtime",
+        installer._FIXED_TERMINAL_HOST,
+        fixture_root=installer._FIXED_TERMINAL_HOST.parents[5],
+    )
     subprocess.run(
-        ["/usr/bin/codesign", "--force", "--sign", "-", str(path)],
+        private_child_command(
+            ["/usr/bin/codesign", "--force", "--sign", "-", str(path)],
+            allowed=(Path("/usr/bin/codesign"),),
+        ),
         check=True,
         capture_output=True,
     )
     return path
 
 
+def _app_child_command(command: list[str], env: dict[str, str]) -> list[str]:
+    root = Path(env["HOME"]).parent
+    allowed = [
+        Path("/usr/bin/true"),
+        Path("/usr/bin/codesign"),
+        Path("/usr/sbin/lsof"),
+        HELPER.parent / "ps",
+        installer._FIXED_TERMINAL_HOST,
+        root
+        / "Applications/Vibecrafted.app/Contents/Resources/runtime-pack/install-runtime-pack.sh",
+        root / "Applications/Vibecrafted.app/Contents/MacOS/vc-terminal",
+        root / "Applications/Vibecrafted.app/Contents/Helpers/vc-frame",
+    ]
+    empty_main_probe = root / "fixture-bin/swift-main-empty"
+    if empty_main_probe.is_file():
+        allowed.append(empty_main_probe)
+    pgrep = shutil.which("pgrep", path=env["PATH"])
+    if pgrep and Path(pgrep).resolve().is_relative_to(root):
+        allowed.append(Path(pgrep))
+    return private_child_command(command, allowed=tuple(allowed), fixture_root=root)
+
+
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", str(HELPER), *args, "--expected-team", "not set"],
+        _app_child_command(
+            [
+                "/bin/bash",
+                str(HELPER),
+                *args,
+                "--expected-team",
+                "not set",
+                "--open-bin",
+                "/usr/bin/true",
+            ],
+            env,
+        ),
         env=env,
         capture_output=True,
         text=True,
@@ -297,17 +495,22 @@ def test_live_and_delayed_handoff_not_pruned(lane):
     ]
     release = state / "release"
     process = subprocess.Popen(
-        [
-            "/bin/bash",
-            str(HELPER),
-            *args,
-            "--expected-team",
-            "not set",
-            "--hold-after",
-            "ready",
-            "--until",
-            str(release),
-        ],
+        _app_child_command(
+            [
+                "/bin/bash",
+                str(HELPER),
+                *args,
+                "--expected-team",
+                "not set",
+                "--hold-after",
+                "ready",
+                "--until",
+                str(release),
+                "--open-bin",
+                "/usr/bin/true",
+            ],
+            env,
+        ),
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -422,6 +625,11 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
     (repo / "scripts").mkdir(parents=True)
     (repo / "dist").mkdir()
     shutil.copy(ROOT / "scripts/install-app.sh", repo / "scripts/install-app.sh")
+    ownership = Path(
+        "vibecrafted-app/shell-agent/app/Vibecrafted/AppInstanceOwnership.swift"
+    )
+    (repo / ownership).parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / ownership, repo / ownership)
     # Only fixture wiring differs: the real helper still performs all mutation,
     # strict codesign, locking, publication observation, and fd-bound disposal.
     (repo / "scripts/vc-app-update.sh").write_text(
@@ -431,6 +639,25 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
     )
     binaries = parent.parent / "fixture-bin"
     binaries.mkdir()
+    # This receipt/disposal test has no running Main. The real AppKit/quit
+    # adapter is exercised by test_install_app_main_identity; never let this
+    # filesystem fixture enumerate or signal host applications through Swift.
+    empty_main_probe = binaries / "swift-main-empty"
+    empty_main_probe.write_text(
+        f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
+        "assert len(sys.argv) == 3\n"
+        "source = Path(sys.argv[1]).read_text()\n"
+        "assert 'enum AppInstanceOwnership' in source\n"
+        "assert 'func installMainSnapshot' in source\n"
+        "assert Path(sys.argv[2]).name == 'Vibecrafted.app'\n"
+    )
+    empty_main_probe.chmod(0o755)
+    copied_wrapper = repo / "scripts/install-app.sh"
+    text = copied_wrapper.read_text()
+    assert text.count("/usr/bin/swift ") == 1
+    copied_wrapper.write_text(
+        text.replace("/usr/bin/swift ", str(empty_main_probe) + " ", 1)
+    )
     (binaries / "pgrep").write_text("#!/bin/sh\nexit 1\n")
     (binaries / "pgrep").chmod(0o755)
     env.update(
@@ -455,12 +682,17 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
         wrapper.write_text("#!/bin/sh\nexit 0\n")
         wrapper.chmod(0o755)
         subprocess.run(
-            ["/usr/bin/codesign", "--force", "--sign", "-", str(source)],
+            private_child_command(
+                ["/usr/bin/codesign", "--force", "--sign", "-", str(source)],
+                allowed=(Path("/usr/bin/codesign"),),
+            ),
             check=True,
             capture_output=True,
         )
         result = subprocess.run(
-            ["/bin/bash", str(repo / "scripts/install-app.sh")],
+            _app_child_command(
+                ["/bin/bash", str(repo / "scripts/install-app.sh")], env
+            ),
             env=env,
             capture_output=True,
             text=True,

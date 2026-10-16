@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .. import portable_lock
 from ..control_plane import control_plane_home
 from ..runtime_paths import vibecrafted_home
 
@@ -58,6 +61,7 @@ class WorktreeGeometry:
     target_path: str
     artifact_path: str
     integrator_exclusive: bool = False
+    cache_creation_receipt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -178,8 +182,15 @@ class WorktreeManager:
                     f"refusing existing worktree {root}; resume with its owning "
                     "run id or clean it explicitly"
                 )
-            self._validate_target(root)
             self._validate_reuse(geometry)
+            from ..cache_lifecycle import retain_cache_for_launch
+
+            try:
+                retain_cache_for_launch(vibecrafted_home(), root / "target")
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise WorktreeContractError(
+                    f"cache reuse proof uncertain: {exc}"
+                ) from exc
         else:
             branch_exists = bool(
                 _git(
@@ -203,7 +214,9 @@ class WorktreeManager:
                 raise WorktreeContractError(
                     "new worker baseline differs from pinned commit"
                 )
+            proof = self._validate_target(root, creation_geometry=geometry)
             self._validate_reuse(geometry)
+            geometry = replace(geometry, cache_creation_receipt=proof)
         self._validate_target(root)
         return geometry
 
@@ -408,13 +421,39 @@ class WorktreeManager:
                 f"refusing dirty reused worktree {root}: {dirty}"
             )
 
-    def _validate_target(self, root: Path) -> None:
+    def _validate_target(
+        self, root: Path, *, creation_geometry: WorktreeGeometry | None = None
+    ) -> str:
+        from ..cache_lifecycle import (
+            build_lease,
+            dispatch_target_creation,
+            identity,
+            record_dispatch_cache_creation,
+        )
+
         target = root / "target"
         if target.is_symlink():
             raise WorktreeContractError(
                 f"worker target must be a real local directory, not a symlink: {target}"
             )
-        target.mkdir(parents=True, exist_ok=True)
+        if creation_geometry is not None:
+            try:
+                with dispatch_target_creation(
+                    vibecrafted_home(), root
+                ) as created_identity:
+                    if created_identity is not None:
+                        with build_lease(target):
+                            proof = record_dispatch_cache_creation(
+                                vibecrafted_home(),
+                                creation_geometry,
+                                created_identity=created_identity,
+                            )
+                        return proof
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                pass  # Ambiguous publication/observation never grants ownership.
+        # Validation/recovery can create missing output, without ownership.
+        target.mkdir(exist_ok=True)
+        identity(target)
         resolved = target.resolve()
         try:
             resolved.relative_to(root.resolve())
@@ -441,6 +480,7 @@ class WorktreeManager:
                     if existing and not existing.endswith("\n"):
                         handle.write("\n")
                     handle.write("/target/\n")
+        return ""
 
 
 def _safe_component(value: str, fallback: str) -> str:
@@ -455,10 +495,53 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+@contextmanager
+def _worktree_metadata_lock(repo: Path) -> Iterator[None]:
+    """Serialize short mutations across all checkouts of one Git repository.
+
+    Reuse the kernel primitive used by dispatch receipts and installation.
+    Their leases have different ownership/path/lifetime contracts. Each call
+    opens its own descriptor, so flock excludes threads as well as processes.
+    Keep the inode permanently: unlinking it would split waiting owners.
+    """
+    common = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not common:
+        raise WorktreeContractError(
+            "cannot resolve Git common directory for worktree lock"
+        )
+    lock = Path(common).resolve() / "vibecrafted-worktrees.lock"
+    try:
+        handle = lock.open("a+b")
+        try:
+            portable_lock.flock(handle.fileno(), portable_lock.LOCK_EX)
+        except BaseException:
+            handle.close()
+            raise
+    except OSError as exc:
+        raise WorktreeContractError(
+            f"failed to lock worktree metadata at {lock}: {exc}"
+        ) from exc
+    try:
+        yield
+    finally:
+        # Closing our non-inherited descriptor also releases the kernel lock
+        # on exceptions; Git and worker processes never own this lease.
+        try:
+            portable_lock.flock(handle.fileno(), portable_lock.LOCK_UN)
+        finally:
+            handle.close()
+
+
 def _run(repo: Path, command: list[str], action: str) -> None:
-    proc = subprocess.run(
-        command, cwd=repo, capture_output=True, text=True, check=False
+    mutates_worktrees = command[:2] == ["git", "worktree"] and command[2:3] in (
+        ["add"],
+        ["remove"],
+        ["prune"],
     )
+    with _worktree_metadata_lock(repo) if mutates_worktrees else nullcontext():
+        proc = subprocess.run(
+            command, cwd=repo, capture_output=True, text=True, check=False
+        )
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
         raise WorktreeContractError(f"failed to {action}: {detail}")

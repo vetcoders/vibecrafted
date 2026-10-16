@@ -47,7 +47,7 @@ Then:
 
 ## Installer / update UX
 
-- Post-install launch offers **Start here** cockpit (`vc-start`) — onboarding content, not restore magic.
+- Post-install launch offers the **Launchpad** cockpit (`vc-start`) — onboarding content, not restore magic.
 - Update prompts must cite this contract or the narrower sentence above.
 - Auto-update must not silent-swap binaries while claiming full agent restore.
 

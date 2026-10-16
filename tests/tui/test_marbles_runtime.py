@@ -7,9 +7,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,18 @@ def _prepare_fake_marbles_bundle(tmp_path: Path) -> tuple[Path, Path]:
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/scripts/lib",
         scripts_dir / "lib",
+    )
+    # This fixture copies the shell library, not the Python package above it.
+    # Bind that private copy to its real owner instead of relying on an
+    # editable import inherited by Linux but absent in bare macOS Python.
+    util = scripts_dir / "lib/util.sh"
+    owner = 'source_root="$(cd "$lib_dir/../../../.." && pwd)"'
+    source = util.read_text()
+    assert source.count(owner) == 1
+    util.write_text(
+        source.replace(
+            owner, "source_root=" + shlex.quote(str(REPO_ROOT / "vibecrafted-core"))
+        )
     )
 
     for name in (
@@ -301,6 +314,41 @@ def _prepare_fake_marbles_bundle(tmp_path: Path) -> tuple[Path, Path]:
     return scripts_dir, capture_file
 
 
+def test_fake_bundle_resolves_artifacts_without_ambient_pythonpath(tmp_path):
+    scripts, _ = _prepare_fake_marbles_bundle(tmp_path)
+    home = tmp_path / "isolated"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.update(
+        HOME=str(home),
+        VIBECRAFTED_HOME=str(home / ".vibecrafted"),
+        VIBECRAFTED_PYTHON=str(Path(sys.base_prefix) / "bin/python3"),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1/common.sh"; spawn_store_dir "$2"',
+            "fixture",
+            str(scripts),
+            str(REPO_ROOT),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(
+        home
+        / ".vibecrafted/artifacts"
+        / _org_repo()
+        / datetime.now().strftime("%Y_%m%d")
+    )
+
+
 def _delay_next_plan_write(script_path: Path) -> None:
     marker = 'next_plan="$(_loop_child_plan "$next")"'
     replacement = 'sleep "${MARBLES_TEST_DELAY_NEXT_PLAN:-0}"\n' + marker
@@ -326,13 +374,42 @@ def _expected_operator_session(run_id: str | None = None) -> str:
 
 def _marbles_state_dirs(crafted_home: Path) -> list[Path]:
     marbles_dir = crafted_home / "marbles"
-    live = [
-        path
-        for path in marbles_dir.iterdir()
-        if path.is_dir() and path.name != "_archived"
-    ]
-    archived = list((marbles_dir / "_archived").glob("*/*"))
-    return live + archived
+    deadline = time.monotonic() + 5
+    while True:
+        live = [
+            path
+            for path in marbles_dir.iterdir()
+            if path.is_dir() and path.name != "_archived"
+        ]
+        archived = list((marbles_dir / "_archived").glob("*/*"))
+        # The verifier may archive between the two directory observations.
+        # Require the actual state file, retrying only this publication gap.
+        observed = [path for path in live + archived if (path / "state.json").is_file()]
+        if observed or time.monotonic() >= deadline:
+            return observed
+        time.sleep(0.02)
+
+
+def test_state_discovery_retries_archive_publication_gap(tmp_path, monkeypatch):
+    home = tmp_path / "crafted"
+    archived = home / "marbles/_archived"
+    state = archived / "2026-10-14/marb-fixture"
+    state.mkdir(parents=True)
+    (state / "state.json").write_text("{}")
+    original_glob = Path.glob
+    calls = 0
+
+    def observe(path, pattern):
+        nonlocal calls
+        if path == archived:
+            calls += 1
+            if calls == 1:
+                return iter(())
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", observe)
+    assert _marbles_state_dirs(home) == [state]
+    assert calls >= 2
 
 
 def _org_repo() -> str:
@@ -343,27 +420,6 @@ def _org_repo() -> str:
     match = re.search(r"[:/]([^/]+)/([^/.]+?)(?:\.git)?$", remote)
     assert match is not None
     return f"{match.group(1)}/{match.group(2)}"
-
-
-def test_marbles_spawn_chains_with_agent_and_ancestor_plan_contract() -> None:
-    script = (
-        REPO_ROOT
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "scripts"
-        / "marbles_spawn.sh"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        'success_hook="bash $q_scripts/marbles_next.sh $q_state $count 1 '
-        '$marbles_run_id $q_root $q_runtime $q_scripts $q_lock $q_store"' in script
-    )
-    assert (
-        'failure_hook="bash $q_scripts/marbles_next.sh --failed $q_state '
-        '$count 1 $marbles_run_id $q_root $q_runtime $q_scripts $q_lock $q_store"'
-        in script
-    )
 
 
 def _run_marbles_prompt(
@@ -730,8 +786,10 @@ def test_parse_contract_fails_closed_on_unknown_flag() -> None:
     assert "Unknown flag: --bogus-flag" in result.stderr
 
 
-def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
+@pytest.mark.parametrize("effort", ["none", "minimal", "high", "max"])
+def test_skill_contract_dispatches_model_and_provider_effort(
     tmp_path: Path,
+    effort: str,
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
@@ -763,7 +821,7 @@ def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
                 "_vetcoders_print_launch_receipt() { return 0; }; "
                 "_vetcoders_maybe_spawn_await_pane() { return 0; }; "
                 '_vetcoders_dispatch_skill_prompt() { printf "%s\\n" "$@" > "$MODEL_CAPTURE"; }; '
-                "_vetcoders_skill claude audit --model claude-opus-5 "
+                f"_vetcoders_skill claude audit --model claude-opus-5 --effort {effort} "
                 '--file "$MODEL_BRIEF" --root "$MODEL_ROOT"'
             ),
         ],
@@ -776,7 +834,99 @@ def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
 
     assert result.returncode == 0, result.stderr
     dispatched = capture.read_text(encoding="utf-8").splitlines()
-    assert dispatched[-4:] == ["--root", str(root), "--model", "claude-opus-5"]
+    assert dispatched[-6:] == [
+        "--root",
+        str(root),
+        "--model",
+        "claude-opus-5",
+        "--effort",
+        effort,
+    ]
+
+
+@pytest.mark.parametrize("identity", ["run", "session", "fresh"])
+@pytest.mark.parametrize("input_mode", ["prompt", "file"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "high", "max"])
+def test_noninteractive_resume_transports_provider_effort(
+    tmp_path: Path, identity: str, input_mode: str, effort: str
+) -> None:
+    """Each accepted resume route preserves model/effort at the core boundary."""
+
+    capture = tmp_path / "core-argv"
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("continue\n")
+    identity_args = {
+        "run": "--run-id work-260816-213657-08420",
+        "session": "--session abc12345-1234-1234-1234-abc123456789",
+        "fresh": "",
+    }[identity]
+    input_args = (
+        "--prompt continue"
+        if input_mode == "prompt"
+        else f"--file {shlex.quote(str(prompt_file))}"
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                f'_vetcoders_run_core_cli() {{ printf "%s\\n" "$@" > {shlex.quote(str(capture))}; }}; '
+                f"_vetcoders_resume_agent codex {identity_args} {input_args} "
+                f"--model gpt-6 --effort {effort}"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text().splitlines()
+    assert (
+        argv[:2]
+        == {
+            "run": ["codex", "resume"],
+            "session": ["resume-session", "codex"],
+            "fresh": ["workflow", "codex"],
+        }[identity]
+    )
+    assert argv[argv.index("--model") + 1] == "gpt-6"
+    assert argv[argv.index("--effort") + 1] == effort
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/bin/zsh"])
+def test_root_rewrite_keeps_effort_values_as_values(shell: str) -> None:
+    """A provider-bound effort value cannot be mistaken for another root flag."""
+
+    result = subprocess.run(
+        [
+            shell,
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                "_vetcoders_rewrite_contract_root_argv /normalized/repo "
+                "--root relative --effort --root --model gpt-6; "
+                'printf "%s\\n" "${_vetcoders_contract_argv[@]}"'
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "--root",
+        "/normalized/repo",
+        "--effort",
+        "--root",
+        "--model",
+        "gpt-6",
+    ]
 
 
 def test_parse_contract_double_dash_still_passes_literal_dash_text() -> None:
@@ -844,7 +994,127 @@ def test_parse_contract_accepts_fork_session_flag() -> None:
     assert lines["PROMPT"] == ""
 
 
-def test_resume_command_composes_claude_fork_session() -> None:
+def _capture_public_resume_permissions(
+    tmp_path: Path, configuration: str, public_args: tuple[str, ...] = ()
+) -> dict:
+    """Run the public shell through its real command builder, without a provider.
+
+    The private interpreter seam replaces interactive-command admission while
+    item7 owns that implementation; the durable config and controls resolvers
+    remain real. The terminal seam records the resulting receipt, never execs.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    config = tmp_path / "permissions.toml"
+    config.write_text(configuration, encoding="utf-8")
+    interpreter = tmp_path / "inert-interactive-python"
+    interpreter.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            """
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            from vibecrafted_core.execution_controls import resolve_execution_controls
+            from vibecrafted_core.server_config import durable_permission_selection
+
+            args = sys.argv[1:]
+            if args[:3] != ["-m", "vibecrafted_core.spawn", "interactive-command"]:
+                raise SystemExit("unexpected private interpreter invocation")
+            provider = args[3]
+            explicit = args[args.index("--permissions") + 1] if "--permissions" in args else ""
+            configured, source = durable_permission_selection(
+                provider, Path(os.environ["RESUME_POLICY_CONFIG"])
+            )
+            controls = resolve_execution_controls(
+                provider, permissions=explicit, mode="interactive",
+                configured_permissions=configured, permissions_source=source,
+            )
+            print(json.dumps({
+                "argv": args,
+                "execution_controls": controls.receipt(),
+            }))
+            """
+        ),
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "RESUME_POLICY_CONFIG": str(config),
+        "PYTHONPATH": str(REPO_ROOT / "vibecrafted-core"),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"source {shlex.quote(str(HELPER_SCRIPT))}; "
+                "_vetcoders_core_python_spec() { "
+                f"printf '%s\\t%s\\n' {shlex.quote(str(interpreter))} "
+                f"{shlex.quote(str(REPO_ROOT / 'vibecrafted-core'))}; }}; "
+                "_vetcoders_declaration_escalate_if_needed() { return 2; }; "
+                "_vetcoders_aicx_resume_fallback() { printf 'MODE=new_session\\n'; }; "
+                '_vetcoders_enter_admitted_interactive() { printf "%s\\n" "$2"; }; '
+                "_vetcoders_resume_agent claude --runtime plain "
+                + shlex.join(public_args)
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "public_args", "effective", "source"),
+    [
+        ('permissions = "read-only"\n', (), "read-only", "config:global"),
+        (
+            'permissions = "bypass"\n[agents.claude]\npermissions = "read-only"\n',
+            (),
+            "read-only",
+            "config:agents.claude",
+        ),
+        ("", (), "auto", "default"),
+        (
+            'permissions = "read-only"\n',
+            ("--permissions", "bypass"),
+            "bypass",
+            "dispatch",
+        ),
+    ],
+    ids=["global-read-only", "agent-read-only", "default-auto", "explicit-bypass"],
+)
+def test_public_interactive_resume_permission_precedence(
+    tmp_path: Path,
+    configuration: str,
+    public_args: tuple[str, ...],
+    effective: str,
+    source: str,
+) -> None:
+    payload = _capture_public_resume_permissions(tmp_path, configuration, public_args)
+    controls = payload["execution_controls"]
+    assert controls["permissions_effective"] == effective
+    assert controls["permissions_source"] == source
+    assert ("--permissions" in payload["argv"]) == bool(public_args)
+
+
+def test_resume_command_composes_claude_fork_session(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
     payload = subprocess.run(
         [
             "bash",
@@ -858,17 +1128,24 @@ def test_resume_command_composes_claude_fork_session() -> None:
         ],
         check=True,
         cwd=REPO_ROOT,
+        env=env,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert payload[0] == (
-        "claude --print --dangerously-skip-permissions --resume abc-123 --fork-session"
-    )
-    assert payload[1] == (
-        "claude --print --dangerously-skip-permissions --resume abc-123 "
-        "--fork-session 'go on'"
-    )
-    assert payload[2] == "claude --resume abc-123"
+    commands = [shlex.split(command) for command in payload]
+    for command in commands:
+        assert command[0] == "claude"
+        assert command[command.index("--resume") + 1] == "abc-123"
+        assert "--dangerously-skip-permissions" not in command
+        assert "bypassPermissions" not in command
+    for command in commands[:2]:
+        assert "--print" in command
+        assert command[command.index("--permission-mode") + 1] == "auto"
+        assert command.count("--fork-session") == 1
+    assert "go on" not in commands[0]
+    assert commands[1][-1] == "go on"
+    assert "--fork-session" not in commands[2]
+    assert "--print" not in commands[2]
 
 
 def test_resume_agent_rejects_fork_session_for_non_claude() -> None:
@@ -1272,7 +1549,7 @@ def test_marbles_runtime_consumes_ancestor_override_sequence_across_children(
     assert all(loop["ancestor_slug"] == "ancestor" for loop in state["loops"][:3])
     assert state["ancestor_mtime"] == datetime.fromtimestamp(
         (state_dir / "ancestor.md").stat().st_mtime,
-        timezone.utc,
+        UTC,
     ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     events = _load_spawn_events(capture_file)

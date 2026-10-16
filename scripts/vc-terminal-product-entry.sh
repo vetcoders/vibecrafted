@@ -9,13 +9,17 @@
 # Alacritty does not expand ${HOME} in [terminal].shell.program; the private
 # config is not a product surface.
 #
-# Finder treats a naked unix executable as Terminal.app's job. When a
-# generation or App helper ships vc-terminal.app, exec that bundle's
-# Contents/MacOS/alacritty so Dock/LaunchServices identity and logo attach.
-# libexec/vc-terminal remains the required native host and the fallback.
+# macOS terminal bytes execute inside the fixed /Applications/Vibecrafted.app
+# main bundle. Generations remain internal; Linux uses the flat native host.
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
+
+# A visible terminal enables TTY color without forcing ordinary shell pipelines.
+# Explicit provider/pane launches force their own level in env_allowlist.py.
+unset NO_COLOR NODE_DISABLE_COLORS ANSI_COLORS_DISABLED FORCE_COLOR CLICOLOR_FORCE
+case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac
+export CLICOLOR=1
 
 # Root discovery cannot call PATH tools. Sanitization has not run yet, and a
 # hostile or empty inherited PATH is a supported startup case.
@@ -91,53 +95,24 @@ _vc_terminal_sanitize_inherited_path() {
 }
 
 _vc_terminal_is_bundle_host() {
-  local candidate="${1:-}" macos contents bundle
-  [[ "$candidate" == /* ]] || return 1
-  [[ "$candidate" == */vc-terminal.app/Contents/MacOS/alacritty ]] || return 1
-  macos="${candidate%/*}"
-  contents="${macos%/*}"
-  bundle="${contents%/*}"
-  [[ "${bundle##*/}" == "vc-terminal.app" ]] || return 1
+  local candidate="${1:-}" bundle=/Applications/Vibecrafted.app
+  [[ "$candidate" == "$bundle/Contents/MacOS/vc-terminal" ]] || return 1
   [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
-  [[ ! -L "$macos" && ! -L "$contents" && ! -L "$bundle" ]] || return 1
+  [[ ! -L "$bundle" && ! -L "$bundle/Contents" && ! -L "$bundle/Contents/MacOS" ]] || return 1
   [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
-  # A bundle without its declared icon is not a branded host.  Do not let an
-  # ambient VIBECRAFTED_TERMINAL_HOST turn that incomplete shell into the
-  # visible product identity.
-  [[ -s "$bundle/Contents/Resources/alacritty.icns" \
-    && ! -L "$bundle/Contents/Resources/alacritty.icns" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty.icns" ]] || return 1
-  # Both payloads' bundles are stamped VC Terminal by the one builder helper.
-  # A bundle still carrying the donor's name is somebody else's app sitting at
-  # a path shaped like ours; it does not get to be the product's Dock identity.
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
-    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist" 2>/dev/null)" == "io.vetcoders.vibecrafted" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist" 2>/dev/null)" == "Vibecrafted" ]] || return 1
 }
 
 _vc_terminal_select_host() {
-  local fallback="$1" candidate
-  # .app is a macOS identity mechanism. Other supported platforms always
-  # retain the generation's flat native host, even when a polluted environment
-  # supplies a bundle-shaped path.
-  [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || {
-    printf '%s\n' "$fallback"
+  local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal
+  [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || { printf '%s\n' "$fallback"; return 0; }
+  if _vc_terminal_is_bundle_host "$candidate"; then
+    printf '%s\n' "$candidate"
     return 0
-  }
-  for candidate in \
-    "$root/libexec/vc-terminal.app/Contents/MacOS/alacritty" \
-    "${VIBECRAFTED_TERMINAL_HOST:-}"
-  do
-    if _vc_terminal_is_bundle_host "$candidate"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf '%s\n' "$fallback"
+  fi
+  printf 'vc-terminal: fixed signed host missing at /Applications/Vibecrafted.app; install the reviewed notarized app before opening a terminal.\n' >&2
+  return 78
 }
 
 _vc_terminal_sanitize_inherited_path
@@ -159,6 +134,13 @@ export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
+# The runtime python pin: this terminal's python and python3 are the
+# interpreter pinned above, reached through the generation's door. The shell
+# profile only inherits it and puts the door back after zsh startup.
+if [[ -x "$root/config/runtime-pin/bin/python3" ]]; then
+  PATH="$root/config/runtime-pin/bin${PATH:+:$PATH}"
+  export PATH
+fi
 
 # This wrapper creates a new native terminal, so it must not pass through an
 # attachment identity from the non-interactive caller.  The child may start a
@@ -228,17 +210,25 @@ for argument in "$@"; do
       printf 'vc-terminal: --config-file is product-owned: %s\n' "$config" >&2
       exit 2
       ;;
+    --socket | --socket=*)
+      if [[ "$host" == */Contents/MacOS/vc-terminal ]]; then
+        printf 'vc-terminal: the host IPC socket is product-owned\n' >&2
+        exit 2
+      fi
+      value_pending=true
+      ;;
     --option)
       value_pending=true
       option_pending=true
       ;;
     --option=*) shell_options+=(--option "${argument#*=}") ;;
     -o?*) shell_options+=(--option "${argument#-o}") ;;
-    --embed | --socket | --working-directory | --title | -T | -t | --class | -s)
+    --embed | --working-directory | --title | -T | -t | --class | -s)
       value_pending=true
       ;;
   esac
 done
+host_tail=(${1+"$@"})
 if ! $explicit_command; then
   if ! startup_error="$("$root/bin/python3" -B "$root/scripts/vetcoders_install.py" terminal-shell-check \
     "${shell_options[@]}" 2>&1)"; then
@@ -247,11 +237,44 @@ if ! $explicit_command; then
     [[ -f "$primary" ]] || primary="$root/config/alacritty/launch-primary-shell.zsh"
     if [[ -f "$primary" ]]; then
       # Override for this invocation only. Never persist diagnostic argv.
-      exec "$host" --config-file "$config" "$@" -e /bin/bash "$primary"
+      host_tail=(${1+"$@"} -e /bin/bash "$primary")
+    else
+      # Even a damaged generation must leave a readable terminal with a shell.
+      host_tail=(${1+"$@"} -e /bin/zsh -fc
+        'print -u2 -- "Vibecrafted: product shell missing. Open Vibecrafted.app → Repair Runtime; run vc-terminal --doctor. Startup log unavailable: product shell missing."; exec /bin/zsh -dfi')
     fi
-    # Even a damaged generation must leave a readable terminal with a shell.
-    exec "$host" --config-file "$config" "$@" -e /bin/zsh -fc \
-      'print -u2 -- "Vibecrafted: product shell missing. Open Vibecrafted.app → Repair Runtime; run vc-terminal --doctor. Startup log unavailable: product shell missing."; exec /bin/zsh -dfi'
   fi
 fi
-exec "$host" --config-file "$config" "$@"
+
+# One fixed macOS host per user: every further window is a native
+# `msg create-window` request to the admitted host, never a second GUI
+# process. The helper serializes first start under a private flock, proves the
+# host by kernel identity and socket peer, and writes the launch receipt the
+# App consumes. Delivery is not window readiness and never agent start; a
+# refusal is final here, without a duplicate-host fallback. Linux keeps the
+# flat host: no portable proof of host identity is claimed there.
+admission_helper="$root/vibecrafted-core/vibecrafted_core/terminal_host.py"
+launch_receipt="${VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT:-}"
+unset VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT
+if [[ "$host" == */Contents/MacOS/vc-terminal && "$(/usr/bin/uname -s)" == "Darwin" ]]; then
+  if [[ -f "$admission_helper" && ! -L "$admission_helper" && -x "$root/bin/python3" ]]; then
+    admission_args=(admit --wrapper-pid "$$" --host "$host" --config "$config")
+    [[ -z "$launch_receipt" ]] || admission_args+=(--receipt "$launch_receipt")
+    # exec keeps the wrapper as the helper's direct parent: its PID is the
+    # identity the fresh host inherits through the exec below.
+    admission="$(exec "$root/bin/python3" -I -B "$admission_helper" "${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"})" \
+      || exit $?
+    case "$admission" in
+      reused) exit 0 ;;
+      fresh) exec "$host" --config-file "$config" ${host_tail[@]+"${host_tail[@]}"} ;;
+    esac
+    printf 'vc-terminal: unrecognized host admission: %s\n' "$admission" >&2
+    exit 70
+  fi
+  # Without its admission helper a generation cannot prove the single host;
+  # starting an unadmitted GUI would be the duplicate this boundary forbids.
+  printf 'vc-terminal: host admission helper missing: %s; run vc-terminal --doctor.\n' \
+    "$admission_helper" >&2
+  exit 78
+fi
+exec "$host" --config-file "$config" ${host_tail[@]+"${host_tail[@]}"}

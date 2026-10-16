@@ -289,6 +289,8 @@ def test_run_doctor_smokes_helper_and_launcher_runtime(
 
     guide_path = installer.write_start_here_guide(store_path, state, findings)
     guide_text = guide_path.read_text(encoding="utf-8")
+    assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Launchpad" in guide_text
+    assert "tab **Launchpad**" in guide_text
     assert "vibecrafted init claude" in guide_text
     assert "vibecrafted dou claude" in guide_text
     assert "vibecrafted decorate codex" in guide_text
@@ -1129,6 +1131,70 @@ def test_runtime_verifier_python_falls_back_only_when_none_is_carried(
     (dangling_root / "bin/python3").symlink_to(tmp_path / "missing")
     with pytest.raises(OSError, match="dangling link"):
         installer._runtime_verifier_python(dangling_root)
+
+
+def test_runtime_semantic_verifier_hides_permanently_bound_python_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    _write_release_contract_runtime_manifest(runtime, monkeypatch)
+    site = runtime / "python-site"
+    site.mkdir()
+    for name in (
+        "jsonschema",
+        "jsonschema_specifications",
+        "referencing",
+        "rpds",
+        "attrs",
+        "attr",
+    ):
+        spec = importlib.util.find_spec(name)
+        assert spec is not None and spec.submodule_search_locations is not None
+        shutil.copytree(
+            next(iter(spec.submodule_search_locations)),
+            site / name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    typing_extensions = importlib.util.find_spec("typing_extensions")
+    if typing_extensions is not None and typing_extensions.origin is not None:
+        shutil.copy2(typing_extensions.origin, site / "typing_extensions.py")
+
+    # Model the native Py_SetPath / embeddable ._pth contract: -I/-S cannot
+    # remove the host's python-site entry. Execute the real captured verifier.
+    seed = tmp_path / "bound-python-site.py"
+    seed.write_text(
+        "import runpy, sys\n"
+        "assert sys.argv[1:5] == ['-I', '-S', '-B', '-X']\n"
+        f"sys.path.insert(0, {str(site)!r})\n"
+        "sys.argv = sys.argv[6:]\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    python = runtime / "bin/python3"
+    _write_executable(
+        python,
+        "#!/bin/sh\nexec "
+        + installer.shlex_quote(str(Path(sys.executable).absolute()))
+        + " -I -S -B "
+        + installer.shlex_quote(str(seed))
+        + ' "$@"\n',
+    )
+    positive = installer._run_runtime_verifier_semantic_command(
+        [
+            str(runtime / installer._RUNTIME_VERIFIER_PRODUCT),
+            "schema",
+            str(runtime / installer._RUNTIME_GENERATION_MANIFEST),
+        ],
+        cache=tmp_path / "pycache",
+        python_executable=python,
+    )
+    # A schema error proves jsonschema was genuinely imported on this host.
+    installer._assert_runtime_verifier_semantic_failure(
+        positive,
+        expected_code=installer._RUNTIME_VERIFIER_E_SCHEMA,
+        context="schema with permanently bound site packages",
+    )
+    installer._validate_runtime_verifier_semantics(runtime)
 
 
 def test_installer_release_contract_assets_fail_closed_for_missing_or_exact_byte_drift(

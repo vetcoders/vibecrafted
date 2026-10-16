@@ -10,6 +10,36 @@ import pytest
 from tests.tui.test_start_workspace_contract import Scene, _creates, _rc, _run
 
 
+def _install_fixed_host_origin_probe(scene: Scene, *, owned: bool) -> Path:
+    helper = scene.generation / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    receipt = scene.tmp_path / "fixed-host-origin-probe.txt"
+    helper.write_text(
+        "import pathlib, sys\n"
+        + f"pathlib.Path({str(receipt)!r}).write_text(' '.join(sys.argv[1:]))\n"
+        + f"sys.exit(0 if {owned!r} and sys.argv[1:] == ['owns-fixed-host'] else 1)\n"
+    )
+    return receipt
+
+
+def _install_fixed_host_origin_sequence(
+    scene: Scene, decisions: tuple[bool, ...]
+) -> Path:
+    helper = scene.generation / "vibecrafted-core/vibecrafted_core/terminal_host.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    counter = scene.tmp_path / "fixed-host-origin-count.txt"
+    helper.write_text(
+        "import pathlib, sys\n"
+        + f"path = pathlib.Path({str(counter)!r})\n"
+        + "count = int(path.read_text()) if path.exists() else 0\n"
+        + "path.write_text(str(count + 1))\n"
+        + f"decisions = {decisions!r}\n"
+        + "owned = decisions[count] if count < len(decisions) else decisions[-1]\n"
+        + "sys.exit(0 if owned and sys.argv[1:] == ['owns-fixed-host'] else 1)\n"
+    )
+    return counter
+
+
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 @pytest.mark.parametrize("inside", [False, True])
 def test_new_host_preserves_existing_host_and_workspace(
@@ -103,6 +133,97 @@ def test_created_host_terminal_child_attaches_exact_host(tmp_path: Path) -> None
     assert _rc(result) == 0, result.stdout + result.stderr
     assert not _creates(scene.calls())
     assert any(c["argv"] == ["attach", "vc-host@7a69d24d"] for c in scene.calls())
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_created_host_handoff_uses_fixed_host_identity_after_receipt_consumption(
+    tmp_path: Path, shell: str
+) -> None:
+    host = "vc-host@9c03fa38"
+    scene = Scene(tmp_path, live=(host,))
+    receipt = _install_fixed_host_origin_probe(scene, owned=True)
+    result = _run(
+        scene,
+        "_vetcoders_has_owned_vc_terminal_entry; vc-start --new-host",
+        shell=shell,
+        tty=True,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                scene.generation / "bin/vibecrafted"
+            ),
+            "VIBECRAFTED_START_CREATED_HOST": host,
+        },
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    assert receipt.read_text() == "owns-fixed-host"
+    assert scene.live() == [host]
+    assert not _creates(scene.calls())
+    assert [c["argv"] for c in scene.calls() if c["argv"][:1] == ["attach"]] == [
+        ["attach", host],
+        ["attach", host],
+    ]
+    assert not scene.terminal_launches(wait=0)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_unadmitted_created_host_handoff_refuses_without_recursive_creation(
+    tmp_path: Path, shell: str
+) -> None:
+    host = "vc-host@9c03fa38"
+    scene = Scene(tmp_path, live=(host,))
+    receipt = _install_fixed_host_origin_probe(scene, owned=False)
+    result = _run(
+        scene,
+        "_vetcoders_has_owned_vc_terminal_entry; vc-start --new-host",
+        shell=shell,
+        tty=True,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                scene.generation / "bin/vibecrafted"
+            ),
+            "VIBECRAFTED_START_CREATED_HOST": host,
+        },
+    )
+    assert _rc(result) == 4, result.stdout + result.stderr
+    assert receipt.read_text() == "owns-fixed-host"
+    output = result.stdout + result.stderr
+    assert "handoff was not admitted" in output
+    assert "remains intact" in output
+    assert scene.live() == [host]
+    assert not _creates(scene.calls())
+    assert not scene.terminal_launches(wait=0)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_created_host_handoff_lost_identity_refuses_without_rehandoff(
+    tmp_path: Path, shell: str
+) -> None:
+    host = "vc-host@9c03fa38"
+    scene = Scene(tmp_path, live=(host,))
+    counter = _install_fixed_host_origin_sequence(scene, (True, False))
+    result = _run(
+        scene,
+        "_vetcoders_has_owned_vc_terminal_entry; vc-start --new-host",
+        shell=shell,
+        tty=True,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                scene.generation / "bin/vibecrafted"
+            ),
+            "VIBECRAFTED_START_CREATED_HOST": host,
+        },
+    )
+    assert _rc(result) == 4, result.stdout + result.stderr
+    assert counter.read_text() == "2"
+    output = result.stdout + result.stderr
+    assert "lost terminal ownership" in output
+    assert "remains detached" in output
+    assert scene.live() == [host]
+    assert not _creates(scene.calls())
+    assert not scene.terminal_launches(wait=0)
 
 
 def test_new_host_deck_uses_shared_owner(tmp_path: Path) -> None:
@@ -216,6 +337,7 @@ def test_split_tty_enters_project_without_prompting_or_changing_old_host(
         "_vetcoders_start_host_generation() { printf '4.3.1+gf8debfd6\\n'; }; vc-start",
         shell=shell,
         tty=True,
+        owned_terminal=True,
         developer_root=True,
         extra_env={
             "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
@@ -527,12 +649,15 @@ def test_start_refreshes_previous_shell_inventory_and_preserves_existing_project
         '_vetcoders_start_cached_live_hosts=""; '
         "vc-start existing-project",
     )
-    assert _rc(result) == 3, result.stdout + result.stderr
+    # Entry contract (2026-10-10): a live session with no TTY is entered
+    # through the product terminal, not refused with an inventory menu.
+    assert _rc(result) == 0, result.stdout + result.stderr
     assert not _creates(scene.calls())
     assert scene.live() == sorted(before)
     for name, body in before.items():
         assert (scene.table / "live" / name).read_bytes() == body
-    assert not scene.terminal_launches(wait=0)
+    launches = scene.terminal_launches()
+    assert len(launches) == 1, (launches, result.stderr)
 
 
 def _fault_created_host_role(scene: Scene, fault: str, failures: int) -> Path:

@@ -38,12 +38,15 @@ market. `vc-release` deploys.
 
 ## Requirements
 
-- macOS, Linux, or Windows through WSL2 (no native Windows build)
+- macOS, Linux, native Windows (win32-x64 Runtime Pack), or Windows through WSL2
 - Today: bootstrap installer on macOS/Linux/WSL2
-  (`curl -fsSL https://vibecrafted.io/install.sh | bash`).
+  (`curl -fsSL https://vibecrafted.io/install.sh | bash`). It installs the
+  version named in `https://vibecrafted.io/channel/main.json`.
   Signed `Vibecrafted.app` DMG when a GitHub Release actually attaches one.
-  Windows: install WSL2, then the same bootstrap inside the distro.
-- Git, Python 3.10+, `make` for the source-checkout path
+  Native Windows: the win32-x64 Runtime Pack via `install.ps1 -Pack`; until a
+  release publishes that carrier, build it from a checkout. WSL2 remains the
+  POSIX alternative.
+- Git, Python 3.11+, `make` for the source-checkout path
 - One or more agent CLIs: Claude Code, Codex, or Gemini CLI
 - Required foundations: Loctree (structural analysis), AICX (session history)
 

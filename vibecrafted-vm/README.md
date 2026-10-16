@@ -1,8 +1,9 @@
 # Linux arm64 Runtime Pack carrier
 
-This directory owns the hardened image that will be consumed by the Workshop
-`local-vm` backend in H2b3b. H2b3a does **not** enable that selector or create
-per-run containers.
+This directory owns the hardened Runtime Pack carrier image. It is **not** the
+Agents launcher's `local-vm` environment: that selector runs the persistent
+per-project dev container described below (a container, not a VM), and does
+not create per-run carrier containers.
 
 The image has one input: the checksum-pinned Runtime Pack produced by the
 repository's canonical `package-runtime-pack.sh` contract. It does not build
@@ -63,36 +64,41 @@ personal development convenience. They require an explicitly supplied
 security boundary, do not build this carrier, and are not the Workshop
 selector backend.
 
-## Persistent, per-repo dev container
+## Persistent, per-repo dev container (Agents "local container")
 
-`Dockerfile.dev` + `compose.dev.yaml` + `dev-up.sh` are a batteries-included
-personal workstation: a **non-ephemeral, per-repo** container that preserves
-**session-history continuity across agents**. It bakes the toolchain
-(Debian 13 + uv + Node + Rust) and the agent CLIs — **claude, codex, gemini,
-and kimi (pilot)** — plus the AICX/Loctree memory foundations. The repo is
-mounted live at `/workspace`; every agent's session state (`~/.claude`, `~/.codex`,
-`~/.gemini`, `~/.kimi`) and the AICX corpus (`~/.aicx`) live in per-project
-named volumes, so rebuilding the container never loses history.
+The recipe — `Dockerfile.dev`, `compose.dev.yaml`, `dev-entry.sh`, `entry.sh`,
+`zshrc.template` — lives in
+`vibecrafted-core/vibecrafted_core/runtime/dev-container/` so it ships inside
+every installed generation. It is a batteries-included, **non-ephemeral,
+per-repo** container that preserves **session-history continuity across
+agents**: Debian 13 + uv + Node + Rust, the agent CLIs **claude, codex, gemini
+and kimi**, and the AICX/Loctree foundations. The repo is mounted live at
+`/workspace`; every agent's session state (`~/.claude`, `~/.codex`,
+`~/.gemini`, `~/.kimi-code`) and the AICX corpus (`~/.aicx`) live in
+per-project named volumes, so rebuilding never loses history.
+
+The Agents launcher drives it through `vibecrafted_core.dev_container`
+(runtime-policy key `local-vm`, shown as `local-container`): the image is
+`vibecrafted-dev:recipe-<digest>` labelled with the recipe digest, built only
+when the recipe changes, then `docker compose -p vc-<repo-slug> up -d
+--no-build` and `docker exec -it -w /workspace` into the selected agent. It
+never runs `down -v`, never mounts the host `HOME`, and passes provider keys by
+name only. The Docker VM must share the project path (Colima shares only
+`$HOME` by default); the launcher refuses an unshared path with the exact
+`colima start --mount` instruction instead of mounting an empty `/workspace`.
 
 ```bash
-# from anywhere: stand up a container for the current repo
+# manual entry for the current repo (same project name and volumes)
 vibecrafted-vm/dev-up.sh                 # or: dev-up.sh /path/to/repo
 
-# open a shell (project = vc-<repo-slug>)
-docker compose -p vc-<repo-slug> -f vibecrafted-vm/compose.dev.yaml exec dev zsh
-
-# stop but KEEP history
-docker compose -p vc-<repo-slug> -f vibecrafted-vm/compose.dev.yaml down
-# wipe history for this repo
-docker compose -p vc-<repo-slug> -f vibecrafted-vm/compose.dev.yaml down -v
+recipe=vibecrafted-core/vibecrafted_core/runtime/dev-container
+docker compose -p vc-<repo-slug> -f "$recipe/compose.dev.yaml" exec dev zsh
+docker compose -p vc-<repo-slug> -f "$recipe/compose.dev.yaml" down     # keeps history
+docker compose -p vc-<repo-slug> -f "$recipe/compose.dev.yaml" down -v  # wipes history
 ```
 
-Each repo gets its own isolated container and volumes via the Compose project
-name (`-p vc-<slug>`, set automatically by `dev-up.sh`). Tailnet is optional —
-supply `TAILSCALE_AUTHKEY` to join the mesh (userspace networking, no `NET_ADMIN`).
-Like `compose.yaml`, this is an operator convenience, not a security boundary,
-and is distinct from the hardened Runtime Pack carrier above.
-
-This is **not** a parallel toolchain: it shares the Debian 13 baseline with
-`.cursor/Dockerfile` (the Cloud Agent env) and reuses this directory's
-`entry.sh` (readiness probe + optional tailnet).
+Tailnet is optional — supply `TAILSCALE_AUTHKEY` to join the mesh (userspace
+networking, no `NET_ADMIN`). Like `compose.yaml`, this is a local development
+container, not a security boundary, and is distinct from the hardened Runtime
+Pack carrier above. It shares the Debian 13 baseline with `.cursor/Dockerfile`
+(the Cloud Agent env).

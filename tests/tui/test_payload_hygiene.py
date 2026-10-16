@@ -400,6 +400,27 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
         ).strip()
         == "/private/tmp/scratch"
     )
+    # `/var/folders` is macOS's per-user confstr temp area — every box has it,
+    # and three tracked files document TMPDIR semantics with that literal. Only
+    # the randomized bucket below it identifies a host. Measured 2026-10-10 on
+    # div0: a `--snapshot-donors` build put the frame donor under $TMPDIR, the
+    # walk generalized it to `/var/folders`, and the gate refused its own
+    # committed documentation comments as a build-host leak.
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/var/folders/zz"').strip() == ""
+    )
+    assert (
+        run_library(
+            'payload_hygiene_topmost_host_root "/var/folders/zz/abc123/T/vibecrafted-source-donors-x/vc-frame"'
+        ).strip()
+        == "/var/folders/zz"
+    )
+    assert (
+        run_library(
+            'payload_hygiene_topmost_host_root "/private/var/folders/zz/abc123/T/snap"'
+        ).strip()
+        == "/private/var/folders/zz"
+    )
 
 
 # The packer refuses any path carrying one of these components, so a literal

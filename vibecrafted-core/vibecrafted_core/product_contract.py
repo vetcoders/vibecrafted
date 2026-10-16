@@ -28,6 +28,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
@@ -241,37 +242,23 @@ _LAUNCH_ENV_DENYLIST = frozenset(
     }
 )
 _WALKAROUND_TEMP_PARENT = Path("/tmp")
-_LAUNCH_TERMINAL = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+_LAUNCH_TERMINAL = "Contents/MacOS/vc-terminal"
 _LAUNCH_FRAME = "Contents/Helpers/vc-frame"
 _LAUNCH_CONFIG = "Contents/Resources/terminal/vibecrafted.toml"
 _LAUNCH_SHELL = "Contents/Resources/runtime/bin/vc-start"
 _LAUNCH_PRIMARY_SHELL = (
     "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh"
 )
-_TERMINAL_HELPER_APP = "Contents/Helpers/vc-terminal.app"
-# The Runtime Pack is independently launchable, so it materializes its own
-# branded terminal bundle beside its flat native host; the App then copies that
-# whole payload into Contents/Resources/runtime. Two .app directories therefore
-# reach the customer inside one Vibecrafted.app, and they are the same product
-# identity assembled by one builder function. Name both here: a bundle absent
-# from this tuple is an unknown nested customer app and still fails closed.
-_TERMINAL_RUNTIME_APP = "Contents/Resources/runtime/libexec/vc-terminal.app"
-TERMINAL_APP_BUNDLES = (_TERMINAL_HELPER_APP, _TERMINAL_RUNTIME_APP)
-_TERMINAL_BUNDLE_ID = "io.vetcoders.vc-terminal"
-_TERMINAL_BUNDLE_EXECUTABLE = "alacritty"
-_TERMINAL_BUNDLE_ICON = "alacritty.icns"
-_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
-# Signature artefacts, not payload. `codesign` writes a bundle's
-# Contents/_CodeSignature when it seals that bundle; the release builder seals
-# every nested bundle BEFORE it writes the product inventory and seals the
-# outer bundle AFTER. So each declared nested bundle already carries a seal the
-# inventory must not claim, and the outer seal does not exist yet. The writer
-# (scripts/unified_product_manifest.py) and this reader share exactly this list
-# so neither can quietly exempt a path the other still counts.
+_TERMINAL_FONT_FILES = (
+    "Contents/Resources/fonts/SourceCodePro[wght].ttf",
+    "Contents/Resources/fonts/SourceCodePro-Italic[wght].ttf",
+    "Contents/Resources/fonts/OFL.txt",
+)
+# Only the main app's seal is signature metadata. A nested .app is forbidden,
+# and its seal must not gain an inventory exemption.
 _SIGNATURE_INVENTORY_EXCLUSIONS = (
     Path("Contents/_CodeSignature"),
     Path("Contents/CodeResources"),
-    *(Path(bundle) / "Contents/_CodeSignature" for bundle in TERMINAL_APP_BUNDLES),
 )
 PRODUCT_MANIFEST_REFERENT = "manifests/product-manifest.json"
 RUNTIME_MANIFEST_REFERENT = "manifests/runtime-manifest.json"
@@ -1575,7 +1562,7 @@ def _validate_launch_contract(
     ):
         _fail(
             E_ENTRYPOINT,
-            "launch_contract does not encode the canonical Start here entry",
+            "launch_contract does not encode the canonical Launchpad entry",
         )
     environment = raw["environment"]
     if not isinstance(environment, dict):
@@ -1646,13 +1633,168 @@ def _launch_child_path(app: Path, host_path: str | None) -> str:
     return os.pathsep.join(ordered)
 
 
+def _login_shell_probe_environment(host: Mapping[str, str]) -> dict[str, str]:
+    """Read the Founder's startup files, rather than a product ZDOTDIR overlay."""
+    environment = _guest_environment(host)
+    dotdir = environment.get("ZDOTDIR", "")
+    home = environment.get("HOME", "")
+    crafted_home = environment.get("VIBECRAFTED_HOME", f"{home}/.vibecrafted")
+    roots = [
+        environment.get("VIBECRAFTED_ROOT", ""),
+        environment.get("VIBECRAFTED_RUNTIME_ROOT", ""),
+        f"{home}/.config/vibecrafted/vc-terminal",
+        f"{crafted_home}/shell/quick-cmd",
+    ]
+    if dotdir and any(
+        root and (dotdir == root or dotdir.startswith(root.rstrip("/") + "/"))
+        for root in roots
+    ):
+        user_dotdir = environment.get("VIBECRAFTED_USER_ZDOTDIR")
+        if user_dotdir:
+            environment["ZDOTDIR"] = user_dotdir
+        else:
+            environment.pop("ZDOTDIR", None)
+    return environment
+
+
+def _login_shell_fingerprint(environment: Mapping[str, str]) -> tuple[Any, ...]:
+    """Invalidate when the selected shell, startup files or resolver inputs change.
+
+    Sourced plugins are not recursively indexed; restarting the app refreshes
+    those. Missing files have stamps too, so creating an rc file invalidates.
+    """
+    shell = environment.get("SHELL", "/bin/zsh")
+    home = Path(environment.get("HOME", ""))
+    dotdir = Path(environment.get("ZDOTDIR", str(home)))
+    config = Path(environment.get("XDG_CONFIG_HOME", str(home / ".config")))
+    files = [Path(shell)]
+    files.extend(
+        dotdir / name for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin")
+    )
+    files.extend(
+        home / name for name in (".profile", ".bash_profile", ".bash_login", ".bashrc")
+    )
+    files.extend(
+        Path("/etc") / name
+        for name in ("profile", "zshenv", "zprofile", "zshrc", "zlogin")
+    )
+    files.extend([Path("/etc/paths"), config / "fish/config.fish"])
+    for directory in (Path("/etc/paths.d"), config / "fish/conf.d"):
+        try:
+            files.extend(sorted(directory.iterdir()))
+        except OSError:
+            pass
+    stamps = []
+    for path in files:
+        try:
+            metadata = path.stat()
+            stamp = (metadata.st_mtime_ns, metadata.st_ctime_ns, metadata.st_size)
+        except (OSError, ValueError):
+            stamp = None
+        stamps.append((str(path), stamp))
+    return (
+        shell,
+        *(
+            environment.get(name, "")
+            for name in ("HOME", "ZDOTDIR", "PATH", "XDG_CONFIG_HOME")
+        ),
+        tuple(stamps),
+    )
+
+
+@lru_cache(maxsize=32)
+def _probe_login_shell_path(
+    fingerprint: tuple[Any, ...], environment_items: tuple[tuple[str, str], ...]
+) -> str | None:
+    shell = str(fingerprint[0])
+    if not shell.startswith("/") or Path(shell).name not in {
+        "zsh",
+        "bash",
+        "sh",
+        "dash",
+        "ksh",
+        "fish",
+    }:
+        return None
+    marker = "vc_path_" + os.urandom(16).hex()
+    value = "(string join : $PATH)" if Path(shell).name == "fish" else '"$PATH"'
+    command = f"printf '{marker}\\0%s\\0{marker}' {value}"
+    try:
+        process = subprocess.Popen(
+            [shell, "-i", "-l", "-c", command],
+            env=dict(environment_items),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        output, _ = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        # Startup can leave grandchildren holding the pipe. Terminate only
+        # this probe's new process group, then reap its shell.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            # A startup child may have deliberately left the new group while
+            # retaining stdout. Do not let its open pipe defeat the deadline.
+            if process.stdout is not None:
+                process.stdout.close()
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        return None
+    if process.returncode != 0:
+        return None
+    boundary = marker.encode()
+    match = re.search(boundary + b"\x00([^\x00]*)\x00" + boundary, output)
+    if match is None:
+        return None
+    try:
+        path = match[1].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return (
+        path
+        if path and any(entry.startswith("/") for entry in path.split(os.pathsep))
+        else None
+    )
+
+
+def resolve_login_shell_path(host: Mapping[str, str]) -> str:
+    """Bounded, cached login-interactive PATH probe; only PATH is adopted.
+
+    Failures are cached with the same fingerprint as successes. The host PATH
+    stays the fallback; shell-exported variables never bypass the deny-list.
+    """
+    if sys.platform == "win32":
+        return host.get("PATH", "")
+    environment = _login_shell_probe_environment(host)
+    # Startup files can compose PATH from user variables. Preserve that input
+    # environment, but emit only PATH; no rc-exported variables are adopted.
+    return _probe_login_shell_path(
+        _login_shell_fingerprint(environment), tuple(sorted(environment.items()))
+    ) or host.get("PATH", "")
+
+
 def build_launch_environment(
     app_path: str | Path,
     *,
     host_environment: Mapping[str, str] | None = None,
+    probe_user_path: bool | None = None,
 ) -> dict[str, str]:
     """Verify the product and build its child environment: the user's own
-    environment as the base, Vibecrafted pins overlaid on top."""
+    environment as the base, Vibecrafted pins overlaid on top. Process-backed
+    calls recover login-shell PATH; explicit mappings opt in with probe_user_path.
+    """
     raw_app = Path(app_path)
     if raw_app.is_symlink():
         _fail(E_PATH, "app bundle root must not be a symlink")
@@ -1695,9 +1837,13 @@ def build_launch_environment(
     except (OSError, ValueError) as exc:
         _fail(E_PATH, f"VIBECRAFTED_RUNTIME_HOME cannot be created or written: {exc}")
     child = _guest_environment(host)
+    probe_path = (
+        host_environment is None if probe_user_path is None else probe_user_path
+    )
+    user_path = resolve_login_shell_path(host) if probe_path else host.get("PATH")
     child.update(
         {
-            "PATH": _launch_child_path(app, host.get("PATH")),
+            "PATH": _launch_child_path(app, user_path),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_APP_ROOT": str(app),
             "VIBECRAFTED_VC_FRAME_BIN": str(app / _LAUNCH_FRAME),
@@ -2051,59 +2197,6 @@ def _verify_product_module_receipts(
             _fail(E_ENTRYPOINT, f"product entrypoint is not bound to {name} receipt")
 
 
-def _verify_terminal_app_bundle(
-    app: Path,
-    relative: str,
-    *,
-    files: Mapping[str, Mapping[str, Any]],
-) -> None:
-    """One identity, one proof, for every vc-terminal.app the product carries.
-
-    The App helper and the Runtime Pack's own bundle come out of a single
-    builder function, so a per-payload allowance here would let them drift back
-    apart without the gate noticing. A bundle whose Info.plist cannot be parsed
-    — or parses to something that is not a dictionary — is a contract failure
-    with a code, never an AttributeError from the verifier.
-    """
-    bundle = app / relative
-    plist_path = bundle / "Contents/Info.plist"
-    try:
-        with plist_path.open("rb") as handle:
-            plist = plistlib.load(handle)
-    except (OSError, ValueError, ExpatError) as exc:
-        _fail(E_BUNDLE, f"terminal bundle Info.plist is invalid: {relative}: {exc}")
-    if not isinstance(plist, dict):
-        _fail(
-            E_BUNDLE,
-            f"terminal bundle Info.plist top level must be a dictionary: {relative}",
-        )
-    canonical = {
-        "CFBundleIdentifier": _TERMINAL_BUNDLE_ID,
-        "CFBundleExecutable": _TERMINAL_BUNDLE_EXECUTABLE,
-        "CFBundleIconFile": _TERMINAL_BUNDLE_ICON,
-        "CFBundleDisplayName": _TERMINAL_BUNDLE_DISPLAY_NAME,
-        "CFBundleName": _TERMINAL_BUNDLE_DISPLAY_NAME,
-    }
-    for key, expected in canonical.items():
-        if plist.get(key) != expected:
-            _fail(E_BUNDLE, f"terminal bundle {key} is not canonical: {relative}")
-    for name, declared in (
-        ("executable", f"{relative}/Contents/MacOS/{_TERMINAL_BUNDLE_EXECUTABLE}"),
-        ("icon", f"{relative}/Contents/Resources/{_TERMINAL_BUNDLE_ICON}"),
-    ):
-        if declared not in files:
-            _fail(
-                E_INVENTORY,
-                f"terminal bundle {name} is absent from signed inventory: {declared}",
-            )
-    _verify_assembler_signed_macho(bundle, relative=relative)
-    if _codesign_identifier(bundle) != _TERMINAL_BUNDLE_ID:
-        _fail(
-            E_PROOF,
-            f"terminal bundle signature Identifier is not canonical: {relative}",
-        )
-
-
 def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str, Any]:
     """Verify one explicit assembled Vibecrafted.app and its product manifest."""
     app = Path(app_path)
@@ -2220,10 +2313,17 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         for path in app.rglob("*")
         if path.is_dir() and path.suffix.lower() == ".app"
     )
-    if nested_apps != sorted(TERMINAL_APP_BUNDLES):
+    if nested_apps:
         _fail(E_BUNDLE, f"nested customer app bundles are forbidden: {nested_apps}")
-    for terminal_bundle in TERMINAL_APP_BUNDLES:
-        _verify_terminal_app_bundle(app, terminal_bundle, files=validated.entries)
+    if plist.get("ATSApplicationFontsPath") != "fonts":
+        _fail(E_BUNDLE, "main app must declare its private terminal font directory")
+    for relative in _TERMINAL_FONT_FILES:
+        entry = validated.entries.get(relative)
+        if entry is None or entry["kind"] != "resource" or entry["size"] == 0:
+            _fail(
+                E_INVENTORY,
+                f"terminal font resource is absent from signed inventory: {relative}",
+            )
     _verify_product_module_receipts(
         app,
         modules,
@@ -3620,8 +3720,8 @@ def _scenario_start_here(
 ) -> Mapping[str, bytes | str]:
     layout = scenario.product_config / "vc-frame/layouts/operator.kdl"
     payload = layout.read_bytes()
-    if b'tab name="Start here"' not in payload:
-        raise RuntimeError("installed operator layout has no Start here tab")
+    if b'tab name="Launchpad"' not in payload:
+        raise RuntimeError("installed operator layout has no Launchpad tab")
     help_output = _scenario_command(
         scenario, [scenario.launchers / "vc-start", "--help"]
     ).stdout
@@ -4046,49 +4146,12 @@ def _self_test() -> int:
         primary_shell.parent.mkdir(parents=True, exist_ok=True)
         primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
         primary_shell.chmod(0o755)
-        terminal_bundle_files: list[dict[str, Any]] = []
-        for bundle_relative in TERMINAL_APP_BUNDLES:
-            terminal_app = app / bundle_relative
-            bundle_executable = terminal_app / "Contents/MacOS/alacritty"
-            bundle_executable.parent.mkdir(parents=True, exist_ok=True)
-            if not bundle_executable.exists():
-                shutil.copy2(executable, bundle_executable)
-                _run_tool(
-                    [codesign, "--force", "--sign", "-", str(bundle_executable)],
-                    failure_code=E_PROOF,
-                    context="self-test could not sign terminal bundle executable",
-                )
-            terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-            terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-            terminal_icon.write_bytes(b"terminal-icns-fixture")
-            with (terminal_app / "Contents/Info.plist").open("wb") as handle:
-                plistlib.dump(
-                    {
-                        "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                        "CFBundleExecutable": "alacritty",
-                        "CFBundleIconFile": "alacritty.icns",
-                        "CFBundleName": "VC Terminal",
-                        "CFBundleDisplayName": "VC Terminal",
-                        "CFBundlePackageType": "APPL",
-                    },
-                    handle,
-                )
-            _run_tool(
-                [codesign, "--force", "--sign", "-", str(terminal_app)],
-                failure_code=E_PROOF,
-                context=f"self-test could not sign terminal bundle {bundle_relative}",
-            )
-            terminal_bundle_files.extend(
-                _fixture_entry(app, relative, kind=kind)
-                for relative, kind in (
-                    (f"{bundle_relative}/Contents/MacOS/alacritty", "executable"),
-                    (f"{bundle_relative}/Contents/Info.plist", "config"),
-                    (
-                        f"{bundle_relative}/Contents/Resources/alacritty.icns",
-                        "resource",
-                    ),
-                )
-            )
+        terminal_files = [_fixture_entry(app, _LAUNCH_TERMINAL, kind="executable")]
+        for relative in _TERMINAL_FONT_FILES:
+            resource = app / relative
+            resource.parent.mkdir(parents=True, exist_ok=True)
+            resource.write_bytes(b"self-test-font-resource")
+            terminal_files.append(_fixture_entry(app, relative, kind="resource"))
         terminal_config = app / _LAUNCH_CONFIG
         terminal_config.parent.mkdir(parents=True, exist_ok=True)
         terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -4105,13 +4168,12 @@ def _self_test() -> int:
                     "CFBundleIconFile": PRODUCT_ICON_FILE,
                     "CFBundleShortVersionString": "1.0.0",
                     "CFBundleVersion": "1",
+                    "ATSApplicationFontsPath": "fonts",
                 },
                 handle,
             )
         terminal_product_entry = next(
-            entry
-            for entry in terminal_bundle_files
-            if entry["path"] == _LAUNCH_TERMINAL
+            entry for entry in terminal_files if entry["path"] == _LAUNCH_TERMINAL
         )
         frame_product_entry = _fixture_entry(
             app, "Contents/Helpers/vc-frame", kind="executable"
@@ -4219,7 +4281,7 @@ def _self_test() -> int:
                     f"Contents/Resources/{PRODUCT_ICON_FILE}",
                     kind="resource",
                 ),
-                *terminal_bundle_files,
+                *terminal_files,
                 frame_product_entry,
                 _fixture_entry(app, terminal_binding["manifest_path"], kind="config"),
                 _fixture_entry(app, frame_binding["manifest_path"], kind="config"),

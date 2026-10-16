@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1097,8 +1097,11 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         assert f"attach --create-background {expected_session}" in payload
         assert "--new-session-with-layout" in payload
         assert f"--session {expected_session} --new-session-with-layout" not in payload
-        assert f"--session {expected_session} action new-tab" in payload
-        assert f"run_id=interactive target={expected_session}/claude" in result.stdout
+        assert f"--session {expected_session} action new-pane --floating" in payload
+        assert (
+            f"run_id=interactive target={expected_session}/{REPO_ROOT.name} · claude · unknown"
+            in result.stdout
+        )
         assert f"watch=vc-frame attach {expected_session}" in result.stdout
         assert "There is no active session!" not in result.stderr
         outcomes.append((result.returncode, result.stdout, result.stderr))
@@ -1514,7 +1517,7 @@ def test_explicit_terminal_marbles_manual_spawn_omits_l1_transcript_tail(
         / ".vibecrafted"
         / "artifacts"
         / _org_repo()
-        / datetime.now(timezone.utc).strftime("%Y_%m%d")
+        / datetime.now(UTC).strftime("%Y_%m%d")
         / "marbles"
         / "reports"
     )

@@ -89,6 +89,22 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
         'config_root / "vetcoders" / "frontier",',
         "uninstall cleanup: removes a leftover retired sidecar tree",
     ),
+    (
+        "vibecrafted-core/vibecrafted_core/runtime/dev-container/Dockerfile.dev",
+        "/root/.gemini /root/.kimi /root/.config/vetcoders",
+        (
+            "container-image home: pre-creates agent dirs inside the Linux "
+            "dev container's /root, never on the operator's machine"
+        ),
+    ),
+    (
+        "vibecrafted-core/vibecrafted_core/runtime/dev-container/zshrc.template",
+        'export VETCODERS_CONFIG_DIR="${VETCODERS_CONFIG_DIR:-/root/.config/vetcoders}"',
+        (
+            "container-image shell profile: points agents at the dev "
+            "container's own /root config home, never the operator's"
+        ),
+    ),
 )
 
 

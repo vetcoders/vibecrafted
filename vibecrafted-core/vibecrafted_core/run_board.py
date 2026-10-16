@@ -47,11 +47,13 @@ def _parse_iso(raw: Any) -> dt.datetime | None:
     if not text:
         return None
     try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = text.replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(normalized_timestamp)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return parsed
 
 
@@ -86,7 +88,7 @@ def collect_board(*, all_days: bool, limit: int) -> dict[str, Any]:
                 continue
             seen.add(run_id)
             runs.append(dict(run))
-    today = dt.datetime.now(tz=dt.timezone.utc).astimezone().date()
+    today = dt.datetime.now(tz=dt.UTC).astimezone().date()
     if not all_days:
         runs = [run for run in runs if _is_today(run, today)]
     runs.sort(key=_sort_key, reverse=True)
@@ -155,7 +157,7 @@ def render_board(result: dict[str, Any], *, all_days: bool) -> str:
     scope = (
         "all days"
         if all_days
-        else dt.datetime.now(tz=dt.timezone.utc).astimezone().date().isoformat()
+        else dt.datetime.now(tz=dt.UTC).astimezone().date().isoformat()
     )
     lines.append(f"Runs — {scope}")
     if not runs:

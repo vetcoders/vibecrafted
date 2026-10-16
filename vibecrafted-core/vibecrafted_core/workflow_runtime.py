@@ -9,16 +9,21 @@ import asyncio
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .effort_overrides import _with_effort_override
+from .execution_controls import ExecutionControls
+from .marbles_reception import SCHEMA as RECEPTION_SCHEMA
+from .marbles_reception import read_evidence, readonly_command, receive, tree_receipt
 from .model_overrides import _with_model_override
 from .package_resources import package_root
-from .report_contract import parse_report_path
+from .report_contract import parse_report_path, stamp_launcher_report_identity
 from .research_config import (
     SUPPORTED_RESEARCH_AGENTS,
     ResearchAgentSelection,
@@ -60,6 +65,7 @@ class ChildResult:
     cost_usd: float | None = None
     resume_command: str = ""
     completed_at: str = ""
+    usage_events: int = 0
 
 
 def _parent_run_id() -> str:
@@ -97,9 +103,9 @@ def _slug(value: str, fallback: str) -> str:
 
 def _artifact_ts() -> str:
     """Artifact date stamp: `VIBECRAFTED_ARTIFACT_TS` override, else today's UTC date."""
-    return os.environ.get("VIBECRAFTED_ARTIFACT_TS") or datetime.now(
-        timezone.utc
-    ).strftime("%Y-%m-%d")
+    return os.environ.get("VIBECRAFTED_ARTIFACT_TS") or datetime.now(UTC).strftime(
+        "%Y-%m-%d"
+    )
 
 
 def _artifact_slug(prompt: str) -> str:
@@ -307,7 +313,16 @@ def _result_meta(result: ChildResult) -> dict[str, object]:
         "cost_usd": result.cost_usd if result.cost_usd is not None else "unknown",
         "resume_command": result.resume_command,
         "completed_at": result.completed_at,
+        "usage_events": result.usage_events,
     }
+    if result.usage_events <= 0:
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        ):
+            payload[key] = "unknown"
     if result.tokens_cache_write is not None:
         payload["tokens_cache_write"] = result.tokens_cache_write
     if result.model_override_skip_reason:
@@ -320,15 +335,24 @@ def _parent_receipt(results: Sequence[ChildResult]) -> dict[str, object]:
     tokens_input = sum(result.tokens_input for result in results)
     tokens_cached_input = sum(result.tokens_cached_input for result in results)
     tokens_output = sum(result.tokens_output for result in results)
+    cost = _sum_cost_usd(results)
     receipt: dict[str, object] = {
         "session_id": "aggregated" if results else "",
         "tokens_input": tokens_input,
         "tokens_cached_input": tokens_cached_input,
         "tokens_output": tokens_output,
-        "tokens_total": _tokens_total(tokens_input, tokens_cached_input, tokens_output),
-        "cost_usd": _sum_cost_usd(results),
-        "cost_source": "children_sum" if results else "none",
+        "tokens_total": sum(_child_tokens_total(result) for result in results),
+        "cost_usd": cost,
+        "cost_source": "children_sum" if cost is not None else "unknown",
     }
+    if not results or any(result.usage_events <= 0 for result in results):
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        ):
+            receipt[key] = "unknown"
     cache_write = _sum_cache_write(results)
     if cache_write is not None:
         receipt["tokens_cache_write"] = cache_write
@@ -362,7 +386,7 @@ def _parent_footer(run_id: str, status: str, receipt: dict[str, object]) -> list
             f"  cost_usd: {cost if cost is not None else 'unknown'}",
             f"  cost_source: {receipt.get('cost_source', 'none')}",
             f"  status: {status}",
-            f"  completed_at: {datetime.now(timezone.utc).isoformat()}",
+            f"  completed_at: {datetime.now(UTC).isoformat()}",
             '  resume_hint: ""',
             "---",
             "",
@@ -445,21 +469,28 @@ def _child_prompt(kind: str, label: str, root: str, prompt: str) -> str:
     if kind == "marbles":
         marbles_blindness = (
             "- You are intentionally blind to prior marbles runs.\n"
-            "- Do not read sibling child reports/transcripts unless the operator "
-            "prompt explicitly names them.\n"
+            "- Do not read sibling child reports/transcripts or receiver state.\n"
+            "- One bounded WRITE cut, one commit, one report; then leave.\n"
+            "- Preserve report run_id/session_id exactly. Set finalized: true "
+            "with one non-empty truthful claim when this bounded invocation "
+            "has a terminal outcome; partial/blocked status can be finalized. "
+            "This does not claim the whole unchanged task has converged.\n"
+            "- Reception/RECEPTION.md, ledger, rankings and prior verification "
+            "are receiver-only. Do not read them or author the next brief.\n"
         )
+    track = f"- Track: {label}\n" if kind != "marbles" else ""
+    tail = f"\nTrack: {label}\n" if kind == "marbles" else ""
     return f"""You are running as a supervised Vibecrafted {kind} worker.
 
 Contract:
 - Work in repository root: {root}
 - Skill: vc-{kind}
-- Track: {label}
-- Do not launch external agent fleets.
+{track}- Do not launch external agent fleets.
 - Write your durable report to VIBECRAFTED_REPORT_PATH.
 - Let stdout/stderr form VIBECRAFTED_TRANSCRIPT_PATH.
 {WORKER_SIGNAL_DISCIPLINE}{marbles_blindness}
 Operator prompt:
-{prompt}
+{prompt}{tail}
 """
 
 
@@ -506,21 +537,31 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy", "copilot", "omp"})
 
 
-def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
+def native_resume_argv(
+    agent: str, agent_session_id: str, controls: ExecutionControls | None = None
+) -> list[str]:
     """Build a provider-native resume argv without shell interpretation.
 
     Only adapters verified by the runtime contract live here.  In particular,
     a generic ``session_id`` is never accepted as provider identity and
     unsupported agents never fall back to a fresh-session command.
+
+    Permission flags come from the shared decision (``controls`` when the
+    caller holds the resumed run's admitted policy, otherwise the durable
+    config / fleet-default chain in ``_headless_policy_flags``) — never an
+    embedded bypass literal. Resume retains the admitted policy instead of
+    silently reverting (Founder decision 13716da4a2b8af7049ea1565).
     """
+    from .spawn import _headless_policy_flags
 
     normalized_agent = str(agent or "").strip().lower()
     native_id = str(agent_session_id or "").strip()
     if not native_id:
         raise ValueError("missing_agent_session_id")
+    flags, _permissions = _headless_policy_flags(normalized_agent, controls)
     if normalized_agent == "claude":
         return [
             "claude",
@@ -530,7 +571,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            *flags,
         ]
     if normalized_agent == "codex":
         return [
@@ -538,7 +579,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "exec",
             "resume",
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *flags,
             native_id,
             "-",
         ]
@@ -549,8 +590,7 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             native_id,
             "--cwd",
             ".",
-            "--permission-mode",
-            "bypassPermissions",
+            *flags,
             "--no-alt-screen",
             "--output-format",
             "streaming-json",
@@ -561,10 +601,13 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
         # agy 1.2.1 probe 2026-09-11: `--conversation <id>` composes with the
         # private `--print=` + stream-json stdin lane and keeps the same
         # conversation_id (context preserved). Prompt never rides argv.
-        command = _stdin_command("agy")
+        command = _stdin_command("agy", controls)
         return [command[0], "--conversation", native_id, *command[1:]]
     if normalized_agent == "copilot":
-        command = _stdin_command("copilot")
+        command = _stdin_command("copilot", controls)
+        return [command[0], "--resume", native_id, *command[1:]]
+    if normalized_agent == "omp":
+        command = _stdin_command("omp", controls)
         return [command[0], "--resume", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
@@ -594,8 +637,10 @@ async def _run_child(
     file, resolving its command, applying a requested model pin once, and
     returning the collected `ChildResult`.
     """
+    from .execution_controls import resolve_execution_controls
     from .workflow import (
         WorkflowLaunchSpec,
+        build_launch_command,
         launch_selection_receipt,
         select_plan_effort,
         select_plan_model,
@@ -616,21 +661,24 @@ async def _run_child(
         model_source = os.environ.get("VIBECRAFTED_MODEL_SOURCE") or model_source
     if os.environ.get("VIBECRAFTED_EFFORT_REQUESTED"):
         effort_source = os.environ.get("VIBECRAFTED_EFFORT_SOURCE") or effort_source
-    selection = launch_selection_receipt(
-        WorkflowLaunchSpec(
-            agent=agent,
-            mode=kind,
-            skill="workflow",
-            prompt=prompt,
-            file="",
-            runtime="headless",
-            root=root,
-            model=model,
-            model_source=model_source,
-            effort=effort,
-            effort_source=effort_source,
-        )
+    child_spec = WorkflowLaunchSpec(
+        agent=agent,
+        mode=kind,
+        # A child is a provider worker, not another supervised parent loop.
+        skill="workflow",
+        prompt=prompt,
+        file="",
+        runtime="headless",
+        root=root,
+        model=model,
+        model_source=model_source,
+        effort=effort,
+        effort_source=effort_source,
+        permissions="bypass"
+        if kind == "marbles-reception" and agent == "codex"
+        else "",
     )
+    selection = launch_selection_receipt(child_spec)
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
     report, transcript, meta, prompt_file = _child_artifact_paths(
@@ -643,20 +691,67 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = _with_effort_override(
-        agent,
-        _with_model_override(
+    if command is None and agent == "kimi":
+        # Kimi's -p consumes argv text. Reuse the canonical owner with the
+        # complete child contract already materialized, including loop instructions.
+        child_command = build_launch_command(child_spec, root, prompt_file=prompt_file)
+    else:
+        child_command = _with_effort_override(
             agent,
-            command if command is not None else _stdin_command(agent),
-            model,
-        ),
-        effort,
-    )
+            _with_model_override(
+                agent,
+                command
+                if command is not None
+                else _stdin_command(
+                    agent,
+                    controls=resolve_execution_controls("codex", permissions="bypass")
+                    if kind == "marbles-reception" and agent == "codex"
+                    else None,
+                ),
+                model,
+            ),
+            effort,
+        )
     child_env = _child_env(agent, report, transcript, meta, model)
+    if kind == "marbles-reception":
+        child_env["PYTHONDONTWRITEBYTECODE"] = "1"
     child_command = _resolve_agent_command(agent, child_command, child_env)
+    receiver_guard: dict[str, str] | None = None
+    if kind == "marbles-reception":
+        # Provider flags still come from their canonical owners. This guard is
+        # the READ source boundary, including shared worktree Git metadata.
+        child_command, receiver_guard = await asyncio.to_thread(
+            readonly_command, root, child_command, agent
+        )
     _write_json(meta, {"run_id": run_id, "agent": agent, **selection})
+    if receiver_guard is not None:
+        _write_json(
+            meta,
+            {
+                "run_id": run_id,
+                "agent": agent,
+                **selection,
+                "receiver_guard": receiver_guard,
+            },
+        )
     if _tee_enabled():
         print(f"\n===== {kind}:{label}:{agent} =====", flush=True)
+
+    def child_activity(chunk: bytes) -> None:
+        # Real raw output includes tool/session events with no display text.
+        # Propagate movement, never synthetic PID/heartbeat optimism, so the
+        # outer quiet-worker bound measures the nested provider too.
+        print(
+            json.dumps(
+                {
+                    "type": "workflow.child_activity",
+                    "child_run_id": run_id,
+                    "bytes": len(chunk),
+                }
+            ),
+            flush=True,
+        )
+
     handle: AsyncRunHandle = await AsyncSupervisor().run(
         run_id=run_id,
         command=child_command,
@@ -669,6 +764,8 @@ async def _run_child(
         require_report=True,
         require_transcript_output=False,
         tee_output=_tee_enabled(),
+        on_output=child_activity,
+        salvage_report_from_stream=kind == "marbles-reception",
     )
     validation = handle.artifact_validation
     settled = getattr(handle, "telemetry", None)
@@ -704,6 +801,9 @@ async def _run_child(
         else handle.cost_usd,
         resume_command=handle.resume_command,
         completed_at=handle.completed_at.isoformat() if handle.completed_at else "",
+        usage_events=settled.usage.events
+        if settled is not None
+        else handle.usage_events,
     )
 
 
@@ -775,6 +875,9 @@ def _child_result_from_meta(label: str, meta_path: Path) -> ChildResult | None:
         completed_at=str(
             payload.get("completed_at") or payload.get("updated_at") or ""
         ),
+        usage_events=(_optional_int((payload.get("usage") or {}).get("events")) or 0)
+        if isinstance(payload.get("usage"), dict)
+        else 0,
     )
 
 
@@ -876,7 +979,7 @@ def _timed_out_lane_result(
         tokens_output=observed.tokens_output if observed is not None else 0,
         cost_usd=observed.cost_usd if observed is not None else None,
         resume_command=observed.resume_command if observed is not None else "",
-        completed_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -1076,7 +1179,7 @@ def _failed_synthesis_result(last: ChildResult, reason: str) -> ChildResult:
         agent=last.agent,
         prompt="",
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(
         "---\nstatus: failed\n---\n\n"
@@ -1160,29 +1263,52 @@ def _write_parent_report(
     *,
     synthesis: ChildResult | None = None,
     research_selection: ResearchAgentSelection | None = None,
+    reception: dict[str, object] | None = None,
+    receivers: Sequence[ChildResult] = (),
+    status_override: str = "",
 ) -> None:
     """Write the parent supervised run's Markdown report and meta.json: status,
     receipt, research lane selection, synthesis and per-child sections.
     """
-    status = _research_run_status(results, synthesis, kind=kind)
+    status = status_override or _research_run_status(results, synthesis, kind=kind)
     lanes_failed = [
         result.agent
         for result in results
         if result.exit_code != 0 or not result.artifact_ok
     ]
-    accounting_results = tuple(results) + (
-        (synthesis,) if synthesis is not None else ()
+    accounting_results = (
+        tuple(results)
+        + tuple(receivers)
+        + ((synthesis,) if synthesis is not None else ())
     )
     receipt = _parent_receipt(accounting_results)
     cost = receipt.get("cost_usd")
     report = _parent_report_path()
     report.parent.mkdir(parents=True, exist_ok=True)
+    existing = parse_report_path(report).fields if report.exists() else {}
+    session_id = existing.get("session_id") or str(
+        receipt.get("session_id") or "aggregated"
+    )
+    parent_agent = (
+        existing.get("agent")
+        or os.environ.get("VIBECRAFTED_AGENT")
+        or (results[0].agent if results else "runtime")
+    )
+    receipt["session_id"] = session_id
     lines = [
         "---",
         f"status: {status}",
         f"skill: vc-{kind}",
         f"run_id: {_parent_run_id()}",
-        f"session_id: {receipt.get('session_id') or 'aggregated'}",
+        f"session_id: {session_id}",
+        f"agent: {parent_agent}",
+        f"claim_status: {status}",
+        "finalized: true",
+        "claim: "
+        + json.dumps(
+            f"Supervised {kind} execution {status}; convergence "
+            f"{(reception or {}).get('verdict', 'not_assessed')}."
+        ),
         f"root: {root}",
         f"tokens_input: {receipt['tokens_input']}",
         f"tokens_cached_input: {receipt['tokens_cached_input']}",
@@ -1318,54 +1444,89 @@ def _write_parent_report(
             ]
         )
         lines.extend(child_lines)
+    if reception is not None:
+        lines.extend(
+            [
+                "",
+                "## Verified Reception",
+                "",
+                "```json",
+                json.dumps(reception, indent=2),
+                "```",
+                "",
+            ]
+        )
     lines.extend(_parent_footer(_parent_run_id(), status, receipt))
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _write_json(
-        _parent_meta_path(),
-        {
-            "run_id": _parent_run_id(),
-            "skill": kind,
-            "status": status,
-            "report": str(report),
-            "session_id": receipt.get("session_id") or "aggregated",
-            "tokens_input": receipt["tokens_input"],
-            "tokens_cached_input": receipt["tokens_cached_input"],
-            **(
-                {"tokens_cache_write": receipt["tokens_cache_write"]}
-                if receipt.get("tokens_cache_write") is not None
-                else {}
-            ),
-            "tokens_output": receipt["tokens_output"],
-            "tokens_total": receipt["tokens_total"],
-            "cost_usd": cost if cost is not None else "unknown",
-            "cost_source": receipt["cost_source"],
-            **(
-                {"model_requested": receipt["model_requested"]}
-                if receipt.get("model_requested")
-                else {}
-            ),
-            "research_agent_source": research_selection.source
-            if research_selection is not None
-            else "",
-            "research_agents": list(research_selection.agents)
-            if research_selection is not None
-            else [],
-            "research_ignored_agents": list(research_selection.ignored)
-            if research_selection is not None
-            else [],
-            "research_synthesizer": research_selection.synthesizer
-            if research_selection is not None
-            else "",
-            "research_synthesizer_model": research_selection.synthesizer_model
-            if research_selection is not None
-            else "",
-            "research_synthesizer_source": research_selection.synthesizer_source
-            if research_selection is not None
-            else "",
-            "lanes_failed": lanes_failed,
-            "synthesis": _result_meta(synthesis) if synthesis is not None else {},
-            "children": [_result_meta(result) for result in results],
-        },
+    from .control_plane import control_plane_home
+    from .run_mutation import mutate_run_meta
+
+    summary = {
+        "run_id": _parent_run_id(),
+        "skill": kind,
+        "status": status,
+        "report": str(report),
+        "session_id": session_id,
+        "tokens_input": receipt["tokens_input"],
+        "tokens_cached_input": receipt["tokens_cached_input"],
+        **(
+            {"tokens_cache_write": receipt["tokens_cache_write"]}
+            if receipt.get("tokens_cache_write") is not None
+            else {}
+        ),
+        "tokens_output": receipt["tokens_output"],
+        "tokens_total": receipt["tokens_total"],
+        "cost_usd": cost if cost is not None else "unknown",
+        "cost_source": receipt["cost_source"],
+        **(
+            {"model_requested": receipt["model_requested"]}
+            if receipt.get("model_requested")
+            else {}
+        ),
+        "research_agent_source": research_selection.source
+        if research_selection is not None
+        else "",
+        "research_agents": list(research_selection.agents)
+        if research_selection is not None
+        else [],
+        "research_ignored_agents": list(research_selection.ignored)
+        if research_selection is not None
+        else [],
+        "research_synthesizer": research_selection.synthesizer
+        if research_selection is not None
+        else "",
+        "research_synthesizer_model": research_selection.synthesizer_model
+        if research_selection is not None
+        else "",
+        "research_synthesizer_source": research_selection.synthesizer_source
+        if research_selection is not None
+        else "",
+        "lanes_failed": lanes_failed,
+        "synthesis": _result_meta(synthesis) if synthesis is not None else {},
+        "children": [_result_meta(result) for result in results],
+        **(
+            {
+                "reception": reception,
+                "receivers": [_result_meta(result) for result in receivers],
+            }
+            if reception is not None
+            else {}
+        ),
+    }
+
+    def merge_summary(latest: dict[str, object]) -> dict[str, object]:
+        latest.update(summary)
+        return latest
+
+    control_root = control_plane_home()
+    control_root.mkdir(parents=True, exist_ok=True)
+    mutate_run_meta(
+        control_root,
+        meta_path=_parent_meta_path(),
+        mutation_root=_parent_meta_path().parent,
+        run_id=_parent_run_id(),
+        mutator=merge_summary,
+        create=True,
     )
 
 
@@ -1486,6 +1647,109 @@ async def run_research_synthesis(
     )
 
 
+def _reception_prompt(
+    root: str,
+    prompt: str,
+    candidate: ChildResult,
+    tree: dict[str, str],
+    rounds: Sequence[dict[str, object]],
+) -> str:
+    def finding(key: str, evidence: str) -> dict[str, str]:
+        return {
+            "id": key,
+            "severity": "medium",
+            "cluster": "example",
+            "evidence": evidence,
+        }
+
+    open_example = finding(
+        "example-open", "Observed gap remains; record actual candidate evidence"
+    )
+    closed_example = finding(
+        "example-closed", "Rechecked previous gap; record actual closure evidence"
+    )
+    examples = {
+        "attacked": [open_example, closed_example],
+        "resolved": [closed_example],
+        "still_open": [open_example],
+        "discovered": [finding("example-new", "New verified gap in current candidate")],
+        "regressions": [
+            finding("example-regression", "Previously working behavior now fails")
+        ],
+    }
+    sample = {
+        "schema": RECEPTION_SCHEMA,
+        "root": tree["root"],
+        "candidate_run_id": candidate.run_id,
+        "candidate_sha": tree["head"],
+        "scope_verified": False,
+        "scope_evidence": "Explain coverage and remaining uncertainty",
+        "gate": "unknown",
+        "checks": [],
+        "blocker": "",
+        **{
+            name: []
+            for name in (
+                "attacked",
+                "resolved",
+                "still_open",
+                "discovered",
+                "regressions",
+            )
+        },
+    }
+    return f"""You are the informed READ-only Marbles receiver, not a WRITE worker.
+Work only against the assigned repository: {root}
+Do not edit code, commit, switch branch, launch workers, or write a next plan.
+Emit your verified report as the final stdout response. The runtime persists it
+at VIBECRAFTED_REPORT_PATH; do not write the report or any other file yourself.
+{WORKER_SIGNAL_DISCIPLINE}
+Read the candidate report completely: {candidate.report}
+Verify the actual current files, diff/commit and relevant gates against this unchanged task:
+{prompt}
+
+The task above defines immutable acceptance and scope. Its edit, commit, touch,
+install and other WRITE-only execution steps are NOT permission for this READ phase.
+Do not touch source inputs to force freshness. Preserve the source write guard.
+Use canonical external test outputs and their normal shared-target leases where
+the task requires them. Do not invent a private Rust target or bypass a lease.
+For Python checks disable source caches (PYTHONDONTWRITEBYTECODE=1, pytest
+-p no:cacheprovider) and place temporary outputs outside the assigned tree.
+If a required gate cannot run without source writes, report gate unknown and
+scope_verified false with the exact blocker; never substitute a green guess.
+
+Reception alone remembers prior accepted evidence (never sent to fresh WRITE workers):
+{json.dumps(list(rounds), indent=2)}
+
+Re-evaluate unresolved findings and regressions; absence from this report does not resolve them.
+Use stable finding ids and severity high/medium/low, with cluster and concrete evidence.
+Never convert narrative guesses, exit 0 or count exhaustion into verified convergence.
+Run the relevant task gates synchronously. Record actual command, exit_code and evidence
+for each check. Gate is pass only when all required checks passed, fail when any failed,
+unknown when unavailable. scope_verified requires actual coverage of the assigned task.
+External/product/substrate blockers go in blocker. Only explicitly resolved ids close.
+Each finding is an object with id, severity, cluster, evidence; resolved must also be attacked.
+All five sets contain finding OBJECTS, never bare string ids. Every attacked id
+must have an explicit disposition: resolved if verified closed, or an open set
+(still_open/discovered/regressions) if unresolved. Missing disposition is invalid.
+Keep severity/cluster consistent for a stable id, and never mark the same id resolved
+and open. Prior findings omitted here remain open in the ledger.
+The runtime computes metrics and the final decision; do not invent metrics or accept debt.
+Emit exactly one fenced `marbles-reception` JSON block in your report, with this schema:
+```marbles-reception
+{json.dumps(sample, indent=2)}
+```
+checks contains objects: {{"command": "exact command", "exit_code": 0, "evidence": "actual result"}}.
+Finding-object illustration for all five sets (not observed facts; replace these
+examples with actual findings/evidence, or [] when the set is verified empty):
+```json
+{json.dumps(examples, indent=2)}
+```
+An empty ledger is a finding to verify, not a default. Missing evidence blocks reception.
+Finalize your report with an honest status and non-empty claim. Then leave.
+"""
+
+
 async def run_marbles(
     root: str,
     agent: str,
@@ -1495,15 +1759,41 @@ async def run_marbles(
     workflow: str = "marbles",
     model_requested: str = "",
 ) -> int:
-    """Run up to `count` sequential marbles/polarize loop iterations, stopping
-    early on the first failed/invalid child or a child report whose ``status``
-    is ``blocked`` or ``failed``; writes the parent report.
-    Returns 0 only if all `count` iterations completed cleanly.
+    """Bounded fresh WRITE rounds, each followed by awaited informed reception.
+
+    Exit 0 means completed execution (possibly budget exhausted); only the
+    separately recorded verified verdict can attest convergence. Polarize
+    retains its own fixed-count contract.
     """
     model_requested = _remember_runtime_model_request(model_requested)
     kind = _safe_label(workflow) or "marbles"
     results: list[ChildResult] = []
+    receivers: list[ChildResult] = []
+    rounds: list[dict[str, object]] = []
+    state: dict[str, object] | None = None
+    final: dict[str, object] = {
+        "verdict": "not_converged",
+        "reason": "round_budget_exhausted",
+    }
+    status = "completed"
     for index in range(1, max(count, 1) + 1):
+        before: dict[str, str] | None = None
+        if kind == "marbles":
+            try:
+                before = await asyncio.to_thread(tree_receipt, root)
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                subprocess.SubprocessError,
+            ) as error:
+                final = {
+                    "verdict": "blocked",
+                    "decision": "escalate",
+                    "reason": f"substrate_unverifiable:{error}",
+                }
+                status = "blocked"
+                break
         loop_prompt = _loop_prompt(kind, prompt, index, count, depth)
         result = await _run_child(
             kind=kind,
@@ -1515,9 +1805,186 @@ async def run_marbles(
         )
         results.append(result)
         if result.exit_code != 0 or not result.artifact_ok:
+            status = "failed"
+            final = {
+                "verdict": "blocked",
+                "decision": "escalate",
+                "reason": "worker_execution_or_artifact_failed",
+            }
             break
         if _child_report_status(result) in _LOOP_STOP_REPORT_STATUSES:
+            status = _child_report_status(result)
+            final = {
+                "verdict": "blocked",
+                "decision": "escalate",
+                "reason": f"worker_report_{status}",
+            }
             break
+        if kind != "marbles":
+            continue
+        try:
+            tree = await asyncio.to_thread(tree_receipt, root)
+            if before is None or tree["branch"] != before["branch"]:
+                raise ValueError("assigned_branch_changed")
+            ancestry = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "merge-base",
+                    "--is-ancestor",
+                    before["head"],
+                    tree["head"],
+                ],
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+            if ancestry.returncode != 0:
+                raise ValueError("candidate_replaced_baseline_history")
+            if (
+                tree["source_hash"] != before["source_hash"]
+                and tree["head"] == before["head"]
+            ):
+                raise ValueError("candidate_cut_not_committed")
+            # A receiver never edits the candidate. Check the full content
+            # fingerprint on both sides of READ, not just HEAD or clean status.
+            try:
+                from .execution_controls import resolve_execution_controls
+
+                # The reception resume must keep the fresh receiver's admitted
+                # policy: codex's receiver guard (readonly_command) requires the
+                # bypass opt-in; without it the default auto argv drops
+                # --dangerously-bypass-approvals-and-sandbox and the run blocks
+                # on receiver_codex_inner_sandbox_not_disabled.
+                command = native_resume_argv(
+                    agent,
+                    result.agent_session_id,
+                    controls=resolve_execution_controls("codex", permissions="bypass")
+                    if agent == "codex"
+                    else None,
+                )
+                receiver_mode = "native_resume"
+            except ValueError:
+                command = None
+                receiver_mode = "fresh_informed"
+            receiver = await _run_child(
+                kind="marbles-reception",
+                label=f"marbles-L{index}-reception",
+                agent=agent,
+                root=root,
+                prompt=prompt,
+                command=command,
+                model_requested=model_requested,
+                prompt_body=_reception_prompt(root, prompt, result, tree, rounds),
+            )
+            receivers.append(receiver)
+            if (
+                receiver_mode == "native_resume"
+                and receiver.agent_session_id != result.agent_session_id
+            ):
+                raise ValueError("receiver_native_session_identity_mismatch")
+            if await asyncio.to_thread(tree_receipt, root) != tree:
+                raise ValueError("receiver_modified_assigned_tree")
+            if receiver.exit_code != 0 or not receiver.artifact_ok:
+                raise ValueError("receiver_execution_or_artifact_failed")
+            evidence = read_evidence(
+                receiver.report, candidate_run_id=result.run_id, tree=tree
+            )
+            candidate_state = receive(
+                state,
+                evidence,
+                report=receiver.report,
+                no_source_progress=tree["source_hash"] == before["source_hash"],
+            )
+            declared = _child_report_status(receiver)
+            if declared == "failed" or (
+                declared == "blocked" and candidate_state["verdict"] != "blocked"
+            ):
+                raise ValueError(f"receiver_report_{declared}_contradicts_reception")
+            # Stdout-only READ artifacts are persisted by the runtime. Attest
+            # only after schema, candidate identity and source immutability
+            # were checked; process exit zero alone never finalizes a claim.
+            phase_status = (
+                "blocked" if candidate_state["verdict"] == "blocked" else "completed"
+            )
+            stamp_launcher_report_identity(
+                receiver.report,
+                run_id=receiver.run_id,
+                session_id=parse_report_path(receiver.report).fields.get(
+                    "session_id", ""
+                ),
+                agent=receiver.agent,
+                skill="marbles-reception",
+                status=phase_status,
+                runtime_fields={
+                    "status": phase_status,
+                    "claim_status": phase_status,
+                    "finalized": "true",
+                    "claim_kind": "marbles-reception",
+                    "claim": f"Validated READ evidence for {result.run_id} at {tree['head']}; gate {candidate_state['gate']}, verdict {candidate_state['verdict']}.",
+                    "reception_verdict": str(candidate_state["verdict"]),
+                    "reception_gate": str(candidate_state["gate"]),
+                },
+            )
+            state = candidate_state
+            rounds.append(
+                {
+                    **state,
+                    "receiver_mode": receiver_mode,
+                    "receiver_run_id": receiver.run_id,
+                    "source": tree,
+                }
+            )
+            final = {**state, "rounds": rounds, "execution_status": "completed"}
+            _write_json(_child_dir() / "reception.json", final)
+            print(
+                json.dumps(
+                    {
+                        "type": "workflow.reception",
+                        "round": index,
+                        "decision": state["decision"],
+                        "verdict": state["verdict"],
+                    }
+                ),
+                flush=True,
+            )
+            if state["decision"] == "escalate":
+                status = "blocked"
+                break
+            if state["decision"] == "stop":
+                break
+            # Surface-shift recommendations remain inside the unchanged plan;
+            # never inject prior findings/rankings into the next WRITE context.
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+            final = {
+                "verdict": "blocked",
+                "decision": "escalate",
+                "reason": str(error),
+                "rounds": rounds,
+                "execution_status": "completed",
+                "open_findings": (state or {}).get("open_findings", []),
+            }
+            status = "blocked"
+            break
+    if kind == "marbles":
+        final.setdefault("rounds", rounds)
+        final["round_budget"] = max(count, 1)
+        final["rounds_completed"] = len(results)
+        if status == "completed" and final.get("verdict") != "converged":
+            final.update(decision="stop", reason="round_budget_exhausted")
+        _write_json(_child_dir() / "reception.json", final)
+        _write_parent_report(
+            kind,
+            root,
+            prompt,
+            results,
+            reception=final,
+            receivers=receivers,
+            status_override=status,
+        )
+        return 0 if status == "completed" else 1
     _write_parent_report(kind, root, prompt, results)
     return (
         0
@@ -1571,6 +2038,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _with_shutdown(awaitable):
+    """Cancel the active owner on TERM/INT and await nested cleanup before exit."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(awaitable)
+    installed: list[signal.Signals] = []
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                sig, lambda: task.cancel() if not task.cancelling() else None
+            )
+            installed.append(sig)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return 128 + signal.SIGTERM
+    finally:
+        for sig in installed:
+            loop.remove_signal_handler(sig)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint: parse args, stash requested model/synthesizer overrides
     into env, and dispatch to the matching `run_*` coroutine via `asyncio.run`.
@@ -1589,26 +2078,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ["VIBECRAFTED_RESEARCH_SYNTHESIZER_MODEL"] = synthesizer_model
     if ns.command == "research":
         prompt = ns.prompt or _read_prompt_file(ns.prompt_file)
-        return asyncio.run(run_research(ns.root, prompt, model_requested))
+        return asyncio.run(
+            _with_shutdown(run_research(ns.root, prompt, model_requested))
+        )
     if ns.command == "research-lane":
         prompt = ns.prompt or _read_prompt_file(ns.prompt_file)
         return asyncio.run(
-            run_research_lane(ns.root, prompt, ns.agent, model_requested)
+            _with_shutdown(
+                run_research_lane(ns.root, prompt, ns.agent, model_requested)
+            )
         )
     if ns.command == "research-synthesis":
         prompt = ns.prompt or _read_prompt_file(ns.prompt_file)
-        return asyncio.run(run_research_synthesis(ns.root, prompt, model_requested))
+        return asyncio.run(
+            _with_shutdown(run_research_synthesis(ns.root, prompt, model_requested))
+        )
     if ns.command == "marbles":
         prompt = ns.prompt or _read_prompt_file(ns.prompt_file)
         return asyncio.run(
-            run_marbles(
-                ns.root,
-                ns.agent,
-                prompt,
-                ns.count,
-                ns.depth,
-                ns.workflow,
-                model_requested,
+            _with_shutdown(
+                run_marbles(
+                    ns.root,
+                    ns.agent,
+                    prompt,
+                    ns.count,
+                    ns.depth,
+                    ns.workflow,
+                    model_requested,
+                )
             )
         )
     return 2

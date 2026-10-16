@@ -16,8 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 
 # Pinned to the native Windows entry point selected for v4.3.1 on 2026-10-01.
-# The public website still serves the older WSL-only copy; release acceptance
-# must separately settle that deployment drift. See
+# On 2026-10-14 https://vibecrafted.io/install.ps1 served these exact bytes;
+# release acceptance still re-checks the live copy. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
 INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb1ec30c"
@@ -29,6 +29,12 @@ INSTALL_PS1_SHA256 = "595ec587d69448419073efdc6d0d490d87c80c6149ba3cad658370b9fb
 # brew install it. Calling one of these from a `run:` line is fatal at the
 # step, with no fallback.
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
+
+
+def _source_gate_workflow(trigger: str = "release.yml") -> str:
+    wrapper = (REPO_ROOT / ".github/workflows" / trigger).read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/source-gate.yml" in wrapper
+    return (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(encoding="utf-8")
 
 
 def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> None:
@@ -96,7 +102,7 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     """
     workflow_path = REPO_ROOT / ".github/workflows/gate-rehearsal.yml"
     assert workflow_path.is_file()
-    text = workflow_path.read_text(encoding="utf-8")
+    text = _source_gate_workflow("gate-rehearsal.yml")
 
     # Forbidden: moving stable channel
     assert "RUSTUP_TOOLCHAIN: stable" not in text
@@ -119,6 +125,19 @@ def test_gate_rehearsal_workflow_pins_and_provisions_rust_toolchain() -> None:
     unified_idx = text.index("Run unified product contract gate")
     test_idx = text.index("Run installer and product tests")
     assert prov_idx < unified_idx < test_idx
+
+
+def test_source_and_rehearsal_have_identical_gate_steps() -> None:
+    source = _source_gate_workflow()
+    assert source == _source_gate_workflow("gate-rehearsal.yml")
+    assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in source
+    assert 'rustup default "$RUSTUP_TOOLCHAIN"' in source
+    assert "printf 'RUSTUP_HOME=%s\\n' \"$(rustup show home)\"" in source
+    assert "printf 'CARGO_HOME=%s\\n' \"$HOME/.cargo\"" in source
+    assert '>> "$GITHUB_ENV"' in source
+    assert source.index("Provision pinned Rust toolchain") < source.index(
+        "Run unified product contract gate"
+    )
 
 
 @pytest.mark.parametrize("profile", ["local", "local-classic"])
@@ -729,6 +748,12 @@ def test_public_install_surfaces_name_all_release_carriers() -> None:
             f"{relative} must name the portable channel asset"
         )
         assert "vc-frame/releases/latest/download/install.sh" not in text
+        # The website publishes the bootstrap channel separately from GitHub
+        # Releases, so a reader needs the manifest that names what
+        # `curl | bash` will install before trusting a version on this page.
+        assert "https://vibecrafted.io/channel/main.json" in text, (
+            f"{relative} must name the bootstrap channel manifest"
+        )
 
 
 @pytest.mark.parametrize("doctor_step", [0, 1], ids=["ubuntu", "debian"])
@@ -779,9 +804,10 @@ def test_linux_install_doctor_rejects_unrunnable_owned_donors(
 
 
 def test_tag_workflow_is_a_read_only_source_gate() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
-    assert "permissions:\n  contents: read" in workflow
+    wrapper = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "permissions:\n  contents: read" in wrapper
     assert "persist-credentials: false" in workflow
     assert 'test "$GITHUB_REF_TYPE" = "tag"' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
@@ -828,7 +854,7 @@ def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
     target is out of scope — those resolve at recipe level and several fall
     back to `uvx`.
     """
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
     run_lines: list[str] = []
     in_run = False
@@ -886,7 +912,7 @@ def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
     one canonically named DMG and one portable tarball, each resolved by the
     publisher from a build script and documented in the kickoff.
     """
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = _source_gate_workflow()
 
     assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
     assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
@@ -1203,9 +1229,7 @@ def test_bundle_parity_verifier_uses_artifact_and_isolated_install_roots() -> No
 
 def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    source_workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
-        encoding="utf-8"
-    )
+    source_workflow = _source_gate_workflow()
     release_workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
         encoding="utf-8"
     )
@@ -1262,8 +1286,8 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
 @pytest.mark.parametrize(
     ("donor", "revision"),
     [
-        ("terminal", "cfa2c367ed36ba9179a05fff32ab1221060cb04e"),
-        ("frame", "a485821727bb1bc1dc27a17d6db78a375e723e63"),
+        ("terminal", "38ef2f918383ca4dde797d22869b619097c81d05"),
+        ("frame", "0b91c4f0806356b5c92e46c82bf0fdf0310c0222"),
     ],
 )
 def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
@@ -1286,6 +1310,8 @@ def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
 
 
 def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
+    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    assert pins["schema"] == "vibecrafted.source-components.v1"
     workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
     linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
     windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
@@ -1293,9 +1319,30 @@ def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
         revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
         assert revision is not None
         sha = revision.group(1)
+        assert pins["components"][f"vc-{donor}"]["revision"] == sha
         assert f'${donor}Revision = "{sha}"' in windows
         assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
         assert f"repository: vetcoders/vc-{donor}" in workflow
+
+
+def test_changelog_names_only_the_pinned_donor_revisions() -> None:
+    # The Frame pin kept moving after the 4.4.0 entry was written, and the
+    # entry kept naming the first one. Release notes for the version being cut
+    # may only name full revisions that the builders actually pin.
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    section = re.search(
+        rf"^## \[{re.escape(version)}\][^\n]*\n(?P<body>.*?)(?=^## \[|\Z)",
+        changelog,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"CHANGELOG.md has no entry for {version}"
+    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    pinned = {component["revision"] for component in pins["components"].values()}
+    named = set(re.findall(r"\b[0-9a-f]{40}\b", section.group("body")))
+    assert named <= pinned, (
+        f"CHANGELOG {version} names unpinned revisions: {sorted(named - pinned)}"
+    )
 
 
 @pytest.mark.parametrize("mechanism", ["api", "apple-id", "incomplete"])
@@ -1481,8 +1528,6 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     assert '--version "$VERSION"' in builder
     assert icon.is_file()
     assert icon.stat().st_size > 100_000
-    assert "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" in builder
-    assert "$TERMINAL_REPO/assets/icon/terminal.png" in builder
     assert '"$ICON_SOURCE" "$resources/Vibecrafted.icns" "$ICON_REFERENCE"' in builder
     assert "! -name 'Vibecrafted.icns'" in builder
     assert '[[ -s "$resources/TrayIcon.png" ]]' in builder
@@ -1552,7 +1597,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "SourceCodePro[wght].ttf" in builder
     assert "SourceCodePro-Italic[wght].ttf" in builder
     assert "OFL.txt" in builder
-    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert 'embed_terminal_font_resources "$APP"' in builder
     assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert "missing Source Code Pro input" in builder
     assert "(OpenType|TrueType) [Ff]ont" in builder
@@ -1697,6 +1742,14 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+    assert (
+        'donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"'
+        in builder
+    )
+    assert (
+        'donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"'
+        in builder
+    )
 
     # Regenerated plugin assets are deterministic derived output. Their
     # mutation must not make the binary claim that the immutable donor commit
@@ -2027,7 +2080,7 @@ def test_embedded_python_drops_native_code_no_declared_executable_reaches(
 ) -> None:
     """Release #7 (c71487bf, CPython 3.14.7) died at VCPC027: the bundled
     verifier found libpython, the Tcl/Tk stack and its thread/itcl packages
-    reachable from no declared executable. Run the real prune function on a
+    now reached by the native embedded Python hosts; the unrelated Tcl/Tk stack remains pruned. Run the real prune function on a
     python-build-standalone shaped tree whose interpreter links no libpython.
     """
     python = _embedded_python_fixture(tmp_path / "static")
@@ -2039,6 +2092,7 @@ def test_embedded_python_drops_native_code_no_declared_executable_reaches(
     assert remaining == [
         "bin/pip3",
         "bin/python3.14",
+        "lib/libpython3.14.dylib",
         "lib/pkgconfig/python3-embed.pc",
         "lib/python3.14/json/__init__.py",
         "lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so",
@@ -2065,7 +2119,7 @@ def test_embedded_python_keeps_libpython_the_interpreter_links(tmp_path: Path) -
     )
     call = builder.index('prune_embedded_python_unreachable "$runtime/python"')
     assert call < builder.index(
-        'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"'
+        'install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}"'
     )
     assert 'if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then' in builder
 
@@ -2373,51 +2427,16 @@ def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> Non
     assert "_CodeSignature/CodeResources" in helper
 
 
-def test_vc_terminal_bundle_identity_has_a_single_materializer() -> None:
-    """Both payloads' bundles are stamped by one function, or they drift.
-
-    Measured on 5ff2c4c5: the App helper was stamped VC Terminal and the new
-    Runtime Pack bundle kept the donor's CFBundleName, so the same binary
-    reached the Dock under two names depending on which payload was installed.
-    """
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
-        encoding="utf-8"
-    )
-    installer_source = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
-        encoding="utf-8"
-    )
-
+def test_vc_terminal_uses_one_fixed_main_app_identity() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
     assert (
-        builder.count('/usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app"') == 1
+        'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
+        in builder
     )
-    assert builder.count("Set :CFBundleDisplayName VC Terminal") == 1
-    assert builder.count("Set :CFBundleName VC Terminal") == 1
-    assert (
-        builder.count(
-            'materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app"'
-        )
-        == 1
-    )
-    assert builder.count('materialize_vc_terminal_app_bundle "$terminal_app"') == 1
-    # The pack bundle is a Darwin-only product contract; Linux keeps the flat
-    # native host, so the call has to stay inside the platform guard.
-    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
-        "\nbuild_product() {", 1
-    )[0]
-    guard = materializer.index('if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then')
-    call = materializer.index("materialize_vc_terminal_app_bundle")
-    assert guard < call < materializer.index("\n  fi\n", guard)
-
-    # The two admission predicates read the same stamp.
-    assert '"$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal"' in entry
-    assert '_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"' in installer_source
-    assert (
-        'document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME'
-        in installer_source
-    )
+    assert "materialize_vc_terminal_app_bundle" not in builder
+    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in entry
+    assert "io.vetcoders.vibecrafted" in entry
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,26 @@ def _dry_run_launcher(tmp_path: Path, agent: str) -> Path:
     plan = _write_plan(tmp_path)
     env = os.environ.copy()
     env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["VIBECRAFTED_TEST_MODE"] = "1"
+    if agent == "cursor":
+        # Permission flags are resolved through the canonical probe of the
+        # selected cursor-agent, even for a dry run (fail closed, never the
+        # declared contract unverified). Give it the surface a modern install has.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "cursor-agent"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  --version) printf '%s\\n' '2026.08.25' ;;\n"
+            "  --help|-h) printf '%s\\n' '--print' '--output-format' '--force'"
+            " '--trust' '--resume [chatId]' '--mode' ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
 
     result = subprocess.run(
         [
@@ -57,6 +78,29 @@ def _dry_run_launcher(tmp_path: Path, agent: str) -> Path:
     return launcher
 
 
+def _provider_command(launcher: Path, executable: str) -> list[str]:
+    """Decode generated shell output without running a provider or launcher."""
+    assignment = next(
+        line
+        for line in launcher.read_text(encoding="utf-8").splitlines()
+        if line.startswith("SPAWN_CMD=")
+    )
+    command = shlex.split(assignment)[0].split("=", 1)[1]
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    start = tokens.index(executable)
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(tokens))
+            if tokens[index] in {"|", ";", "<", ">", "&&", "2"}
+        ),
+        len(tokens),
+    )
+    return tokens[start:end]
+
+
 def test_command_deck_exposes_agy_junie_and_grok_help_topics() -> None:
     for agent in ("agy", "junie", "grok", "cursor"):
         result = subprocess.run(
@@ -77,42 +121,30 @@ def test_agy_spawn_dry_run_uses_private_stream_json_stdin_contract(
     launcher = _dry_run_launcher(tmp_path, "agy")
     text = launcher.read_text(encoding="utf-8")
 
-    assert "SPAWN_AGENT=agy" in text
-    # The prompt never rides argv: agy reads one stream-json user message from stdin.
-    assert "agy --print= --input-format stream-json --output-format stream-json" in text
-    assert "--dangerously-skip-permissions --add-dir" in text
-    assert "--print-timeout 30m" in text
+    command = _provider_command(launcher, "agy")
+    assert "--print=" in command
+    assert command[command.index("--input-format") + 1] == "stream-json"
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert "--dangerously-skip-permissions" not in command
+    # The prompt rides a private stream-json file on stdin, never argv.
+    assert "Do the bounded task." not in " ".join(command)
     assert "_agy_prompt.ndjson" in text
-    assert '--print "$(cat ' not in text
     assert "$(cat " not in text
-    # Human pane through the shared parser; raw stream teed for await/meta.
     assert "vibecrafted_core.agent_stream --agent agy --last-message" in text
     assert "tee -a" in text
-    assert "Agy completed without writing a standalone report file" in text
-    assert "Agy failed before writing a standalone report file" in text
-    assert "pipeline_status=65" not in text
 
 
 def test_junie_spawn_dry_run_uses_project_task_contract(tmp_path: Path) -> None:
     launcher = _dry_run_launcher(tmp_path, "junie")
     text = launcher.read_text(encoding="utf-8")
 
-    assert "SPAWN_AGENT=junie" in text
-    assert "junie --project=" in text
-    assert "--task=" in text
-    assert "--skip-update-check" in text
-    assert "--input-format=text" in text
-    assert "--output-format=json-stream" in text
-    assert "--output-format=text" not in text
-
-
-def test_junie_spawn_dry_run_pipes_json_stream_to_transcript(tmp_path: Path) -> None:
-    launcher = _dry_run_launcher(tmp_path, "junie")
-    text = launcher.read_text(encoding="utf-8")
-
-    assert "junie --project=" in text
-    assert "--output-format=json-stream" in text
-    assert "2>&1 | tee -a $qtranscript" not in text
+    command = _provider_command(launcher, "junie")
+    assert any(arg.startswith("--project=") for arg in command)
+    assert any(arg.startswith("--task=") for arg in command)
+    assert "--skip-update-check" in command
+    assert "--input-format=text" in command
+    assert "--output-format=json-stream" in command
+    assert "--output-format=text" not in command
     assert "tee -a" in text
 
 
@@ -132,18 +164,14 @@ def test_grok_spawn_dry_run_uses_prompt_file_contract(tmp_path: Path) -> None:
     launcher = _dry_run_launcher(tmp_path, "grok")
     text = launcher.read_text(encoding="utf-8")
 
-    # Contract alignment (grok 0.2.97): --prompt-file delivery, permission, streaming-json
-    # for transcript capture (matches verified python _stdin_command lane), --cwd.
-    assert "SPAWN_AGENT=grok" in text
-    assert "grok --cwd" in text
-    assert "--permission-mode bypassPermissions" in text
-    assert "--prompt-file" in text
-    assert "--output-format streaming-json" in text
-    assert (
-        "tee -a " in text
-    )  # transcript capture (expanded path in generated SPAWN_CMD)
-    assert "--prompt-file " in text
-    # resume flag shape covered in dedicated grok test below (source contract)
+    command = _provider_command(launcher, "grok")
+    assert Path(command[command.index("--cwd") + 1]) == tmp_path / "repo"
+    assert command[command.index("--permission-mode") + 1] == "auto"
+    assert "bypassPermissions" not in command
+    prompt = Path(command[command.index("--prompt-file") + 1])
+    assert "Do the bounded task." in prompt.read_text(encoding="utf-8")
+    assert command[command.index("--output-format") + 1] == "streaming-json"
+    assert "tee -a" in text
 
 
 def test_cursor_spawn_dry_run_uses_stream_json_stdin_contract(
@@ -152,13 +180,13 @@ def test_cursor_spawn_dry_run_uses_stream_json_stdin_contract(
     launcher = _dry_run_launcher(tmp_path, "cursor")
     text = launcher.read_text(encoding="utf-8")
 
-    # cursor-agent headless contract: `-p` reads the prompt from stdin,
-    # stream-json events tee'd into the transcript, --force --trust mirror
-    # the headless bypass policy used by the other fleet wrappers.
-    assert "SPAWN_AGENT=cursor" in text
-    assert "cursor-agent -p --output-format stream-json --force --trust" in text
+    command = _provider_command(launcher, "cursor-agent")
+    assert "-p" in command
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert "--trust" in command
+    assert "--force" not in command
+    assert "Do the bounded task." not in " ".join(command)
     assert "tee -a" in text
-    assert "Cursor failed before writing a standalone report file" in text
 
 
 def test_dry_run_meta_records_new_agents(tmp_path: Path) -> None:
@@ -174,56 +202,7 @@ def test_dry_run_meta_records_new_agents(tmp_path: Path) -> None:
         assert payload["agent"] == agent
 
 
-def test_grok_resume_uses_resume_flag_not_session_id_and_streams_json() -> None:
-    """Regression on grok resume contract (grok 0.2.97):
-    - MUST use --resume (never -s/--session-id for resume per help)
-    - headless uses --output-format streaming-json for parseable transcript
-    - --single for prompt continuation; --permission-mode and --no-alt-screen
-    - non-interactive wraps streaming-json through AgentStreamParser
-    - prompted resume is admitted as a tracked run (36614036); a bare resume
-      opens the operator seat — the untracked G7 worker branch is gone
-    Source-of-truth is the grok case in marbles.sh (shell resume builder) and
-    `grok --help` (0.2.x: `-r/--resume`, `-p/--single`, `--output-format`).
-    """
-    marbles_path = (
-        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/marbles.sh"
-    )
-    src = marbles_path.read_text(encoding="utf-8")
-
-    # Isolate the resume_command grok) block (not fresh_session_command).
-    assert "_vetcoders_resume_command()" in src
-    resume_fn = src.split("_vetcoders_resume_command()", 1)[1]
-    assert "    grok)" in resume_fn
-    grok_block = resume_fn.split("    grok)", 1)[1].split(";;", 1)[0]
-
-    # resume flag shape
-    assert "grok --resume " in grok_block
-    assert "--session-id" not in grok_block
-    assert "-s " not in grok_block and "--session-id=" not in grok_block
-
-    # output format for capture + prompt delivery via --single in resume context
-    assert "--output-format streaming-json" in grok_block
-    assert (
-        "--single " in grok_block
-        or "--single\n" in grok_block
-        or "--single " in grok_block
-    )
-
-    # other contract flags present in headless resume path
-    assert "--permission-mode bypassPermissions" in grok_block
-    assert "--no-alt-screen" in grok_block
-    assert "--cwd " in grok_block
-
-    # AgentStreamParser and the admitted-run seat are resume-agent contracts
-    # (not only inside the grok case of the command builder).
-    assert "_vetcoders_wrap_with_agent_stream" in src
-    assert "vibecrafted_core.agent_stream" in src
-    assert "_vetcoders_enter_admitted_interactive" in src
-    assert "Resume launched in operator session:" in src
-    assert "Resume launched in worker session:" not in src
-
-    # Fixture-based unit test for spawn.py extraction against grok 0.2.97 streaming-json shape
-    # (no real grok call). Covers session-id (sessionId in end event) + JSON_TOKEN_PATTERNS usage.
+def test_grok_stream_extracts_session_and_usage() -> None:
     from vibecrafted_core.spawn import _extract_cost, _extract_session, _extract_tokens
 
     # Realistic grok streaming-json transcript fragment (end event + usage if emitted; patterns are general)

@@ -1,18 +1,58 @@
 """Allowlist for the environment a headless worker may inherit.
 
-Interactive sessions keep the dispatcher environment. Headless workers do not.
+Interactive births keep the dispatcher environment apart from native parent
+identity, with visible color policy.
+Headless workers keep their independent no-color intent and allowlist.
 Copying ``os.environ`` wholesale leaked the parent Claude bus
 (``CLAUDE_CODE_MESSAGING_SOCKET`` / ``CLAUDE_CODE_MESSAGING_TOKEN``) into a
 Codex worker, along with unrelated API tokens. One allowlist is the gate.
 
 ``selected_runtime_environment`` is not this gate. Message delivery still uses
 that helper to address a selected runtime generation.
+
+What passes the gate keeps the runtime python pin: ``pin_runtime_python``
+puts the selected generation's python door first on PATH and points ZDOTDIR
+at its guest directory, so the worker's own shells -- a provider's login-shell
+snapshot, ``zsh -lc``, a hook -- reach ``VIBECRAFTED_PYTHON`` as python3.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+
+from .runtime_paths import pin_runtime_python
+
+# Native process identity belongs to one provider birth, never its parent.
+# Keep this exact list aligned with vc-frame-product-entry.sh, whose native
+# bootstrap intentionally does not require a Python interpreter. Credentials,
+# config homes, messaging buses and harness flags are separate contracts.
+INHERITED_PROVIDER_IDENTITY_KEYS: tuple[str, ...] = (
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "GROK_SESSION_ID",
+)
+
+
+def managed_provider_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Copy a new managed provider's env without inherited native identity.
+
+    Call only at provider birth. Ordinary tools inside an existing provider
+    must retain its own identity, including calls to AICX current. Admitted
+    resume/fork targets travel through canonical arguments and receipts.
+    """
+    child = dict(source)
+    for key in INHERITED_PROVIDER_IDENTITY_KEYS:
+        child.pop(key, None)
+    return child
+
+
+def provider_identity_shell_prelude() -> str:
+    """Clear an old Frame server's identity before a provider script's exports."""
+    return "unset " + " ".join(INHERITED_PROVIDER_IDENTITY_KEYS) + "\n"
+
 
 # Process basics a provider CLI needs before it can read HOME or speak HTTPS.
 _PROCESS_ALLOW: frozenset[str] = frozenset(
@@ -30,6 +70,8 @@ _PROCESS_ALLOW: frozenset[str] = frozenset(
         "TERM",
         "COLORTERM",
         "NO_COLOR",
+        "NODE_DISABLE_COLORS",
+        "ANSI_COLORS_DISABLED",
         "FORCE_COLOR",
         "CLICOLOR",
         "CLICOLOR_FORCE",
@@ -138,6 +180,18 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
         "KIMI_API_KEY",
         "MOONSHOT_API_KEY",
         "MOONSHOT_BASE_URL",
+        # OMP profiles carry provider auth, MCP servers, and user settings.
+        # Preserve its documented config overrides, not arbitrary PI_/OMP_ vars.
+        "OMP_PROFILE",
+        "PI_PROFILE",
+        "PI_CODING_AGENT_DIR",
+        "PI_CONFIG_DIR",
+        "PI_CONFIG_FILES",
+        "PI_PACKAGE_DIR",
+        "PI_SMOL_MODEL",
+        "PI_SLOW_MODEL",
+        "PI_PLAN_MODEL",
+        "OMP_MODEL",
         # Copilot CLI login also accepts an OS credential-store token. For
         # automation these are its documented environment token sources.
         "COPILOT_GITHUB_TOKEN",
@@ -183,6 +237,47 @@ _PREFIX_ALLOW: tuple[str, ...] = (
 )
 
 
+# Visible product entries override inherited rendering opt-outs, including a
+# long-lived Frame server's environment. Never apply this to headless workers
+# or ordinary pipe output. TERM/COLORTERM remain the capability authority; only
+# an absent/dumb TERM is repaired for the explicitly selected terminal.
+_COLOR_DISABLE_KEYS = ("NO_COLOR", "NODE_DISABLE_COLORS", "ANSI_COLORS_DISABLED")
+
+
+def visible_color_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Copy one explicitly visible child's environment, preserving capabilities."""
+    child = dict(source)
+    for key in _COLOR_DISABLE_KEYS:
+        child.pop(key, None)
+    if not child.get("TERM") or child["TERM"] == "dumb":
+        child["TERM"] = "xterm-256color"
+    level = "1"
+    if child.get("COLORTERM") in {"truecolor", "24bit"}:
+        level = "3"
+    elif "256color" in child["TERM"]:
+        level = "2"
+    child.update(FORCE_COLOR=level, CLICOLOR="1", CLICOLOR_FORCE="1")
+    return child
+
+
+def visible_color_shell_prelude() -> str:
+    """Normalize the pane's environment, not the dispatcher's stale snapshot.
+
+    This is for explicitly visible provider/workflow output, including tee.
+    Native terminals/profiles only remove opt-outs and enable TTY detection;
+    they leave FORCE_COLOR/CLICOLOR_FORCE unset so ordinary pipes stay plain.
+    """
+    return (
+        "unset " + " ".join(_COLOR_DISABLE_KEYS) + "\n"
+        'case "${TERM:-dumb}" in dumb) export TERM=xterm-256color ;; esac\n'
+        'case "${COLORTERM:-}" in\n'
+        "  truecolor|24bit) export FORCE_COLOR=3 ;;\n"
+        '  *) case "$TERM" in *256color*) export FORCE_COLOR=2 ;; *) export FORCE_COLOR=1 ;; esac ;;\n'
+        "esac\n"
+        "export CLICOLOR=1 CLICOLOR_FORCE=1\n"
+    )
+
+
 def env_key_allowed(name: str) -> bool:
     """Return whether one environment name may enter a headless worker."""
     if name in _PROCESS_ALLOW or name in _PROVIDER_ALLOW:
@@ -190,17 +285,42 @@ def env_key_allowed(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in _PREFIX_ALLOW)
 
 
+def provider_workspace_environment(
+    source: Mapping[str, str], provider: str
+) -> dict[str, str]:
+    """Trust the Kimi workspace selected by the admitted launch, process-locally.
+
+    Kimi's --auto controls tool approval, not folder trust. Without this
+    separate provider setting, headless jobs silently omit project MCPs and
+    interactive entries stop at a folder prompt. No global trust store changes.
+    """
+    child = dict(source)
+    if provider == "kimi":
+        child["KIMI_CODE_TRUST_WORKSPACE"] = "1"
+    return child
+
+
 def filter_headless_worker_env(source: Mapping[str, str]) -> dict[str, str]:
-    """Copy only allowlisted string entries, preserving order and values.
+    """Copy only allowlisted string entries, then carry the runtime python pin.
 
     Non-string values are dropped. ``subprocess`` environments are strings,
     and a non-string would be a programming error rather than a secret to pass.
+    The inherited ZDOTDIR does not pass; a selected generation that carries
+    the python door replaces it with its guest directory (see
+    ``runtime_paths.pin_runtime_python``).
     """
-    return {
-        key: value
-        for key, value in source.items()
-        if isinstance(key, str) and isinstance(value, str) and env_key_allowed(key)
-    }
+    return provider_workspace_environment(
+        pin_runtime_python(
+            {
+                key: value
+                for key, value in source.items()
+                if isinstance(key, str)
+                and isinstance(value, str)
+                and env_key_allowed(key)
+            }
+        ),
+        str(source.get("VIBECRAFTED_AGENT") or ""),
+    )
 
 
 def dispatcher_identity(

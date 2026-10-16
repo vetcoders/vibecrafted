@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import signal
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .agent_stream import (
@@ -37,10 +38,14 @@ from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
 from .telemetry import (
+    CostRecord,
     RunTelemetry,
+    Unknown,
+    UsageRecord,
     build_run_telemetry,
     parent_session_ids,
     resolve_provider_session_id,
+    tokens_total,
     usage_record,
 )
 
@@ -90,13 +95,47 @@ def _default_silence_timeout() -> float:
 
 def _utc_now() -> datetime:
     """Current UTC-aware datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _provider_store_home() -> Path:
     """User home holding provider session stores; overridable for hermetic tests."""
     override = str(os.environ.get("VIBECRAFTED_PROVIDER_STORE_HOME") or "").strip()
     return Path(override).expanduser() if override else Path.home()
+
+
+# Sources whose session id the provider itself revealed for this child.
+_PROVIDER_OBSERVED_SESSION_SOURCES = frozenset(
+    {"provider_stream", "provider_session_store"}
+)
+# AgentStreamParser.resume_command placeholder while its stream has no id.
+_RESUME_SESSION_PLACEHOLDER = "<session_id>"
+
+
+def _with_adopted_session(handle: AsyncRunHandle, resume_command: str) -> str:
+    """Fill the resume placeholder with a validated store-adopted identity.
+
+    kimi names its session only in the trailing resume hint, so the parser's
+    command still carries the placeholder after the store revealed the id.
+    """
+    if (
+        handle.stream_session_source != "provider_session_store"
+        or not handle.agent_session_id
+        or handle.agent_session_id != handle.stream_session_id
+    ):
+        return resume_command
+    return resume_command.replace(_RESUME_SESSION_PLACEHOLDER, handle.agent_session_id)
+
+
+def _read_meta(handle: AsyncRunHandle) -> dict[str, object]:
+    """Best-effort read of the run's meta.json for parent-identity refusal."""
+    if handle.meta_path is None:
+        return {}
+    try:
+        payload = json.loads(handle.meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def transcript_human_path(transcript_path: Path | None) -> Path | None:
@@ -124,7 +163,17 @@ def _infer_agent(command: Sequence[str]) -> str:
     # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
     if name == "cursor-agent":
         return "cursor"
-    if name in {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "copilot"}:
+    if name in {
+        "claude",
+        "codex",
+        "agy",
+        "junie",
+        "grok",
+        "cursor",
+        "kimi",
+        "copilot",
+        "omp",
+    }:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -132,24 +181,57 @@ def _infer_agent(command: Sequence[str]) -> str:
 
 
 def _json_text_fragment(event: dict[str, object]) -> str:
-    """Extract the display text (if any) from one parsed JSON stream event line."""
+    """Select assistant evidence using the canonical agent_stream event shapes.
+
+    Pane rendering also includes thinking and tool output, so its display text
+    is not an attestation. Only explicit assistant/answer fields belong here.
+    """
+    if event.get("role") not in (None, "assistant") or event.get("parent_tool_use_id"):
+        return ""
+
+    def content_text(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(
+                block["text"]
+                for block in value
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+        return ""
+
     event_type = str(event.get("type") or "")
     if event_type == "assistant.message" and isinstance(event.get("data"), dict):
-        return str(event["data"].get("content") or "")
-    if event_type == "thought":
-        return ""
+        return content_text(event["data"].get("content"))
+    if event_type == "assistant":
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") in (None, "assistant"):
+            return content_text(message.get("content"))
+        return content_text(event.get("content")) if message is None else ""
+    if event.get("role") == "assistant":
+        return content_text(event.get("content"))
     if event_type == "item.completed":
         item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "agent_message":
             text = item.get("text")
             return text if isinstance(text, str) else ""
+    if event_type == "result" or event.get("event") == "result":
+        if event.get("is_error"):
+            return ""
+        result = event.get("result")
+        return content_text(
+            result.get("response") if isinstance(result, dict) else result
+        )
     if event_type == "text":
-        value = event.get("data")
-        return value if isinstance(value, str) else ""
-    for key in ("message", "text", "content", "data"):
-        value = event.get(key)
-        if isinstance(value, str):
-            return value
+        return content_text(
+            event.get("data") or event.get("text") or event.get("content")
+        )
+    if event_type == "content":
+        content = event.get("content")
+        if isinstance(content, dict) and content.get("type") == "text":
+            return content_text(content.get("text"))
     return ""
 
 
@@ -161,19 +243,41 @@ def _fallback_report_body(transcript_text: str) -> str:
     """
     text_fragments: list[str] = []
     plain_lines: list[str] = []
+    json_transport = False
+    fence = ""
     for line in transcript_text.splitlines():
         stripped = line.strip()
         if not stripped:
+            plain_lines.append(line)
+            continue
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            fence = "" if fence == marker else marker
+            plain_lines.append(line)
+            continue
+        if fence:
+            plain_lines.append(line)
             continue
         if stripped.startswith("{"):
+            json_transport = True
             try:
                 loaded = json.loads(stripped)
             except json.JSONDecodeError:
-                if not is_grok_ignorable_transport_error(line):
-                    plain_lines.append(line)
                 continue
             if isinstance(loaded, dict):
-                text_fragments.append(_json_text_fragment(loaded))
+                fragment = _json_text_fragment(loaded)
+                is_result = (
+                    loaded.get("type") == "result" or loaded.get("event") == "result"
+                )
+                # Claude's terminal result repeats its final assistant message.
+                # Suppress only that exact mirror; conflicting text stays visible
+                # so reception can reject ambiguous blocks rather than hide them.
+                if fragment and not (
+                    is_result and text_fragments and fragment == text_fragments[-1]
+                ):
+                    if is_result and text_fragments:
+                        text_fragments.append("\n")
+                    text_fragments.append(fragment)
             continue
         if is_grok_ignorable_transport_error(line):
             continue
@@ -181,7 +285,16 @@ def _fallback_report_body(transcript_text: str) -> str:
     body = "".join(text_fragments).strip()
     if body:
         return body + "\n"
+    if json_transport:
+        return ""
     return "\n".join(plain_lines).strip() + ("\n" if plain_lines else "")
+
+
+def _is_workflow_parent(command: Sequence[str]) -> bool:
+    return len(command) >= 3 and tuple(command[1:3]) == (
+        "-m",
+        "vibecrafted_core.workflow_runtime",
+    )
 
 
 def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
@@ -206,6 +319,11 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         failure = attribute_failure(
             handle.transcript_path, handle.exit_code, agent=handle.agent
         )
+    aggregate = _workflow_parent_telemetry(handle, failure)
+    if aggregate is not None:
+        handle.agent_model = "aggregated"
+        handle.telemetry = aggregate
+        return aggregate
     if handle.stream_session_id:
         candidate, candidate_source = (
             handle.stream_session_id,
@@ -213,7 +331,7 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         )
     else:
         candidate, candidate_source = handle.agent_session_id, "launch_contract"
-    handle.telemetry = build_run_telemetry(
+    telemetry = build_run_telemetry(
         usage=usage,
         model=handle.agent_model,
         reported_cost=handle.cost_usd,
@@ -228,7 +346,170 @@ def _run_telemetry(handle: AsyncRunHandle) -> RunTelemetry:
         started_at=handle.started_at.isoformat(),
         completed_at=handle.completed_at.isoformat() if handle.completed_at else None,
     )
-    return handle.telemetry
+    # A provider-observed identity that survived parent/runtime refusal is the
+    # child's native session. The legacy aliases must not settle empty beside it.
+    if (
+        not handle.agent_session_id
+        and candidate_source in _PROVIDER_OBSERVED_SESSION_SOURCES
+        and isinstance(telemetry.provider_session_id, str)
+    ):
+        handle.agent_session_id = telemetry.provider_session_id
+        handle.resume_command = _with_adopted_session(handle, handle.resume_command)
+    handle.telemetry = telemetry
+    return telemetry
+
+
+def _workflow_parent_telemetry(handle: AsyncRunHandle, failure) -> RunTelemetry | None:
+    """Reduce terminal child receipts, never the orchestration Python stream.
+
+    Only the source-owned workflow module may publish this aggregate. Read
+    each exact terminal child meta and cross-check identity/usage mirrors;
+    arbitrary report prose or a precomputed parent sum is not evidence.
+    """
+    if not _is_workflow_parent(handle.command):
+        return None
+    if handle.meta_path is None:
+        return None
+    reason = "no terminal child receipts"
+    events = 0
+    totals = {
+        key: 0
+        for key in (
+            "tokens_input",
+            "tokens_cached_input",
+            "tokens_output",
+            "tokens_total",
+        )
+    }
+    cache_write = 0
+    cache_known = True
+    cost = 0.0
+    cost_known = True
+    valid = False
+    try:
+        parent = json.loads(handle.meta_path.read_text())
+        if not isinstance(parent, dict) or parent.get("run_id") != handle.run_id:
+            raise ValueError("workflow_parent_identity_mismatch")
+        children = parent.get("children")
+        receivers = parent.get("receivers", [])
+        if not isinstance(children, list) or not isinstance(receivers, list):
+            raise TypeError("workflow_child_receipts_missing")
+        rows = children + receivers
+        if isinstance(parent.get("synthesis"), dict) and parent["synthesis"]:
+            rows.append(parent["synthesis"])
+        if not rows:
+            raise ValueError("no terminal child receipts")
+        seen: set[str] = set()
+        all_known = True
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("run_id"), str):
+                raise TypeError("invalid_workflow_child_receipt")
+            run_id = row["run_id"]
+            if not run_id.startswith(handle.run_id + "-") or run_id in seen:
+                raise ValueError("workflow_child_identity_conflict")
+            seen.add(run_id)
+            report = Path(row["report"])
+            child = json.loads(report.with_suffix(".meta.json").read_text())
+            for key in ("run_id", "agent", "report", "transcript", "exit_code"):
+                if child.get(key) != row.get(key):
+                    raise ValueError(f"workflow_child_receipt_mismatch:{key}")
+            if Path(
+                str(child.get("root") or "")
+            ).resolve() != handle.root.resolve() or not child.get("completed_at"):
+                raise ValueError("workflow_child_not_terminal_on_assigned_root")
+            usage = child.get("usage")
+            if (
+                not isinstance(usage, dict)
+                or usage.get("schema") != "vibecrafted.usage.v1"
+            ):
+                raise ValueError("invalid_workflow_child_usage_schema")
+            count = usage.get("events")
+            if type(count) is not int or count < 0:
+                raise ValueError("invalid_workflow_child_usage_events")
+            events += count
+            values = {key: usage.get(key) for key in totals}
+            known = count > 0 and all(
+                type(value) is int and value >= 0 for value in values.values()
+            )
+            if usage.get("unit") != "tokens" or (count > 0 and not known):
+                raise ValueError("invalid_workflow_child_usage_values")
+            if known:
+                if values["tokens_total"] != tokens_total(
+                    values["tokens_input"],
+                    values["tokens_cached_input"],
+                    values["tokens_output"],
+                ):
+                    raise ValueError("contradictory_workflow_child_usage")
+                for key, value in values.items():
+                    if child.get(key) != value or row.get(key) != value:
+                        raise ValueError(f"contradictory_workflow_child_usage:{key}")
+                    totals[key] += value
+            else:
+                if not all(
+                    isinstance(value, dict)
+                    and value.get("value") == "unknown"
+                    and value.get("reason")
+                    for value in values.values()
+                ):
+                    raise ValueError("unmeasured_workflow_child_claims_known_usage")
+                if any(
+                    child.get(key) != "unknown" or row.get(key) != "unknown"
+                    for key in values
+                ):
+                    raise ValueError("contradictory_workflow_child_unknown_usage")
+                all_known = False
+            created = usage.get("tokens_cache_write")
+            if type(created) is int and created >= 0:
+                cache_write += created
+            else:
+                cache_known = False
+            child_cost = child.get("cost")
+            if not isinstance(child_cost, dict):
+                raise TypeError("invalid_workflow_child_cost")
+            amount = child_cost.get("amount")
+            if (
+                type(amount) in {int, float}
+                and math.isfinite(amount)
+                and amount >= 0
+                and child_cost.get("currency") == "USD"
+                and not child_cost.get("unit")
+            ):
+                if child_cost.get("source") != "provider_reported" and not str(
+                    child_cost.get("source")
+                ).startswith("estimated:"):
+                    raise ValueError("unmeasured_workflow_child_claims_known_cost")
+                if child.get("cost_usd") != amount or row.get("cost_usd") != amount:
+                    raise ValueError("contradictory_workflow_child_cost")
+                cost += amount
+            else:
+                cost_known = False
+        valid = all_known
+        reason = "one or more child phases have unmeasured usage"
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        reason = f"workflow aggregate refused: {error}"
+        cost_known = False
+    missing = Unknown(reason=reason)
+    usage = UsageRecord(
+        **{key: value if valid else missing for key, value in totals.items()},
+        tokens_cache_write=cache_write
+        if valid and cache_known
+        else Unknown(reason="child cache-write usage incomplete"),
+        source="children_sum",
+        events=events if valid else 0,
+    )
+    return RunTelemetry(
+        usage=usage,
+        cost=CostRecord(
+            amount=round(cost, 6)
+            if cost_known
+            else Unknown(reason="child cost evidence incomplete or invalid"),
+            source="children_sum" if cost_known else "unknown",
+        ),
+        failure=failure,
+        provider_session_id=Unknown(reason="workflow parent has no provider session"),
+        provider_session_source="none",
+        model="aggregated",
+    )
 
 
 def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -433,6 +714,7 @@ class AsyncRunHandle:
     artifact_validation: ArtifactValidation | None = None
     first_output_seen: bool = False
     session_id: str = ""
+    launch_session_id: str = ""
     agent: str = ""
     skill: str = ""
     agent_session_id: str = ""
@@ -520,6 +802,10 @@ class AsyncSupervisor:
         if env:
             merged_env.update(env)
         session_id = ensure_session_id(merged_env.get("VIBECRAFTED_SESSION_ID"))
+        # Retain the launcher's legacy correlation identity separately. The
+        # workspace/runtime identity below is canonical for parent report/meta;
+        # an orchestration parent has no provider stream to stamp its shell.
+        launch_session_id = session_id if _is_workflow_parent(command) else ""
         merged_env["VIBECRAFTED_SESSION_ID"] = session_id
         workspace_fields: dict[str, object] = {}
         try:
@@ -584,6 +870,17 @@ class AsyncSupervisor:
                 skill=skill,
                 claim_digest=claim_digest,
             )
+            if launch_session_id:
+                from .report_contract import stamp_launcher_report_identity
+
+                stamp_launcher_report_identity(
+                    report_path,
+                    run_id=run_id,
+                    session_id=session_id,
+                    agent=agent,
+                    skill=skill,
+                    status="pending",
+                )
 
         await self._emit(
             run_id,
@@ -645,6 +942,7 @@ class AsyncSupervisor:
             report_path=Path(report_path) if report_path is not None else None,
             transcript_path=transcript,
             session_id=session_id,
+            launch_session_id=launch_session_id,
             agent=agent,
             skill=skill,
             agent_session_id=initial_agent_session_id,
@@ -719,6 +1017,8 @@ class AsyncSupervisor:
                             latest.setdefault(field, origin[field])
                     latest.setdefault("dispatcher", dict(dispatcher))
                     latest.setdefault("run_id", run_id)
+                    if launch_session_id:
+                        latest["launch_session_id"] = launch_session_id
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
                     latest.setdefault("skill", skill)
@@ -802,6 +1102,7 @@ class AsyncSupervisor:
         require_transcript_output: bool = False,
         tee_output: bool = False,
         salvage_report_from_stream: bool = False,
+        on_output: Callable[[bytes], None] | None = None,
     ) -> AsyncRunHandle:
         """Spawn, watch to completion, validate artifacts, and settle a run end to end.
 
@@ -809,34 +1110,54 @@ class AsyncSupervisor:
         manufacturing; otherwise writes a report fallback, meta summary, and
         the terminal lifecycle transition (COMPLETED/FAILED/STALLED).
         """
-        handle = await self.spawn(
-            run_id=run_id,
-            command=command,
-            root=root,
-            env=env,
-            meta_path=meta_path,
-            report_path=report_path,
-            transcript_path=transcript_path,
-            prompt_file_path=prompt_file_path,
-        )
+        try:
+            handle = await self.spawn(
+                run_id=run_id,
+                command=command,
+                root=root,
+                env=env,
+                meta_path=meta_path,
+                report_path=report_path,
+                transcript_path=transcript_path,
+                prompt_file_path=prompt_file_path,
+            )
+        except asyncio.CancelledError:
+            handle = self._runs.get(run_id)
+            if handle is not None:
+                await self._settle_cancelled(handle)
+            raise
         if tee_output:
             _write_terminal(_terminal_frontmatter(handle))
         try:
             if timeout is None:
                 await self._watch_process(
-                    handle, tee_output=tee_output, silence_timeout=silence_timeout
+                    handle,
+                    tee_output=tee_output,
+                    silence_timeout=silence_timeout,
+                    on_output=on_output,
                 )
             else:
                 await asyncio.wait_for(
                     self._watch_process(
-                        handle, tee_output=tee_output, silence_timeout=silence_timeout
+                        handle,
+                        tee_output=tee_output,
+                        silence_timeout=silence_timeout,
+                        on_output=on_output,
                     ),
                     timeout=timeout,
                 )
-        except asyncio.TimeoutError as stall:
+        except TimeoutError as stall:
             await self._terminate(handle)
             handle.exit_code = handle.process.returncode
             handle.completed_at = _utc_now()
+            # Persist terminal truth before waking await. A stall used to return
+            # with only spawn metadata, so a dead parent looked perpetually live.
+            self._write_meta_summary(handle)
+            self._write_terminal_meta(
+                handle,
+                "timed_out",
+                "silence" if isinstance(stall, _SilenceTimeout) else "wall_clock",
+            )
             # Both stall kinds settle through this one path; the recorded reason
             # still names which instrument fired, so a triage never has to guess
             # whether the worker ran too long or went mute.
@@ -854,6 +1175,11 @@ class AsyncSupervisor:
                 },
             )
             return handle
+        except asyncio.CancelledError:
+            # Nested workflows own separate process groups. Cancellation must
+            # reap their children before the outer dispatcher exits.
+            await self._settle_cancelled(handle)
+            raise
 
         handle.exit_code = handle.process.returncode
         if handle.meta_path is not None:
@@ -866,10 +1192,15 @@ class AsyncSupervisor:
                 or handle.agent_session_id == fork_meta.get("fork_source_session_id")
             ):
                 handle.exit_code = 1
+            # Add the fork parents; never drop the launch-time parents the
+            # live publisher already refused against.
             handle.parent_sessions = {
-                key: str(fork_meta[key])
-                for key in ("fork_source_session_id", "parent_provider_session_id")
-                if fork_meta.get(key)
+                **handle.parent_sessions,
+                **{
+                    key: str(fork_meta[key])
+                    for key in ("fork_source_session_id", "parent_provider_session_id")
+                    if fork_meta.get(key)
+                },
             }
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
@@ -983,6 +1314,7 @@ class AsyncSupervisor:
         *,
         tee_output: bool = False,
         silence_timeout: float | None = None,
+        on_output: Callable[[bytes], None] | None = None,
     ) -> None:
         """Stream stdout lines to the transcript, parse usage, and emit heartbeats.
 
@@ -1003,7 +1335,10 @@ class AsyncSupervisor:
         try:
             while True:
                 completed, _pending = await asyncio.wait(
-                    {read_task}, timeout=_HEARTBEAT_INTERVAL_SECONDS
+                    {read_task},
+                    timeout=min(_HEARTBEAT_INTERVAL_SECONDS, silence_bound)
+                    if silence_bound > 0
+                    else _HEARTBEAT_INTERVAL_SECONDS,
                 )
                 if not completed:
                     # stdout silence is normal while an agent waits inside a
@@ -1033,6 +1368,8 @@ class AsyncSupervisor:
                 if not chunk:
                     break
                 last_output_monotonic = time.monotonic()
+                if on_output is not None:
+                    on_output(chunk)
                 read_task = asyncio.create_task(handle.process.stdout.readline())
                 if handle.transcript_path is not None:
                     with handle.transcript_path.open("ab") as transcript:
@@ -1204,16 +1541,22 @@ class AsyncSupervisor:
             )
 
         status = "completed" if handle.exit_code == 0 else "failed"
+        telemetry = _run_telemetry(handle)
+        runtime_fields = telemetry.frontmatter_fields()
+        if telemetry.usage.source == "children_sum" and not telemetry.usage.known:
+            runtime_fields["usage_reason"] = telemetry.usage.tokens_input.reason
         stamp_launcher_report_identity(
             report,
             run_id=handle.run_id,
-            session_id=handle.agent_session_id,
+            session_id=handle.session_id
+            if handle.launch_session_id
+            else handle.agent_session_id,
             agent=handle.agent or "unknown",
             skill=handle.skill or "unknown",
             status=status,
-            model=handle.agent_model,
+            model=telemetry.model,
             claim_digest=handle.claim_digest,
-            runtime_fields=_run_telemetry(handle).frontmatter_fields(),
+            runtime_fields=runtime_fields,
         )
 
     def _sync_stream_summary(
@@ -1231,7 +1574,9 @@ class AsyncSupervisor:
         handle.usage_events = parser.usage_events
         handle.cost_usd = parser.cost_usd
         handle.cost_source = parser.cost_source
-        handle.resume_command = parser.resume_command(handle.root)
+        handle.resume_command = _with_adopted_session(
+            handle, parser.resume_command(handle.root)
+        )
 
     def _adopt_provider_session_identity(self, handle: AsyncRunHandle) -> None:
         """Adopt a session id the provider revealed on disk before its stream does.
@@ -1257,7 +1602,35 @@ class AsyncSupervisor:
             return
         handle.stream_session_id = discovered
         handle.stream_session_source = "provider_session_store"
+        # The store hit is a candidate until it clears the same parent/runtime/
+        # fork refusal as stream identities. Only then does it become the
+        # handle's native identity; a declared launch-contract session wins.
+        validated = self._validated_stream_session_id(handle, _read_meta(handle))
+        if validated and not handle.agent_session_id:
+            handle.agent_session_id = validated
+            handle.resume_command = _with_adopted_session(handle, handle.resume_command)
         self._publish_stream_session_identity(handle)
+
+    def _validated_stream_session_id(
+        self, handle: AsyncRunHandle, payload: Mapping[str, object]
+    ) -> str:
+        """The stream/store candidate when no launch/runtime/fork parent owns it."""
+        parent_fields = dict(handle.parent_sessions)
+        for key in (
+            "runtime_session_id",
+            "vibecrafted_session_id",
+            "parent_provider_session_id",
+            "fork_source_session_id",
+        ):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                parent_fields.setdefault(key, value)
+        resolved, _source = resolve_provider_session_id(
+            handle.stream_session_id,
+            source=handle.stream_session_source,
+            parents=parent_session_ids({}, extra=parent_fields),
+        )
+        return resolved if isinstance(resolved, str) else ""
 
     def _publish_stream_session_identity(self, handle: AsyncRunHandle) -> None:
         """Publish a provider-reported child identity while its run is live.
@@ -1271,29 +1644,15 @@ class AsyncSupervisor:
             return
 
         def _enrich(payload: dict[str, object]) -> dict[str, object] | None:
-            parent_fields = dict(handle.parent_sessions)
-            for key in (
-                "runtime_session_id",
-                "vibecrafted_session_id",
-                "parent_provider_session_id",
-                "fork_source_session_id",
-            ):
-                value = str(payload.get(key) or "").strip()
-                if value:
-                    parent_fields.setdefault(key, value)
-            resolved, source = resolve_provider_session_id(
-                handle.stream_session_id,
-                source=handle.stream_session_source,
-                parents=parent_session_ids({}, extra=parent_fields),
-            )
-            if not isinstance(resolved, str):
+            resolved = self._validated_stream_session_id(handle, payload)
+            if not resolved:
                 return None
             payload.update(
                 {
                     "session_id": resolved,
                     "agent_session_id": resolved,
                     "provider_session_id": resolved,
-                    "provider_session_source": source,
+                    "provider_session_source": handle.stream_session_source,
                 }
             )
             return payload
@@ -1320,7 +1679,14 @@ class AsyncSupervisor:
         summary = {
             "run_id": handle.run_id,
             "agent": handle.agent,
-            "session_id": handle.agent_session_id,
+            "session_id": handle.session_id
+            if handle.launch_session_id
+            else handle.agent_session_id,
+            **(
+                {"launch_session_id": handle.launch_session_id}
+                if handle.launch_session_id
+                else {}
+            ),
             "agent_session_id": handle.agent_session_id,
             "agent_model": handle.agent_model,
             "runtime_session_id": handle.session_id,
@@ -1368,6 +1734,14 @@ class AsyncSupervisor:
 
         def _merge_summary(payload: dict[str, object]) -> dict[str, object]:
             """Merge the computed summary onto the mutator's current meta payload."""
+            if isinstance(payload.get("reception"), dict) and payload.get("status") in {
+                "completed",
+                "blocked",
+                "failed",
+            }:
+                # The parent workflow owns its semantic result. Artifact
+                # validation and process exit are independent axes below.
+                summary["status"] = payload["status"]
             if not str(payload.get("origin_session") or "").strip() and origin.get(
                 "origin_session"
             ):
@@ -1403,9 +1777,50 @@ class AsyncSupervisor:
             create=True,
         )
 
+    async def _settle_cancelled(self, handle: AsyncRunHandle) -> None:
+        await self._terminate(handle)
+        handle.exit_code = handle.process.returncode
+        handle.completed_at = _utc_now()
+        self._write_meta_summary(handle)
+        self._write_terminal_meta(handle, "failed", "supervisor_cancelled")
+        await self._transition(
+            handle,
+            RunState.FAILED,
+            "supervisor cancelled",
+            payload={"exit_code": handle.exit_code, "liveness": "terminal"},
+        )
+
+    def _write_terminal_meta(
+        self, handle: AsyncRunHandle, status: str, reason: str
+    ) -> None:
+        if handle.meta_path is None:
+            return
+
+        def settle(payload: dict[str, object]) -> dict[str, object]:
+            payload.update(
+                status=status,
+                state=status,
+                liveness="terminal",
+                terminal_reason=reason,
+                exit_code=handle.exit_code,
+                completed_at=handle.completed_at.isoformat()
+                if handle.completed_at
+                else "",
+            )
+            return payload
+
+        mutate_run_meta(
+            control_plane_home(),
+            meta_path=handle.meta_path,
+            mutation_root=handle.meta_path.parent,
+            run_id=handle.run_id,
+            mutator=settle,
+            create=True,
+        )
+
     async def _terminate(self, handle: AsyncRunHandle) -> None:
-        """SIGTERM the run's process group (or process), escalating to SIGKILL after 3s."""
-        if handle.process.returncode is not None:
+        """SIGTERM the owned group, allowing up to 5s for nested cleanup, then reap it."""
+        if handle.process.returncode is not None and handle.pgid is None:
             return
         try:
             if handle.pgid is not None:
@@ -1415,8 +1830,8 @@ class AsyncSupervisor:
         except ProcessLookupError:
             return
         try:
-            await asyncio.wait_for(handle.process.wait(), timeout=3)
-        except asyncio.TimeoutError:
+            await asyncio.wait_for(handle.process.wait(), timeout=5)
+        except TimeoutError:
             try:
                 if handle.pgid is not None:
                     os.killpg(handle.pgid, signal.SIGKILL)
@@ -1425,6 +1840,13 @@ class AsyncSupervisor:
             except ProcessLookupError:
                 pass
             await handle.process.wait()
+        # An exited group leader does not imply its pipe-holding descendants
+        # exited. Reap the owned remainder, including children ignoring TERM.
+        if handle.pgid is not None:
+            try:
+                os.killpg(handle.pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     async def _transition(
         self,

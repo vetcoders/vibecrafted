@@ -47,9 +47,9 @@ def test_supervisor_defaults_and_sandbox_support_cover_agy_junie_grok() -> None:
     except ValueError as e:
         assert "deprecated" in str(e).lower() or "agy" in str(e).lower()
     # agy >= 1.1: --print takes the prompt as its value; flags precede it.
+    # Default permissions are auto for the whole fleet; agy auto needs no flag.
     assert _default_command("agy", "go") == [
         "agy",
-        "--dangerously-skip-permissions",
         "--add-dir",
         ".",
         "--print-timeout",

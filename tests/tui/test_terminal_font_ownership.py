@@ -8,7 +8,7 @@ SpotMono.ttc and CoreText picked it over the owner's own `~/Library/Fonts` file.
 The replacement is the route Apple documents for a consuming app:
 `ATSApplicationFontsPath` in the bundle's Info.plist, naming a directory under
 Resources. `vc-terminal-product-entry.sh` execs
-`vc-terminal.app/Contents/MacOS/alacritty`, so that bundle is the main bundle of
+`/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal`, so that bundle is the main bundle of
 the process that draws the glyphs.
 
   https://developer.apple.com/documentation/bundleresources/information-property-list/atsapplicationfontspath
@@ -170,11 +170,11 @@ def test_builder_binds_the_font_to_the_bundle_that_draws_it() -> None:
     assert "OFL.txt" in builder
     assert "SPOT_MONO_FONT" not in builder
     assert "Add :ATSApplicationFontsPath string fonts" in builder
-    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert 'embed_terminal_font_resources "$APP"' in builder
     # The font is bound before any signature is spent on the helper bundle.
-    assert builder.index(
-        'embed_terminal_font_resources "$terminal_app"'
-    ) < builder.index("sign_nested_app_bundles\n")
+    assert builder.index('embed_terminal_font_resources "$APP"') < builder.index(
+        "sign_nested_app_bundles\n"
+    )
 
 
 def test_product_terminal_config_asks_for_the_bundled_family() -> None:
@@ -309,92 +309,48 @@ def test_licensed_font_preflight_covers_every_darwin_payload(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="PlistBuddy and ditto are macOS")
-def test_both_materializer_roles_receive_the_font_before_any_signature(
-    tmp_path: Path,
-) -> None:
-    """Run the real materializer twice; both payloads come out font-owning.
-
-    One function assembles the App helper and the Runtime Pack's own bundle, so
-    the proof has to be that the shipped body — not a second copy of it — puts
-    Source Code Pro and ATSApplicationFontsPath into whichever bundle it is given.
-    Nothing is signed here: the materializer runs before any signature is
-    spent, and the absence of Contents/_CodeSignature is part of the claim.
-    """
-    terminal_repo = tmp_path / "vc-terminal"
-    donor = terminal_repo / "extra/osx/vc-terminal.app"
-    (donor / "Contents/MacOS").mkdir(parents=True)
-    (donor / "Contents/Info.plist").write_bytes(
+def test_main_app_receives_terminal_font_before_signature(tmp_path: Path) -> None:
+    """The exact resource helper binds fonts to the sole physical main app."""
+    if sys.platform != "darwin":
+        pytest.skip("PlistBuddy fixture is macOS only")
+    bundle = tmp_path / "Vibecrafted.app"
+    (bundle / "Contents/MacOS").mkdir(parents=True)
+    (bundle / "Contents/Info.plist").write_bytes(
         plistlib.dumps(
             {
-                "CFBundleIdentifier": "org.alacritty",
-                "CFBundleExecutable": "alacritty",
-                "CFBundleIconFile": "alacritty.icns",
-                "CFBundleName": "Alacritty",
-                "CFBundlePackageType": "APPL",
+                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
+                "CFBundleExecutable": "Vibecrafted",
+                "CFBundleName": "Vibecrafted",
             }
         )
     )
-    icons = terminal_repo / "assets/icon"
-    icons.mkdir(parents=True)
-    (icons / "vc-terminal-icon.png").write_bytes(b"png-fixture")
-    (icons / "terminal.png").write_bytes(b"png-reference-fixture")
-
-    source_root = tmp_path / "vibecrafted"
-    (source_root / "scripts").mkdir(parents=True)
-    icon_builder = source_root / "scripts/build-vibecrafted-icon.sh"
-    icon_builder.write_text(
-        '#!/bin/sh\nprintf "icns-fixture\\n" > "$2"\n', encoding="utf-8"
+    fonts = REPO_ROOT / "assets/fonts/source-code-pro"
+    driver = (
+        "set -euo pipefail\n"
+        + _builder_function("die")
+        + _builder_function("embed_terminal_font_resources")
+        + 'embed_terminal_font_resources "$1"\n'
     )
-    icon_builder.chmod(0o755)
-
-    binary = tmp_path / "alacritty"
-    binary.write_bytes(b"terminal-binary-fixture")
-    binary.chmod(0o755)
-    font_directory = REPO_ROOT / "assets/fonts/source-code-pro"
-
-    driver = "".join(
-        (
-            "set -euo pipefail\n",
-            _builder_function("die"),
-            _builder_function("embed_terminal_font_resources"),
-            _builder_function("materialize_vc_terminal_app_bundle"),
-            'materialize_vc_terminal_app_bundle "$1" "$2" "$3"\n',
-        )
+    result = subprocess.run(
+        ["bash", "-c", driver, "fonts", str(bundle)],
+        env={"PATH": "/usr/bin:/bin", "TERMINAL_FONT_DIR": str(fonts)},
+        capture_output=True,
+        text=True,
+        check=False,
     )
-
-    for role, relative in (
-        ("helper", "Vibecrafted.app/Contents/Helpers/vc-terminal.app"),
-        ("Runtime Pack", "VibecraftedRuntime/libexec/vc-terminal.app"),
+    assert result.returncode == 0, result.stderr
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
     ):
-        bundle = tmp_path / "payloads" / relative
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["bash", "-c", driver, "materializer", str(bundle), str(binary), role],
-            env={
-                "PATH": "/usr/bin:/bin",
-                "TERMINAL_REPO": str(terminal_repo),
-                "SOURCE_ROOT": str(source_root),
-                "TERMINAL_FONT_DIR": str(font_directory),
-            },
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"{role}: {result.stdout}{result.stderr}"
-
-        for name in (
-            "SourceCodePro[wght].ttf",
-            "SourceCodePro-Italic[wght].ttf",
-            "OFL.txt",
-        ):
-            bundled = bundle / "Contents/Resources/fonts" / name
-            assert bundled.read_bytes() == (font_directory / name).read_bytes(), role
-        with (bundle / "Contents/Info.plist").open("rb") as handle:
-            info = plistlib.load(handle)
-        assert info["ATSApplicationFontsPath"] == "fonts", role
-        assert info["CFBundleName"] == "VC Terminal", role
-        assert info["CFBundleDisplayName"] == "VC Terminal", role
-        assert not (bundle / "Contents/_CodeSignature").exists(), role
+        assert (bundle / "Contents/Resources/fonts" / name).read_bytes() == (
+            fonts / name
+        ).read_bytes()
+    document = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+    assert document["ATSApplicationFontsPath"] == "fonts"
+    assert document["CFBundleIdentifier"] == "io.vetcoders.vibecrafted"
+    assert not (bundle / "Contents/_CodeSignature").exists()
 
 
 def test_hosted_release_uses_repository_font_inputs_without_a_private_font_secret():

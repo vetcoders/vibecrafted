@@ -1,4 +1,4 @@
 interface:
-  display_name: "VC Ship"
-  short_description: "Full Build-Converge-Ship pipeline"
-  default_prompt: "Use the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. pipeline to run the complete process: init, workflow, followup, marbles convergence, dou audit, decorate, hydrate, and release."
+  display_name: "VC Just Do"
+  short_description: "Take the task, deliver, and verify the result"
+  default_prompt: "Use $vc-justdo to carry out the requested task in this session and verify the result. Let the request define the work; keep the process proportional to the task."

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from .control_plane import (
     RunNotResolved,
     _await_child_runs,
     await_run,
+    bare_run_id,
     control_plane_home,
     ensure_session_id,
     lookup_run,
@@ -50,7 +51,13 @@ from .effort_overrides import (
     _effort_override_receipt,
     _with_effort_override,
 )
-from .env_allowlist import dispatcher_identity, filter_headless_worker_env
+from .env_allowlist import (
+    dispatcher_identity,
+    filter_headless_worker_env,
+    managed_provider_environment,
+    provider_identity_shell_prelude,
+    visible_color_shell_prelude,
+)
 from .events import append_event
 from .execution_controls import (
     SUPERVISED_RUNTIME_KINDS,
@@ -95,6 +102,7 @@ SUPPORTED_AGENTS = {
     "cursor",
     "kimi",
     "copilot",
+    "omp",
     "swarm",
 }
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}
@@ -187,10 +195,11 @@ class WorkflowLaunchSpec:
     worktree: bool = False
     parent_root: str = ""
     # Public execution controls (``--permissions`` / ``--sandbox``). Empty /
-    # ``None`` keeps the historical provider default (bypass; auto for junie;
-    # sandbox left to the provider). Both are resolved through
-    # execution_controls.resolve_execution_controls, which refuses anything the
-    # installed provider CLI cannot enforce before any process is launched.
+    # ``None`` resolves the fleet default ``auto`` (Founder decision
+    # 13716da4a2b8af7049ea1565) or the durable config opt-in. Both are resolved
+    # through execution_controls.resolve_execution_controls, which refuses
+    # anything the installed provider CLI cannot enforce before any process
+    # is launched.
     permissions: str = ""
     sandbox: bool | None = None
     # Founder-authorized continuation on a recorded trust BLOCK. Empty /
@@ -198,6 +207,11 @@ class WorkflowLaunchSpec:
     remediate_trust_block: bool = False
     remediation_reason: str = ""
     remediation_task: str = ""
+    # The admission-frozen execution-controls receipt (an
+    # ``ExecutionControls.receipt()`` projection). One frozen decision rides
+    # from admission to argv/meta/resume; nothing downstream re-resolves
+    # against live config (Founder decision 13716da4a2b8af7049ea1565).
+    execution_controls_frozen: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
@@ -397,17 +411,31 @@ def _dispatcher_command(
 
 
 def _write_command_script(
-    path: Path, command: list[str], exports: dict[str, str] | None = None
+    path: Path,
+    command: list[str],
+    exports: dict[str, str] | None = None,
+    *,
+    visible: bool = False,
 ) -> Path:
     """Write an executable bash wrapper: export ``exports`` then ``exec command``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     export_lines = "".join(
         f"export {key}={shlex.quote(value)}\n" for key, value in (exports or {}).items()
     )
+    # Frame executes this script with its long-lived daemon environment, not
+    # Popen's map. Only managed provider scripts cross this identity boundary;
+    # ordinary command scripts retain their current provider's tool context.
+    identity_prelude = (
+        provider_identity_shell_prelude()
+        if (exports or {}).get("VIBECRAFTED_AGENT")
+        else ""
+    )
     path.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        f"{identity_prelude}"
         f"{export_lines}"
+        f"{visible_color_shell_prelude() if visible else ''}"
         f"exec {shlex.join(command)}\n",
         encoding="utf-8",
     )
@@ -537,17 +565,7 @@ def _write_research_lane_scripts(
             claim_digest=claim_digest,
             worker_session=worker_session,
         )
-        export_lines = "".join(
-            f"export {key}={shlex.quote(value)}\n" for key, value in exports.items()
-        )
-        path.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f"{export_lines}"
-            f"exec {shlex.join(command)}\n",
-            encoding="utf-8",
-        )
-        path.chmod(0o755)
+        _write_command_script(path, command, exports, visible=True)
         scripts[agent] = path
     return scripts
 
@@ -918,6 +936,7 @@ def _launch_transport_command(
     command_script = _write_command_script(
         launch_dir / f"{run_id}-dispatcher.sh",
         dispatch_command,
+        visible=True,
         exports=_runtime_script_exports(
             run_id=run_id,
             prompt_path=prompt_path,
@@ -1614,7 +1633,10 @@ def _identity_base_hint(requested_repo: str, base: str) -> str:
 
 
 def normalize_launch_spec(
-    payload: dict[str, Any], source_dir: str | Path
+    payload: dict[str, Any],
+    source_dir: str | Path,
+    *,
+    admission_controls: ExecutionControls | None = None,
 ) -> WorkflowLaunchSpec:
     """Validate and normalize a raw launch payload into a :class:`WorkflowLaunchSpec`.
 
@@ -1735,7 +1757,8 @@ def normalize_launch_spec(
             )
         # Refuse before any control-plane write: the resolver raises with the
         # provider's exact supported alternative (never a silent downgrade).
-        resolve_execution_controls(agent, permissions=permissions, sandbox=sandbox)
+        if admission_controls is None:
+            resolve_execution_controls(agent, permissions=permissions, sandbox=sandbox)
 
     execution = str(payload.get("runtime_class") or "")
     if execution and execution not in {"living-tree", "local-worktrees"}:
@@ -1848,7 +1871,7 @@ def normalize_launch_spec(
     if worktree and not root:
         raise ValueError("--worktree requires a selected repository (--repo <path>).")
 
-    return WorkflowLaunchSpec(
+    spec = WorkflowLaunchSpec(
         agent=agent,
         mode=mode,
         skill=skill,
@@ -1883,15 +1906,29 @@ def normalize_launch_spec(
         remediation_reason=remediation_reason,
         remediation_task=remediation_task,
     )
+    # Freeze the execution-controls decision at admission: one resolution rides
+    # to argv, meta and any later resume of this run (Founder 13716da4…).
+    frozen = admission_controls or launch_execution_controls(spec)
+    if frozen is not None and frozen.provider != spec.agent:
+        raise ExecutionControlsError("admitted controls do not match launch provider")
+    if frozen is not None:
+        spec = replace(spec, execution_controls_frozen=frozen.receipt())
+    return spec
 
 
 def launch_execution_controls(spec: WorkflowLaunchSpec) -> ExecutionControls | None:
     """Resolved controls for a direct-agent launch; ``None`` for supervised kinds.
 
+    An admission-frozen decision (``spec.execution_controls_frozen``) wins over
+    any re-resolution, so argv/meta/resume never drift with live config.
     Always computed (also when both flags were omitted) so every launch receipt
     states the effective permission policy and sandbox state next to what was
     requested. Raises :class:`ExecutionControlsError` for a refused request.
     """
+    if spec.execution_controls_frozen:
+        from .execution_controls import controls_from_receipt
+
+        return controls_from_receipt(spec.execution_controls_frozen)
     runtime_kind = workflow_registry.workflow_runtime_kind(spec.skill)
     if runtime_kind in SUPERVISED_RUNTIME_KINDS or spec.agent == "swarm":
         if spec.permissions or spec.sandbox is not None:
@@ -1900,8 +1937,15 @@ def launch_execution_controls(spec: WorkflowLaunchSpec) -> ExecutionControls | N
                 "supervised runtime yet; omit them or launch a direct agent skill."
             )
         return None
+    from .server_config import durable_permission_selection
+
+    configured_word, configured_source = durable_permission_selection(spec.agent)
     return resolve_execution_controls(
-        spec.agent, permissions=spec.permissions, sandbox=spec.sandbox
+        spec.agent,
+        permissions=spec.permissions,
+        sandbox=spec.sandbox,
+        configured_permissions=configured_word,
+        permissions_source=configured_source,
     )
 
 
@@ -2143,21 +2187,15 @@ def build_launch_command(
             worker_agent,
             _with_model_override(
                 worker_agent,
-                _default_command(
-                    worker_agent,
-                    prompt_text,
-                    controls if controls is not None and controls.requested else None,
-                ),
+                _default_command(worker_agent, prompt_text, controls),
                 spec.model,
             ),
             spec.effort,
         )
-    # The default shape stays byte-identical to the historical command; the
-    # resolved argv is injected only when the caller asked for a control.
-    if controls is not None and controls.requested:
-        worker_command = _stdin_command(worker_agent, controls=controls)
-    else:
-        worker_command = _stdin_command(worker_agent)
+    # The admission-resolved (and admission-frozen) controls always apply —
+    # the resolver owns the default policy now; there is no separate
+    # "historical default" lane to preserve (Founder 13716da4a2b8af7049ea1565).
+    worker_command = _stdin_command(worker_agent, controls=controls)
     return _with_effort_override(
         worker_agent,
         _with_model_override(worker_agent, worker_command, spec.model),
@@ -3550,12 +3588,12 @@ def launch_workflow(
     else:
         merged_env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
 
-    # Headless Popen replaces the child environment. Interactive and visible
-    # launches keep the dispatcher environment; vc-frame does not use this map.
+    # Headless Popen replaces the child environment. Frame does not use this
+    # map: generated provider scripts clear parent identity and apply color policy.
     launch_env = (
         filter_headless_worker_env(merged_env)
         if spec.runtime == "headless"
-        else merged_env
+        else managed_provider_environment(merged_env)
     )
 
     append_event(
@@ -5052,7 +5090,9 @@ def _native_resume_idempotency_result(
 def _verified_native_resume_command(
     agent: str,
     agent_session_id: str,
-) -> tuple[list[str], str, str]:
+    *,
+    parent_meta: dict[str, Any] | None = None,
+) -> tuple[list[str], str, str, ExecutionControls]:
     """Return one live-probed provider resume argv with no shell boundary."""
 
     normalized_agent = str(agent or "").strip().lower()
@@ -5086,8 +5126,35 @@ def _verified_native_resume_command(
             detail=provider_probe.detail,
             retryable=True,
         )
+    # A tracked continuation supplies its exact locked parent. SID-only
+    # discovery may recover one owner, but must not pick a newer run's policy.
     try:
-        command = native_resume_argv(normalized_agent, agent_session_id)
+        owning_run = parent_meta
+        if owning_run is None:
+            owning_run = find_run_for_identity_token(
+                agent_session_id, require_unique_root=True, require_unique_run=True
+            )
+        from .execution_controls import controls_from_receipt
+        from .server_config import durable_permission_selection
+
+        controls = controls_from_receipt(
+            (owning_run or {}).get("execution_controls") or {}
+        )
+        if controls is None:
+            configured, source = durable_permission_selection(normalized_agent)
+            controls = resolve_execution_controls(
+                normalized_agent,
+                configured_permissions=configured,
+                permissions_source=source,
+            )
+        if controls.provider != normalized_agent:
+            raise ValueError("admitted controls do not match resume provider")
+    except ValueError as exc:
+        raise _NativeResumeCommandRejected(
+            "native_resume_policy_unavailable", detail=str(exc)
+        ) from exc
+    try:
+        command = native_resume_argv(normalized_agent, agent_session_id, controls)
     except ValueError as exc:
         raise _NativeResumeCommandRejected(
             "native_resume_unsupported",
@@ -5100,6 +5167,7 @@ def _verified_native_resume_command(
         command,
         str(provider_probe.state),
         str(provider_probe.version or ""),
+        controls,
     )
 
 
@@ -5187,9 +5255,11 @@ def manual_resume_session(
             detail=str(exc),
         )
     try:
-        command, _probe_state, _probe_version = _verified_native_resume_command(
-            normalized_agent,
-            native_id,
+        command, _probe_state, _probe_version, controls = (
+            _verified_native_resume_command(
+                normalized_agent,
+                native_id,
+            )
         )
     except _NativeResumeCommandRejected as exc:
         return _manual_explicit_resume_rejection(
@@ -5234,6 +5304,7 @@ def manual_resume_session(
                 "model": model_requested,
             },
             resolved_source_dir,
+            admission_controls=controls,
         )
     except ValueError as exc:
         return _manual_explicit_resume_rejection(
@@ -5311,7 +5382,9 @@ def manual_fork_session(
     if not source.get("accepted"):
         return source
     try:
-        command, probe_state, version = _verified_native_resume_command(agent, session)
+        command, probe_state, version, _controls = _verified_native_resume_command(
+            agent, session
+        )
         if agent == "codex":
             # The resume probe alone is insufficient evidence of exec fork.
             probe = subprocess.run(
@@ -5454,12 +5527,68 @@ def looks_like_control_plane_run_id(value: str) -> bool:
     return any(part.isdigit() for part in rest.split("-"))
 
 
+def _read_identity_run_facts(run_id: str) -> dict[str, Any] | None:
+    """Read recorded identity without lifecycle synchronization or discovery."""
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    try:
+        meta = lookup_runtime_run_meta(target)
+        snapshot = lookup_run_snapshot(target)
+        if snapshot is None and any(
+            path.exists()
+            for path in (
+                run_snapshot_dir() / f"{target}.json",
+                run_snapshot_dir() / "archive" / f"{target}.json",
+            )
+        ):
+            raise ValueError("identity facts unavailable: invalid run snapshot")
+    except OSError as exc:
+        raise ValueError(
+            "identity facts unavailable: recorded facts could not be read"
+        ) from exc
+    if meta is None:
+        return snapshot
+    if not meta or str(meta.get("run_id") or target) != target:
+        raise ValueError("identity facts unavailable: invalid canonical run metadata")
+    for key in ("agent", "root"):
+        canonical = str(meta.get(key) or "")
+        projected = str((snapshot or {}).get(key) or "")
+        if key == "root" and canonical and projected:
+            try:
+                canonical = str(Path(canonical).resolve())
+                projected = str(Path(projected).resolve())
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(
+                    "identity facts unavailable: recorded root could not be resolved"
+                ) from exc
+        if canonical and projected and canonical != projected:
+            raise ValueError(f"identity facts unavailable: conflicting recorded {key}")
+    merged = _merge_run_and_meta(meta, snapshot or {})
+    # Canonical blanks are uncertainty, never permission to reuse an old
+    # projection's provider identity or its root/provider attribution.
+    # Projected runtime aliases remain evidence for namespace refusals.
+    for key in (
+        "agent",
+        "root",
+        "agent_session_id",
+        "session_id",
+        "native_identity_status",
+    ):
+        merged[key] = meta.get(key, "")
+    merged["run_id"] = target
+    return merged
+
+
 def classify_resume_identity(token: str) -> str:
     """Classify a resume token as run_id, provider session, or Vibecrafted session."""
     text = str(token or "").strip()
     if not text:
         return "empty"
-    if looks_like_control_plane_run_id(text) or lookup_run(text) is not None:
+    if (
+        looks_like_control_plane_run_id(text)
+        or _read_identity_run_facts(text) is not None
+    ):
         return "run_id"
     found = find_run_for_identity_token(text)
     if found is None:
@@ -5483,12 +5612,14 @@ def classify_resume_identity(token: str) -> str:
     return "unknown"
 
 
-def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
+def find_run_for_identity_token(
+    token: str, *, require_unique_root: bool = False, require_unique_run: bool = False
+) -> dict[str, Any] | None:
     """Resolve a token against run ids and recorded session fields."""
     text = str(token or "").strip()
     if not text:
         return None
-    direct = lookup_run(text)
+    direct = _read_identity_run_facts(text)
     if direct is not None:
         return direct
     root = control_plane_home() / "runtime_runs"
@@ -5500,9 +5631,14 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-    except OSError:
-        return None
-    for path in metas[:300]:
+    except OSError as exc:
+        raise ValueError(
+            "identity facts unavailable: runtime metadata could not be read"
+        ) from exc
+    selected = None
+    recorded_roots: set[str] = set()
+    recorded_agents: set[str] = set()
+    for path in metas if require_unique_root or require_unique_run else metas[:300]:
         payload = _read_json_object(path)
         for key in (
             "agent_session_id",
@@ -5512,9 +5648,43 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
         ):
             if str(payload.get(key) or "").strip() != text:
                 continue
-            run_id = str(payload.get("run_id") or path.parent.name)
-            return lookup_run(run_id) or payload
-    return None
+            run_id = path.parent.name
+            if str(payload.get("run_id") or run_id) != run_id:
+                raise ValueError(
+                    "identity facts unavailable: invalid canonical run metadata"
+                )
+            facts = _read_identity_run_facts(run_id) or {**payload, "run_id": run_id}
+            if require_unique_run and selected is not None:
+                raise ValueError(
+                    "ambiguous native policy owner; select an exact --run-id"
+                )
+            if not require_unique_root and not require_unique_run:
+                return facts
+            if text in {
+                str(facts.get("runtime_session_id") or "").strip(),
+                str(facts.get("vibecrafted_session_id") or "").strip(),
+            }:
+                raise ValueError(
+                    "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                    "not a provider session"
+                )
+            if facts.get("agent"):
+                recorded_agents.add(str(facts["agent"]).strip().lower())
+                if len(recorded_agents) > 1:
+                    raise ValueError("conflicting recorded session providers")
+            if facts.get("root"):
+                try:
+                    recorded_roots.add(str(Path(facts["root"]).expanduser().resolve()))
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(
+                        "identity facts unavailable: recorded root"
+                    ) from exc
+                if len(recorded_roots) > 1:
+                    raise ValueError("conflicting recorded session checkouts")
+            if selected is None:
+                selected = facts
+            break
+    return selected
 
 
 FORK_SOURCE_SCHEMA = "vibecrafted.fork_source.v1"
@@ -5552,10 +5722,12 @@ def resolve_session_selection(
     *,
     environment: dict[str, str] | None = None,
     selection: dict[str, Any] | None = None,
+    infer_recorded_root: bool = False,
 ) -> dict[str, Any]:
     """Resolve public current/last without global recency or implicit cloning.
 
-    Last is the newest recorded native session in this exact checkout/provider;
+    Last compares recorded run starts and verified native catalog activity in
+    this exact checkout/provider;
     equal timestamps for different sessions are ambiguous, never arbitrary.
     Current requires explicit process context and agrees with recorded ownership.
     """
@@ -5635,13 +5807,26 @@ def resolve_session_selection(
             native = _provider_session_for_continue(row)
             stamp = str(row.get("started_at") or row.get("created_at") or "")
             try:
-                instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                # Keep legacy date-only parsing and embedded-Z rejection.
+                normalized_timestamp = stamp.replace("Z", "+00:00")
+                instant = datetime.fromisoformat(normalized_timestamp)
                 if instant.tzinfo is None:
                     continue
-                timestamp = instant.astimezone(timezone.utc).timestamp()
+                timestamp = instant.astimezone(UTC).timestamp()
             except ValueError:
                 continue
             if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:
+                candidates[native] = (timestamp, row)
+        from .spawn import native_catalog_session_candidates
+
+        native_candidates = native_catalog_session_candidates(provider, selected_root)
+        for row in native_candidates:
+            native = row["session_id"]
+            timestamp = row.get("timestamp")
+            if (
+                timestamp is not None
+                and timestamp > candidates.get(native, (float("-inf"), {}))[0]
+            ):
                 candidates[native] = (timestamp, row)
         if not candidates:
             raise ValueError(
@@ -5654,13 +5839,36 @@ def resolve_session_selection(
                 "last is ambiguous: equal timestamps for different native sessions"
             )
         token = winners[0]
-        provenance = "repository_provider_latest_started"
-    result = resolve_fork_source(provider, session=token, require_native_fork=False)
+        provenance = (
+            "native_provider_catalog_latest_updated"
+            if candidates[token][1].get("identity_source") == "native_provider_catalog"
+            else "repository_provider_latest_started"
+        )
+    result = resolve_fork_source(
+        provider,
+        session=token,
+        require_native_fork=False,
+        require_unique_root=True,
+    )
     if not result.get("accepted"):
         raise ValueError(str(result.get("detail") or result.get("reason")))
     recorded_root = result.get("source_root")
+    if infer_recorded_root and selector.strip() not in {"current", "last", "previous"}:
+        if not recorded_root:
+            raise ValueError(
+                "selected session has no recorded repository checkout; pass --repo"
+            )
+        # A native UUID names its existing checkout when the caller supplied
+        # no repository override. Never infer from recency, basename or a
+        # transcript's later tool cwd; the canonical run owns this fact.
+        selected_root = select_repository(
+            recorded_root, require_git=True, label="resume session checkout"
+        ).path
     if recorded_root and str(Path(recorded_root).resolve()) != selected_root:
         raise ValueError("selected session belongs to a different repository checkout")
+    if provenance == "native_provider_catalog_latest_updated":
+        # Catalog existence is native-session truth, never historical run proof.
+        result = {**result, "source_run_id": "", "source_root": selected_root}
     return {
         **result,
         "session_selector": selector,
@@ -5675,6 +5883,7 @@ def resolve_fork_source(
     run_id: str = "",
     session: str = "",
     require_native_fork: bool = True,
+    require_unique_root: bool = False,
 ) -> dict[str, Any]:
     """Resolve the stable provider identity a ``vibecrafted fork`` branches from.
 
@@ -5757,7 +5966,11 @@ def resolve_fork_source(
                 ),
                 session=target_session,
             )
-        found = find_run_for_identity_token(target_session) or {}
+        found = (
+            find_run_for_identity_token(target_session, require_unique_root=True)
+            if require_unique_root
+            else find_run_for_identity_token(target_session)
+        ) or {}
         recorded_agent = str(found.get("agent") or "").strip().lower()
         if recorded_agent and recorded_agent != normalized_agent:
             return _fork_source_rejection(
@@ -6401,9 +6614,12 @@ def native_resume_run(
             idempotency_key=resume_idempotency_key,
         )
 
+    admitted_parent = _merge_run_and_meta(run, parent_meta)
     try:
-        command, provider_probe_state, provider_probe_version = (
-            _verified_native_resume_command(agent, agent_session_id)
+        command, provider_probe_state, provider_probe_version, controls = (
+            _verified_native_resume_command(
+                agent, agent_session_id, parent_meta=admitted_parent
+            )
         )
     except _NativeResumeCommandRejected as exc:
         return _native_resume_rejection(
@@ -6538,6 +6754,17 @@ def native_resume_run(
                 retryable=authority.retryable,
             )
         locked_receipt_id = authority.receipt_id
+        # The probe remains outside mutation locks; revalidate the exact
+        # parent's frozen decision with its identity/settlement snapshot.
+        if _merge_run_and_meta(locked_run, locked_meta).get(
+            "execution_controls"
+        ) != admitted_parent.get("execution_controls"):
+            return _native_resume_rejection(
+                target,
+                "execution_controls_changed",
+                run=locked_run,
+                idempotency_key=resume_idempotency_key,
+            )
 
         resume_mode = "automatic" if resume_idempotency_key else "manual"
         owner_token = ""
@@ -6695,6 +6922,7 @@ def native_resume_run(
             ),
             claim_digest=claim_digest,
             run_id=child_run_id,
+            execution_controls_frozen=controls.receipt(),
         )
         resume_command = _with_model_override(agent, command, spec.model)
         if owner_token:

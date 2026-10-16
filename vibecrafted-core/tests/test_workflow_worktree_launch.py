@@ -36,7 +36,7 @@ def _stub_worker(monkeypatch: pytest.MonkeyPatch, cwd_file: Path) -> None:
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
-        lambda _agent: [
+        lambda _agent, **_kwargs: [
             sys.executable,
             "-c",
             (

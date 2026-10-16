@@ -34,6 +34,7 @@ SUPPORTED_AGENTS = {
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 }
 
 DEFAULT_SHIP_PROMPT = (

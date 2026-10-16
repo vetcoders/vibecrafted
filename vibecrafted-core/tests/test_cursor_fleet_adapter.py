@@ -9,6 +9,7 @@ import pytest
 from vibecrafted_core import spawn, workflow, workflow_runtime
 from vibecrafted_core.agent_stream import AgentStreamParser
 from vibecrafted_core.continuity import capabilities as continuity
+from vibecrafted_core.execution_controls import resolve_execution_controls
 from vibecrafted_core.model_overrides import MODEL_OVERRIDE_FLAGS, _with_model_override
 
 
@@ -49,12 +50,17 @@ def test_cursor_headless_stdin_and_default_commands(
     )
     continuity.clear_probe_cache()
 
-    stdin = spawn._stdin_command("cursor")
+    stdin = spawn._stdin_command(
+        "cursor", resolve_execution_controls("cursor", permissions="bypass")
+    )
     assert stdin[0] == "cursor-agent"
     assert "-p" in stdin
     assert "stream-json" in stdin
     assert "--force" in stdin
     assert "--trust" in stdin
+    auto = spawn._stdin_command("cursor")
+    assert "--trust" in auto
+    assert "--force" not in auto
 
     default = spawn._default_command("cursor", "hello from fleet")
     assert default[0] == "cursor-agent"

@@ -181,7 +181,7 @@ and read by `run_triage` for SESSIONS board f/x/n triangulation.
 ```yaml
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|agy|junie|grok|cursor|system>
+agent: <claude|codex|agy|junie|grok|cursor|omp|system>
 skill: <vc-skill-name>
 project: <repo-name>
 status: <pending|in-progress|completed|failed|blocked|partial>
@@ -266,6 +266,59 @@ exact same scripts. Always use the portable scripts to ensure maximum compatibil
 Portable spawns default to detached headless execution on every platform.
 Pass `--runtime terminal` only for an explicitly selected TTY-required
 compatibility path; vc-frame remains an optional observer.
+
+### Execution permissions
+
+The default is `permissions = "auto"`, not an implicit bypass. In
+`~/.config/vibecrafted/config.toml` (honoring `XDG_CONFIG_HOME`), an operator
+may explicitly opt one provider into bypass while retaining the global default:
+
+```toml
+permissions = "auto"
+
+[agents.omp]
+permissions = "bypass"
+```
+
+Resolution order is **explicit dispatch > `agents.<provider>.permissions` >
+global `permissions` > `auto`**. Malformed configuration or an unsupported
+policy/runtime combination refuses launch; it never falls back to bypass.
+Sandbox is an independent control, not an alias for permission policy.
+
+The admitted decision is frozen through provider argv, metadata, and native
+resume; later configuration edits do not silently change an admitted run.
+Direct portable launchers also consume the central resolver via
+`spawn_resolve_permissions` before preparing paths or metadata. They are not
+a separate no-flag permission lane. Their `--runtime terminal`/`visible` selects
+presentation only: the provider still runs in print/exec mode, so headless
+permission restrictions still apply.
+
+OMP `auto` maps to the native write tier; an exec prompt requirement is refused
+headless rather than bypassed. Read-only uses a tool whitelist. OMP `bypass`
+maps to native yolo and requires explicit opt-in. Kimi and Copilot do not
+support headless `auto`; choose a supported explicit policy or a supported
+interactive runtime rather than expecting unattended escalation.
+
+OMP workers inherit the selected native profile and its MCP configuration via
+`HOME`, `OMP_PROFILE`/`PI_PROFILE`, `PI_CODING_AGENT_DIR`, and `PI_CONFIG_FILES`.
+The worker allowlist preserves these explicit configuration overrides without
+admitting arbitrary `OMP_`/`PI_` variables. Register `vibecrafted-mcp` in the
+selected profile's `mcp.json`, or use the workspace's `.omp/mcp.json`; dispatch
+does not copy credentials or silently register servers in other CLI profiles.
+
+OMP telemetry is collected by the existing server collector, not a dedicated
+daemon. Its bounded modes are `line`, `once`, `sessions`, and `archive`; `daemon`
+is refused by the launcher and backend. Native discovery follows the selected
+OMP profile and explicit agent-directory overrides; `--store` explicitly selects
+`<store>/agent/sessions`. Incremental scans commit only newline-terminated
+records, retaining a partial tail for the next scan. Stream accounting uses final
+assistant `message_end` usage, never partial starts or lifecycle copies.
+
+Tracked native resume uses the selected parent's admitted controls, not another
+run sharing its provider session ID. An ambiguous untracked session requires an
+explicit run ID. Interactive admission resolves durable configuration and freezes
+the result through argv and metadata; explicit opt-ins survive later config
+changes. Omitted public resume permissions remain omitted until that resolution.
 
 ### Codex
 

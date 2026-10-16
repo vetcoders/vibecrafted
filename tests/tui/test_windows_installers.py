@@ -14,6 +14,8 @@ import tarfile
 import uuid
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGING = REPO_ROOT / "packaging" / "windows"
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "build-windows-installers.ps1"
@@ -820,3 +822,54 @@ def test_product_codes_are_stable_per_version_and_change_for_upgrades() -> None:
         check=False,
     )
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize("job", ["windows-msi-install", "windows-exe-install"])
+def test_windows_installer_doctor_failure_is_attributed_to_receipt_markers(
+    job: str,
+) -> None:
+    """A red doctor after install must name the receipt marker that kept it red.
+
+    PR112 run 38739451489 failed `runtime-receipt: publication or recovery is
+    pending` on the EXE lane only, while the MSI and Burn logs were identical to
+    the green run 38733148470 and the receipt itself was never captured. The
+    failure branch records the receipt marker SHAPES before throwing. It is a
+    structural control: no PowerShell is executed here.
+    """
+    workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(
+        encoding="utf-8"
+    )
+    jobs = workflow.split(f"\n  {job}:", 1)[1]
+    jobs = re.split(r"\n  [a-z0-9-]+:\n", jobs, maxsplit=1)[0]
+    step = jobs.split("- name: vibecrafted doctor from installed launcher", 1)[1]
+    step = step.split("\n      - name:", 1)[0]
+    failure = step.split("if ($LASTEXITCODE -ne 0) {", 1)[1].split(
+        "\n          }\n", 1
+    )[0]
+    throw = 'throw "vibecrafted doctor failed with exit $doctorExit"'
+
+    # The primary failure survives: exit captured first, throw is the last act,
+    # and every diagnostic step sits inside try/catch so it cannot replace it.
+    assert failure.index("$doctorExit = $LASTEXITCODE") < failure.index("try {")
+    assert failure.count("try {") == failure.count("} catch {") == 2
+    assert failure.rstrip().endswith(throw)
+    assert failure.index("receipt-attribution.txt") < failure.index(throw)
+
+    for marker in (
+        "install_pending",
+        "config_transaction",
+        "config_pending",
+        "config_conflicts",
+        "uninstall_pending",
+        "rescue_pending",
+    ):
+        assert f'"{marker}"' in failure
+    assert "install-receipt.json" in failure
+
+    # Shapes only: config_transaction / config_conflicts carry paths and file
+    # bodies, so no marker value may be serialised into the log.
+    assert "ConvertTo-Json" not in failure
+    assert "Substring" not in failure
+    assert "truthy=$truthy count=$count" in failure
+    assert '@("preparing", "ancillary") -contains' in failure
+    assert "install_phase=other" in failure

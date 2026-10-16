@@ -6,9 +6,8 @@ must open in the default system application.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 from scripts import vetcoders_install as installer
 

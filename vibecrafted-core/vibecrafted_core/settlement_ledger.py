@@ -29,7 +29,7 @@ import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -630,7 +630,7 @@ def _metadata_record(
         "schema": SETTLEMENT_LEDGER_METADATA_SCHEMA,
         "record_type": "ledger_metadata",
         "ledger_schema": SETTLEMENT_LEDGER_SCHEMA,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "history_origin": history_origin,
         "backfill": backfill,
         "previous_hash": _ZERO_HASH,

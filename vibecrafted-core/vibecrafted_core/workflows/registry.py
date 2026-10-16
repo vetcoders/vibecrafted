@@ -125,7 +125,7 @@ WORKFLOW_DEFINITIONS: dict[str, WorkflowDefinition] = {
     ),
     "prune": WorkflowDefinition(
         id="prune",
-        cadence="read",
+        cadence="write",
         lifecycle_order=55,
         input_policy="optional_with_default",
         default_prompt_file="default_prompt.md",

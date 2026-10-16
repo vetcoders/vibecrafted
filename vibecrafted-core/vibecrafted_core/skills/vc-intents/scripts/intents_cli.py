@@ -42,7 +42,7 @@ import sys
 import tempfile
 import unicodedata
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = "vc-intents.ledger.v2"
@@ -86,11 +86,11 @@ ASSETS = HERE.parent / "assets"
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -575,7 +575,7 @@ def _plan_artifact_day(repo: Path, artifacts: str | None) -> Path:
     except ArtifactIdentityError as exc:
         die(f"{exc}; pass --artifacts")
     home = Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
-    day = datetime.now(timezone.utc).strftime("%Y_%m%d")
+    day = datetime.now(UTC).strftime("%Y_%m%d")
     return home / "artifacts" / org / name / day
 
 

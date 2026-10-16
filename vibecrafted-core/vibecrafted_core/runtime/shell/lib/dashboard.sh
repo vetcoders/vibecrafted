@@ -66,7 +66,10 @@ _vetcoders_product_core_cli() {
 
 _vetcoders_product_workspace_prepare() {
   local requested_root="${1:-}"
+  local runtime_session="${2:-}" runtime_state="${3:-}" socket_dir=""
   local line key value resolved resolve_status=0
+  local -a resolve_args=()
+  _vetcoders_start_wes_return_session=""
   if [[ -z "$requested_root" ]]; then
     requested_root="$(pwd -P)" || return $?
   fi
@@ -76,15 +79,19 @@ _vetcoders_product_workspace_prepare() {
     unset VIBECRAFTED_BUILD_ID VIBECRAFTED_OPERATOR_SESSION VIBECRAFTED_WORKSPACE_ROOT
     return 0
   fi
+  resolve_args=(workspace resolve --root "$requested_root" --env)
+  if [[ -n "$runtime_session" || -n "$runtime_state" ]]; then
+    socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return $?
+    resolve_args+=(--runtime-session-id "$runtime_session" --socket-dir "$socket_dir" --runtime-state "$runtime_state")
+  fi
   resolved="$(
-    _vetcoders_product_core_cli \
-      workspace resolve --root "$requested_root" --env
+    _vetcoders_product_core_cli "${resolve_args[@]}"
   )" || resolve_status=$?
   if [[ "$resolve_status" -ne 0 || -z "$resolved" ]]; then
     [[ "$resolve_status" -ne 0 ]] || resolve_status=1
     printf "vc-start: could not resolve requested workspace root '%s' (status %s).\n" \
       "$requested_root" "$resolve_status" >&2
-    printf "vc-start: clear stale VIBECRAFTED_WORKSPACE_* values or re-run from the intended root.\n" >&2
+    printf "vc-start: inconsistent workspace ownership requires explicit recovery; no seat was adopted.\n" >&2
     return "$resolve_status"
   fi
   while IFS= read -r line; do
@@ -100,6 +107,8 @@ _vetcoders_product_workspace_prepare() {
     VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
     export VIBECRAFTED_OPERATOR_SESSION
   fi
+  [[ "$runtime_state" != live ]] || _vetcoders_start_wes_return_session="$runtime_session"
+  return 0
 }
 
 # ONE canonical workspace owner for both public interactive entries.
@@ -229,12 +238,12 @@ PY_RUNTIME_ADMIT
 }
 
 # ---------------------------------------------------------------------------
-# vc-start argument contract (2026-09-09, Founder P0 "one create-only workspace
-# contract from every entrypoint"). Shell `vc-start` and deck `cmd_start` both
+# vc-start argument contract: one repository entry from every entrypoint.
+# Shell `vc-start` and deck `cmd_start` both
 # parse through here and then enter _vetcoders_start_entry; there is no second
 # parser and nothing is forwarded to vc-frame as opaque input any more.
 #
-#   vc-start [<workspace>] [--repo <path>|--root <path>]   create-only start
+#   vc-start [<workspace>] [--repo <path>|--root <path>]   enter workspace
 #   vc-start resume [...]                                  deliberate re-entry
 #
 # Outputs (globals, read by _vetcoders_start_entry):
@@ -494,57 +503,123 @@ _vetcoders_start_apply_launch_spec() {
   export VIBECRAFTED_START_LAUNCH_PINNED=1
 }
 
-# Open the product terminal for a start that has no visible surface here.
-# $1 = the decision mode:
-#   strict  -- plain start: the ONLY signals are the re-entry boundary and
-#              this process's own controlling terminal. An inherited
-#              VC_FRAME_*/ZELLIJ_* marker or an operator-session name proves
-#              nothing about THIS process's stdin (Founder repro 2026-09-09:
-#              vc-start from an agent tool inside an attached pane reached the
-#              engine and died on "stdin is not a terminal" after the whole
-#              preparation had run).
-#   declared -- `vc-start resume`: the declaration family's shared decision
-#              (_vetcoders_needs_vc_terminal_entry), unchanged by this cut.
-# $2 = project root (the terminal's working directory); the rest is the argv
-# the child replays.
-# The terminal child we opened carries the product-owned re-entry boundary
-# (marker AND owner = this generation's vibecrafted front door). A bare
-# `VIBECRAFTED_TERMINAL_ENTRY=1` is inherited ancestry, not a surface: start and
-# resume share one admission proof (_vetcoders_has_owned_vc_terminal_entry).
+# Start always enters through VC Terminal. The existing explicit re-entry
+# receipt stops recursive opens, including a host which supplied no PTY.
+# Outside Frame, ordinary product shells can also prove their physical host
+# through process ancestry. Frame's detached server ancestry and inherited
+# socket do not identify the current attached frontend: unknown means handoff.
 _vetcoders_start_is_owned_terminal_child() {
-  command -v _vetcoders_has_owned_vc_terminal_entry >/dev/null 2>&1 &&
-    _vetcoders_has_owned_vc_terminal_entry
+  if command -v _vetcoders_has_owned_vc_terminal_entry >/dev/null 2>&1 &&
+    _vetcoders_has_owned_vc_terminal_entry; then
+    return 0
+  fi
+  _vetcoders_in_vc_frame && return 1
+  [[ -t 0 && -t 1 ]] || return 1
+  _vetcoders_start_has_owned_terminal_host
+}
+
+_vetcoders_start_is_ssh_caller() {
+  [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]]
+}
+
+_vetcoders_start_has_owned_terminal_host() {
+  local owner="" python_bin="" admission_helper="" admission_rc=0
+  owner="$(_vetcoders_vc_frame_owner_root)" || return 1
+  python_bin="$(_vetcoders_internal_python)" || return 1
+  admission_helper="$owner/vibecrafted-core/vibecrafted_core/terminal_host.py"
+  # The fixed macOS app host is mutable across upgrades and is not a
+  # generation-local path. Reuse its existing paired static/live-code
+  # authority; caller environment and a same-user path never establish it.
+  if [[ -f "$admission_helper" && ! -L "$admission_helper" ]]; then
+    if "$python_bin" -I -B "$admission_helper" owns-fixed-host >/dev/null 2>&1; then
+      return 0
+    else
+      admission_rc=$?
+    fi
+    # Exit 1 means no fixed host occurs in ancestry. Explicit identity,
+    # signature, UID and race refusals are final; legacy ancestry must not
+    # override the fixed-host authority.
+    ((admission_rc == 1)) || return "$admission_rc"
+  fi
+  # Retain the flat/developer and legacy generation-local ancestry contract.
+  "$python_bin" - "$owner" <<'PY_TERMINAL_ORIGIN'
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1])
+candidates = {
+    root / "libexec/vc-terminal",
+    root / "libexec/vc-terminal.app/Contents/MacOS/alacritty",
+}
+# Ambient host paths (including older App helpers) cannot expand this selected
+# generation's immutable physical candidates. Unknown hosts require handoff.
+physical = set()
+for candidate in candidates:
+    try:
+        if not candidate.is_absolute() or any(p.is_symlink() for p in (candidate, *candidate.parents)):
+            continue
+        info = candidate.stat()
+        if stat.S_ISREG(info.st_mode) and os.access(candidate, os.X_OK):
+            physical.add(str(candidate))
+    except OSError:
+        continue
+if not physical:
+    sys.exit(1)
+pid, seen = os.getppid(), set()
+deadline = time.monotonic() + 2
+try:
+    while pid > 1 and pid not in seen and len(seen) < 32:
+        seen.add(pid)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "ppid=,uid=,comm="],
+            capture_output=True, text=True, check=False, timeout=remaining,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+        fields = result.stdout.strip().split(maxsplit=2)
+        if result.returncode or len(fields) != 3 or int(fields[1]) != os.geteuid():
+            break
+        executable = fields[2]
+        # Linux ps reports a short comm; /proc exposes the actual executable.
+        if sys.platform.startswith("linux"):
+            executable = os.readlink(f"/proc/{pid}/exe")
+        if executable in physical:
+            sys.exit(0)
+        pid = int(fields[0])
+except (OSError, ValueError, subprocess.TimeoutExpired):
+    pass
+sys.exit(1)
+PY_TERMINAL_ORIGIN
 }
 
 _vetcoders_start_open_terminal_if_needed() {
-  local mode="${1:-strict}" project_root="${2:-}"
+  local project_root="${2:-}"
   shift 2 || shift $#
   unset VIBECRAFTED_START_ESCALATED
   [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != "1" ]] || return 0
-  case "$mode" in
-    declared)
-      if ! command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 ||
-        ! _vetcoders_needs_vc_terminal_entry; then
-        return 0
-      fi
-      ;;
-    *)
-      # The child we open re-enters this very entry; the owned boundary stops
-      # the loop even if the host somehow fails to hand it a PTY.
-      ! _vetcoders_start_is_owned_terminal_child || return 0
-      # A real controlling terminal is the direct path -- and the only proof.
-      [[ ! -t 0 || ! -t 1 ]] || return 0
-      ;;
-  esac
+  # Both plain start and deliberate start resume obey the same host rule.
+  # General declaration verbs keep their independent surface policy.
+  ! _vetcoders_start_is_owned_terminal_child || return 0
+  if _vetcoders_start_is_ssh_caller; then
+    return 0
+  fi
   local front_door=""
   front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
   if [[ -z "$front_door" ]]; then
-    printf 'vc-start: no TTY and no installed vc-start front door to open a terminal with.\n' >&2
-    printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
+    printf 'vc-start: no installed vc-start front door to open VC Terminal with.\n' >&2
+    printf 'Install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
     return 1
   fi
   printf 'vc-start: opening terminal...\n' >&2
-  _vetcoders_open_entry_in_vc_terminal "$front_door" "$project_root" "$@" || return 1
+  # Start must use this generation's bundle/flat host, never an ambient helper.
+  (unset VIBECRAFTED_TERMINAL_HOST
+    _vetcoders_open_entry_in_vc_terminal "$front_door" "$project_root" "$@") || return 1
   VIBECRAFTED_START_ESCALATED=1
   export VIBECRAFTED_START_ESCALATED
   return 0
@@ -555,6 +630,7 @@ _vetcoders_start_open_terminal_if_needed() {
 # state. Configuration publication belongs exclusively to explicit installation.
 _vetcoders_product_entry_prepare() {
   local requested_root="${1:-}" owner_root required entry_status=0
+  local runtime_session="${2:-}" runtime_state="${3:-}"
   [[ -n "$requested_root" ]] || requested_root="$(pwd -P)" || return $?
   unset VIBECRAFTED_PRODUCT_ENTRY VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
 
@@ -582,6 +658,20 @@ _vetcoders_product_entry_prepare() {
       VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
       return "$entry_status"
     }
+  else
+    # The source engine's panes use the same explicit interpreter pin as an
+    # installed generation. Resolve it through the existing source owner,
+    # before Frame inherits the environment; panes never guess via PATH.
+    VIBECRAFTED_CORE_DIR="$(_vetcoders_owned_core_dir)" || {
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    }
+    export VIBECRAFTED_CORE_DIR
+    VIBECRAFTED_PYTHON="$(_vetcoders_owned_python_bin)" || {
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    }
+    export VIBECRAFTED_PYTHON
   fi
   _vetcoders_pin_vc_frame_config_dir || {
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
@@ -625,7 +715,7 @@ _vetcoders_product_entry_prepare() {
   else
     printf 'vc-start: preparing workspace %s...\n' "$(_vetcoders_shell_quote "$requested_root")" >&2
   fi
-  _vetcoders_product_workspace_prepare "$requested_root" || {
+  _vetcoders_product_workspace_prepare "$requested_root" "$runtime_session" "$runtime_state" || {
     entry_status=$?
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
     return "$entry_status"
@@ -895,7 +985,7 @@ _vetcoders_resume_workspace() {
 }
 
 # ---------------------------------------------------------------------------
-# vc-start: one create-only workspace contract (2026-09-09, Founder P0)
+# vc-start: enter the selected repository workspace.
 # ---------------------------------------------------------------------------
 # The same owner from every entrypoint (shell `vc-start`, deck `vibecrafted
 # start`, the bundled Rust front door, the terminal child):
@@ -906,28 +996,19 @@ _vetcoders_resume_workspace() {
 #               validated once. A repository whose name is not a legal session
 #               name is refused with the explicit-name form, never normalized.
 #   3. check -- the selected engine's own `list-sessions` in the product socket
-#               namespace, markers cleared. A live session (attached or not) or
-#               an EXITED resurrection record under the name refuses the start
-#               (exit 3) BEFORE any window, workspace record or provider; an
-#               unreadable inventory refuses too (exit 4): doubt is not
-#               permission to duplicate. Frame's `attach --create-background`
-#               RESURRECTS a dead record instead of creating (src/commands.rs,
-#               the ClientInfo::Resurrect arm), which is why the record has to
-#               be ruled out here first.
+#               namespace, markers cleared. An unreadable inventory refuses
+#               (exit 4): doubt is not permission to duplicate.
 #   4. create -- Frame's server-side exclusive `attach --create-background`
 #               (zellij-client/src/lib.rs start_server_detached): the loser of
 #               a race gets exit 1 + "Session already exists", told apart from
-#               every other refusal. Nothing is killed, deleted, renamed,
-#               switched or attached on conflict; no unique-name fallback.
+#               every other refusal. An EXITED record is restored with the
+#               same engine verb, without supplying a new layout.
 #   5. enter  -- a caller with a controlling terminal attaches (outside a
 #               frame) or moves its own client with switch-session (inside one:
 #               the shared canvas, never a nested multiplexer). A caller WITHOUT
-#               one has already created the session (step 4 needs no PTY) and
+#               one creates/restores if needed (step 4 needs no PTY), then
 #               opens the VC Terminal host on the root with the same name/repo
-#               argv plus VIBECRAFTED_START_CREATED_SESSION, so the child enters
-#               the very session this start created instead of finding the
-#               name taken. The parent's exit status therefore already says
-#               whether the workspace exists.
+#               argv so the child enters the selected session.
 # `vc-start resume` is the deliberate re-entry and keeps its own owner.
 
 # One project identity for start: explicit root, else the Git top-level that
@@ -1229,6 +1310,24 @@ _vetcoders_start_refuse_existing_workspace() {
   return 3
 }
 
+# WES is the existing ownership ledger. A known same-name session for a
+# different root is ambiguous. LIVE return also requires a coherent WES seat
+# during preparation, before terminal handoff.
+_vetcoders_start_check_existing_owner() {
+  local name="${1:-}" state="${2:-}" root="${3:-}" socket_dir="" owner=""
+  socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 4
+  owner="$(_vetcoders_product_core_cli workspace session-owner \
+    --runtime-session-id "$name" --socket-dir "$socket_dir" --runtime-state "$state" 2>/dev/null)" || {
+    printf 'vc-start: could not verify the owner of workspace %s.\n' "$(_vetcoders_shell_quote "$name")" >&2
+    return 4
+  }
+  if [[ -n "$owner" && "$owner" != "$root" ]]; then
+    _vetcoders_start_refuse_existing_workspace "$name" "$state" "$root"
+    return $?
+  fi
+  return 0
+}
+
 # Refuse when the inventory cannot answer. Exit 4.
 _vetcoders_start_refuse_inventory() {
   local name="${1:-}"
@@ -1395,6 +1494,27 @@ _vetcoders_start_create_workspace_session() {
   return 0
 }
 
+# Restore the selected EXITED record in place. Frame retains its layout and
+# suspended panes; supplying a new layout here would replace their state.
+_vetcoders_start_resurrect_workspace_session() {
+  local vc_frame_bin="${1:-}" session_name="${2:-}" out="" rc=0
+  printf 'vc-start: restoring workspace %s...\n' "$(_vetcoders_shell_quote "$session_name")" >&2
+  out="$(_vetcoders_start_frame_env "$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || rc=$?
+  if ((rc == 0)) && _vetcoders_wait_for_vc_frame_session "$session_name" 40; then
+    _vetcoders_start_inventory_cache_valid=0
+    return 0
+  fi
+  # A concurrent entry may have restored the same record first.
+  _vetcoders_start_read_inventory_state "$session_name"
+  if [[ "$_vetcoders_start_inventory_state" == live ]]; then
+    _vetcoders_start_inventory_cache_valid=0
+    return 0
+  fi
+  printf 'vc-start: could not restore workspace %s; delete its stopped record with vc-frame delete-session %s, then run vc-start again for a fresh workspace.\n' \
+    "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$session_name")" >&2
+  return 4
+}
+
 # Enter a peer session, addressing the sole observed source frontend explicitly.
 # A shell pane can be shared, so multiple source clients remain ambiguous.
 # The engine validates that exact client at action admission; a concurrent attach
@@ -1548,12 +1668,25 @@ _vetcoders_start_enter_lobby() {
   _vetcoders_start_ensure_host "$vc_frame_bin" "" || return $?
   host="$_vetcoders_start_operator_session"
   printf 'vc-start: opening Operator Frame; choose a project when ready.\n' >&2
-  if _vetcoders_in_vc_frame; then
-    _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
+  if ! _vetcoders_start_is_owned_terminal_child; then
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+      if _vetcoders_in_vc_frame; then
+        _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
+        return $?
+      fi
+      _vetcoders_product_entry_prepare "$root" || return $?
+      _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+      return $?
+    fi
+    _vetcoders_start_open_terminal_if_needed strict "$root"
     return $?
   fi
-  if ! _vetcoders_start_is_owned_terminal_child && [[ ! -t 0 || ! -t 1 ]]; then
-    _vetcoders_start_open_terminal_if_needed strict "$root"
+  if _vetcoders_in_vc_frame; then
+    _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
     return $?
   fi
   if [[ ! -t 0 || ! -t 1 ]]; then
@@ -1564,27 +1697,43 @@ _vetcoders_start_enter_lobby() {
   _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
 }
 
-# Create-only start from a caller WITHOUT a controlling terminal: the create
+# Start from a caller WITHOUT a controlling terminal: the create
 # itself needs no PTY, so it happens here, before any window -- the caller's
 # exit status reflects the workspace, not the terminal host. Config pin and
 # engine admission only; the full product preparation (workspace record,
 # server eye) runs in the terminal child, which has the surface.
 _vetcoders_start_create_before_terminal() {
   local session_name="${1:-}" root="${2:-}" vc_frame_bin="" rc=0 state=""
+  _vetcoders_start_preterminal_created=0
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
   _vetcoders_require_vc_frame || return 1
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  # The creator must carry a coherent WES pair before the engine can become
+  # live. Its terminal child then returns to that exact recorded seat.
+  _vetcoders_product_workspace_prepare "$root" "$session_name" missing || return $?
   _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" || rc=$?
   if ((rc == 3)); then
     _vetcoders_start_read_inventory_state "$session_name"
     state="$_vetcoders_start_inventory_state"
-    [[ "$state" == dead ]] || state="live"
-    _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
-    return $?
+    case "$state" in
+      live|dead)
+        _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
+        if [[ "$state" == live ]]; then
+          _vetcoders_product_workspace_prepare "$root" "$session_name" live
+          return $?
+        fi
+        _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
+        _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
+        _vetcoders_record_vc_frame_attachment live "$session_name"
+        return $?
+        ;;
+      *) _vetcoders_start_refuse_inventory "$session_name"; return $? ;;
+    esac
   fi
+  ((rc != 0)) || _vetcoders_start_preterminal_created=1
   return "$rc"
 }
 
@@ -1592,7 +1741,11 @@ _vetcoders_start_create_before_terminal() {
 # the root). Re-read the inventory (cheap; the create below is exclusive
 # anyway), create unless this very start already did, then enter.
 _vetcoders_start_launch_workspace() {
-  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" state="" rc=0
+  local session_name="${1:-}" root="${2:-}" entry_mode="${3:-enter}" vc_frame_bin="" state="" rc=0
+  # Internal Workshop preparation reuses this owner without the public terminal
+  # front door. Keep the parser's name guard before a create-lock path is used.
+  _vetcoders_start_validate_workspace_name "$session_name" || return $?
+  case "$entry_mode" in enter|background) ;; *) return 2 ;; esac
   if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
     printf 'vc-start: product preparation failed; the workspace was not created.\n' >&2
     return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
@@ -1613,40 +1766,51 @@ _vetcoders_start_launch_workspace() {
 
   _vetcoders_start_read_inventory_state "$session_name"
   state="$_vetcoders_start_inventory_state"
+  if [[ "$state" == live || "$state" == dead ]]; then
+    _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
+  fi
+  if [[ "$state" == live && "${_vetcoders_start_wes_return_session:-}" != "$session_name" ]]; then
+    _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
+  fi
   case "$state" in
     error)
       _vetcoders_start_refuse_inventory "$session_name"
       return $?
       ;;
     dead)
-      _vetcoders_start_refuse_existing_workspace "$session_name" dead "$root"
-      return $?
+      _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
       ;;
-    live)
-      if [[ "${VIBECRAFTED_START_CREATED_SESSION:-}" != "$session_name" ]]; then
-        _vetcoders_start_refuse_existing_workspace "$session_name" live "$root"
-        return $?
-      fi
-      # Created by the start that opened this terminal; bind it now that the
-      # workspace identities exist, then enter.
-      _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
-      ;;
-    *)
+    missing)
       _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" || rc=$?
       if ((rc == 3)); then
         _vetcoders_start_read_inventory_state "$session_name"
         state="$_vetcoders_start_inventory_state"
-        [[ "$state" == dead ]] || state="live"
-        _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
-        return $?
+        case "$state" in
+          live|dead)
+            _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
+            if [[ "$state" == live ]]; then
+              _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
+            else
+              _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
+              _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
+            fi
+            ;;
+          *) _vetcoders_start_refuse_inventory "$session_name"; return $? ;;
+        esac
+      elif ((rc != 0)); then
+        return "$rc"
+      else
+        printf 'vc-start: created workspace %s for %s\n' \
+          "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
       fi
-      ((rc == 0)) || return "$rc"
-      printf 'vc-start: created workspace %s for %s\n' \
-        "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
       ;;
   esac
+  if [[ "${_vetcoders_start_wes_return_session:-}" != "$session_name" ]]; then
+    _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+  fi
   unset VIBECRAFTED_START_CREATED_SESSION
   export VIBECRAFTED_OPERATOR_SESSION="$session_name"
+  [[ "$entry_mode" != background ]] || return 0
   _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$session_name"
 }
 
@@ -1662,6 +1826,14 @@ _vetcoders_start_active_host_root() {
     # use the installer's verified resolution, never ambient roots.
     printf '%s\n' "$owner"
   fi
+}
+
+_vetcoders_start_pin_host_root() {
+  local active="$1"
+  export VIBECRAFTED_ROOT="$active" VIBECRAFTED_RUNTIME_ROOT="$active"
+  export VIBECRAFTED_RUNTIME_BIN="$active/bin" VIBECRAFTED_CORE_DIR="$active/vibecrafted-core"
+  export VIBECRAFTED_PYTHON="$active/bin/python3" VIBECRAFTED_VC_FRAME_BIN="$active/bin/vc-frame"
+  unset VIBECRAFTED_APP_ROOT VIBECRAFTED_TERMINAL_HOST PYTHONPATH PYTHONHOME
 }
 
 _vetcoders_start_generation_label() {
@@ -1716,7 +1888,7 @@ PY_HOST_GENERATION
 _vetcoders_start_new_host() (
   local root="${1:-}" active="" owner="" generation="" short="" base="vc-host" host="" rc=0 index=1
   local vc_frame_bin="" role="" front_door="" existing="" sessions=""
-  local created_here=0 role_rc=0 role_attempts=0 role_deadline=0
+  local created_handoff=0 created_here=0 role_rc=0 role_attempts=0 role_deadline=0
   local entry_args=(--new-host)
   if ! _vetcoders_start_is_lobby "$root"; then
     entry_args+=(--repo "$root")
@@ -1727,13 +1899,21 @@ _vetcoders_start_new_host() (
     # The native vc-start front door reads these roots before sourcing its
     # shell. Pin the admitted owner for both re-entry and the terminal child;
     # an absolute executable path alone does not defeat inherited old roots.
-    export VIBECRAFTED_ROOT="$active" VIBECRAFTED_RUNTIME_ROOT="$active"
-    export VIBECRAFTED_RUNTIME_BIN="$active/bin" VIBECRAFTED_CORE_DIR="$active/vibecrafted-core"
-    export VIBECRAFTED_PYTHON="$active/bin/python3" VIBECRAFTED_VC_FRAME_BIN="$active/bin/vc-frame"
-    unset VIBECRAFTED_APP_ROOT PYTHONPATH PYTHONHOME
+    _vetcoders_start_pin_host_root "$active"
+  fi
+  if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]]; then
+    _vetcoders_start_validate_workspace_name "$VIBECRAFTED_START_CREATED_HOST" "host name" || return 2
+    if ! _vetcoders_start_is_owned_terminal_child; then
+      printf 'vc-start: created-host handoff was not admitted; host %s remains intact and no replacement was created.\n' \
+        "$VIBECRAFTED_START_CREATED_HOST" >&2
+      printf 'After verifying the active terminal host, enter it explicitly with: vc-frame attach %s\n' \
+        "$(_vetcoders_shell_quote "$VIBECRAFTED_START_CREATED_HOST")" >&2
+      return 4
+    fi
+    created_handoff=1
   fi
   if [[ "$active" != "$owner" ]]; then
-    if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+    if ((created_handoff)); then
       printf 'vc-start: active generation changed while opening host %s; it remains intact. Retry --new-host explicitly.\n' "$VIBECRAFTED_START_CREATED_HOST" >&2
       return 4
     fi
@@ -1747,10 +1927,9 @@ _vetcoders_start_new_host() (
   _vetcoders_pin_vc_frame_config_dir || return 4
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
   # Only an owned terminal child may consume the exact created host.
-  if [[ -n "${VIBECRAFTED_START_CREATED_HOST:-}" ]] && _vetcoders_start_is_owned_terminal_child; then
+  if ((created_handoff)); then
     host="$VIBECRAFTED_START_CREATED_HOST"
     unset VIBECRAFTED_START_CREATED_HOST
-    _vetcoders_start_validate_workspace_name "$host" "host name" || return 2
     _vetcoders_start_read_inventory_state "$host"
     [[ "$_vetcoders_start_inventory_state" == live ]] || return 4
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -1812,12 +1991,36 @@ _vetcoders_start_new_host() (
     role="$(_vetcoders_start_session_projection_role "$host" "$vc_frame_bin")" || return 4
     [[ "$role" == host ]] || return 4
   fi
-  if _vetcoders_in_vc_frame || [[ ! -t 0 || ! -t 1 ]]; then
+  if ((created_handoff)); then
+    if ! _vetcoders_start_is_owned_terminal_child; then
+      printf 'vc-start: created-host handoff lost terminal ownership; host %s remains detached and no replacement was created.\n' \
+        "$host" >&2
+      printf 'After verifying the active terminal host, enter it explicitly with: vc-frame attach %s\n' \
+        "$(_vetcoders_shell_quote "$host")" >&2
+      return 4
+    fi
+    _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+    return $?
+  fi
+  if _vetcoders_in_vc_frame || ! _vetcoders_start_is_owned_terminal_child; then
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+      if _vetcoders_in_vc_frame; then
+        _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$host"
+        return $?
+      fi
+      _vetcoders_start_frame_env "$vc_frame_bin" attach "$host"
+      return $?
+    fi
     # Inside-host requests need another terminal even with a TTY. Reuse the
     # canonical PTY supplier, which clears inherited Frame markers.
     front_door="$(_vetcoders_product_front_door vc-start)" || return 4
     export VIBECRAFTED_START_CREATED_HOST="$host"
-    _vetcoders_open_entry_in_vc_terminal "$front_door" "$root" "${entry_args[@]}" || {
+    (unset VIBECRAFTED_TERMINAL_HOST
+      _vetcoders_open_entry_in_vc_terminal "$front_door" "$root" "${entry_args[@]}") || {
       printf 'vc-start: host %s remains detached; enter it with: vc-frame attach %s\n' "$host" "$host" >&2
       return 4
     }
@@ -1829,7 +2032,7 @@ _vetcoders_start_new_host() (
 # Shared entry for shell `vc-start` and deck `cmd_start`, after
 # _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
 _vetcoders_start_entry() {
-  local root="" session_name="" state="" rc=0
+  local root="" session_name="" state="" vc_frame_bin="" rc=0
   # Emit life before launch-spec/catalogue resolution can do expensive work.
   # Progress stays on stderr so machine-readable entry probes keep stdout.
   printf 'vc-start: checking your workspace and available sessions...\n' >&2
@@ -1840,6 +2043,29 @@ _vetcoders_start_entry() {
     printf 'vc-start: could not resolve the project root.\n' >&2
     return "$rc"
   }
+  # Foreign callers select the installer's active generation before inventory,
+  # creation or terminal admission. Re-enter its exact executable and argv.
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 ]] && ! _vetcoders_start_is_owned_terminal_child; then
+    local owner="" active=""
+    owner="$(_vetcoders_vc_frame_owner_root)" || return 4
+    active="$(_vetcoders_start_active_host_root)" || return 4
+    if [[ "$active" != "$owner" ]]; then
+      local -a active_args=()
+      [[ -z "${_vetcoders_start_contract_base:-}" ]] || active_args+=(--base "$_vetcoders_start_contract_base")
+      [[ -z "${_vetcoders_start_contract_execution_runtime:-}" ]] || active_args+=(--execution-runtime "$_vetcoders_start_contract_execution_runtime")
+      [[ -z "${_vetcoders_start_contract_worktree:-}" ]] || active_args+=(--worktree "$_vetcoders_start_contract_worktree")
+      active_args+=("$@")
+      (
+        _vetcoders_start_pin_host_root "$active"
+        if _vetcoders_start_is_lobby "$root"; then
+          cd "$root" && "$active/bin/vc-start" "${active_args[@]}"
+        else
+          "$active/bin/vc-start" "${active_args[@]}" --repo "$root"
+        fi
+      )
+      return $?
+    fi
+  fi
   if _vetcoders_start_is_lobby "$root"; then
     if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == 1 ]]; then
       _vetcoders_product_entry_prepare "$root" || return $?
@@ -1863,8 +2089,15 @@ _vetcoders_start_entry() {
 
   if [[ "${_vetcoders_start_mode:-start}" == "resume" ]]; then
     # Deliberate re-entry: the declaration family's own escalation and owner.
-    _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
-    [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+    if _vetcoders_start_is_ssh_caller; then
+      if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+        return 1
+      fi
+    else
+      _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
+      [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+    fi
     _vetcoders_product_entry_prepare "$root" || return $?
     if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
       _vetcoders_product_entry_probe_print
@@ -1905,34 +2138,39 @@ _vetcoders_start_entry() {
       _vetcoders_start_refuse_inventory "$session_name"
       return $?
       ;;
-    dead)
-      _vetcoders_start_refuse_existing_workspace "$session_name" dead "$root"
-      return $?
-      ;;
-    live)
-      if [[ "${VIBECRAFTED_START_CREATED_SESSION:-}" != "$session_name" ]]; then
-        _vetcoders_start_refuse_existing_workspace "$session_name" live "$root"
-        return $?
-      fi
-      ;;
+    dead|live) ;;
   esac
-
-  # An attached caller enters through Frame's native per-client switch. It
-  # already has a frontend even when this tool invocation itself has no TTY.
-  if _vetcoders_in_vc_frame; then
-    _vetcoders_product_entry_prepare "$root" || return $?
-    _vetcoders_start_launch_workspace "$session_name" "$root"
-    return $?
+  if [[ "$state" == dead || "$state" == live ]]; then
+    _vetcoders_start_check_existing_owner "$session_name" "$state" "$root" || return $?
+  fi
+  if [[ "$state" == live ]]; then
+    # Ambiguous or inconsistent WES seats refuse before a terminal window.
+    _vetcoders_product_workspace_prepare "$root" "$session_name" live || return $?
   fi
 
-  # 4+5 without a surface: create here, then open the terminal that enters.
-  if ! _vetcoders_start_is_owned_terminal_child && [[ ! -t 0 || ! -t 1 ]]; then
-    if [[ "$state" != "live" ]]; then
-      _vetcoders_start_create_before_terminal "$session_name" "$root" || return $?
-      printf 'vc-start: created workspace %s for %s\n' \
-        "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+  # Foreign terminals, including Frame frontends of unknown host provenance,
+  # create here and enter only in the owned terminal child. No foreign switch.
+  if _vetcoders_start_is_ssh_caller; then
+    if ! _vetcoders_in_vc_frame && [[ ! -t 0 || ! -t 1 ]]; then
+      printf 'vc-start: stdin is not a terminal (TTY); cannot start an interactive session.\n' >&2
+      return 1
     fi
-    export VIBECRAFTED_START_CREATED_SESSION="$session_name"
+  elif ! _vetcoders_start_is_owned_terminal_child; then
+    if [[ "$state" == dead ]]; then
+      vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 4
+      _vetcoders_product_workspace_prepare "$root" "$session_name" dead || return $?
+      _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
+      _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+    elif [[ "$state" == missing ]]; then
+      _vetcoders_start_create_before_terminal "$session_name" "$root" || return $?
+      if [[ "${_vetcoders_start_preterminal_created:-0}" == 1 ]]; then
+        printf 'vc-start: created workspace %s for %s\n' \
+          "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+      fi
+    fi
+    if [[ "${_vetcoders_start_preterminal_created:-0}" == 1 ]]; then
+      export VIBECRAFTED_START_CREATED_SESSION="$session_name"
+    fi
     _vetcoders_start_open_terminal_if_needed strict "$root" "$@" --repo "$root" || rc=$?
     unset VIBECRAFTED_START_CREATED_SESSION
     if ((rc != 0)); then
@@ -1943,7 +2181,7 @@ _vetcoders_start_entry() {
     return 0
   fi
 
-  # 4+5 with a surface (a real terminal, or the child the terminal opened).
-  _vetcoders_product_entry_prepare "$root" || return $?
+  # 4+5 in the physical product terminal or its admitted re-entry child.
+  _vetcoders_product_entry_prepare "$root" "$session_name" "$state" || return $?
   _vetcoders_start_launch_workspace "$session_name" "$root"
 }

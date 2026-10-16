@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import ui
@@ -133,8 +133,8 @@ def parse_time(raw: str) -> datetime | None:
     except ValueError:
         return None
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def idle_minutes(state: dict[str, str]) -> float | None:

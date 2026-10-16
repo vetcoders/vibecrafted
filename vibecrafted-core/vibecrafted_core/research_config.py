@@ -7,18 +7,18 @@ from __future__ import annotations
 
 import os
 import sys
+import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from .runtime_paths import vibecrafted_home
 
 # Every dispatchable provider is a valid research lane (parity with
 # cli.AGENTS minus the swarm coordinator itself — guarded by a test).
-# kimi is fable-class (Founder 2026-09-30): never silently dropped.
+# kimi is fable-class (Founder 2026-09-30): never silently dropped. omp is a
+# full headless worker (stdin prompt lane, NDJSON session event, native resume).
 SUPPORTED_RESEARCH_AGENTS = (
     "claude",
     "codex",
@@ -28,6 +28,7 @@ SUPPORTED_RESEARCH_AGENTS = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 DEFAULT_RESEARCH_AGENTS = ("claude", "codex", "agy")
 

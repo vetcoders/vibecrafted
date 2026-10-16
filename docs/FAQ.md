@@ -16,7 +16,15 @@ For the long-form answer bank, see [FAQ-ANSWERED.md](FAQ-ANSWERED.md).
   `${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/vc-skills.sh` manually when you want the helpers in your current session.
 
 - **Do you have a guided GUI install path?**
-  Yes. The public product is `Vibecrafted.app`, carried by the single signed and notarized canonical DMG on the [latest release](https://github.com/vetcoders/vibecrafted/releases/latest). Checkout-only `make wizard` and `make install` surfaces are maintainer tools, not alternative product installers.
+  On macOS 14+ (arm64), yes: `Vibecrafted.app` ships as one signed and notarized DMG attached to a GitHub Release.
+  Check the assets of the [latest release](https://github.com/vetcoders/vibecrafted/releases/latest) first —
+  no release up to `v4.3.3` attached a DMG. Without one, use the bootstrap from [INSTALL.md](INSTALL.md).
+  Checkout-only `make wizard` and `make install` surfaces are maintainer tools, not alternative product installers.
+
+- **Which version does `curl -fsSL https://vibecrafted.io/install.sh | bash` install?**
+  The one named by `https://vibecrafted.io/channel/main.json`. The website publishes that channel separately from
+  GitHub Releases, so it can lag the newest release; on 2026-10-14 it named `4.1.0`. Read the manifest before you
+  run the bootstrap, and confirm the result with `vibecrafted --version`.
 
 - **What does `make doctor` check?**
   The doctor verifies the central store, helper availability, symlink health, required foundations (`loctree-mcp` and

@@ -11,13 +11,20 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import tomllib
-from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
+from _runtime_pack_fixture import (
+    REPO_ROOT,
+    bind_private_terminal_wrapper,
+    fixed_terminal_fixture,
+    private_child_command,
+    private_runtime_pack_seed,
+    seed_runtime_pack,
+)
 from vibecrafted_core.vc_frame_staging import (
     resolve_clipboard_command,
     resolve_pane_shell,
@@ -35,6 +42,97 @@ _ADVANCED_MOUSE_ACTIONS_SCALAR = re.compile(
 _ADVANCED_MOUSE_ACTIONS_BLOCK = re.compile(
     r"(?:^//[^\n]*\n)*^advanced_mouse_actions (?:true|false)$", re.MULTILINE
 )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Seatbelt policy controls")
+def test_private_child_fence_controls(tmp_path):
+    allowed = tmp_path / "allowed"
+    refused = tmp_path / "refused"
+    for path in (allowed, refused):
+        path.write_text("#!/bin/bash\nprintf 'private-canary\\n'\n")
+        path.chmod(0o700)
+    positive = subprocess.run(
+        private_child_command([str(allowed)], allowed=(allowed,)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert positive.returncode == 0 and positive.stdout == "private-canary\n"
+    for command in ([str(refused)], ["/bin/bash", "-c", f'exec "{refused}"']):
+        denied = subprocess.run(
+            private_child_command(command, allowed=(allowed,)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert denied.returncode != 0 and "Operation not permitted" in denied.stderr
+        assert "private-canary" not in denied.stdout
+    network = subprocess.run(
+        private_child_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import errno,socket; s=socket.socket(); "
+                    "assert s.connect_ex(('127.0.0.1', 9)) == errno.EPERM"
+                ),
+            ]
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert network.returncode == 0, network.stderr
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "symlink", "code"])
+def test_copied_child_host_admission_precedes_drift_refusal(installed, damage):
+    paths, payload, result = installed
+    host = installer._FIXED_TERMINAL_HOST
+    generation = Path(result["root"])
+    assert host.read_bytes() == (generation / "libexec/vc-terminal").read_bytes()
+    script = """
+import importlib.util, sys
+from pathlib import Path
+payload, generation = map(Path, sys.argv[1:])
+sys.path.insert(0, str(payload / "scripts"))
+spec = importlib.util.spec_from_file_location("private_owner", payload / "scripts/vetcoders_install.py")
+owner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = owner
+spec.loader.exec_module(owner)
+owner.sys.platform = "darwin"
+try:
+    print(owner._product_terminal_host(generation=generation, app_root=None))
+except owner.RuntimeInstallRefusal as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(23)
+"""
+    command = private_child_command(
+        [sys.executable, "-B", "-c", script, str(payload), str(generation)],
+        allowed=(host,),
+        fixture_root=host.parents[4],
+    )
+    positive = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert positive.returncode == 0 and positive.stdout.strip() == str(host)
+    prior = _snapshot(paths["runtime_home"])
+    if damage == "missing":
+        host.unlink()
+    elif damage == "malformed":
+        host.write_bytes(b"#!/bin/sh\nexit 0\n")
+    elif damage == "symlink":
+        host.unlink()
+        host.symlink_to(generation / "libexec/vc-terminal")
+    else:
+        host.write_bytes(host.read_bytes() + b"fixture code drift")
+    negative = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert negative.returncode == 23, negative.stderr
+    reason = (
+        "differs from candidate signed terminal code"
+        if damage == "code"
+        else "host missing or malformed"
+    )
+    assert reason in negative.stderr
+    assert _snapshot(paths["runtime_home"]) == prior
 
 
 # This observer is deliberately independent of the installer's digest/receipt code.
@@ -63,6 +161,12 @@ def _snapshot(root: Path) -> dict[str, tuple]:
 
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch):
+    fixed_terminal_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "seed_runtime_pack",
+        private_runtime_pack_seed(installer._FIXED_TERMINAL_HOST),
+    )
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -259,9 +363,12 @@ def test_ready_resolution_uses_generation_host_and_one_physical_config(
     paths, _, result = installed
     envelope = _resolve(paths, capsys, status="ready")
     assert envelope["runtime"]["root"] == result["root"]
-    assert envelope["runtime"]["terminal_host"] == str(
-        Path(result["root"]) / "libexec/vc-terminal"
+    expected_host = (
+        installer._FIXED_TERMINAL_HOST
+        if sys.platform == "darwin"
+        else Path(result["root"]) / "libexec/vc-terminal"
     )
+    assert envelope["runtime"]["terminal_host"] == str(expected_host)
     assert envelope["runtime"]["frame_config"] == str(
         Path.home() / ".config/vibecrafted/vc-frame"
     )
@@ -470,7 +577,7 @@ def test_parallel_resolvers_are_read_only_and_agree(installed, capsys):
     command = [
         sys.executable,
         "-B",
-        str(REPO_ROOT / "scripts/vetcoders_install.py"),
+        str(Path(result["root"]) / "scripts/vetcoders_install.py"),
         "runtime-resolve",
         "--runtime-home",
         str(paths["runtime_home"]),
@@ -479,7 +586,18 @@ def test_parallel_resolvers_are_read_only_and_agree(installed, capsys):
 
     def invoke(_):
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=20, check=True
+            private_child_command(
+                command,
+                allowed=(
+                    installer._FIXED_TERMINAL_HOST,
+                    Path(result["root"]) / "libexec/vc-terminal",
+                ),
+                fixture_root=installer._FIXED_TERMINAL_HOST.parents[4],
+            ),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
         )
         return json.loads(completed.stdout)
 
@@ -1115,8 +1233,13 @@ def _crash_install(payload: Path, paths: dict, cut: str) -> None:
 import os, sys
 from pathlib import Path
 from argparse import Namespace
-from scripts import vetcoders_install as owner
 payload, runtime, product, launcher, cut = map(str, sys.argv[1:])
+import importlib.util
+sys.path.insert(0, str(Path(payload) / "scripts"))
+spec = importlib.util.spec_from_file_location("private_installer", Path(payload) / "scripts/vetcoders_install.py")
+owner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = owner
+spec.loader.exec_module(owner)
 real_replace = os.replace
 rollback = False
 
@@ -1136,17 +1259,21 @@ os.replace = crash
 owner.cmd_runtime_install(Namespace(payload_root=payload, app_root=None, terminal_host=None, frame_helper=None))
 """
     result = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-c",
-            script,
-            str(payload),
-            str(paths["runtime_home"]),
-            str(paths["product_config"]),
-            str(paths["launcher_home"]),
-            cut,
-        ],
+        private_child_command(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                script,
+                str(payload),
+                str(paths["runtime_home"]),
+                str(paths["product_config"]),
+                str(paths["launcher_home"]),
+                cut,
+            ],
+            allowed=(installer._FIXED_TERMINAL_HOST, payload / "bin/vc-terminal"),
+            fixture_root=installer._FIXED_TERMINAL_HOST.parents[4],
+        ),
         cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,
@@ -1576,6 +1703,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('VIBECRAFTED_RUNTIME_ROOT','VIBECRAFTED_RUNTIME_BIN','VIBECRAFTED_ROOT','VIBECRAFTED_TERMINAL_HOST','VIBECRAFTED_VC_FRAME_BIN','VIBECRAFTED_PYTHON','XDG_CONFIG_HOME','VC_FRAME_CONFIG_DIR','VC_FRAME_CONFIG_FILE','PYTHONPATH')}}}}))\n"
     )
     host.chmod(0o755)
+    selected_host = bind_private_terminal_wrapper(wrapper, host)
     monkeypatch.setenv("HOME", str(home))
     for key in (
         "VIBECRAFTED_RUNTIME_ROOT",
@@ -1602,7 +1730,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
             assert environment[key] == str(generation)
         assert environment["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
-        assert environment["VIBECRAFTED_TERMINAL_HOST"] == str(host)
+        assert environment["VIBECRAFTED_TERMINAL_HOST"] == str(selected_host)
         assert environment["VIBECRAFTED_VC_FRAME_BIN"] == str(
             generation / "libexec/vc-frame"
         )
@@ -1664,65 +1792,55 @@ def _terminal_wrapper_generation(tmp_path: Path) -> tuple[Path, Path, Path]:
     libexec = generation / "libexec/vc-terminal"
     libexec.write_text("#!/bin/sh\nprintf 'libexec-ran\\n'\n")
     libexec.chmod(0o755)
-    return generation, wrapper, libexec
+    selected_host = bind_private_terminal_wrapper(wrapper, libexec)
+    return generation, wrapper, selected_host
 
 
 @pytest.mark.skipif(
     sys.platform != "darwin",
     reason=".app is a Darwin identity mechanism; other platforms keep the flat host",
 )
-def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
-    tmp_path, monkeypatch
-):
+def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
     home = tmp_path / "home"
     entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
     entry.write_text("[general]\n")
-    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
-    bundle_host = (
-        tmp_path
-        / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    generation, wrapper, host = _terminal_wrapper_generation(tmp_path)
+    host.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'host': sys.argv[0]}))\n"
     )
-    _bundle_capture_host(bundle_host, sys.executable)
+    if sys.platform == "darwin":
+        from _runtime_pack_fixture import sign_private_terminal_pair
+
+        # Keep the private pair: identical recorder bytes, one ad-hoc signature.
+        # `captured["host"] == str(host)` below still proves the bundle path ran.
+        paired = generation / "libexec/vc-terminal"
+        paired.write_text(host.read_text())
+        sign_private_terminal_pair(paired, host)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    legacy = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(legacy, sys.executable)
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(legacy))
     result = subprocess.run(
         [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
-    capture = json.loads(result.stdout)
-    assert capture["host"] == str(bundle_host)
-    assert capture["argv"] == ["--config-file", str(entry), "-e", "true"]
-
-    generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
-    _bundle_capture_host(generation_bundle, sys.executable)
-    monkeypatch.delenv("VIBECRAFTED_TERMINAL_HOST")
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    capture = json.loads(result.stdout)
-    assert capture["host"] == str(generation_bundle)
-
-    # An incomplete bundle must not masquerade as a valid branded host.
-    (generation_bundle.parents[1] / "Resources/alacritty.icns").unlink()
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "libexec-ran\n"
-
-    # Nor may a complete bundle that never received the canonical stamp: the
-    # donor ships its own CFBundleName and the builder overwrites it in both
-    # payloads, so an unstamped bundle is somebody else's app.
-    donor_bundle = tmp_path / "donor/vc-terminal.app/Contents/MacOS/alacritty"
-    _bundle_capture_host(donor_bundle, sys.executable, name="Alacritty")
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(donor_bundle))
-    result = subprocess.run(
-        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "libexec-ran\n"
+    captured = json.loads(result.stdout)
+    assert captured["host"] == str(host)
+    assert captured["argv"] == ["--config-file", str(entry), "-e", "true"]
+    # A generation bundle or inherited override never rescues a missing or
+    # symlinked fixed host. Keep the flat generation engine present as control.
+    host.unlink()
+    for symlink in (False, True):
+        if symlink:
+            host.symlink_to(legacy)
+        refused = subprocess.run(
+            [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+        )
+        assert refused.returncode == 78, refused.stderr
+        assert not refused.stdout
+        assert "fixed signed host missing" in refused.stderr
 
 
 @pytest.mark.skipif(
@@ -1877,12 +1995,24 @@ def test_terminal_wrapper_invalid_spec_uses_product_shell_without_writing_config
     primary = terminal / "launch-primary-shell.zsh"
     shutil.copy2(REPO_ROOT / "config/alacritty/launch-primary-shell.zsh", primary)
     generation, wrapper, native = _terminal_wrapper_generation(tmp_path)
-    (generation / "bin/python3").symlink_to(sys.executable)
+    door = generation / "bin/python3"
+    if door.is_symlink():
+        # The private terminal binder already owns this generation's door.
+        assert door.readlink() == Path(sys.executable)
+    else:
+        door.symlink_to(sys.executable)
     (generation / "scripts").symlink_to(REPO_ROOT / "scripts")
     native.write_text(
         f"#!{sys.executable}\nimport json, os, sys\n"
         "print(json.dumps({'argv': sys.argv[1:], 'error': os.environ.get('VIBECRAFTED_TERMINAL_STARTUP_ERROR')}))\n"
     )
+    if sys.platform == "darwin":
+        from _runtime_pack_fixture import sign_private_terminal_pair
+
+        # `native` is the bound bundle host: re-pair its rewritten recorder.
+        paired = generation / "libexec/vc-terminal"
+        paired.write_text(native.read_text())
+        sign_private_terminal_pair(paired, native)
     monkeypatch.setenv("HOME", str(home))
     before = _snapshot(home)
     for _ in range(2):
@@ -2325,7 +2455,7 @@ def _installed_policy(roots) -> dict:
 
 def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys):
     """A first install must produce the chrome the product promises."""
-    _install(
+    result = _install(
         seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a"),
         capsys,
     )
@@ -2336,6 +2466,48 @@ def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys
     assert {
         policy["font"][face]["family"] for face in ("normal", "bold", "italic")
     } == {_PRODUCT_FONT_FAMILY}
+    assert policy["colors"].get("transparent_background_colors", False) is True
+    staged = tomllib.loads(
+        (Path(result["root"]) / "config/vc-terminal/vibecrafted.toml").read_text()
+    )
+    assert staged["colors"].get("transparent_background_colors", False) is True
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_applies_rgb_background_opacity_and_preserves_preferences(
+    tmp_path, roots, capsys
+):
+    """New background policy must reach an existing, customized terminal."""
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    previous = incoming.replace("transparent_background_colors = true\n", "")
+    assert (
+        tomllib.loads(previous)["colors"].get("transparent_background_colors", False)
+        is False
+    )
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    _user_edit(policy, b"opacity = 0.9", b"opacity = 0.75")
+    _user_edit(policy, b'family = "Spot Mono"', b'family = "Founder Mono"')
+    _user_edit(policy, b'background = "#0b0b12"', b'background = "#112233"')
+    _user_edit(
+        policy,
+        b'key = "Enter"\nmods = "Shift"',
+        b'key = "Enter"\nmods = "Control"',
+    )
+    expected = _installed_policy(roots)
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    expected["colors"]["transparent_background_colors"] = True
+    assert _installed_policy(roots) == expected
     _resolve(roots, capsys, status="ready")
 
 

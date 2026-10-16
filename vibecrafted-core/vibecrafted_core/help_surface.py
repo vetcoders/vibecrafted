@@ -26,6 +26,7 @@ _FLEET_AGENT_ORDER = (
     "cursor",
     "kimi",
     "copilot",
+    "omp",
 )
 FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
 AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"
@@ -401,6 +402,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
 CORE_SURFACE_COMMANDS = (
     "claims",
     "message",
+    "reinstall",
     "relocate",
     "resume-session",
     "settlements",
@@ -475,6 +477,7 @@ Commands:
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
   update               Update to the latest release
+  reinstall --clean    Stop everything, reinstall, resurrect sessions + agents
   uninstall            Remove runtime; preserve Founder data and unknowns
   help [topic|--all]   This deck · full reference
 
@@ -640,7 +643,7 @@ def _option_lines(topic: str) -> list[str]:
         "  --base <ref|SHA|HEAD>          Pinned commit; local HEAD or identity remote HEAD by default",
         "  --execution-runtime <living-tree|local-worktrees>  Execution location",
         "  --worktree [true|false]        Alias for local-worktrees; dirty parent preserved",
-        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
+        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: per-agent/global config, else auto)",
         "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
         "  --remediate-trust-block       Founder-authorized continuation on a trust BLOCK; does not rewrite the journal",
         "  --remediation-reason <text>   Required with --remediate-trust-block; recorded on the launch receipt",

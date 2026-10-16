@@ -79,7 +79,7 @@ _SESSION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
             re.IGNORECASE,
         ),
     )
-    for agent in ("claude", "codex", "agy", "junie", "grok", "cursor", "copilot")
+    for agent in ("claude", "codex", "agy", "junie", "grok", "cursor", "copilot", "omp")
 }
 
 _SANDBOX_SUPPORTED_AGENTS = {

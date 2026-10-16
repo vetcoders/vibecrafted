@@ -80,7 +80,7 @@ _cyan='\033[36m'
 _red='\033[31m'
 _reset='\033[0m'
 
-_agents=(claude codex agy junie grok cursor kimi copilot)
+_agents=(claude codex agy junie grok cursor kimi copilot omp)
 _skills=(audit canary decorate delegate dou followup guard hydrate implement intents justdo marbles ownership partner polarize prune release research review scaffold trust workflow)
 
 _script_repo_root() {
@@ -229,7 +229,7 @@ PY
 _has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok|cursor|kimi|copilot) return 0 ;;
+    claude|codex|agy|junie|grok|cursor|kimi|copilot|omp) return 0 ;;
     gemini) return 1 ;;  # deprecated - see migration error below
     *) return 1 ;;
   esac
@@ -273,6 +273,7 @@ _require_agent_cli() {
       cursor) printf '    curl https://cursor.com/install -fsS | bash\n' >&2 ;;
       kimi) printf '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' >&2 ;;
       copilot) printf '    npm install -g @github/copilot\n' >&2 ;;
+      omp) printf '    curl -fsSL https://omp.sh/install | sh\n' >&2 ;;
     esac
     printf '  Or check the whole fleet: vibecrafted doctor\n' >&2
   fi
@@ -800,7 +801,7 @@ _print_ship_path() {
 
 cmd_skill_help() {
   local skill="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi|copilot>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi|copilot|omp>}"
   local wrapper="vc-$skill"
   local display_skill="$skill"
   local version=""
@@ -956,24 +957,23 @@ cmd_start_help() {
   printf '          Rules: 1-24 characters, no / or \\, no leading -, no control characters,\n'
   printf '          no leading/trailing whitespace. Reserved words: operator, vibecrafted\n'
   printf '          (= default start), resume (= deliberate re-entry). Nothing is normalized.\n'
-  printf '  Create: create-only. The live vc-frame inventory is read first; a session with\n'
-  printf '          the same name (attached, detached or EXITED) refuses the start with the\n'
-  printf '          attach/switch/rename commands. Nothing is attached, switched, killed,\n'
-  printf '          renamed or suffixed for you. Two concurrent starts yield one workspace\n'
-  printf '          and one refusal (vc-frame creates exclusively).\n'
-  printf '  Enter:  with a terminal outside Frame, enter the new workspace.\n'
-  printf '          Inside Frame, CLI entry requires exactly one client on the source session.\n'
+  printf '  Enter:  an existing live workspace is attached or switched to; an EXITED\n'
+  printf '          workspace is restored in place; a missing workspace is created.\n'
+  printf '          An unreadable inventory or a known name owned by another repository\n'
+  printf '          refuses safely. Names are never silently changed or suffixed.\n'
+  printf '          From a foreign terminal, open the active-generation VC Terminal.\n'
+  printf '          Owned terminal re-entry attaches directly; unknown Frame host opens VC Terminal.\n'
   printf '          With multiple source clients, use the Sessions rail or Cmd-Up/Down.\n'
   printf '          The destination may already have multiple clients.\n'
   printf '          Each session owns its tabs and one chrome; multiple clients may attach.\n'
   printf '          Cmd-Up/Down switches sessions; Cmd-Left/Right switches local tabs.\n'
-  printf '          Without a terminal, VC Terminal opens on the repository to enter it.\n'
+  printf '          Without a terminal, VC Terminal also opens on the requested repository.\n'
   printf '  Frame:  --new-host creates another Operator Frame session on the active generation.\n'
   printf '          Names: vc-host@<shortgen>, then -2, -3; existing sessions stay intact.\n'
   printf '          Ordinary project entry does not replace or join an older Operator Frame.\n'
   printf '          In scripts, pass --new-host explicitly; resume deliberately keeps its owner.\n'
   printf '          Operator Frame is session 00; projects start at 01 in the Sessions rail.\n'
-  printf '  Exit:   0 entered · 2 usage/name/root · 3 workspace exists · 4 inventory/create\n'
+  printf '  Exit:   0 entered · 2 usage/name/root · 3 foreign name collision · 4 inventory/restore/create\n'
   printf '          Native entry propagates the Frame exit status.\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
@@ -1142,9 +1142,9 @@ cmd_resume_help() {
   printf '  Resume a stopped control-plane run, a provider session, or AICX continuity.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot> --run-id <work-...> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot> --session <provider-uuid> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> --session <provider-uuid> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]\n'
   printf '\n'
   printf '%bAfter stop:%b\n' "$_bold" "$_reset"
   printf '  Stop kills the process group. There is no same-PGID restart.\n'
@@ -1204,7 +1204,7 @@ cmd_fork_help() {
   printf '  --repo <path|org/name>              canonical repository (--root: equivalent legacy alias)\n'
   printf '  --runtime visible|terminal          bare interactive fork (default: visible)\n'
   printf '  --runtime headless                  task fork with --prompt/--file (default with input)\n'
-  printf '  --placement right|floating          pane shape (default: right)\n'
+  printf '  --placement right|floating          pane shape (default: floating)\n'
   printf '  --model <name>                      provider model override\n'
   printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
   printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
@@ -1225,8 +1225,8 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor|kimi|copilot] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
-  printf '  vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
+  printf '  vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
   printf '  terminal  (default) open a tab in the vc-frame cockpit; missing host support refuses\n'
@@ -1260,8 +1260,8 @@ cmd_partner_help() {
   printf '  --prompt/--file remain interactive; without a TTY the canonical VC Terminal handoff is used.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor|kimi|copilot] [--runtime terminal|visible|plain]\n'
-  printf '  vc-partner [claude|codex|agy|junie|grok|cursor|kimi|copilot]\n'
+  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp] [--runtime terminal|visible|plain]\n'
+  printf '  vc-partner [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner claude\n'
@@ -1278,8 +1278,8 @@ cmd_operator_help() {
   printf '  Opens a TTY face with /vc-operator — same family as init, not a worker job.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor|kimi|copilot] [--runtime terminal|visible]\n'
-  printf '  vc-operator [claude|codex|agy|junie|grok|cursor|kimi|copilot]\n'
+  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp] [--runtime terminal|visible]\n'
+  printf '  vc-operator [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted operator claude\n'
@@ -1397,10 +1397,11 @@ cmd_telemetry_help() {
   printf '  telemetry junie line|once|sessions|daemon|archive\n'
   printf '  telemetry copilot line|once|sessions|daemon|archive\n'
   printf '  telemetry cursor line|once|sessions|daemon|archive\n'
+  printf '  telemetry omp line|once|sessions|archive\n'
   printf '  telemetry line                        Statuslines of present engines\n'
-  printf '  telemetry once                        JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor\n'
+  printf '  telemetry once                        JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor, omp\n'
   printf '  telemetry archive                     Backfill daily usage archives for present engines\n'
-  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi|copilot>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
   printf '  vibecrafted telemetry <same>\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
   printf '\n'
@@ -1420,7 +1421,7 @@ _telemetry_engine_script() {
   local engine="${1:-}"
   local package_root script
   case "$engine" in
-    agy|kimi|codex|claude|grok|junie|copilot|cursor) ;;
+    agy|kimi|codex|claude|grok|junie|copilot|cursor|omp) ;;
     *) return 1 ;;
   esac
   package_root="$(_package_resource_root 2>/dev/null || true)"
@@ -1480,6 +1481,11 @@ _telemetry_engine_mode_ok() {
         line|once|daemon|tui|archive) return 0 ;;
       esac
       ;;
+    omp)
+      case "$mode" in
+        line|once|sessions|archive) return 0 ;;
+      esac
+      ;;
     codex|claude|grok|junie|copilot|cursor)
       case "$mode" in
         line|once|sessions|daemon|archive) return 0 ;;
@@ -1517,7 +1523,7 @@ cmd_telemetry_engine() {
 
 cmd_telemetry_line() {
   local engine ran=0 rc=0
-  for engine in agy kimi codex claude grok junie copilot cursor; do
+  for engine in agy kimi codex claude grok junie copilot cursor omp; do
     _telemetry_engine_script "$engine" >/dev/null 2>&1 || continue
     ran=1
     _telemetry_run_engine "$engine" line "$@" || rc=$?
@@ -1534,7 +1540,7 @@ cmd_telemetry_once() {
   python_bin="$(_telemetry_python)" || return 1
   mkdir -p "$crafted_home/tmp"
   tmpdir="$(mktemp -d "$crafted_home/tmp/telemetry-once.XXXXXX")"
-  for engine in agy kimi codex claude grok junie copilot cursor; do
+  for engine in agy kimi codex claude grok junie copilot cursor omp; do
     if script="$(_telemetry_engine_script "$engine")"; then
       "$python_bin" "$script" once "$@" > "$tmpdir/$engine.json" 2>"$tmpdir/$engine.err" || true
       if [[ ! -s "$tmpdir/$engine.json" ]]; then
@@ -1547,7 +1553,7 @@ cmd_telemetry_once() {
   ONCE_DIR="$tmpdir" "$python_bin" - <<'PY'
 import json, os, pathlib
 
-order = ["agy", "kimi", "codex", "claude", "grok", "junie", "copilot", "cursor"]
+order = ["agy", "kimi", "codex", "claude", "grok", "junie", "copilot", "cursor", "omp"]
 root = pathlib.Path(os.environ["ONCE_DIR"])
 union = {}
 for agent in order:
@@ -1636,7 +1642,7 @@ EOF
 
 cmd_telemetry_archive() {
   local engine ran=0 rc=0
-  for engine in agy kimi codex claude grok junie copilot cursor; do
+  for engine in agy kimi codex claude grok junie copilot cursor omp; do
     _telemetry_engine_script "$engine" >/dev/null 2>&1 || continue
     ran=1
     _telemetry_run_engine "$engine" archive "$@" || rc=$?
@@ -1770,7 +1776,7 @@ cmd_telemetry() {
     smoke)
       cmd_telemetry_smoke "$@"
       ;;
-    agy|kimi|codex|claude|grok|junie|copilot|cursor)
+    agy|kimi|codex|claude|grok|junie|copilot|cursor|omp)
       cmd_telemetry_engine "$subcommand" "$@"
       ;;
     line)
@@ -2077,8 +2083,15 @@ _server_helper_python() {
 }
 
 _server_python() {
-  local python_bin
+  local python_bin core_dir owner_root
   python_bin="$(_server_helper_python)" || return $?
+  if [[ "${1:-}" == "pair-health" && -f "${2:-}/guardian.execution.json" ]]; then
+    # -I deliberately ignores ambient PYTHONPATH. Admit only the physical
+    # launcher's selected core for the embedded Guardian probe.
+    core_dir="$(_core_module_dir)" || return 78
+    owner_root="$(_script_owner_root)" || return 78
+    set -- "$@" "$core_dir" "$owner_root"
+  fi
   "$python_bin" -I - "$@" <<'PY'
 from __future__ import annotations
 
@@ -3054,6 +3067,45 @@ elif operation == "status-read":
         print(f"{host}\t{port}")
 elif operation == "pair-health":
     runtime_dir = Path(args[0])
+    if (runtime_dir / "guardian.execution.json").exists():
+        if len(args) != 3:
+            fail("selected launcher core missing for embedded Guardian probe", 78)
+        core_dir = Path(args[-2])
+        owner_root = Path(args[-1])
+        package_dir = core_dir / "vibecrafted_core"
+        resolved_core = core_dir.resolve()
+        resolved_package = package_dir.resolve()
+        if not (
+            resolved_core == owner_root / "vibecrafted-core"
+            and resolved_package == resolved_core / "vibecrafted_core"
+        ) and not (
+            owner_root.name == "vibecrafted_core"
+            and resolved_package == owner_root
+            and resolved_core == owner_root.parent
+        ):
+            fail("selected launcher core outside physical owner", 78)
+        if not core_dir.is_absolute() or any(
+            not path.is_file() or path.is_symlink()
+            for path in (package_dir / "__init__.py", package_dir / "server_supervisor.py")
+        ):
+            fail("selected launcher core missing for embedded Guardian probe", 78)
+        sys.path.insert(0, str(core_dir))
+        from vibecrafted_core.server_supervisor import (
+            SupervisorPaths, _managed_pair_in_process_healthy, _managed_pair_snapshot,
+        )
+        paths = SupervisorPaths.create(
+            home=runtime_dir.parent,
+            runtime_home=Path(os.environ.get("VIBECRAFTED_RUNTIME_HOME", str(Path.home() / ".local/share/vibecrafted"))),
+            operator_home=Path.home(),
+        )
+        status = read_json(runtime_dir / "status.json")
+        host, port = validate_endpoint(status.get("host", "127.0.0.1"), status.get("port", 3024))
+        if not _managed_pair_in_process_healthy(paths, host=host, port=port):
+            fail("server or embedded Guardian is not ready", 4)
+        snapshot = _managed_pair_snapshot(paths)
+        print(f"Server: RUNNING (PID {snapshot['server_pid']}, listening on {origin(host, port)})")
+        print(f"Guardian: RUNNING (supervisor thread, owner PID {snapshot['guardian_owner_pid']})")
+        raise SystemExit(0)
     audit_process_probe("pair-health", os.getpid())
 
     def first_line(path: Path) -> str:
@@ -3944,6 +3996,11 @@ _guardian_binary() {
 }
 
 _stop_guardian() {
+  # Embedded recovery is stopped by its supervisor owner, never by signalling
+  # the shared PID as though it were an independent Guardian child.
+  if [[ "${VIBECRAFTED_GUARDIAN_EXECUTION:-}" == "supervisor-thread" ]]; then
+    return 0
+  fi
   _stop_managed_process guardian Guardian
 }
 
@@ -3967,6 +4024,10 @@ _guardian_ready_receipt_state() {
 }
 
 _ensure_guardian() {
+  if [[ "${VIBECRAFTED_GUARDIAN_EXECUTION:-}" == "supervisor-thread" ]]; then
+    # The supervisor proves readiness itself after this bounded server start.
+    return 0
+  fi
   local host="${1:-127.0.0.1}"
   local port="${2:-3024}"
   local runtime_dir guardian_pid_file guardian_url_file guardian_ready_path_file
@@ -4178,6 +4239,11 @@ cmd_server() {
   esac
   if [[ "$lifecycle_mutation" -eq 1 ]] && ! _server_lifecycle_lock_is_owned; then
     _with_server_lifecycle_lock "$verb" "$@"
+    return $?
+  fi
+  if [[ "$verb" == "start" && \
+    "${VIBECRAFTED_SERVER_SUPERVISOR_CHILD:-0}" != "1" ]]; then
+    _server_supervisor_cli service start "$@"
     return $?
   fi
   if [[ "$verb" == "stop" && \
@@ -4486,6 +4552,11 @@ cmd_server() {
     status)
       local runtime_dir
       runtime_dir="$(_server_runtime_dir)"
+      if [[ -f "$runtime_dir/guardian.execution.json" ]]; then
+        _server_supervisor_cli runtime-status || return $?
+        _server_python pair-health "$runtime_dir"
+        return $?
+      fi
       local pid_file="$runtime_dir/server.pid"
       local guardian_pid_file="$runtime_dir/guardian.pid"
       local status_file="$runtime_dir/status.json"
@@ -4640,14 +4711,7 @@ cmd_server() {
       else
         printf "  [%b!%b] Compatibility binary missing at %s\n" "$_yellow" "$_reset" "$compat_server_bin"
       fi
-      local guardian_bin
-      guardian_bin="$(_guardian_binary 2>/dev/null || true)"
-      if [[ -n "$guardian_bin" && -x "$guardian_bin" ]]; then
-        printf "  [%b✓%b] Guardian entrypoint present and executable at %s\n" "$_green" "$_reset" "$guardian_bin"
-      else
-        printf "  [%b✗%b] Guardian entrypoint vc-guardian is missing or not executable\n" "$_red" "$_reset"
-        has_errors=1
-      fi
+      printf "  Guardian recovery owner: vc-server-supervisor (embedded thread)\n"
 
       # 2. Site root & Fonts check
       if [[ -d "$site_root" ]]; then
@@ -4743,6 +4807,13 @@ cmd_server() {
         has_errors=1
       fi
 
+      if [[ -f "$runtime_dir/guardian.execution.json" ]]; then
+        if _server_python pair-health "$runtime_dir"; then
+          printf "  [%b✓%b] Embedded Guardian readiness verified\n" "$_green" "$_reset"
+        else
+          has_errors=1
+        fi
+      else
       case "$guardian_state" in
         missing)
           if [[ $server_healthy -eq 1 ]]; then
@@ -4781,6 +4852,7 @@ cmd_server() {
           ;;
       esac
 
+      fi
       if [[ "$server_state" == "missing" && "$guardian_state" == "missing" ]]; then
         printf "  [%b✓%b] Server/guardian lifecycle is cleanly stopped\n" "$_green" "$_reset"
       fi
@@ -4843,7 +4915,8 @@ cmd_tui() {
   deck_path="$deck_path/scripts/vibecrafted"
   state_root="$crafted_home/control_plane"
 
-  _sync_control_plane_best_effort
+  # Voc draws its loading state immediately and reads the canonical projection
+  # on its existing refresh worker; launching must not wait for a full sync.
 
   if [[ -n "${binary_path:-}" && -x "$binary_path" ]]; then
     "$binary_path" --state-root "$state_root" --deck "$deck_path" "$@"
@@ -4905,7 +4978,7 @@ cmd_help() {
   case "$topic" in
     ""|-h|--help)
       ;;
-    claude|codex|agy|junie|grok|cursor|kimi|copilot)
+    claude|codex|agy|junie|grok|cursor|kimi|copilot|omp)
       cmd_agent_help "$topic"
       return
       ;;
@@ -4998,7 +5071,7 @@ cmd_help() {
       cmd_fork_help
       return
       ;;
-    claims|message|relocate|resume-session|settlements)
+    claims|message|reinstall|relocate|resume-session|settlements)
       if _run_core_help "$topic"; then
         return 0
       fi
@@ -5058,6 +5131,7 @@ cmd_help() {
   printf '  %bclaims%b               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)\n' "$_cyan" "$_reset"
   printf '  %bsettlements%b          Read-only f/x/n ledger query (summary|list|inspect)\n' "$_cyan" "$_reset"
   printf '  %bupdate%b               Update to the latest release\n' "$_cyan" "$_reset"
+  printf '  %breinstall --clean%b    Stop everything, reinstall, resurrect sessions + agents\n' "$_cyan" "$_reset"
   printf '  %buninstall%b            Remove runtime; preserve Founder data and unknowns\n' "$_cyan" "$_reset"
   printf '  %bhelp%b [topic|--all]   This deck · full reference\n' "$_cyan" "$_reset"
   printf '\n'
@@ -5065,7 +5139,7 @@ cmd_help() {
   printf '  scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release\n'
   printf '  %b14 more skills: vibecrafted help --all%b\n' "$_dim" "$_reset"
   printf '\n'
-  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor · kimi · copilot\n' "$_bold" "$_reset"
+  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor · kimi · copilot · omp\n' "$_bold" "$_reset"
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
@@ -5141,8 +5215,9 @@ cmd_help_full() {
   printf '  %btelemetry junie%b line|once|sessions|daemon Junie session ledger\n' "$_cyan" "$_reset"
   printf '  %btelemetry copilot%b line|once|sessions|daemon Copilot session ledger\n' "$_cyan" "$_reset"
   printf '  %btelemetry cursor%b line|once|sessions|daemon Cursor has no local token ledger\n' "$_cyan" "$_reset"
+  printf '  %btelemetry omp%b line|once|sessions|daemon    omp session ledger\n' "$_cyan" "$_reset"
   printf '  %btelemetry line%b                            Statuslines of present engines\n' "$_cyan" "$_reset"
-  printf '  %btelemetry once%b                            JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor\n' "$_cyan" "$_reset"
+  printf '  %btelemetry once%b                            JSON union of agy, kimi, codex, claude, grok, junie, copilot, cursor, omp\n' "$_cyan" "$_reset"
   printf '  %btelemetry smoke%b [flags]                   Smoke the headless marbles telemetry path\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted telemetry%b <same>               Same entrypoint through the main deck\n' "$_cyan" "$_reset"
   printf '\n'
@@ -5158,12 +5233,12 @@ cmd_help_full() {
   printf '  %bvibecrafted dashboard gc%b [flags]      Prune dead/stale vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard switch%b <name>   Switch to session (vc-frame-native)\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted housekeeping%b plan|run|schedule  Disk-space reclaim + auto schedule\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Create a vc-frame workspace (create-only)\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Enter the repository workspace\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted gui%b                       Public/local-web launch + observe surface\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"
   printf '\n'
-  printf '%b  Agents: claude · codex · agy · junie · grok · cursor · kimi · copilot%b\n' "$_bold" "$_reset"
+  printf '%b  Agents: claude · codex · agy · junie · grok · cursor · kimi · copilot · omp%b\n' "$_bold" "$_reset"
   printf '\n'
   printf '%b=== ADDITIONAL SKILLS ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -5197,6 +5272,7 @@ cmd_help_full() {
   printf '  %bvibecrafted settlements%b summary|list|inspect               Read-only f/x/n ledger\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted status%b                    Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted update%b                     Pull latest + reinstall\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted reinstall%b --clean --dry-run  Snapshot sessions/agents; plan kill → install → resurrect\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted doctor%b                    Installation health check\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted version%b                   Print version\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted uninstall%b                 Reverse the install\n' "$_cyan" "$_reset"
@@ -5380,8 +5456,12 @@ cmd_core_workflow_skill() {
 }
 
 cmd_init() {
-  # Leading --help must never be parsed as an agent name (vc-init --help audit).
-  if _is_help_flag "${1:-}"; then
+  # Deck help is leading or immediately after a registered agent, before CLI
+  # admission. Later flags belong to the helper; prompt values and -- tails
+  # must never be scanned as help requests.
+  if _is_help_flag "${1:-}" || {
+    _has_agent "${1:-}" && _is_help_flag "${2:-}"
+  }; then
     cmd_init_help
     return 0
   fi
@@ -6373,7 +6453,7 @@ cmd_fork() {
     return 1
   }
 
-  local selector="" run_id="" runtime="" placement="right"
+  local selector="" run_id="" runtime="" placement="floating"
   local input_explicit=""
   local model="" permissions="" repo_dir="" root_dir="" prompt=""
   local plan_file="" base="" execution="" worktree=""
@@ -6516,16 +6596,15 @@ cmd_fork() {
     if [[ "$runtime" == terminal ]]; then
       _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
     else
-      _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" "$command_text" "$root_dir"
+      _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" "$command_text" "$root_dir" "" "$agent" "$placement"
     fi
     return $?
   fi
 
-  local vc_frame_bin session_name repo_label pane_title cmd_script
+  local vc_frame_bin session_name pane_title cmd_script
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
   session_name="$projection_host"
-  repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
-  pane_title="${agent} fork @${repo_label} ${session_id}"
+  pane_title="$(_vetcoders_interactive_pane_title "$agent" "$root_dir" "$model")"
   cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
   _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
 
@@ -6624,7 +6703,7 @@ cmd_capabilities() {
 
 cmd_lifecycle_help() {
   local verb="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi|copilot>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi|copilot|omp>}"
   local description=""
   local flags="--last|--run-id <id>"
   case "$verb" in
@@ -6879,6 +6958,10 @@ run_wrapper() {
     cmd_update "$@"
     return
   fi
+  if [[ "$wrapper" == "vc-reinstall" ]]; then
+    cmd_core_cli reinstall "$@"
+    return
+  fi
   if [[ "$wrapper" == "vc-receipt" ]]; then
     cmd_receipt "$@"
     return
@@ -7000,12 +7083,13 @@ main() {
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
     claims|message|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
+    reinstall) cmd_core_cli reinstall "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
     agents) cmd_agents "$@" ;;
     swarm) cmd_swarm "$@" ;;
-    claude|codex|gemini|agy|junie|grok|cursor|kimi|copilot)
+    claude|codex|gemini|agy|junie|grok|cursor|kimi|copilot|omp)
       local action="${1:-<action>}"
       printf '%b✗%b Agent-first grammar was removed: vibecrafted %s %s\n' "$_red" "$_reset" "$cmd" "$action" >&2
       if [[ "$action" == "<action>" ]] || _is_help_flag "$action"; then

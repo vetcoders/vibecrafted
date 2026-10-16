@@ -120,18 +120,19 @@ simplified_ui true
 `layouts/operator.kdl` is the one physical product layout: vc-start,
 `vibecrafted dashboard default`, `vibecrafted dashboard vibecrafted`, and
 native `default_layout "operator"` all resolve to it. It carries the same product
-tabs: **Start here**, **Agents**, **Shell**, and **voc**
+tabs: **Launchpad**, **Agents**, and **Shell**
 (no spaces in layout _filenames_; never `Vibecrafted Operator.kdl`):
 
 - `session_layer` (tagged `session_canvas`) — compact-bar brand + **SESSIONS
   rail always** + status-bar. `default_tab_template`, swap layouts, and every
   `tab` body are content-only; the parser mounts them inside `session_layer`
   (mirrors native `zellij-utils/assets/layouts/vibecrafted.kdl` in vc-frame)
-- tab **Start here** — product map (`about` / `guide_mode "mission-control"`)
+- tab **Launchpad** — product map (`about` / `guide_mode "mission-control"`)
 - tab **Agents** — Agent Workspaces dashboard; `[New agent]` creates an
   interactive Agent TTY on this tab, while PANE + arrows walks its faces
 - tab **Shell** — workspace shell
-- tab **voc** — observation door for this workspace, never the launcher itself
+- **Voc** — the single global console chip beside Composer in the top bar;
+  it is outside project tabs and session faces
 
 The interactive launcher deliberately exposes only contracts that stay in the
 current panel today: `init --runtime plain` and bare `resume`. The accepted

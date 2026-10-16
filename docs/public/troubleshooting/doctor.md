@@ -191,6 +191,14 @@ explicitly. `resume` remains deliberate re-entry. The new host has its own
 terminal when started from inside another host. Open projects from that host;
 workspaces remain guests and roles still come from layout identity markers.
 
+On macOS, if the fixed product-host handoff cannot prove the current signed
+app/Runtime Pack pair, `vc-start` stops without opening another window or
+allocating a `-2`, `-3`, or later replacement. The created host remains
+available. Verify that the app and active Runtime Pack are paired, then use the
+exact recovery command printed by the refusal (`vc-frame attach
+<reported-host>`). Do not repeat `--new-host` until the terminal/runtime pairing
+is healthy.
+
 ## Receipt — provenance on top of health
 
 Doctor proves the install is internally consistent. `vibecrafted receipt` proves where it **came from**:

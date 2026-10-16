@@ -4,15 +4,15 @@
 
 ```mermaid
 flowchart TD
-    A[Operator: vibecrafted marbles codex --prompt 'Fix what is still wrong'] --> B[Create or inherit ancestor run lock]
-    B --> C[Build ancestor prompt from one source]
-    C --> D[Launch L1 agent run and watcher]
-    D --> E[Collect finding, fix, and new evidence]
-    E --> F{Converged?}
-    F -->|no| G[Spawn next loop]
-    G --> E
-    F -->|yes| H[Write convergence report and return]
-    E -->|blocked after repeated attempts| I[Escalate to vc-partner]
+    A[Operator: vibecrafted marbles codex] --> B[Snapshot unchanged task and assigned root]
+    B --> D[Fresh blind WRITE worker: one cut, commit, report]
+    D --> E[Await informed READ receiver on guarded source]
+    E --> F[Validate evidence and merge reception ledger]
+    F --> G{Reception verdict and budget}
+    G -->|continue or shift within same task| D
+    G -->|verified convergence| H[Write parent report and terminal metadata]
+    G -->|budget exhausted: not converged| H
+    G -->|invalid or blocked| I[Escalate to Operator]
     I --> H
 ```
 
@@ -44,6 +44,9 @@ po faktycznym zakończeniu.
 
 ### Artefakty sesji
 
-- Korzeń artefaktów: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/marbles/`
-- Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
-- Outputy: raporty ancestora, raporty pętli, raporty zbieżności, transkrypty oraz sidecary `.meta.json` pod `marbles/reports/`
+- Obecny właściciel w core: `workflow_runtime.run_marbles`, nadzorowany przez `AsyncSupervisor`.
+- Raport rodzica: `report` z potwierdzenia launchu; dzieci leżą obok w `<run_id>-children/`.
+- Wyjścia WRITE: `marbles-L<N>.md`, transkrypt, prompt i metadane na tym samym przydzielonym korzeniu.
+- Wyjścia READ: osobne artefakty `marbles-L<N>-reception`; `reception.json` trzyma przyjęte findingi, metryki, routing i końcowy werdykt. Stan odbiorcy nigdy nie jest wstrzykiwany do promptów WRITE.
+- `--count` to maksimum, nie dowód zbieżności. Ukończony run może mieć `verdict: not_converged` po wyczerpaniu budżetu. Niepoprawna weryfikacja lub powtarzające się porażki dają `blocked`; tylko zweryfikowany pusty reception daje `converged`.
+- Natywny resume działa wyłącznie przez zweryfikowane adaptery; pozostali providerzy dostają świeżego poinformowanego odbiorcę READ. Strażnik źródeł macOS chroni przydzielone pliki i współdzielone metadane Gita. Hosty bez tego strażnika na razie jawnie blokują reception.

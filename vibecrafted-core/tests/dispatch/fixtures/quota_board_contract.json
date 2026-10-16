@@ -1,0 +1,222 @@
+{
+  "agents": [
+    {
+      "age_s": "<old>",
+      "agent": "agy",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "gemini-3.1-pro-high · stale",
+      "headline": "EXHAUSTED",
+      "id": "agy",
+      "model": "gemini-3.1-pro-high",
+      "name": "Antigravity",
+      "observed_at": "<observed_at>",
+      "pool": "google",
+      "present": true,
+      "provenance": "agy-transcript",
+      "scope": {
+        "account": null,
+        "model": "gemini-3.1-pro-high",
+        "pool": "google"
+      },
+      "source": "~/.vibecrafted/telemetry/agy/quota.json",
+      "stale": true,
+      "state": "stale",
+      "status": "warn",
+      "tokens": null
+    },
+    {
+      "age_s": "<fresh>",
+      "agent": "claude",
+      "bars": [
+        {
+          "id": "limit",
+          "label": "limit",
+          "level": "warn",
+          "ratio": 0.97,
+          "text": "97%"
+        }
+      ],
+      "cost_usd": null,
+      "detail": "limit 97%",
+      "headline": "97%",
+      "id": "claude",
+      "model": null,
+      "name": "Claude",
+      "observed_at": "<observed_at>",
+      "pool": "anthropic",
+      "present": true,
+      "provenance": "fleet_engine",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "anthropic"
+      },
+      "source": "~/.vibecrafted/telemetry/claude/quota.json",
+      "stale": false,
+      "state": "low",
+      "status": "warn",
+      "tokens": null
+    },
+    {
+      "account": "acct-1",
+      "age_s": "<fresh>",
+      "agent": "codex",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "quota exhausted",
+      "headline": "EXHAUSTED",
+      "id": "codex",
+      "model": null,
+      "name": "Codex",
+      "observed_at": "<observed_at>",
+      "pool": "openai",
+      "present": true,
+      "provenance": "fleet_engine",
+      "scope": {
+        "account": "acct-1",
+        "model": null,
+        "pool": "openai"
+      },
+      "source": "~/.vibecrafted/telemetry/codex/quota.json",
+      "stale": false,
+      "state": "exhausted",
+      "status": "blocked",
+      "tokens": null
+    },
+    {
+      "age_s": null,
+      "agent": "copilot",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "invalid quota JSON: key must be a string at line 1 column 3",
+      "headline": "unreadable",
+      "id": "copilot",
+      "model": null,
+      "name": "Copilot",
+      "pool": "github",
+      "present": true,
+      "provenance": "unreadable",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "github"
+      },
+      "source": "~/.vibecrafted/telemetry/copilot/quota.json",
+      "stale": false,
+      "state": "malformed",
+      "status": "unknown",
+      "tokens": null
+    },
+    {
+      "age_s": "<fresh>",
+      "agent": "cursor",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "usage lives in Cursor cloud · unmeasured quota",
+      "headline": "cloud-only",
+      "id": "cursor",
+      "model": null,
+      "name": "Cursor",
+      "observed_at": "<observed_at>",
+      "pool": "anysphere",
+      "present": true,
+      "provenance": "cloud_unavailable",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "anysphere"
+      },
+      "source": "~/.vibecrafted/telemetry/cursor/quota.json",
+      "stale": false,
+      "state": "unknown",
+      "status": "unknown",
+      "tokens": null
+    },
+    {
+      "age_s": "<old>",
+      "agent": "grok",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "quota exhausted · stale",
+      "headline": "EXHAUSTED",
+      "id": "grok",
+      "model": null,
+      "name": "Grok",
+      "observed_at": "<observed_at>",
+      "pool": "xai",
+      "present": true,
+      "provenance": "fleet_engine",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "xai"
+      },
+      "source": "~/.vibecrafted/telemetry/grok/quota.json",
+      "stale": true,
+      "state": "stale",
+      "status": "warn",
+      "tokens": null
+    },
+    {
+      "age_s": "<fresh>",
+      "agent": "junie",
+      "bars": [],
+      "cost_usd": null,
+      "detail": "99000.0M tok · unmeasured quota",
+      "headline": "unmeasured",
+      "id": "junie",
+      "model": null,
+      "name": "Junie",
+      "observed_at": "<observed_at>",
+      "pool": "jetbrains",
+      "present": true,
+      "provenance": "local_sessions",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "jetbrains"
+      },
+      "source": "~/.vibecrafted/telemetry/junie/quota.json",
+      "stale": false,
+      "state": "unknown",
+      "status": "unknown",
+      "tokens": 99000000000
+    },
+    {
+      "age_s": "<fresh>",
+      "agent": "kimi",
+      "bars": [
+        {
+          "id": "limit5h",
+          "label": "5h",
+          "level": "unknown",
+          "ratio": null,
+          "text": "—"
+        }
+      ],
+      "cost_usd": null,
+      "detail": "5h —",
+      "headline": "—",
+      "id": "kimi",
+      "model": "Coding",
+      "name": "Kimi",
+      "observed_at": "<observed_at>",
+      "pool": "moonshot",
+      "present": true,
+      "provenance": "kimi-probe",
+      "scope": {
+        "account": null,
+        "model": null,
+        "pool": "moonshot"
+      },
+      "source": "~/.vibecrafted/telemetry/kimi/quota.json",
+      "stale": false,
+      "state": "unknown",
+      "status": "unknown",
+      "tokens": null
+    }
+  ],
+  "generated_at": "<generated_at>",
+  "schema": "vibecrafted.quota-dashboard.v1"
+}

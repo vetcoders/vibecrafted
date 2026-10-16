@@ -169,7 +169,7 @@ vc-delegate → Native Delegation Policy.
 
 ## Runbook — bieżąca gramatyka launchera
 
-Agenci: `claude · codex · agy · junie · grok · cursor · kimi · copilot`.
+Agenci: `claude · codex · agy · junie · grok · cursor · kimi · copilot · omp`.
 Pełna gramatyka, prefiks przed planem z pliku, wstrzyknięcie CLI `--help`,
 usuwanie zmiennych sesji Claude oraz await/observe/stop/usage są w
 [runbooku](references/runbook.md). Zapamiętaj kształt:

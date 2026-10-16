@@ -1,0 +1,15 @@
+{
+  "schema": "vibecrafted.source-components.v1",
+  "components": {
+    "vc-frame": {
+      "repository": "https://github.com/vetcoders/vc-frame.git",
+      "version": "4.4.0",
+      "revision": "0b91c4f0806356b5c92e46c82bf0fdf0310c0222"
+    },
+    "vc-terminal": {
+      "repository": "https://github.com/vetcoders/vc-terminal.git",
+      "version": "0.18.0-dev",
+      "revision": "38ef2f918383ca4dde797d22869b619097c81d05"
+    }
+  }
+}

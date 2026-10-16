@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 usage() {
   cat <<EOF_USAGE
 Usage: copilot_spawn.sh [--mode <mode>] [--runtime <terminal|visible|headless|background|detached>] [--model <model>] [--root <repo-root>] [--dry-run] <plan.md>
+Permissions: [--permissions <auto|ask|bypass>] [--sandbox <sandbox-policy>]
 
 Portable GitHub Copilot CLI spawn wrapper.
 Defaults to headless. Pass --runtime terminal for a visible vc-frame worker pane.
@@ -16,6 +17,8 @@ EOF_USAGE
 
 mode="implement"
 runtime="headless"
+permissions=""
+sandbox=""
 # Operator BYOK pin: ~/.config/vibecrafted/config.toml [agents.copilot.provider]
 # (Founder decision 2026-09-14: the one config.toml). Only fills vars the
 # environment does not already set, so an explicit export always wins. No
@@ -58,6 +61,16 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || spawn_die "Missing value for --runtime"
       runtime="$1"
       ;;
+    --permissions)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --permissions"
+      permissions="$1"
+      ;;
+    --sandbox)
+      shift
+      [[ $# -gt 0 ]] || spawn_die "Missing value for --sandbox"
+      sandbox="$1"
+      ;;
     --model)
       shift
       [[ $# -gt 0 ]] || spawn_die "Missing value for --model"
@@ -99,6 +112,7 @@ done
 }
 spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
+spawn_resolve_permissions copilot "$runtime" "$permissions" "$sandbox"
 spawn_prepare_paths copilot "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_copilot_prompt.md"
@@ -153,7 +167,7 @@ filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.."
 qfilter_py="$(spawn_shell_quote "$(spawn_python_bin)")"
 qfilter_core="$(spawn_shell_quote "$filter_core")"
 qfilter_cmd="PYTHONPATH=$qfilter_core $qfilter_py -m vibecrafted_core.agent_stream --agent copilot --last-message $qlast_message"
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; copilot --allow-all --no-ask-user --no-auto-update --output-format json $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; copilot $SPAWN_PERMISSION_FLAGS --no-auto-update --output-format json $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; exit \$pipeline_status; }"
 
 combined_success="${copilot_success_hook}${success_hook_extra:+
 $success_hook_extra}"

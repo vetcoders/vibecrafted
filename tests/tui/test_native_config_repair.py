@@ -14,6 +14,7 @@ a traceback, and it never reads a failure as permission to rewrite anything.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -391,10 +392,238 @@ def test_a_different_hash_of_the_same_version_is_not_an_upgrade(
     policy_binary: Path,
 ) -> None:
     title, action, detail = _run(policy_binary, "reinstall-same-version-other-source")
-    assert title == "Runtime upgrade is not available"
-    assert action == "<none>"
+    assert title == "Use this App's runtime?"
+    assert action == "Use this App runtime"
     assert "Installed generation: 4.3.2+gbbbbbbbb" in detail
-    assert "not proven newer" in detail
+    assert "App carrier generation: 4.3.2+gaaaaaaaa" in detail
+    assert "refuses to replace a newer runtime" in detail
+
+
+CONTROLLER_FIXTURE = r"""
+import Foundation
+
+struct CanonicalRuntimeInstall { let root: URL }
+typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
+func lifecycleLog(_ text: String) {}
+final class FakeWebSession { func retry() {} }
+enum FakeAlertResponse { case alertFirstButtonReturn, alertSecondButtonReturn }
+final class NSAlert {
+  enum Style { case warning, critical }
+  static var accept = false
+  static var shown: [[String: Any]] = []
+  var alertStyle: Style = .warning
+  var messageText = ""
+  var informativeText = ""
+  var buttons: [String] = []
+  func addButton(withTitle title: String) { buttons.append(title) }
+  func runModal() -> FakeAlertResponse {
+    Self.shown.append(["title": messageText, "detail": informativeText, "buttons": buttons])
+    return Self.accept ? .alertSecondButtonReturn : .alertFirstButtonReturn
+  }
+}
+
+final class ControllerFixture {
+  struct Identity { let appGeneration: String; let packGeneration: String? }
+  struct ControlPlaneReconcileError: Error { let message: String }
+  var canonicalInstall: CanonicalRuntimeInstall?
+  var canonicalRuntimeEnvironment: [String: String]?
+  var cachedResolution: RuntimeContract?
+  var nextResolution: RuntimeContract
+  var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
+  var startupCarrierChoiceOffered = false
+  var eyeReconcileProcess: Process?
+  var repairInFlight = false
+  var runtimeActionPreflight: String?
+  var serverActionInFlight: String?
+  var runtimeAdvisory: String?
+  var workspaceLaunchFailureReported = false
+  let webSession = FakeWebSession()
+  var pendingReconcile: (() -> Void)?
+  var installCalls = 0
+  var forceRefreshCalls = 0
+  let carrier = "4.4.0+g9c03fa38"
+  let scenario: String
+
+  init(_ scenario: String) {
+    self.scenario = scenario
+    signedCarrierRevisions = ("9c03fa388bcbd5822a43bbcf9caf28536dbe5138", "terminal", "frame")
+    let generation = scenario.contains("matching") ? "4.4.0+g9c03fa38" : "4.4.0+g69a6b8e7"
+    nextResolution = .ready(CanonicalRuntimeInstall(root: URL(fileURLWithPath: "/fixture/" + generation)))
+    if scenario.contains("unusable") && !scenario.contains("became-unusable") {
+      nextResolution = .unusable("fixture receipt refused")
+    }
+    if scenario.contains("missing-carrier") { signedCarrierRevisions = nil }
+  }
+  func currentProductUpdateIdentity() -> Identity {
+    Identity(appGeneration: carrier, packGeneration: canonicalInstall?.root.lastPathComponent)
+  }
+  func applyResolution(_ resolution: RuntimeContract) -> CanonicalRuntimeInstall? {
+    if case .ready(let install) = resolution {
+      canonicalInstall = install; canonicalRuntimeEnvironment = [:]; return install
+    }
+    canonicalInstall = nil; canonicalRuntimeEnvironment = nil; return nil
+  }
+  func resolveInstalledRuntime(forceRefresh: Bool = false, completion: (RuntimeContract) -> Void) {
+    if forceRefresh { forceRefreshCalls += 1 }
+    if forceRefresh && scenario.contains("became-current") {
+      completion(.ready(CanonicalRuntimeInstall(root: URL(fileURLWithPath: "/fixture/" + carrier))))
+      return
+    }
+    if forceRefresh && scenario.contains("became-unusable") {
+      completion(.unusable("fixture changed while resolving"))
+      return
+    }
+    completion(nextResolution)
+  }
+  func reconcileControlPlaneEye(install: CanonicalRuntimeInstall, environment: [String: String],
+    completion: ((Result<Void, ControlPlaneReconcileError>) -> Void)? = nil) {
+    if let completion { pendingReconcile = { completion(.success(())) } }
+  }
+  func installCanonicalRuntime(completion: (Result<CanonicalRuntimeInstall, Error>) -> Void) {
+    installCalls += 1
+    let install = CanonicalRuntimeInstall(root: URL(fileURLWithPath: "/fixture/" + carrier))
+    nextResolution = .ready(install)
+    completion(.success(install))
+  }
+  func updateDeckPresentation() {}
+  func renderServerStatus() {}
+  func inspectConfigurationAtLaunch() {}
+  func ensureFrameWebClient(install: CanonicalRuntimeInstall, environment: [String: String]) {}
+  func refreshServerStatus() {}
+  func applyRuntimePackMenuState() {}
+  func presentPreferenceConflict(_ envelope: PreferenceConflictEnvelope) {}
+  func startup() { finishConnectingCommandDeck(with: nextResolution) }
+  func finishReconcile() { let callback = pendingReconcile; pendingReconcile = nil; callback?() }
+  func healthyRepair() {
+    _ = applyResolution(nextResolution)
+    presentHealthyRepairResult(note: "Configuration inspection found no changes to make.")
+  }
+
+  // EXACT_PRODUCTION_METHODS
+}
+
+let scenario = CommandLine.arguments[1]
+NSAlert.accept = scenario.contains("accept")
+let controller = ControllerFixture(scenario)
+var beforeFinish = 0
+if scenario.hasPrefix("repair") {
+  controller.healthyRepair()
+} else {
+  controller.startup()
+  beforeFinish = NSAlert.shown.count
+  controller.finishReconcile()
+  if scenario.contains("repeat") { controller.startup(); controller.finishReconcile() }
+}
+let result: [String: Any] = ["before_reconcile_finish": beforeFinish,
+  "alerts": NSAlert.shown, "install_calls": controller.installCalls,
+  "force_refresh_calls": controller.forceRefreshCalls]
+print(String(data: try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
+"""
+
+
+def _production_method(source: str, name: str) -> str:
+    start = source.index(f"private func {name}(")
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
+
+
+@pytest.fixture(scope="module")
+def carrier_controller_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Execute production controller methods with inert alert/owner boundaries."""
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is required for the native carrier contract")
+    build = tmp_path_factory.mktemp("carrier-controller")
+    delegate = (POLICY.parent / "AppDelegate.swift").read_text(encoding="utf-8")
+    methods = "\n".join(
+        _production_method(delegate, name)
+        for name in (
+            "finishConnectingCommandDeck",
+            "presentHealthyRepairResult",
+            "offerRuntimePackReinstall",
+            "presentRuntimePackReinstall",
+        )
+    )
+    main = build / "main.swift"
+    main.write_text(
+        CONTROLLER_FIXTURE.replace("// EXACT_PRODUCTION_METHODS", methods),
+        encoding="utf-8",
+    )
+    binary = build / "carrier-controller"
+    subprocess.run(
+        [
+            swiftc,
+            str(POLICY),
+            str(POLICY.parent / "RuntimePackMenuPolicy.swift"),
+            str(main),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        timeout=60,
+    )
+    return binary
+
+
+def _controller(binary: Path, scenario: str) -> dict:
+    result = subprocess.run(
+        [str(binary), scenario], check=True, capture_output=True, text=True, timeout=5
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("entry", ["startup", "repair"])
+def test_verified_same_version_mismatch_has_explicit_choice(
+    carrier_controller_binary, entry
+):
+    result = _controller(carrier_controller_binary, entry + "-cancel")
+    assert result["install_calls"] == 0
+    assert result["force_refresh_calls"] == 1
+    assert len(result["alerts"]) == 1
+    alert = result["alerts"][0]
+    assert alert["buttons"] == ["Cancel", "Use this App runtime"]
+    assert "4.4.0+g69a6b8e7" in alert["detail"]
+    assert "4.4.0+g9c03fa38" in alert["detail"]
+
+
+def test_startup_choice_waits_for_reconcile_and_cancel_is_once(
+    carrier_controller_binary,
+):
+    result = _controller(carrier_controller_binary, "startup-cancel-repeat")
+    assert result["before_reconcile_finish"] == 0
+    assert len(result["alerts"]) == 1
+    assert result["install_calls"] == 0
+
+
+@pytest.mark.parametrize("entry", ["startup", "repair"])
+def test_acceptance_calls_the_existing_installer_once(carrier_controller_binary, entry):
+    result = _controller(carrier_controller_binary, entry + "-accept")
+    assert result["install_calls"] == 1
+    assert result["force_refresh_calls"] == 1
+
+
+@pytest.mark.parametrize("entry", ["startup", "repair"])
+@pytest.mark.parametrize("condition", ["matching", "unusable", "missing-carrier"])
+def test_nonmismatch_has_no_publication(carrier_controller_binary, condition, entry):
+    result = _controller(carrier_controller_binary, entry + "-" + condition + "-accept")
+    assert result["alerts"] == []
+    assert result["install_calls"] == 0
+
+
+@pytest.mark.parametrize("condition", ["became-current", "became-unusable"])
+def test_startup_revalidates_before_offering_the_carrier(
+    carrier_controller_binary, condition
+):
+    result = _controller(carrier_controller_binary, "startup-" + condition + "-accept")
+    assert result["force_refresh_calls"] == 1
+    assert result["alerts"] == []
+    assert result["install_calls"] == 0
 
 
 def test_a_verified_newer_carrier_keeps_the_upgrade_choice(policy_binary: Path) -> None:

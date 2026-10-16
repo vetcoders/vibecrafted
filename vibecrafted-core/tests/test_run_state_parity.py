@@ -163,7 +163,7 @@ def _append_lifecycle_event(home: Path, payload: dict[str, Any]) -> None:
     # horizon, sync_state archives the projection in the same pass the test
     # reads it (went red by itself on 2026-07-06 with ts=2026-06-29).
     event = {
-        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ts": dt.datetime.now(dt.UTC).isoformat(),
         "run_id": payload["run_id"],
         "kind": f"lifecycle:{payload['state']}",
         "message": f"test {payload['state']}",
@@ -569,7 +569,7 @@ def test_reading_paths_run_state_parity(
     )
     monkeypatch.setenv("VIBECRAFTED_CONTROL_OBSERVE", str(control_observe_bin))
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     now_iso = now.isoformat()
 
     # --- Setup Run (a): live worker ---

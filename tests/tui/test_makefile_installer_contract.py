@@ -7,10 +7,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 from scripts import distribution_manifest as distribution
 from scripts import vetcoders_install as installer
@@ -198,6 +198,11 @@ def test_unified_product_contract_gate_executes_installed_runner() -> None:
 
 def test_release_workflow_is_read_only_and_validates_the_exact_tag_source() -> None:
     workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/source-gate.yml" in workflow
+    assert "verify_tag: true" in workflow
+    workflow += (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "run: make unified-product-contract-gate" in workflow
     assert "run: make test-core" in workflow
@@ -327,8 +332,7 @@ def test_install_paths_reconcile_server_service_after_launcher_replacement() -> 
 
 
 def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
-    """Contract: `make install` consumes the same immutable Runtime Pack as
-    the native App. The retained `install-source` spelling uses the same owner.
+    """Source builds and explicit carriers reach the same Runtime Pack owner.
 
     Every recipe that bootstraps uv (install-all, tui-installer)
     must keep the uv bootstrap and the `uv run` invocation inside one shell
@@ -340,19 +344,24 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
 
     # CLI_PRODUCT_SPEC §6.5: `make help` is the six-target deck; everything
     # else lives in `make help-dev`.
-    assert "make install      \\033[2mInstall the receipted Runtime Pack" in text
+    assert (
+        "make install      \\033[2mBuild this checkout and install its receipted Runtime Pack"
+        in text
+    )
     assert "make doctor       \\033[2mHealth check" in text
     assert "dev targets: make help-dev" in text
     assert "help-dev:" in text
     assert "make skills" not in text.split("help:", 1)[1].split("\nvibecrafted:", 1)[0]
     assert "vibecrafted: install" in text
 
-    # The product front door delegates to the Runtime Pack-owned interpreter
-    # and installer. It must never compile foundations or donors itself.
+    # Bare install builds a pinned source carrier. An explicit RUNTIME_PACK
+    # skips that build, and both paths use the same publication owner.
     install_block = text.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+    assert 'if [ -z "$(RUNTIME_PACK)" ]' in install_block
+    assert "scripts/build-source-runtime-pack.py" in install_block
     assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in install_block
     assert 'bash "$(RUNTIME_PACK_INSTALLER)"' in install_block
-    assert 'if [ "$$(uname -s)" = "Darwin" ]' not in install_block
+    assert 'if [ "$$(uname -s)" = Darwin ]' in install_block
     assert "$(MAKE) --no-print-directory install-source" not in install_block
     assert "$(INSTALL_STEP)" not in install_block
 

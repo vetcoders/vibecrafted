@@ -89,8 +89,8 @@ make install RUNTIME_PACK=/absolute/path/to/Vibecrafted_RuntimePack_linux-x64.ta
 ```
 
 **Wynik:** weryfikacja sumy, podpisu i pochodzenia, potem publikacja generacji.
-`make install` nie kompiluje. `install-source` jest dziś aliasem tego targetu;
-kompilację opisuje osobny przepis Build from source.
+Jawny `RUNTIME_PACK` pomija kompilację. Samo `make install` najpierw buduje
+bieżący checkout; `install-source` pozostaje aliasem.
 **Błąd → naprawa:** brak podpisu albo zły klucz wymaga kompletnej, uwierzytelnionej
 paczki. Przy własnym buildzie użyj `VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY` z kroku
 L6 instrukcji deweloperskiej. Przy świadomym waiverze starej glibc przekaż

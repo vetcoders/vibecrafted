@@ -43,6 +43,17 @@ notices, without command history or tool initialization output. Install missing
 tools through their upstream package or installer. A failed explicit workspace
 launch keeps its error visible and leaves a shell available for the next command.
 
+### Quick cmd profile preference
+
+The compact-bar Quick cmd ephemeral shell (`❯_ `) defaults to the isolated product profile (`product`). If you prefer Quick cmd to load your personal shell environment (`~/.zshrc`) automatically, configure the preference in `~/.config/vibecrafted/config.toml`:
+
+```toml
+[terminal]
+quick_cmd_profile = "personal"
+```
+
+When set to `"personal"`, Quick cmd executes `personal-shell` once during startup before prompt and hooks become active, releasing product tool pins and sourcing `~/.zshrc` while preserving Quick cmd's ephemeral one-shot/PIN contract and `❯_ ` prompt. Untouched configurations and `"product"` remain in the isolated product terminal profile. Unknown or malformed preferences report an honest notice to stderr and fall back safely to the product profile.
+
 ## Frontier helpers
 
 The helper layer below is separate from the installed Terminal profile and reads

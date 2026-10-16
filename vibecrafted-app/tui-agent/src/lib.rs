@@ -260,6 +260,8 @@ struct ConsoleLoop {
     feeds: ChangeFeeds,
     /// Set when the operator quit while a launch was still unanswered.
     exit_after_receipt: bool,
+    watcher_setup: Option<mpsc::Receiver<WatcherSetup>>,
+    watchers: Option<WatcherSetup>,
 }
 
 impl ConsoleLoop {
@@ -304,6 +306,8 @@ impl ConsoleLoop {
             scheduler,
             feeds,
             exit_after_receipt: false,
+            watcher_setup: None,
+            watchers: None,
         })
     }
 
@@ -345,6 +349,26 @@ impl ConsoleLoop {
     /// Service everything that is not a key press: background answers, change
     /// notifications and scheduled refreshes. It never waits for a read.
     fn tick(&mut self, app: &mut App, now: Instant) -> LoopControl {
+        if let Some(setup) = self
+            .watcher_setup
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.scheduler.state_watcher_active = setup.state.is_some();
+            self.scheduler.artifact_watcher_active = setup.artifacts.is_some();
+            for error in &setup.errors {
+                app.append_status(error.clone());
+            }
+            self.watchers = Some(setup);
+            self.watcher_setup = None;
+            app.refresh_mux();
+            app.request_refresh(RefreshNeeds {
+                control_plane: true,
+                polarize: true,
+                mission_control: true,
+                ..RefreshNeeds::default()
+            });
+        }
         // Launcher answers and refresh results arrive here, never inside the
         // draw path: the console stays interactive while either is in flight.
         while let Ok(message) = self.background_rx.try_recv() {
@@ -372,6 +396,7 @@ impl ConsoleLoop {
                 force_control_plane: false,
                 polarize: plan.polarize,
                 mission_control: true,
+                memory: false,
             });
         }
         if plan.rendered_runs {
@@ -450,22 +475,7 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
         let mut app = App::new(config)?;
         let (state_tx, state_rx) = mpsc::channel();
-        let state_watcher = match start_state_watcher(&app.config.state_root, state_tx) {
-            Ok(watcher) => Some(watcher),
-            Err(error) => {
-                app.append_status(format!("state watcher unavailable: {error}"));
-                None
-            }
-        };
         let (artifact_tx, artifact_rx) = mpsc::channel();
-        let artifact_root = artifact_watch_root(&crate::polarize::vibecrafted_home());
-        let artifact_watcher = match start_artifact_watcher(&artifact_root, artifact_tx) {
-            Ok(watcher) => Some(watcher),
-            Err(error) => {
-                app.append_status(format!("artifact watcher unavailable: {error}"));
-                None
-            }
-        };
         let mut console = ConsoleLoop::start(
             &app,
             CanonicalRefreshSource,
@@ -473,14 +483,22 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
             ChangeFeeds {
                 state: state_rx,
                 artifacts: artifact_rx,
-                state_watcher_active: state_watcher.is_some(),
-                artifact_watcher_active: artifact_watcher.is_some(),
+                state_watcher_active: false,
+                artifact_watcher_active: false,
             },
         )?;
+        if let Some(job) = app.take_refresh_job() {
+            console.refresh.submit(job);
+        }
+        console.watcher_setup = Some(spawn_watchers(
+            app.config.state_root.clone(),
+            artifact_watch_root(&crate::polarize::vibecrafted_home()),
+            state_tx,
+            artifact_tx,
+        ));
         spawn_catalog_load(&app, &console.background_tx);
         let served = serve(&mut terminal, &mut app, &mut console);
         console.shutdown();
-        drop((state_watcher, artifact_watcher));
         served
     })();
 
@@ -758,6 +776,17 @@ fn handle_key(
 ) -> anyhow::Result<InputOutcome> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(InputOutcome::Quit);
+    }
+    if app.refresh.projection != refresh::ProjectionLoadState::Ready {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(InputOutcome::Quit),
+            KeyCode::Char('r') => {
+                app.refresh.projection = refresh::ProjectionLoadState::Loading;
+                app.request_full_refresh();
+                return Ok(InputOutcome::Handled);
+            }
+            _ => return Ok(InputOutcome::Handled),
+        }
     }
     if let Some(outcome) = handle_home_landing_key(app, key)? {
         return Ok(outcome);
@@ -1167,7 +1196,9 @@ fn apply_mouse(
     mouse: MouseEvent,
     area: ratatui::layout::Rect,
 ) -> anyhow::Result<InputOutcome> {
-    if app.focus != LaunchFocus::Browse {
+    if app.refresh.projection != refresh::ProjectionLoadState::Ready
+        || app.focus != LaunchFocus::Browse
+    {
         return Ok(InputOutcome::Handled);
     }
     let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
@@ -1409,6 +1440,12 @@ fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<InputOutc
 }
 
 fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<InputOutcome> {
+    if app.memory.project.is_empty() {
+        app.refresh_memory();
+        app.focus = LaunchFocus::Memory;
+        app.append_status("AICX context is loading; press w again when it arrives");
+        return Ok(InputOutcome::Handled);
+    }
     let project = app.memory.project.clone();
     let repo = app.config.repo.clone();
     match with_terminal_handed_over(|| crate::memory::launch_wizard(&project, &repo))? {
@@ -1700,6 +1737,39 @@ fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
         message: format!("{error:#}"),
         stderr: String::new(),
     }
+}
+
+struct WatcherSetup {
+    state: Option<RecommendedWatcher>,
+    artifacts: Option<RecommendedWatcher>,
+    errors: Vec<String>,
+}
+
+/// Registration may walk a large artifact tree. Keep it off the input thread;
+/// the console owns the returned handles and uses its polling fallback until
+/// registration finishes. If the console already quit, sending drops them.
+fn spawn_watchers(
+    state_root: PathBuf,
+    artifact_root: PathBuf,
+    state_tx: Sender<()>,
+    artifact_tx: Sender<ArtifactChange>,
+) -> mpsc::Receiver<WatcherSetup> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut errors = Vec::new();
+        let state = start_state_watcher(&state_root, state_tx)
+            .map_err(|error| errors.push(format!("state watcher unavailable: {error}")))
+            .ok();
+        let artifacts = start_artifact_watcher(&artifact_root, artifact_tx)
+            .map_err(|error| errors.push(format!("artifact watcher unavailable: {error}")))
+            .ok();
+        let _ = tx.send(WatcherSetup {
+            state,
+            artifacts,
+            errors,
+        });
+    });
+    rx
 }
 
 fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<RecommendedWatcher> {
@@ -2048,6 +2118,36 @@ mod tests {
 
     fn dispatch_area() -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(0, 0, 120, 40)
+    }
+
+    #[test]
+    fn unready_projection_does_not_operate_hidden_controls() {
+        for projection in [
+            refresh::ProjectionLoadState::Loading,
+            refresh::ProjectionLoadState::Unavailable("private fixture".into()),
+        ] {
+            for focus in [LaunchFocus::Browse, LaunchFocus::EditPrompt] {
+                let mut app = sample_app();
+                app.refresh.projection = projection.clone();
+                app.focus = focus;
+                let prompt = app.launch_prompt.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                for code in [KeyCode::Char('j'), KeyCode::Char('a'), KeyCode::Enter] {
+                    handle_key(&mut app, key(code), &tx).unwrap();
+                }
+                apply_mouse(
+                    &mut app,
+                    mouse(MouseEventKind::ScrollDown, 10, 10),
+                    dispatch_area(),
+                )
+                .unwrap();
+                assert_eq!(app.selected, 0);
+                assert_eq!(app.active_tab, AppTab::Monitor.index());
+                assert_eq!(app.focus, focus);
+                assert_eq!(app.launch_prompt, prompt);
+                assert!(rx.try_recv().is_err(), "hidden controls cannot launch work");
+            }
+        }
     }
 
     #[test]
@@ -2873,6 +2973,10 @@ mod tests {
         ) -> MissionControlState {
             MissionControlState::default()
         }
+
+        fn memory(&mut self, _repo: &Path) -> crate::memory::MemoryState {
+            panic!("initial projection must not wait for AICX continuity")
+        }
     }
 
     struct HeldConsole {
@@ -2961,6 +3065,125 @@ mod tests {
         for c in text.chars() {
             press(held, app, super::tests::key(KeyCode::Char(c)));
         }
+    }
+
+    #[test]
+    fn initial_scan_draws_loading_and_serves_quit_before_requested_memory() {
+        let mut app = sample_app();
+        app.state = ControlPlaneState::empty("/tmp/state");
+        app.runs.clear();
+        app.refresh.projection = refresh::ProjectionLoadState::Loading;
+        app.request_full_refresh();
+        app.refresh_memory();
+        let mut held = held_console(&app, state_with_runs("/tmp/state", &[("fresh", "codex")]));
+        held.console.tick(&mut app, Instant::now());
+        held.entered.recv_timeout(GUARD).expect("initial scan held");
+        assert!(app.refresh.pending.memory);
+        assert!(
+            app.take_refresh_job().is_none(),
+            "memory waits for initial state"
+        );
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+        let shown = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(shown.contains("Loading workspace state"));
+        assert!(!shown.contains("fresh"));
+        assert_eq!(
+            press(&mut held, &mut app, key(KeyCode::Char('q'))),
+            LoopControl::Exit
+        );
+
+        held.release.send(()).unwrap();
+        assert!(held.console.wait_until(&mut app, GUARD, |app| {
+            app.refresh.projection == refresh::ProjectionLoadState::Ready
+        }));
+        assert_eq!(run_ids(&app), vec!["fresh"]);
+        let memory = app
+            .take_refresh_job()
+            .expect("requested continuity follows initial state");
+        assert!(memory.needs.memory);
+        assert!(!memory.needs.control_plane);
+    }
+
+    #[test]
+    fn unavailable_initial_state_retries_to_a_loaded_empty_board_in_home() {
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Home;
+        app.state = ControlPlaneState::empty("/tmp/state");
+        app.runs.clear();
+        app.refresh.projection = refresh::ProjectionLoadState::Loading;
+        app.request_full_refresh();
+        let initial = app.take_refresh_job().unwrap();
+        app.apply_refresh(refresh::RefreshResult {
+            generation: initial.generation,
+            repo: app.config.repo.clone(),
+            control_plane: Some(Err("state permission denied".into())),
+            polarize: None,
+            mission_control: None,
+            memory: None,
+        });
+        assert_eq!(
+            app.refresh.projection,
+            refresh::ProjectionLoadState::Unavailable("state permission denied".into())
+        );
+        let (tx, _) = mpsc::channel();
+        assert!(matches!(
+            handle_key(&mut app, key(KeyCode::Char('r')), &tx).unwrap(),
+            InputOutcome::Handled
+        ));
+        assert_eq!(
+            app.refresh.projection,
+            refresh::ProjectionLoadState::Loading
+        );
+        let retry = app.take_refresh_job().unwrap();
+        assert!(retry.needs.force_control_plane);
+        app.apply_refresh(refresh::RefreshResult {
+            generation: retry.generation,
+            repo: app.config.repo.clone(),
+            control_plane: Some(Ok(ControlPlaneState::empty("/tmp/state"))),
+            polarize: None,
+            mission_control: None,
+            memory: None,
+        });
+        assert_eq!(app.refresh.projection, refresh::ProjectionLoadState::Ready);
+        assert!(app.runs.is_empty());
+    }
+
+    #[test]
+    fn pending_watcher_setup_keeps_fallback_and_quit_available() {
+        let mut app = sample_app();
+        let mut held = held_console(&app, ControlPlaneState::empty("/tmp/state"));
+        let (tx, rx) = mpsc::channel();
+        held.console.watcher_setup = Some(rx);
+        held.console.scheduler.state_watcher_active = false;
+        held.console.scheduler.artifact_watcher_active = false;
+        held.console.tick(&mut app, Instant::now());
+        assert!(held.console.watcher_setup.is_some());
+        assert!(!held.console.scheduler.state_watcher_active);
+        assert_eq!(
+            press(&mut held, &mut app, key(KeyCode::Char('q'))),
+            LoopControl::Exit
+        );
+        tx.send(WatcherSetup {
+            state: None,
+            artifacts: None,
+            errors: vec!["watcher unavailable".into()],
+        })
+        .unwrap();
+        held.console.tick(&mut app, Instant::now());
+        assert!(held.console.watcher_setup.is_none());
+        assert!(held.console.watchers.is_some());
+        assert!(!held.console.scheduler.state_watcher_active);
+        assert!(!held.console.scheduler.artifact_watcher_active);
+        assert!(app.status_line.contains("watcher unavailable"));
+        held.release.send(()).unwrap();
     }
 
     #[test]
@@ -3055,6 +3278,7 @@ mod tests {
             control_plane: Some(Ok(state_with_runs("/tmp/state", &[(run_id, "codex")]))),
             polarize: None,
             mission_control: None,
+            memory: None,
         };
         assert!(app.apply_refresh(answer(newer.generation, "run-newer")));
         assert!(!app.apply_refresh(answer(older.generation, "run-older")));
@@ -3087,6 +3311,7 @@ mod tests {
             control_plane: Some(Err("runs/ is unreadable".to_string())),
             polarize: None,
             mission_control: None,
+            memory: None,
         }));
         assert_eq!(run_ids(&app), board, "last good data stays on the board");
         assert!(
@@ -3235,6 +3460,7 @@ mod tests {
             control_plane: None,
             polarize: Some(Vec::new()),
             mission_control: Some(MissionControlState::default()),
+            memory: None,
         }));
         assert_eq!(app.config.repo, destination);
 

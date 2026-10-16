@@ -293,12 +293,13 @@ mod tests {
         assert_eq!(
             catalog.agents,
             vec![
-                "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot"
+                "agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot", "omp"
             ]
         );
         assert!(catalog.provider("claude").unwrap().model_override.supported);
         assert!(!catalog.provider("junie").unwrap().model_override.supported);
         assert!(catalog.provider("kimi").unwrap().model_override.supported);
+        assert!(catalog.provider("omp").unwrap().model_override.supported);
         assert_eq!(
             catalog.environment("cloud-soon").unwrap().reason,
             "coming soon"
@@ -340,6 +341,25 @@ mod tests {
         let sandbox_off = kimi.control_cell(None, Some("false")).unwrap();
         assert!(!sandbox_off.supported);
         assert!(sandbox_off.reason.contains("cannot be enforced"));
+        let omp = catalog.provider("omp").unwrap();
+        assert_eq!(omp.permissions_default, "auto");
+        let omp_auto = omp.control_cell(Some("auto"), None).unwrap();
+        assert!(omp_auto.supported);
+        assert_eq!(omp_auto.provider_flags, ["--approval-mode", "write"]);
+        let omp_bypass = omp.control_cell(Some("bypass"), None).unwrap();
+        assert!(omp_bypass.supported);
+        assert_eq!(omp_bypass.provider_flags, ["--approval-mode", "yolo"]);
+        let omp_read_only = omp.control_cell(Some("read-only"), None).unwrap();
+        assert!(omp_read_only.supported);
+        assert_eq!(
+            omp_read_only.provider_flags,
+            ["--tools", "read,grep,glob,find"]
+        );
+        let omp_accept_edits = omp.control_cell(Some("accept-edits"), None).unwrap();
+        assert!(omp_accept_edits.supported);
+        let omp_sandbox = omp.control_cell(None, Some("true")).unwrap();
+        assert!(!omp_sandbox.supported);
+        assert!(omp_sandbox.reason.contains("cannot be enforced"));
     }
 
     #[test]

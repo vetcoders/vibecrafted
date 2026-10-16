@@ -17,7 +17,7 @@ case "$(uname -m)" in
   *) die "unsupported Linux architecture: $(uname -m)" ;;
 esac
 platform="linux-$architecture"
-for tool in cargo curl make npm python3 sha256sum tar uv; do require "$tool"; done
+for tool in cargo cc curl make npm python3 sha256sum tar uv; do require "$tool"; done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 output="${1:-$repo_root/build/Vibecrafted_RuntimePack_${platform}.tar.gz}"
@@ -51,10 +51,10 @@ if command -v g++ >/dev/null 2>&1; then
 fi
 
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
-terminal_revision="cfa2c367ed36ba9179a05fff32ab1221060cb04e"
-terminal_archive_sha256="ea2f893250a42b0b2722e835e990d6c8169e4e65d817b99fc951c1f2de128c94"
-frame_revision="a485821727bb1bc1dc27a17d6db78a375e723e63"
-frame_archive_sha256="a45b32fd356bfb3f343e775f22d8811f74703d8d8db533c4b99b3762c921ddaa"
+terminal_revision="38ef2f918383ca4dde797d22869b619097c81d05"
+terminal_archive_sha256="a395232e497151c1fe1885cafe80d0db0531050dee2b833116a6021284168a52"
+frame_revision="0b91c4f0806356b5c92e46c82bf0fdf0310c0222"
+frame_archive_sha256="490f07a02a6588f2676b85b2bfca85af447aa4dfe6ad6e67d81654f7229821b2"
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 payload="$work/payload"
@@ -138,6 +138,7 @@ install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetc
 # The pack never carries the foundations themselves (Maciej, 2026-10-07); it
 # carries their installer so runtime-install can pull each from its own channel.
 install -m 0755 "$repo_root/scripts/install-foundations.sh" "$payload/scripts/install-foundations.sh"
+install -m 0755 "$repo_root/scripts/vibecrafted_housekeeping.py" "$payload/scripts/vibecrafted_housekeeping.py"
 mkdir -p "$payload/scripts/lib"
 install -m 0644 "$repo_root/scripts/lib/runtime-roots.sh" "$payload/scripts/lib/runtime-roots.sh"
 install -m 0644 "$repo_root/scripts/distribution_manifest.py" "$payload/scripts/distribution_manifest.py"
@@ -180,10 +181,15 @@ export PYTHONPATH="\$runtime_root/vibecrafted-core:\$runtime_root/vibecrafted-mc
 exec "\$runtime_root/python/bin/${PORTABLE_PYTHON_BIN}" "\$@"
 EOF
 chmod 0755 "$payload/bin/python3"
+native_python_library="$("$seed_python" -c 'import sysconfig; print(sysconfig.get_config_var("LDLIBRARY"))')"
+[[ "$native_python_library" == libpython*.so* && -f "$payload/python/lib/$native_python_library" ]] \
+  || die "pinned Linux CPython shared library is missing"
 python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
-  --pyproject "$repo_root/vibecrafted-core/pyproject.toml" --bin-dir "$payload/bin"
+  --pyproject "$repo_root/vibecrafted-core/pyproject.toml" --bin-dir "$payload/bin" \
+  --native-library "$native_python_library"
 python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
-  --pyproject "$repo_root/vibecrafted-mcp/pyproject.toml" --bin-dir "$payload/bin"
+  --pyproject "$repo_root/vibecrafted-mcp/pyproject.toml" --bin-dir "$payload/bin" \
+  --native-library "$native_python_library"
 
 find "$payload" -type f -name '*.py[co]' -delete
 find "$payload" -depth -type d -name __pycache__ -exec rm -rf {} +

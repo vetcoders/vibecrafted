@@ -10,13 +10,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from xml.parsers.expat import ExpatError
-
-import tomllib
 
 from .package_resources import (
     deck_path,

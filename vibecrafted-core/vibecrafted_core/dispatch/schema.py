@@ -8,11 +8,10 @@ import os
 import re
 import shlex
 import subprocess
+import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
@@ -576,6 +575,20 @@ def _parse_cuts(
                 errors.append(f"cuts[{index}].effort: {exc}")
 
         mode = _string(item.get("mode")) or "write"
+        permissions = ""
+        raw_permissions = item.get("permissions", "")
+        if "permissions" in item:
+            if not isinstance(raw_permissions, str) or not raw_permissions.strip():
+                errors.append(f"cuts[{index}].permissions: expected a non-empty string")
+            else:
+                try:
+                    from ..execution_controls import parse_permissions_word
+
+                    permissions = parse_permissions_word(
+                        raw_permissions, label=f"cuts[{index}].permissions"
+                    )
+                except ValueError as exc:
+                    errors.append(str(exc))
         mutation = _string(item.get("mutation"))
         observational = bool(item.get("observational") or item.get("observe"))
         verify = _parse_verify(item.get("verify"), index, errors)
@@ -610,6 +623,7 @@ def _parse_cuts(
                 resolved_workflow=resolved_workflow,
                 critical=bool(item.get("critical")),
                 mode=mode,
+                permissions=permissions,
                 model=model,
                 model_source=model_source,
                 effort=effort,

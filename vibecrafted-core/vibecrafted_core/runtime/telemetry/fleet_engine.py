@@ -27,6 +27,10 @@ Measured on this host (2026-10-03), not assumed:
   ``agentMetrics`` repeats the same numbers and is ignored. Compaction
   events are a slice, not added on top of shutdown.
 - cursor has no local token ledger. It does not grow an archive.
+- omp ``message`` events carry per-event assistant ``usage`` buckets
+  (``input``/``output``/``cacheRead``/``cacheWrite``). Measured on this host
+  (2026-10-15, omp 18.11.0): ``totalTokens == input + output + cacheRead +
+  cacheWrite``, so cache buckets are separate spend, not inside input.
 
 Daily rows are appended to ``telemetry/archive/<agent>.jsonl`` (see
 ``usage_archive``). Cache inside input is subtracted for codex, grok, and
@@ -40,6 +44,7 @@ session id, new path) is not counted twice.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -47,7 +52,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Tests load this file by path. The deck wrappers put this directory on
@@ -55,7 +60,7 @@ from pathlib import Path
 _ENGINE_DIR = Path(__file__).resolve().parent
 if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
-import usage_archive
+usage_archive = importlib.import_module("usage_archive")
 
 TAIL_BYTES = 400 * 1024
 # Codex usage is cumulative and usually sits near EOF. A fixed 400 KB window
@@ -103,8 +108,15 @@ COPILOT_KEYS = (
     "cacheReadTokens",
     "cacheWriteTokens",
 )
+OMP_KEYS = (
+    "input",
+    "output",
+    "cacheRead",
+    "cacheWrite",
+    "totalTokens",
+)
 
-FLEET_AGENTS = ("codex", "claude", "grok", "junie", "copilot", "cursor")
+FLEET_AGENTS = ("codex", "claude", "grok", "junie", "copilot", "cursor", "omp")
 CURSOR_REASON = "usage lives in Cursor cloud"
 
 
@@ -120,7 +132,7 @@ def fmt_tokens(value: int) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _as_int(value: object) -> int:
@@ -171,8 +183,60 @@ def _load_json(path: Path) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def _omp_profile(value: str | None) -> str | None:
+    """Mirror pi-utils/dirs.normalizeProfileName without reading config files."""
+    profile = (value or "").strip()
+    if not profile or profile == "default":
+        return None
+    if (
+        not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", profile)
+        or profile in {".", ".."}
+        or profile.endswith(".")
+        or re.fullmatch(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?", profile)
+    ):
+        raise ValueError(f"Invalid OMP profile: {value!r}")
+    return profile
+
+
 def default_store(agent: str) -> Path:
     home = _home()
+    if agent == "omp":
+        # Native sessions live under the agent data directory, not always
+        # <config>/agent: named profiles ignore the default agent override.
+        profile = _omp_profile(
+            os.environ.get("OMP_PROFILE", os.environ.get("PI_PROFILE"))
+        )
+        base_root = Path(
+            os.path.normpath(
+                str(home / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/"))
+            )
+        )
+        root = base_root / "profiles" / profile if profile else base_root
+        agent_dir = root / "agent"
+        override = os.environ.get("PI_CODING_AGENT_DIR")
+        if not profile and override:
+            # An explicitly default OMP_PROFILE must not inherit the agent
+            # directory exported by a parent's lower-priority PI_PROFILE.
+            try:
+                inherited_profile = _omp_profile(os.environ.get("PI_PROFILE"))
+            except ValueError:
+                inherited_profile = None
+            inherited_dir = (
+                base_root / "profiles" / inherited_profile / "agent"
+                if inherited_profile
+                else None
+            )
+            if inherited_dir is None or override != str(inherited_dir):
+                agent_dir = Path(os.path.abspath(override))
+        # pi-utils flattens agent/ only after the XDG app/profile path exists.
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if sys.platform in {"linux", "darwin"} and agent_dir == root / "agent" and xdg:
+            data_dir = Path(xdg) / "omp"
+            if profile:
+                data_dir = data_dir / "profiles" / profile
+            if data_dir.exists():
+                return data_dir
+        return agent_dir
     roots = {
         "codex": home / ".codex",
         "claude": home / ".claude",
@@ -187,7 +251,7 @@ def default_store(agent: str) -> Path:
 def cache_semantics(agent: str) -> str | None:
     if agent in {"codex", "grok", "copilot"}:
         return "subset_of_input"
-    if agent in {"claude", "junie"}:
+    if agent in {"claude", "junie", "omp"}:
         return "separate_buckets"
     return None
 
@@ -200,7 +264,7 @@ def _day_from_iso(value: object, fallback_mtime: float) -> str:
         and value[7] == "-"
     ):
         return value[:10]
-    return datetime.fromtimestamp(fallback_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(fallback_mtime, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _day_from_epoch(value: object, fallback_mtime: float) -> str:
@@ -208,7 +272,7 @@ def _day_from_epoch(value: object, fallback_mtime: float) -> str:
     if number > 10_000_000_000:
         number = int(number / 1000)
     if number > 1_000_000_000:
-        return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(number, tz=UTC).strftime("%Y-%m-%d")
     return _day_from_iso(None, fallback_mtime)
 
 
@@ -286,6 +350,13 @@ def discover_files(agent: str, store: Path) -> list[Path]:
             _walk_files(
                 (store / "session-state",),
                 lambda name: name == "events.jsonl",
+            )
+        )
+    if agent == "omp":
+        return list(
+            _walk_files(
+                (store / "sessions",),
+                lambda name: name.endswith(".jsonl"),
             )
         )
     return []
@@ -605,6 +676,57 @@ def junie_processed(native: dict[str, int]) -> int:
     return sum(native.get(key, 0) for key in JUNIE_KEYS)
 
 
+def _omp_from_line(
+    line: str,
+    native: dict[str, int],
+    days: list | None = None,
+    mtime: float = 0.0,
+) -> bool:
+    if "usage" not in line:
+        return False
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict) or obj.get("type") != "message":
+        return False
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else None
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    for key in OMP_KEYS:
+        native[key] += _as_int(usage.get(key))
+    if days is not None:
+        provider = message.get("provider")
+        model = message.get("model")
+        parts = [
+            part.strip()
+            for part in (provider, model)
+            if isinstance(part, str) and part.strip()
+        ]
+        model_name = "/".join(parts) if parts else "omp"
+        bucket = _separate_bucket(
+            _as_int(usage.get("input")),
+            _as_int(usage.get("output")),
+            _as_int(usage.get("cacheRead")),
+            _as_int(usage.get("cacheWrite")),
+        )
+        row = _day_row(_day_from_iso(obj.get("timestamp"), mtime), model_name, bucket)
+        if row is not None:
+            days.append(row)
+    return True
+
+
+def omp_processed(native: dict[str, int]) -> int:
+    # totalTokens == input + output + cacheRead + cacheWrite (measured); the
+    # buckets are the spend, totalTokens is their sum and is not added again.
+    return sum(
+        native.get(key, 0) for key in ("input", "output", "cacheRead", "cacheWrite")
+    )
+
+
 def _sum_model_metrics(metrics: dict) -> dict[str, int]:
     native = _blank_native(COPILOT_KEYS)
     for body in metrics.values():
@@ -717,6 +839,12 @@ def _session_id(agent: str, path: Path) -> str:
     if agent == "grok":
         # sessions/<id>/<leaf>/usage.json
         return path.parent.parent.name
+    if agent == "omp":
+        # <utc-stamp>_<session-uuid>.jsonl
+        stem = path.stem
+        if "_" in stem:
+            return stem.rsplit("_", 1)[-1]
+        return stem
     return path.stem
 
 
@@ -731,6 +859,8 @@ def _processed_for(agent: str, native: dict[str, int]) -> int:
         return junie_processed(native)
     if agent == "copilot":
         return copilot_processed(native)
+    if agent == "omp":
+        return omp_processed(native)
     return 0
 
 
@@ -760,7 +890,7 @@ def scan_file(
     """Return ``(record, cache_entry, scanned)``.
 
     Unchanged size+mtime reuses the sidecar. Codex re-reads a tail window when
-    the file grew. Claude, junie, and copilot resume from the cached byte
+    the file grew. Claude, junie, copilot, and omp resume from the cached byte
     offset instead of reparsing the prefix.
     """
 
@@ -768,9 +898,11 @@ def scan_file(
         size, mtime_ns, mtime = _stat_signature(path)
     except OSError:
         return None, cached or {}, False
+    # Earlier OMP entries consumed partial EOFs; require the repaired marker.
     if (
         isinstance(cached, dict)
         and cached.get("parser") == PARSER_VERSION
+        and (agent != "omp" or cached.get("complete_lines") is True)
         and cached.get("size") == size
         and cached.get("mtime_ns") == mtime_ns
         and isinstance(cached.get("record"), dict)
@@ -922,6 +1054,49 @@ def scan_file(
         }
         return record, entry, True
 
+    if agent == "omp":
+        native = _blank_native(OMP_KEYS)
+        days = []
+        offset = 0
+        if (
+            isinstance(cached, dict)
+            and cached.get("parser") == PARSER_VERSION
+            and cached.get("complete_lines") is True
+            and isinstance(cached.get("native"), dict)
+            and isinstance(cached.get("days"), list)
+            and _as_int(cached.get("size")) < size
+            and 0 <= _as_int(cached.get("offset")) <= _as_int(cached.get("size"))
+        ):
+            native = {key: _as_int(cached["native"].get(key)) for key in OMP_KEYS}
+            days = [dict(item) for item in cached["days"] if isinstance(item, dict)]
+            offset = _as_int(cached.get("offset"))
+        end = offset
+        try:
+            with path.open("rb") as handle:
+                if offset:
+                    handle.seek(offset)
+                for raw in handle:
+                    if not raw.endswith(b"\n"):
+                        break
+                    _omp_from_line(
+                        raw.decode("utf-8", errors="replace"), native, days, mtime
+                    )
+                    end += len(raw)
+        except OSError:
+            return None, cached or {}, False
+        record = _record(agent, path, native, None, mtime)
+        entry = {
+            "parser": PARSER_VERSION,
+            "complete_lines": True,
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "offset": end,
+            "native": native,
+            "days": days,
+            "record": record,
+        }
+        return record, entry, True
+
     return None, cached or {}, False
 
 
@@ -932,6 +1107,7 @@ def _sum_records(agent: str, records: list[dict]) -> tuple[dict[str, int], int]:
         "grok": GROK_KEYS,
         "junie": JUNIE_KEYS,
         "copilot": COPILOT_KEYS,
+        "omp": OMP_KEYS,
     }[agent]
     native = _blank_native(keys)
     processed = 0
@@ -1016,7 +1192,7 @@ def render_sessions(agent: str, records: list[dict], snapshot: dict) -> str:
         "-" * 64,
     ]
     for record in ordered:
-        stamp = datetime.fromtimestamp(float(record.get("mtime") or 0), tz=timezone.utc)
+        stamp = datetime.fromtimestamp(float(record.get("mtime") or 0), tz=UTC)
         when = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
         processed = fmt_tokens(_as_int(record.get("processed_total")))
         lines.append(f"{when:<20} {processed:>14}  {record.get('id')}")
@@ -1436,6 +1612,12 @@ def run(
     if agent not in FLEET_AGENTS:
         print(f"unknown fleet agent: {agent}", file=sys.stderr)
         return 2
+    if agent == "omp" and mode == "daemon":
+        print(
+            "omp supports bounded collection only; daemon is not available",
+            file=sys.stderr,
+        )
+        return 2
     cache = _load_json(_cache_path(agent, quota_root))
     if mode == "archive" and agent == "cursor":
         snapshot = build_snapshot(
@@ -1523,7 +1705,9 @@ def main(agent: str, argv: list[str] | None = None) -> int:
         "mode",
         nargs="?",
         default="line",
-        choices=["line", "once", "sessions", "daemon", "archive"],
+        choices=["line", "once", "sessions", "archive"]
+        if agent == "omp"
+        else ["line", "once", "sessions", "daemon", "archive"],
     )
     parser.add_argument("--store", help="Agent store root (default: the host store)")
     parser.add_argument(
@@ -1532,7 +1716,13 @@ def main(agent: str, argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--interval", type=int, default=30)
     args, _unknown = parser.parse_known_args(argv)
-    store = Path(args.store).expanduser() if args.store else default_store(agent)
+    try:
+        store = Path(args.store).expanduser() if args.store else default_store(agent)
+    except ValueError as error:
+        parser.error(str(error))
+    if agent == "omp" and args.store:
+        # --store keeps its original config-root contract, independent of env.
+        store = store / "agent"
     root = quota_dir(agent, args.quota_dir)
     return run(agent, args.mode, store, root, interval=args.interval)
 
@@ -1547,6 +1737,7 @@ __all__ = [
     "copilot_processed",
     "fmt_tokens",
     "main",
+    "omp_processed",
     "parse_codex_tail",
     "parse_grok_document",
     "render_statusline",

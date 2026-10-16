@@ -13,22 +13,21 @@ if [[ -z "$launcher" || ! -x "$launcher" ]]; then
   exec "${SHELL:-/bin/zsh}" -l
 fi
 
-# Same candidate order as spawn_python_bin (meta.sh). vc-frame bash -lc panes
-# do not inherit the deck wrapper; Homebrew python3 cannot import core.
-data="${XDG_DATA_HOME:-$HOME/.local/share}"
+# The pane runs the runtime's pinned interpreter by absolute path: the pin the
+# Frame server inherited from its entry, else the selected generation's own
+# bin/python3. Never the uv-tool venv, the active-generation pointer or a PATH
+# python: a pane that quietly ran another interpreter would hide the broken
+# pin until the first import that needs 3.11+.
 candidates=(
   "${VIBECRAFTED_PYTHON:-}"
   "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/bin/python3}"
   "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/bin/python3}"
-  "$data/uv/tools/vibecrafted/bin/python3"
-  "$data/uv/tools/vibecrafted/bin/python"
-  "$data/uv/tools/vibecrafted-core/bin/python3"
-  "$data/vibecrafted/tools/vibecrafted-current/bin/python3"
 )
 for py in "${candidates[@]}"; do
-  [[ -n "$py" && -x "$py" ]] || continue
+  [[ "$py" == /* && -x "$py" && ! -d "$py" ]] || continue
   # This wrapper intentionally becomes the selected interpreter.
   # shellcheck disable=SC2093
   exec "$py" "$launcher" "$@"
 done
-exec "$launcher" "$@"
+printf '\n  No runtime interpreter pinned for this pane (VIBECRAFTED_PYTHON / VIBECRAFTED_RUNTIME_ROOT unset or not executable).\n  Repair: reopen the workspace from Vibecrafted (vc-start) so the Frame server carries its runtime pin.\n\n' >&2
+exec "${SHELL:-/bin/zsh}" -l

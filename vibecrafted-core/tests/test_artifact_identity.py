@@ -61,16 +61,13 @@ def test_parse_origin_accepts_forge_urls_and_rejects_checkout_paths() -> None:
     assert _parse_owner_repo("ssh://git@github.com/vetcoders/vibecrafted.git") == (
         "vetcoders/vibecrafted"
     )
+    # An anonymized checkout-shaped path: a tracked test must never name the
+    # real build host (tests/tui/test_no_tracked_file_names_this_checkout).
     assert (
-        _parse_owner_repo(
-            "/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted"
-        )
-        is None
+        _parse_owner_repo("/Volumes/ws/vetcoders/vibecrafted-suite/vibecrafted") is None
     )
     assert (
-        _parse_owner_repo(
-            "host:/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted"
-        )
+        _parse_owner_repo("host:/Volumes/ws/vetcoders/vibecrafted-suite/vibecrafted")
         is None
     )
     assert _parse_owner_repo("") is None

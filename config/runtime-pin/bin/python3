@@ -1,0 +1,48 @@
+#!/bin/sh
+# vibecrafted-runtime-python-door
+# python and python3 inside a Vibecrafted runtime.
+#
+# A process that enters the runtime (vc-terminal, vc-frame, a vc-* launcher, a
+# dispatched worker) pins one interpreter: VIBECRAFTED_PYTHON, the absolute
+# bin/python3 of the generation that started it. The same entry puts this
+# directory first on PATH, so every child -- a nested shell, an agent, a hook,
+# a `#!/usr/bin/env python3` script -- reaches that interpreter here. An
+# update does not move a live session: the pin names a generation, not
+# "whatever is active now".
+#
+# The door never chooses. Without a usable pin it fails with the reason. A
+# quiet fallback to the host python (macOS ships 3.9.6) or to the active
+# generation only hides the defect until the first `import tomllib`.
+# Outside the runtime this directory is not on PATH and python3 stays the
+# user's own.
+name=${0##*/}
+pin=${VIBECRAFTED_PYTHON-}
+refuse() {
+  printf 'vibecrafted %s: %s\n' "$name" "$1" >&2
+  printf '  %s is the Vibecrafted runtime python door; it runs only the interpreter the runtime pinned.\n' "$0" >&2
+  printf '  Start this shell from Vibecrafted again (vc-terminal, a vc-* command) or remove the door from PATH to use your own python.\n' >&2
+  exit 127
+}
+[ -n "$pin" ] || refuse 'no interpreter is pinned: VIBECRAFTED_PYTHON is unset'
+case $pin in
+  /*) ;;
+  *) refuse "pinned interpreter is not an absolute path: $pin" ;;
+esac
+if [ ! -f "$pin" ] || [ ! -x "$pin" ]; then
+  refuse "pinned interpreter is missing or not executable: $pin"
+fi
+# A pin that comes back here would exec in a loop: a door (this one or a
+# copy), or a script whose shebang looks python up on PATH, which is this door
+# (2026-09-25: such a launcher pinned as the interpreter). Read with builtins;
+# the door forks nothing before exec.
+door_first='' door_mark=''
+{ IFS= read -r door_first && IFS= read -r door_mark; } <"$pin" 2>/dev/null
+if [ "$door_mark" = '# vibecrafted-runtime-python-door' ]; then
+  refuse "VIBECRAFTED_PYTHON names a python door, not an interpreter: $pin"
+fi
+case $door_first in
+  '#!'*'/env python'* | '#!'*'/env -'*' python'* | '#!python'* | '#! python'*)
+    refuse "pinned interpreter finds python through PATH (${door_first}), which leads back to this door: $pin"
+    ;;
+esac
+exec "$pin" "$@"

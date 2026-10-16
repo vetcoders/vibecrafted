@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
-  <a href="VERSION"><img alt="Version 4.3.3" src="https://img.shields.io/badge/version-4.3.3-informational.svg"></a>
+  <a href="VERSION"><img alt="Version 4.4.0" src="https://img.shields.io/badge/version-4.4.0-informational.svg"></a>
   <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows native + WSL2" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20native%20%2B%20WSL2-lightgrey.svg"></a>
 </p>
 
@@ -105,10 +105,10 @@ The runtime ships with **vc-frame**, the terminal cockpit every launcher and
 lifecycle runs inside. One window is one session with a fixed chrome:
 
 <p align="center">
-  <img alt="vc-frame anatomy — Start here map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
+  <img alt="vc-frame anatomy — Launchpad map of the workspace" src="docs/assets/vc-frame-anatomy.png" width="900" />
 </p>
 
-- **TOP** — tabs of this session (`Start here` · `Shell` · one tab per worker run)
+- **TOP** — tabs of this session (`Launchpad` · `Shell` · one tab per worker run)
 - **LEFT** — the sessions rail: other sessions and agent rooms, click to jump
 - **CENTER** — the work surface (guide, shell, live worker streams)
 - **BOTTOM** — status bar with modes (`Ctrl+t` TAB · `Ctrl+p` PANE · `Ctrl+o` SESSION)
@@ -168,11 +168,16 @@ The `//` is not decoration. It is the mark.
 ## Install
 
 Check the [latest GitHub Release](https://github.com/vetcoders/vibecrafted/releases/latest)
-for the assets it actually carries. The latest public release is `v3.5.0` and
-does not include the 4.x DMG, Runtime Packs, portable archive, or native Windows
-installers. For the current public install path, use the bootstrap on macOS or
-Linux, and WSL2 on Windows. Versioned carrier names below describe the 4.x
-release contract and become usable when those assets are published:
+for the assets it actually carries
+(`gh release view --repo vetcoders/vibecrafted --json tagName,assets`). Tags
+`v4.0.0` through `v4.3.3` were never published as GitHub Releases; the newest
+release before 4.4 is `v3.5.0`, a source tarball without DMG, Runtime Packs,
+portable archive or Windows installers. When the latest release lacks the
+carrier you need, use the bootstrap on macOS or Linux, and WSL2 on Windows.
+The bootstrap installs the version named in
+[`channel/main.json`](https://vibecrafted.io/channel/main.json), which the
+website publishes on its own schedule. Versioned carrier names below describe
+the 4.x release contract and are usable once a release attaches them:
 
 - macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
 - macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
@@ -262,25 +267,26 @@ For a read-only recovery plan, invoke the same wrapper and add
 `--rescue --plan`; apply the reported plan with `--rescue --apply
 --plan-digest <digest>` using the same archive and bootstrap identity.
 
-Maintainers who intentionally want local compilation use the explicit source
-lane:
+From a committed source checkout, build and install the selected generation:
 
 ```bash
-make install-source
+make install
 make help-dev   # the full target surface
 ```
 
-`make install` never compiles a product for a stranger. It selects a closed
-Runtime Pack for the current platform and architecture; Linux and WSL2 use the
-Linux x86_64 or arm64 carrier. `make install-source` is the explicit maintainer
-lane and may require the full build toolchain.
+`make install` builds this checkout into a closed Runtime Pack, then installs
+that exact carrier. On macOS, Frame and Terminal come from the full revisions
+in `config/source-components.json`; available checkout objects are reused
+without switching branches or reading dirty files. Missing objects are fetched
+into temporary repositories. An explicit `RUNTIME_PACK=/absolute/path` selects
+a previously built, signed carrier without compiling it.
 
 A Runtime Pack install gives you the headless Vibecrafted runtime — `vibecrafted
 doctor`, every skill launcher, `observe`/`await`, reports and transcripts under
 `~/.vibecrafted`. Foundations (`loct`, `aicx`, `prview`, `screenscribe`) and agent
-CLIs are not part of the pack; install them through their own channels. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
-it ships inside the desktop app below, and `vibecrafted init <agent>` falls back
-to your current terminal until it is present. First run after install:
+CLIs are not part of the pack; install them through their own channels. The
+Runtime Pack includes `vc-frame`, `vc-terminal` and `vc-start`; the desktop app
+provides their native host as well. First run after install:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -293,11 +299,12 @@ vibecrafted status                   # today's runs
 **macOS desktop app:** the intended end-user shape is one Developer ID signed
 and notarized `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` carrying matching
 builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete runtime.
-The DMG is an artifact of releases from 4.3.1 on. Check what a release
-actually carries (`gh release view --json assets -q '.assets[].name'`); if it
-lists a DMG, download it and its adjacent `.dmg.sha256`, verify the checksum,
-then open the DMG. The latest published release may not carry one yet — until
-a release with the DMG is published, use the bootstrap above.
+The DMG belongs to the 4.x release contract; no GitHub Release up to `v4.3.3`
+attached one. Check what a release actually carries
+(`gh release view --repo vetcoders/vibecrafted --json assets -q '.assets[].name'`);
+if it lists a DMG, download it and its adjacent `.dmg.sha256`, verify the
+checksum, then open the DMG. Until a release with the DMG is published, use the
+bootstrap above.
 
 The same release also carries
 `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`, its
@@ -310,15 +317,16 @@ same release carries `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
 and its adjacent `.sha256`. It is not a convenience copy of the repository — it
 is an allowlisted projection of one exact commit, carrying a closed
 `source-provenance.json` whose distribution-tree digest names that commit. The
-installer refuses a payload whose provenance does not close:
+installer refuses a payload whose provenance does not close. Pair it with the
+matching Runtime Pack; the source archive is not the native carrier:
 
 ```bash
 tar -xzf Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz
-bash vibecrafted-<version>/install.sh
+bash vibecrafted-<version>/install.sh --runtime-pack-file /absolute/path/to/matching-pack.tar.gz install
 ```
 
-Unlike `curl | bash`, that pins you to a version instead of to whatever a
-branch happens to hold today.
+Unlike `curl | bash`, which installs whatever the website channel names when
+you run it, that pins you to one verified commit.
 
 Every new or restored `workspace_id` enters through the bundled `vc-start`.
 Vibecrafted sources its own XDG/runtime environment and does not overwrite your

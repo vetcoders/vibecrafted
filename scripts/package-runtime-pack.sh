@@ -65,7 +65,29 @@ done
 [[ -n "$payload_root" ]] || die "--payload-root is required"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-runtime-pack-build.XXXXXX")"
-trap 'rm -rf -- "$work"' EXIT INT TERM HUP
+# Trap-only cleanup follows the installer's bounded, status-preserving pattern.
+# shellcheck disable=SC2329,SC2317
+cleanup_runtime_pack() {
+  local status=$?
+  local _attempt
+  if [[ -n "${work:-}" && -d "$work" ]]; then
+    for _attempt in 1 2 3; do
+      if rm -rf -- "$work" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if [[ -d "$work" ]]; then
+      printf 'Runtime Pack build warning: could not remove temporary directory: %s\n' \
+        "$work" >&2
+    fi
+  fi
+  return "$status"
+}
+trap cleanup_runtime_pack EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 root="$work/VibecraftedRuntime"
 mkdir -p "$root"
 payload_root="$(cd "$payload_root" 2>/dev/null && pwd -P)" \

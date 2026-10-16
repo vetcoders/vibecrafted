@@ -19,7 +19,7 @@ import json
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -212,8 +212,7 @@ def qualify_scope(
         runtime_probe_results=probe_results,
         state=state,
         refusal_reasons=tuple(dict.fromkeys(refusals)),
-        recorded_at=recorded_at
-        or datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        recorded_at=recorded_at or datetime.now(UTC).isoformat(timespec="milliseconds"),
     )
 
 

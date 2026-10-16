@@ -9,8 +9,10 @@ stub on PATH instead of a substituted $SHELL.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
+import venv
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +98,8 @@ def _run_quick_cmd(
     install_frame: bool = True,
     frame_exit: int = 0,
     interrupt: bool = False,
+    extra_env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Drive the wrapper with a `probe` PATH stub and a vc-frame stub."""
 
@@ -118,13 +122,15 @@ def _run_quick_cmd(
     }
     if pane_id is not None:
         env[pane_env] = pane_id
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         ["bash", str(WRAPPER)],
         input=typed,
         capture_output=True,
         text=True,
         env=env,
-        cwd=tmp_path,
+        cwd=cwd or tmp_path,
         timeout=20,
         check=False,
     )
@@ -176,6 +182,33 @@ def test_quick_cmd_wrapper_closes_own_pane_by_id_when_input_ends(
     assert "frame action list-panes --json --state" in recorded
     assert "frame action close-pane --pane-id terminal_18" in recorded
     assert "action close-pane\n" not in recorded
+
+
+def test_fresh_wrapper_closes_own_pane_when_owner_pid_is_inherited_stale(
+    tmp_path: Path,
+) -> None:
+    """A new wrapper must not keep a parent shell's owner pid.
+
+    The generated rc keeps a non-empty owner so a helper that sources it
+    stays the helper. The wrapper boundary is what starts a new owner.
+    An inherited stale pid must not stop this invocation closing its pane.
+    """
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe kept\n",
+        panes=panes,
+        extra_env={"_vc_quick_owner_pid": "999998"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "ran kept",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert events.count("frame action close-pane --pane-id terminal_18") == 1
 
 
 def test_quick_cmd_wrapper_does_not_close_focus_when_pane_id_is_absent(
@@ -662,3 +695,803 @@ def test_product_profile_keeps_on_request_help_behind_quiet_gate() -> None:
     assert "VIBECRAFTED_QUIET_START" in text
     assert "vibecrafted --help" in text
     assert "Your terminal is ready" in text
+
+
+def _install_helper_exit_profile(home: Path) -> None:
+    """Profile fixture: one typed character forks a helper that exits explicitly.
+
+    `(exit 0)` is the case that runs an inherited zshexit. A plain `(print)`
+    subshell does not. The hook is installed by Quick cmd after this file is
+    sourced, so the widget fires only once the line editor is up.
+    """
+
+    product = home / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    (product / "interactive.zsh").write_text(
+        """\
+typeset -g _vc_test_helper_done=0
+_vc_test_note_preexec() {
+  print -r -- "preexec" >> "${VC_QUICK_HELPER_LOG}"
+}
+_vc_test_self_insert() {
+  zle .self-insert
+  (( _vc_test_helper_done )) && return 0
+  _vc_test_helper_done=1
+  (
+    print -r -- "helper kind=subshell ZSH_SUBSHELL=$ZSH_SUBSHELL" >> "${VC_QUICK_HELPER_LOG}"
+    exit 0
+  ) || true
+  print -r -- "helper kind=parent-alive" >> "${VC_QUICK_HELPER_LOG}"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _vc_test_note_preexec
+zle -N self-insert _vc_test_self_insert
+""",
+        encoding="utf-8",
+    )
+
+
+def _read_pty_until(fd: int, output: bytearray, predicate, timeout: float) -> bool:
+    import os
+    import select
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return predicate()
+        if not chunk:
+            return predicate()
+        output += chunk
+    return predicate()
+
+
+def _reap_pty(pid: int, fd: int) -> None:
+    import os
+    import signal
+
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        done, _status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+    os.waitpid(pid, 0)
+
+
+def _install_root_zpty_exit_profile(home: Path) -> None:
+    """Login pin fixture: start one root zpty after Quick cmd's hook exists.
+
+    On zsh 5.9 a zpty child started from a shell function (a typing widget
+    or precmd) has `shfunc` in its eval context and `exit` does not run
+    zshexit. Quick cmd's generated `.zlogin` sources the runtime pin at
+    toplevel, after `.zshrc` has installed the hook, and before the first
+    prompt. No command is accepted. `.zshenv` and `.zprofile` source the
+    same pin earlier, so the pin waits until the product function is the
+    zshexit body. The finished line is written only after that hook has
+    returned and `zpty -t` says the helper is dead.
+    """
+
+    product = home / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    (product / "interactive.zsh").write_text(
+        """\
+_vc_test_note_preexec() {
+  print -r -- "preexec" >> "${VC_QUICK_HELPER_LOG}"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _vc_test_note_preexec
+""",
+        encoding="utf-8",
+    )
+    pin_dir = home / "runtime" / "config" / "runtime-pin"
+    pin_dir.mkdir(parents=True)
+    (pin_dir / "pin.zsh").write_text(
+        """\
+[[ -n ${_vc_test_root_zpty_armed:-} ]] && return 0
+zmodload zsh/parameter
+[[ ${functions[zshexit]:-} == *_vc_quick_close_self* ]] || return 0
+typeset -g _vc_test_root_zpty_armed=1
+zmodload zsh/system
+zmodload zsh/zpty
+functions -c zshexit _vc_test_real_zshexit
+zshexit() {
+  print -r -- "hook kind=zshexit ZSH_SUBSHELL=$ZSH_SUBSHELL pid=$sysparams[pid]" >> "${VC_QUICK_HELPER_LOG}"
+  _vc_test_real_zshexit
+  print -r -- "hook kind=zshexit-returned pid=$sysparams[pid]" >> "${VC_QUICK_HELPER_LOG}"
+}
+zpty vcquickhelper 'exit 0'
+typeset -g _vc_test_i=0
+while (( _vc_test_i < 40 )); do
+  if [[ -f ${VC_QUICK_HELPER_LOG} ]] \
+    && [[ $(<"${VC_QUICK_HELPER_LOG}") == *'hook kind=zshexit-returned pid='* ]] \
+    && ! zpty -t vcquickhelper; then
+    print -r -- "kind=helper-finished owner_pid=$sysparams[pid] parent_alive=1" >> "${VC_QUICK_HELPER_LOG}"
+    break
+  fi
+  sleep 0.05
+  _vc_test_i=$(( _vc_test_i + 1 ))
+done
+""",
+        encoding="utf-8",
+    )
+
+
+def _quick_cmd_after_helper_exit(
+    tmp_path: Path,
+    *,
+    panes: list[dict[str, object]],
+    follow_up: bytes,
+    install_profile=_install_helper_exit_profile,
+    ready_marker: str = "kind=parent-alive",
+    extra_env: dict[str, str] | None = None,
+    prelude: bytes = b"v",
+) -> tuple[str, list[str], list[str]]:
+    """Let the helper exit, then send `follow_up`.
+
+    Returns the helper receipt, frame events observed before follow-up, and
+    the events after the shell leaves. `ready_marker` must be a line the
+    helper writes only after its close hook has returned. `prelude` is the
+    bytes typed before that wait; an empty prelude accepts no line.
+    """
+
+    import os
+    import pty
+
+    bin_dir = tmp_path / "bin"
+    stub_dir = tmp_path / "stubs"
+    log = tmp_path / "events.log"
+    helper_log = tmp_path / "helper.log"
+    _install_frame(bin_dir, log, panes)
+    _install_probe(stub_dir, log)
+    install_profile(tmp_path)
+    env = {
+        "HOME": str(tmp_path),
+        "USER": "op",
+        "TERM": "xterm",
+        "PATH": f"{stub_dir}:{bin_dir}:/usr/bin:/bin",
+        "VC_FRAME_PANE_ID": "terminal_18",
+        "VC_QUICK_HELPER_LOG": str(helper_log),
+    }
+    if extra_env:
+        env.update(extra_env)
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve("/bin/bash", ["/bin/bash", str(WRAPPER)], env)
+
+    output = bytearray()
+    try:
+        assert _read_pty_until(fd, output, lambda: b"\xe2\x9d\xaf_" in output, 15), (
+            output.decode("utf-8", "replace")
+        )
+        if prelude:
+            os.write(fd, prelude)
+        assert _read_pty_until(
+            fd,
+            output,
+            lambda: (
+                helper_log.exists()
+                and ready_marker in helper_log.read_text(encoding="utf-8")
+            ),
+            15,
+        ), output.decode("utf-8", "replace")
+        os.kill(pid, 0)
+        helper_text = helper_log.read_text(encoding="utf-8")
+        before = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        os.write(fd, follow_up)
+        _read_pty_until(
+            fd,
+            output,
+            lambda: (
+                log.exists()
+                and "close-pane --pane-id terminal_18"
+                in log.read_text(encoding="utf-8")
+            ),
+            15,
+        )
+    finally:
+        _reap_pty(pid, fd)
+    after = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return helper_text, before, after
+
+
+def test_typing_without_enter_does_not_let_helper_zshexit_close_the_pane(
+    tmp_path: Path,
+) -> None:
+    """A completion helper's explicit exit inherits zshexit. No Enter was
+    accepted, so that exit must not close the pane; the root shell stays up
+    and a later command still closes exactly this pane id."""
+
+    import re
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    helper_text, before, after = _quick_cmd_after_helper_exit(
+        tmp_path,
+        panes=panes,
+        follow_up=b"\x15probe kept\r",
+    )
+
+    match = re.search(r"kind=subshell ZSH_SUBSHELL=(\d+)", helper_text)
+    assert match is not None, helper_text
+    assert int(match.group(1)) > 0, helper_text
+    assert "kind=parent-alive" in helper_text
+    assert "preexec" not in helper_text.split("kind=parent-alive", 1)[0]
+    assert before == [], before
+    assert after == [
+        "ran kept",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert "action close-pane\n" not in "\n".join(after) + "\n"
+
+
+def test_root_zpty_exit_does_not_close_before_the_owner_accepts_a_command(
+    tmp_path: Path,
+) -> None:
+    """A toplevel root zpty helper exits with ZSH_SUBSHELL=0 and another pid.
+
+    On this zsh, zpty started from a widget or precmd does not run zshexit
+    (the child eval context includes shfunc). That is not this case, and it
+    does not explain a live idle close. Quick cmd's generated .zlogin sources
+    the runtime pin at toplevel after .zshrc installs the hook and before any
+    command is accepted. The helper receipt is written only after the hook
+    returns and zpty -t reports the helper dead. The owner shell stays alive
+    and a later command closes exactly this pane id once.
+    """
+
+    import re
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    helper_text, before, after = _quick_cmd_after_helper_exit(
+        tmp_path,
+        panes=panes,
+        follow_up=b"probe kept\r",
+        install_profile=_install_root_zpty_exit_profile,
+        ready_marker="kind=helper-finished",
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(tmp_path / "runtime")},
+        prelude=b"",
+    )
+
+    hook = re.search(
+        r"hook kind=zshexit ZSH_SUBSHELL=(\d+) pid=(\d+)",
+        helper_text,
+    )
+    returned = re.search(r"hook kind=zshexit-returned pid=(\d+)", helper_text)
+    finished = re.search(
+        r"kind=helper-finished owner_pid=(\d+) parent_alive=1",
+        helper_text,
+    )
+    assert hook is not None, helper_text
+    assert returned is not None, helper_text
+    assert finished is not None, helper_text
+    assert int(hook.group(1)) == 0, helper_text
+    assert returned.group(1) == hook.group(2)
+    assert finished.group(1) != hook.group(2)
+    assert helper_text.index("hook kind=zshexit-returned") < helper_text.index(
+        "kind=helper-finished"
+    )
+    assert "preexec" not in helper_text.split("kind=helper-finished", 1)[0]
+    assert before == [], before
+    assert after == [
+        "ran kept",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+    assert after.count("frame action close-pane --pane-id terminal_18") == 1
+    assert "action close-pane\n" not in "\n".join(after) + "\n"
+
+
+def test_pinned_pane_stays_when_a_helper_subshell_exits(tmp_path: Path) -> None:
+    """Pin still owns the pane: a helper exit does not close it, and a typed
+    exit afterwards closes exactly this id once both commands have run."""
+
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    helper_text, before, after = _quick_cmd_after_helper_exit(
+        tmp_path,
+        panes=panes,
+        follow_up=b"\x15probe one\rprobe two\rexit\r",
+    )
+
+    assert "kind=subshell ZSH_SUBSHELL=" in helper_text
+    assert "kind=parent-alive" in helper_text
+    assert before == [], before
+    assert after == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def _install_interactive_profile(tmp_path: Path) -> Path:
+    product = tmp_path / ".config" / "vibecrafted" / "vc-terminal"
+    product.mkdir(parents=True, exist_ok=True)
+    target = product / "interactive.zsh"
+    target.write_text(PROFILE.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
+def _make_installed_generation(
+    tmp_path: Path,
+    *,
+    version: str = "4.4.0",
+    valid_python: bool = True,
+) -> Path:
+    """Create a private copied-owner installed runtime generation fixture.
+
+    The generation sits under `releases/<version>`, satisfying
+    `_vetcoders_is_installed_generation_product`. Its core is copied from the
+    repository, binding the real owned interpreter (`bin/python3`) without
+    falling back to host python or ambient environment.
+    """
+    gen = tmp_path / "releases" / version
+    gen.mkdir(parents=True, exist_ok=True)
+    if valid_python:
+        venv.EnvBuilder(with_pip=False, symlinks=True).create(gen)
+    core_root = gen / "vibecrafted-core"
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+        core_root / "vibecrafted_core",
+    )
+    return gen
+
+
+def test_quick_cmd_untouched_product_preference_does_not_source_user_zshrc(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe untouched\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists(), (
+        "User ~/.zshrc must not be sourced under default product profile"
+    )
+    assert events == [
+        "ran untouched",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_sources_user_zshrc_exactly_once(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sentinel_hit\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe personal\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel.exists(), (
+        "User ~/.zshrc must be sourced when quick_cmd_profile='personal'"
+    )
+    hits = sentinel.read_text(encoding="utf-8").splitlines()
+    assert hits == ["sentinel_hit"]
+    assert len(hits) == 1
+    assert events == [
+        "ran personal",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_pinned_pane_survives_and_keeps_single_load(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sentinel_hit\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": True, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe one\nprobe two\nexit\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel.exists()
+    hits = sentinel.read_text(encoding="utf-8").splitlines()
+    assert hits == ["sentinel_hit"]
+    assert len(hits) == 1
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_personal_preference_unrelated_pane_survives(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+
+    panes = [
+        {"id": "terminal_18", "is_pinned": False, "is_plugin": False},
+        {"id": "terminal_99", "is_pinned": False, "is_plugin": False},
+    ]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe self\n",
+        panes=panes,
+        pane_id="terminal_18",
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "frame action close-pane --pane-id terminal_18" in events
+    assert "frame action close-pane --pane-id terminal_99" not in events
+    assert events.count("frame action close-pane --pane-id terminal_18") == 1
+
+
+def test_quick_cmd_malformed_preference_handled_honestly_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "unknown_flavor"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe fallback\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists(), (
+        "User ~/.zshrc must not be sourced on malformed preference"
+    )
+    assert "invalid terminal config" in result.stderr
+    assert events == [
+        "ran fallback",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_malformed_toml_handled_honestly_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    sentinel = tmp_path / "sentinel.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe fallback\n",
+        panes=panes,
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+    assert "invalid TOML in server config" in result.stderr
+    assert events == [
+        "ran fallback",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_installed_owned_interpreter_wins_over_hostile_environment(
+    tmp_path: Path,
+) -> None:
+    """Installed physical runtime core + valid owned interpreter wins over
+    hostile env, PATH, cwd, and ambient VIBECRAFTED_PYTHON."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+
+    # 1. Hostile python on PATH that records sentinel and exits with error
+    host_bin = tmp_path / "hostile_bin"
+    host_bin.mkdir()
+    hostile_python_sentinel = tmp_path / "hostile_python_called.log"
+    for name in ("python3", "python"):
+        p = host_bin / name
+        p.write_text(
+            f"#!/bin/sh\necho hit >> '{hostile_python_sentinel}'\nexit 79\n",
+            encoding="utf-8",
+        )
+        p.chmod(0o755)
+
+    # 2. Hostile json.py in cwd
+    hostile_cwd = tmp_path / "hostile_cwd"
+    hostile_cwd.mkdir()
+    (hostile_cwd / "json.py").write_text(
+        "raise RuntimeError('HOSTILE CWD JSON IMPORTED')\n",
+        encoding="utf-8",
+    )
+
+    # 3. Hostile module in ambient PYTHONPATH
+    hostile_lib = tmp_path / "hostile_lib" / "vibecrafted_core"
+    hostile_lib.mkdir(parents=True)
+    (hostile_lib / "__init__.py").write_text(
+        "raise RuntimeError('HOSTILE PYTHONPATH LIB IMPORTED')\n",
+        encoding="utf-8",
+    )
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal_sourced.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "personal_ok\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    stub_dir = tmp_path / "stubs"
+    bin_dir = tmp_path / "bin"
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe hostile_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PATH": f"{host_bin}:{stub_dir}:{bin_dir}:/usr/bin:/bin",
+            "PYTHONPATH": str(tmp_path / "hostile_lib"),
+            "VIBECRAFTED_PYTHON": str(host_bin / "python3"),
+        },
+        cwd=hostile_cwd,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not hostile_python_sentinel.exists(), (
+        "Hostile python on PATH / VIBECRAFTED_PYTHON must never be invoked"
+    )
+    assert personal_sentinel.exists(), (
+        "Personal profile must be loaded via canonical owned interpreter"
+    )
+    assert personal_sentinel.read_text(encoding="utf-8").strip() == "personal_ok"
+    assert events == [
+        "ran hostile_check",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_installed_owner_python_absent_refuses_host_fallback(
+    tmp_path: Path,
+) -> None:
+    """When installed owner python is missing, it refuses to fall back to
+    public/ambient host python and safely defaults to product profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path, valid_python=False)
+
+    host_bin = tmp_path / "hostile_bin"
+    host_bin.mkdir()
+    hostile_python_sentinel = tmp_path / "hostile_python_called.log"
+    for name in ("python3", "python"):
+        p = host_bin / name
+        p.write_text(
+            f"#!/bin/sh\necho hit >> '{hostile_python_sentinel}'\nexit 79\n",
+            encoding="utf-8",
+        )
+        p.chmod(0o755)
+
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    user_zshrc_sentinel = tmp_path / "user_zshrc_sourced.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "sourced\\n" >> "{user_zshrc_sentinel}"\n', encoding="utf-8"
+    )
+
+    stub_dir = tmp_path / "stubs"
+    bin_dir = tmp_path / "bin"
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe absent_python\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PATH": f"{host_bin}:{stub_dir}:{bin_dir}:/usr/bin:/bin",
+            "VIBECRAFTED_PYTHON": str(host_bin / "python3"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not hostile_python_sentinel.exists(), (
+        "Public/host python must not be executed when installed owner python is absent"
+    )
+    assert not user_zshrc_sentinel.exists(), (
+        "Default product profile must be used when interpreter cannot be resolved"
+    )
+    assert events == [
+        "ran absent_python",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_stale_core_override_preserves_installed_generation_and_neutralizes_ambient_python(
+    tmp_path: Path,
+) -> None:
+    """Parent Case 1: Healthy selected runtime + ambient VIBECRAFTED_CORE_DIR
+    pointing to foreign directory outside generation + hostile VIBECRAFTED_PYTHON.
+    The wrapper must bind the generation's owned core and interpreter, executing
+    zero ambient python calls, and honestly load personal profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+
+    # Hostile ambient python
+    hostile = tmp_path / "ambient-python"
+    marker = tmp_path / "ambient-python-invoked.log"
+    hostile.write_text(
+        f'#!/bin/sh\nprintf "hit\\n" >> "{marker}"\nprintf "personal\\n"\n',
+        encoding="utf-8",
+    )
+    hostile.chmod(0o755)
+
+    # Stale foreign core directory
+    alternate = tmp_path / "foreign-core"
+    alternate.mkdir()
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal-loaded.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "loaded\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe owner_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "VIBECRAFTED_CORE_DIR": str(alternate),
+            "VIBECRAFTED_PYTHON": str(hostile),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "Ambient hostile python must never be executed"
+    assert personal_sentinel.exists(), (
+        "Personal profile must be loaded via generation's owned python"
+    )
+    assert events == [
+        "ran owner_check",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_missing_selected_runtime_core_refuses_fallback_to_source_core(
+    tmp_path: Path,
+) -> None:
+    """Parent Case 2: Selected runtime core.sh absent.
+    The wrapper must report the selected owner missing to stderr, refuse to fall
+    through to source core.sh or execute ambient python, and fall safe to product profile."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    (gen / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/core.sh").unlink()
+
+    # Hostile ambient python
+    hostile = tmp_path / "ambient-python"
+    marker = tmp_path / "ambient-python-invoked.log"
+    hostile.write_text(
+        f'#!/bin/sh\nprintf "hit\\n" >> "{marker}"\nprintf "personal\\n"\n',
+        encoding="utf-8",
+    )
+    hostile.chmod(0o755)
+
+    # Configure personal profile
+    config_dir = tmp_path / ".config" / "vibecrafted"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n', encoding="utf-8"
+    )
+    personal_sentinel = tmp_path / "personal-loaded.log"
+    (tmp_path / ".zshrc").write_text(
+        f'printf "loaded\\n" >> "{personal_sentinel}"\n', encoding="utf-8"
+    )
+
+    panes = [{"id": "terminal_18", "is_pinned": False, "is_plugin": False}]
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe owner_check\n",
+        panes=panes,
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "VIBECRAFTED_PYTHON": str(hostile),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "Ambient hostile python must never be executed"
+    assert not personal_sentinel.exists(), (
+        "Personal profile must not be loaded when selected core is missing"
+    )
+    assert "selected runtime core is missing" in result.stderr
+    assert events == [
+        "ran owner_check",
+        "frame action close-pane --pane-id terminal_18",
+    ]

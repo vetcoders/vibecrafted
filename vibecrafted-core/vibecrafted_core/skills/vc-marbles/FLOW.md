@@ -4,15 +4,15 @@
 
 ```mermaid
 flowchart TD
-    A[Operator: vibecrafted marbles codex --prompt 'Fix what is still wrong'] --> B[Create or inherit ancestor run lock]
-    B --> C[Build ancestor prompt from one source]
-    C --> D[Launch L1 agent run and watcher]
-    D --> E[Collect finding, fix, and new evidence]
-    E --> F{Converged?}
-    F -->|no| G[Spawn next loop]
-    G --> E
-    F -->|yes| H[Write convergence report and return]
-    E -->|blocked after repeated attempts| I[Escalate to vc-partner]
+    A[Operator: vibecrafted marbles codex] --> B[Snapshot unchanged task and assigned root]
+    B --> D[Fresh blind WRITE worker: one cut, commit, report]
+    D --> E[Await informed READ receiver on guarded source]
+    E --> F[Validate evidence and merge reception ledger]
+    F --> G{Reception verdict and budget}
+    G -->|continue or shift within same task| D
+    G -->|verified convergence| H[Write parent report and terminal metadata]
+    G -->|budget exhausted: not converged| H
+    G -->|invalid or blocked| I[Escalate to Operator]
     I --> H
 ```
 
@@ -43,6 +43,9 @@ rc=0-on-live and meta stuck `active`/`stalled` after real completion.
 
 ### Session artifacts
 
-- Artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/marbles/`
-- Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
-- Outputs: ancestor reports, loop reports, convergence reports, transcripts, and `.meta.json` sidecars under `marbles/reports/`
+- Current core owner: `workflow_runtime.run_marbles`, supervised by `AsyncSupervisor`.
+- Parent report: the launch receipt's `report`; children live beside it in `<run_id>-children/`.
+- WRITE outputs: `marbles-L<N>.md`, transcript, prompt and metadata on the same assigned root.
+- READ outputs: separate `marbles-L<N>-reception` artifacts; `reception.json` holds accepted findings, metrics, routing and final verdict. Receiver state is never injected into WRITE prompts.
+- `--count` is a maximum, not proof of convergence. A completed run can have `verdict: not_converged` after exhaustion. Invalid verification or repeated failures yield `blocked`; only verified empty reception yields `converged`.
+- Native resume is used only through verified adapters; other providers use a fresh informed READ receiver. The macOS source guard protects assigned files and shared Git metadata. Hosts without this guard currently block reception explicitly.

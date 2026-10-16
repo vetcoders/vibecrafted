@@ -42,18 +42,19 @@ try:
 except ModuleNotFoundError:  # depends on entrypoint
     _installer_brand = importlib.import_module("scripts.installer_brand")
 
-from vibecrafted_core.control_plane import sync_state
-from vibecrafted_core.runtime_paths import (
-    read_version_file,
-    vibecrafted_home,
-    vibecrafted_runtime_bin,
-    vibecrafted_tools_home,
-    xdg_config_home,
-)
-from vibecrafted_core.workflow import (
-    launch_workflow,
-    normalize_launch_spec,
-)
+_control_plane = importlib.import_module("vibecrafted_core.control_plane")
+sync_state = _control_plane.sync_state
+
+_runtime_paths = importlib.import_module("vibecrafted_core.runtime_paths")
+read_version_file = _runtime_paths.read_version_file
+vibecrafted_home = _runtime_paths.vibecrafted_home
+vibecrafted_runtime_bin = _runtime_paths.vibecrafted_runtime_bin
+vibecrafted_tools_home = _runtime_paths.vibecrafted_tools_home
+xdg_config_home = _runtime_paths.xdg_config_home
+
+_workflow = importlib.import_module("vibecrafted_core.workflow")
+launch_workflow = _workflow.launch_workflow
+normalize_launch_spec = _workflow.normalize_launch_spec
 
 PRODUCT_LINE = _installer_brand.PRODUCT_LINE
 TAGLINE = _installer_brand.TAGLINE
@@ -206,8 +207,31 @@ def _serialize_install_plan(steps: list[InstallStep]) -> list[dict[str, str]]:
     ]
 
 
-def build_install_steps(source_dir: str, *, with_shell: bool) -> list[InstallStep]:
-    """Build the ordered install plan: optional foundations, core install, optional runtime."""
+def build_runtime_pack_command(
+    source_dir: str, *, runtime_pack: str, expected_source_revision: str | None
+) -> list[str]:
+    """Build the verified Runtime Pack installer invocation for a selected pack."""
+    installer = Path(source_dir).resolve() / "scripts" / "install-runtime-pack.sh"
+    if not installer.exists():
+        raise FileNotFoundError(f"Runtime Pack installer not found at {installer}")
+    command = ["bash", str(installer), "--pack", runtime_pack]
+    if expected_source_revision:
+        command += ["--expected-source-revision", expected_source_revision]
+    return command
+
+
+def build_install_steps(
+    source_dir: str,
+    *,
+    with_shell: bool,
+    runtime_pack: str | None = None,
+    expected_source_revision: str | None = None,
+) -> list[InstallStep]:
+    """Build the ordered install plan: optional foundations, core install, optional runtime.
+
+    A bootstrap-selected ``runtime_pack`` replaces the source install: the
+    verified pack is what the user chose, never a silent source build.
+    """
     steps: list[InstallStep] = []
     foundations_path = foundations_script_path(source_dir)
     if foundations_path.exists():
@@ -218,12 +242,15 @@ def build_install_steps(source_dir: str, *, with_shell: bool) -> list[InstallSte
             )
         )
 
-    steps.append(
-        InstallStep(
-            label="Install Vibecrafted",
-            command=build_install_command(source_dir, with_shell=with_shell),
+    if runtime_pack:
+        install_command = build_runtime_pack_command(
+            source_dir,
+            runtime_pack=runtime_pack,
+            expected_source_revision=expected_source_revision,
         )
-    )
+    else:
+        install_command = build_install_command(source_dir, with_shell=with_shell)
+    steps.append(InstallStep(label="Install Vibecrafted", command=install_command))
     runtime = os.environ.get("VIBECRAFTED_RUNTIME", "none").strip() or "none"
     runtime_path = runtime_script_path(source_dir)
     if runtime != "none" and runtime_path.exists():
@@ -522,9 +549,18 @@ class InstallRun:
 class InstallController:
     """Owns diagnostics, the running install thread, and control-plane state for the GUI."""
 
-    def __init__(self, source_dir: str, *, bundle_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        source_dir: str,
+        *,
+        bundle_dir: str | None = None,
+        runtime_pack: str | None = None,
+        expected_source_revision: str | None = None,
+    ) -> None:
         """Resolve source_dir, run initial diagnostics, and locate the site bundle."""
         self.source_dir = str(Path(source_dir).resolve())
+        self.runtime_pack = runtime_pack
+        self.expected_source_revision = expected_source_revision
         self.version = read_framework_version(self.source_dir)
         self.diagnostics = run_diagnostics(self.source_dir)
         self.found_items, self.missing_items, self.needs_install = (
@@ -618,7 +654,12 @@ class InstallController:
         """Assemble the full `/api/preflight` JSON payload: brand, diagnostics, plan, status."""
         try:
             install_plan = _serialize_install_plan(
-                build_install_steps(self.source_dir, with_shell=True)
+                build_install_steps(
+                    self.source_dir,
+                    with_shell=True,
+                    runtime_pack=self.runtime_pack,
+                    expected_source_revision=self.expected_source_revision,
+                )
             )
         except FileNotFoundError:
             install_plan = []
@@ -707,7 +748,12 @@ class InstallController:
     def start(self, *, with_shell: bool) -> tuple[bool, str]:
         """Start the install steps in a background daemon thread, refusing a concurrent run."""
         try:
-            steps = build_install_steps(self.source_dir, with_shell=with_shell)
+            steps = build_install_steps(
+                self.source_dir,
+                with_shell=with_shell,
+                runtime_pack=self.runtime_pack,
+                expected_source_revision=self.expected_source_revision,
+            )
         except FileNotFoundError as exc:
             with self._lock:
                 self._run = InstallRun(
@@ -2837,13 +2883,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "default <source>/site/dist lookup."
         ),
     )
+    parser.add_argument(
+        "--runtime-pack",
+        default=None,
+        help="Verified Runtime Pack selected by the bootstrap; installed instead of a source install.",
+    )
+    parser.add_argument(
+        "--expected-source-revision",
+        default=None,
+        help="Source revision the selected Runtime Pack was verified against.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: start the local control-plane server, open a browser, serve forever."""
     args = parse_args(argv)
-    controller = InstallController(args.source, bundle_dir=args.bundle_dir)
+    controller = InstallController(
+        args.source,
+        bundle_dir=args.bundle_dir,
+        runtime_pack=args.runtime_pack,
+        expected_source_revision=args.expected_source_revision,
+    )
     server = InstallerHTTPServer((args.host, args.port), controller)
     host, port = server.server_address[:2]
     host = host.decode() if isinstance(host, bytes) else str(host)

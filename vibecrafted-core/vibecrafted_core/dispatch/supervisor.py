@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +239,7 @@ def workflow_cell_launcher(
                 "runtime": "headless",
                 "model": cut.model,
                 "effort": cut.effort,
+                "permissions": cut.permissions,
                 "runtime_class": runtime_class,
             },
             base_dir,
@@ -452,7 +453,7 @@ class DispatchSupervisor:
                     resume_sequence = self._receipt_store.request_resume()
                 lifted = self._receipt_store.clear_stop_fence(
                     resume_sequence=resume_sequence,
-                    scheduler_resumed_at=datetime.now(timezone.utc).isoformat(
+                    scheduler_resumed_at=datetime.now(UTC).isoformat(
                         timespec="seconds"
                     ),
                 )
@@ -817,7 +818,7 @@ class DispatchSupervisor:
             run_id=self.run_id,
             session_id=self._mutation_claim_session_id,
         )
-        released_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        released_at = datetime.now(UTC).isoformat(timespec="seconds")
         for cut in self.dispatch.cuts:
             self._receipt_store.update(
                 cut.id,
@@ -895,6 +896,23 @@ class DispatchSupervisor:
                 return self._unverified_claim(
                     cut, "claim changed before settlement; verification must run again"
                 )
+            # Final dispatch admission can mark a previously registered cache.
+            # It is not trust acceptance and never deletes source or payload.
+            from ..cache_lifecycle import mark_cache_eligible
+            from ..runtime_paths import vibecrafted_home
+
+            cache_receipt = self._receipt_store.cut(cut.id)
+            if cache_receipt.get("target_path") and cache_receipt.get(
+                "provider_run_id"
+            ):
+                retirement = mark_cache_eligible(
+                    vibecrafted_home(),
+                    Path(cache_receipt["target_path"]),
+                    run_id=str(cache_receipt["provider_run_id"]),
+                    dispatch_run_id=self._receipt_store.run_id,
+                    cut_id=cut.id,
+                )
+                self._receipt_store.update(cut.id, cache_retirement=retirement)
             for dependency in cut.closes_embargo:
                 self._set_state(
                     dependency,
@@ -1772,6 +1790,19 @@ class DispatchSupervisor:
             acceptance="pending",
         )
         try:
+            from ..cache_lifecycle import (
+                reserve_dispatch_cache_attempt,
+                retain_cache_for_launch,
+            )
+            from ..runtime_paths import vibecrafted_home
+
+            geometry = self._geometries.get(cut.id)
+            cache_attempt = ""
+            if geometry is not None and not geometry.integrator_exclusive:
+                retain_cache_for_launch(vibecrafted_home(), Path(geometry.target_path))
+                cache_attempt = reserve_dispatch_cache_attempt(
+                    vibecrafted_home(), geometry, kind
+                )
             cell = self.launcher(cut, prompt, kind)
         # The launcher is an injected provider callback; any exception must be journaled and
         # returned as a failed Verdict before the cell can be admitted.
@@ -1818,6 +1849,19 @@ class DispatchSupervisor:
             attempt=kind,
             idempotency_key=self._dispatch_idempotency_key(cut, kind),
         )
+        # Publish canonical accepted-run identity before extra cache proof I/O.
+        # Native children can already be running; observers need the receipt.
+        if geometry is not None and not geometry.integrator_exclusive:
+            from ..cache_lifecycle import bind_dispatch_cache
+
+            cache_binding = bind_dispatch_cache(
+                vibecrafted_home(),
+                geometry,
+                cell.run_id,
+                attempt_token=cache_attempt,
+                dispatch_run_id=self._receipt_store.run_id,
+            )
+            self._receipt_store.update(cut.id, cache_binding=cache_binding)
         self._set_state(
             cut.id,
             STATE_PENDING,
@@ -2549,7 +2593,7 @@ class DispatchSupervisor:
     def _journal(self, message: str) -> None:
         """Append one timestamped line to journal.md."""
         with self._io_lock:
-            timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            timestamp = datetime.now(UTC).isoformat(timespec="seconds")
             with self.journal_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"- {timestamp} {message}\n")
 
@@ -2559,7 +2603,7 @@ class DispatchSupervisor:
         project = _artifact_plane_project(
             meta.reports_dir, self.tracker_path, self.artifacts_dir
         ) or _repo_checkout_project(meta.repo)
-        written = datetime.now(timezone.utc)
+        written = datetime.now(UTC)
         # session_id repeats run_id: R11 requires a non-empty session_id and
         # the dispatcher has no agent session of its own.
         lines = [

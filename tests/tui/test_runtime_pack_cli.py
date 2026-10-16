@@ -11,6 +11,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import seed_private_git_fixture, stage_build_lease_fixture
 from vibecrafted_core.runtime_pack_contract import (
     REQUIRED_FOUNDATION_EXECUTABLES,
     RuntimePackContractError,
@@ -273,6 +274,9 @@ def _isolated_repo_install(
     scripts = repo / "scripts"
     (scripts / "lib").mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
+    # Make's default interpreter is a repo-owned executable, not host python3.
+    # Keep the real selector in this fixture so install reaches the pack checks.
+    shutil.copy2(REPO_ROOT / "scripts/project-python", scripts / "project-python")
     shutil.copy2(INSTALLER, scripts / INSTALLER.name)
     # The installer reads the build -> install handoff through its owner. A repo
     # without that library keeps the pre-handoff single-archive behaviour, which
@@ -288,6 +292,16 @@ def _isolated_repo_install(
     foundations = scripts / "install-foundations.sh"
     foundations.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     foundations.chmod(0o755)
+    # Bare make install now builds the checkout first. These admission tests
+    # seed a sealed carrier/selection record themselves; the source compiler
+    # has separate coverage in test_source_runtime_pack.py. Record the build
+    # boundary without replacing the installer or its fail-closed checks.
+    source_build_capture = root / "source-build-called"
+    (scripts / "build-source-runtime-pack.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['SOURCE_BUILD_CAPTURE']).write_text('called\\n')\n",
+        encoding="utf-8",
+    )
     home = root / "home"
     home.mkdir(exist_ok=True)
     fake_bin = root / "fake-bin"
@@ -303,7 +317,7 @@ def _isolated_repo_install(
         encoding="utf-8",
     )
     uname.chmod(0o755)
-    return subprocess.run(
+    result = subprocess.run(
         ["make", "--no-print-directory", "install"],
         cwd=repo,
         capture_output=True,
@@ -313,9 +327,16 @@ def _isolated_repo_install(
             **os.environ,
             "HOME": str(home),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "RUNTIME_PACK": "",
+            "SOURCE_BUILD_CAPTURE": str(source_build_capture),
             **(env or {}),
         },
     )
+    if (env or {}).get("RUNTIME_PACK"):
+        assert not source_build_capture.exists(), result.stderr
+    else:
+        assert source_build_capture.read_text() == "called\n", result.stderr
+    return result
 
 
 def test_make_install_discovers_exact_canonical_runtime_pack_name(
@@ -1508,7 +1529,8 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     # 5d41de86: the builder reads VERSION from the bound ROOT_SHA
     # (`git show "$ROOT_SHA:VERSION"`), not from the working tree, so the
     # fixture commits it -- otherwise every preflight dies on that read first.
-    head = _git_repo(repo, "VERSION")
+    stage_build_lease_fixture(repo)
+    head = seed_private_git_fixture(repo, "VERSION")
     previous = repo / "dist/Vibecrafted_RuntimePack_previous-darwin-arm64.tar.gz"
     previous.write_bytes(b"the pack that succeeded yesterday")
     _selection_record(
@@ -2245,3 +2267,66 @@ def test_a_carrier_swapped_after_publication_fails_the_producers_own_record(
 
     assert result.returncode != 0
     assert "recorded digest" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("producer", ["preflight", "single-flight"])
+def test_builder_repo_producers_isolate_hostile_git_routing(
+    tmp_path, monkeypatch, producer
+):
+    from tests.tui.test_release_single_flight import _stage_repo
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "README").write_text("owned victim\n")
+    seed_private_git_fixture(victim, ".")
+    subprocess.run(
+        ["git", "-C", str(victim), "config", "user.name", "owned-victim"],
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        check=True,
+        capture_output=True,
+    )
+    (victim / "foreign-dirty").write_bytes(b"must remain uncommitted")
+    before = {
+        str(p.relative_to(victim)): p.read_bytes()
+        for p in victim.rglob("*")
+        if p.is_file()
+    }
+    hostile = {
+        "GIT_DIR": str(victim / ".git"),
+        "GIT_WORK_TREE": str(victim),
+        "GIT_COMMON_DIR": str(victim / ".git"),
+        "GIT_INDEX_FILE": str(victim / ".git/index"),
+        "GIT_OBJECT_DIRECTORY": str(victim / ".git/objects"),
+        "GIT_CONFIG": str(victim / ".git/config"),
+        "GIT_CONFIG_GLOBAL": str(victim / ".git/config"),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "user.name",
+        "GIT_CONFIG_VALUE_0": "foreign override",
+    }
+    for key, value in hostile.items():
+        monkeypatch.setenv(key, value)
+    repo, head, *_ = (
+        _preflight_builder_repo(tmp_path)
+        if producer == "preflight"
+        else _stage_repo(tmp_path)
+    )
+    after = {
+        str(p.relative_to(victim)): p.read_bytes()
+        for p in victim.rglob("*")
+        if p.is_file()
+    }
+    assert after == before  # HEAD, index, objects, worktree and config bytes.
+    assert {key: os.environ[key] for key in hostile} == hostile
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(repo), *args], env=env, text=True
+        ).strip()
+
+    assert git("rev-parse", "HEAD") == head
+    assert git("config", "--local", "user.name") == "fixture"
+    assert git("show", "HEAD:VERSION") == (
+        VERSION if producer == "preflight" else "4.3.1"
+    )
+    assert not (repo / "foreign-dirty").exists()

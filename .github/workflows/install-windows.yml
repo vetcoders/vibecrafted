@@ -412,8 +412,52 @@ jobs:
           $env:Path = "$bin;$env:Path"
           & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
           if ($LASTEXITCODE -ne 0) {
+            $doctorExit = $LASTEXITCODE
             Get-Content -LiteralPath $doctorLog
-            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+            # A runtime-receipt failure is attributable only from the receipt
+            # itself. Record the SHAPE of the publication/recovery markers it
+            # still carries (present / kind / truthy / count), never their values:
+            # config_transaction and config_conflicts hold paths and file bodies.
+            # The diagnostic must not mask the primary failure, so it is wrapped
+            # and the original doctor exit still reaches the throw below.
+            $receiptFile = Join-Path $env:LOCALAPPDATA "Vibecrafted\install-receipt.json"
+            $attribution = Join-Path $logDir "receipt-attribution.txt"
+            try {
+              if (-not (Test-Path -LiteralPath $receiptFile)) {
+                $rows = @("install-receipt.json missing")
+              } else {
+                $receiptDoc = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json
+                $markers = @("install_pending", "config_transaction", "config_pending", "config_conflicts",
+                  "uninstall_pending", "rescue_pending", "candidate_conflicts",
+                  "retirement_registration_residuals", "retirement_last_result")
+                $rows = foreach ($marker in $markers) {
+                  $property = $receiptDoc.PSObject.Properties[$marker]
+                  if ($null -eq $property) { "$marker=absent"; continue }
+                  $value = $property.Value
+                  if ($null -eq $value) { $kind = "null"; $truthy = $false; $count = 0 }
+                  elseif ($value -is [bool]) { $kind = "bool"; $truthy = $value; $count = 0 }
+                  elseif ($value -is [string]) { $kind = "string"; $truthy = ($value.Length -gt 0); $count = $value.Length }
+                  elseif ($value -is [System.Array]) { $kind = "array"; $count = @($value).Count; $truthy = ($count -gt 0) }
+                  elseif ($value -is [System.Management.Automation.PSCustomObject]) { $kind = "object"; $count = @($value.PSObject.Properties).Count; $truthy = ($count -gt 0) }
+                  else { $kind = "scalar"; $count = 0; $truthy = ($value -ne 0) }
+                  "$marker=present kind=$kind truthy=$truthy count=$count"
+                }
+                $phase = $receiptDoc.PSObject.Properties["install_phase"]
+                if ($null -eq $phase) { $rows += "install_phase=absent" }
+                elseif (@("preparing", "ancillary") -contains [string]$phase.Value) { $rows += "install_phase=$($phase.Value)" }
+                else { $rows += "install_phase=other" }
+                $rows += "receipt_last_write_utc=" + (Get-Item -LiteralPath $receiptFile).LastWriteTimeUtc.ToString("o")
+              }
+            } catch {
+              $rows = @("receipt attribution failed: $($_.Exception.GetType().Name)")
+            }
+            try {
+              $rows | Set-Content -LiteralPath $attribution -Encoding utf8
+              $rows | ForEach-Object { Write-Host $_ }
+            } catch {
+              Write-Host "receipt attribution could not be written"
+            }
+            throw "vibecrafted doctor failed with exit $doctorExit"
           }
           $doctorText = Get-Content -LiteralPath $doctorLog -Raw
           $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })
@@ -709,8 +753,52 @@ jobs:
           $env:Path = "$bin;$env:Path"
           & $cmd doctor *>&1 | Tee-Object -FilePath $doctorLog
           if ($LASTEXITCODE -ne 0) {
+            $doctorExit = $LASTEXITCODE
             Get-Content -LiteralPath $doctorLog
-            throw "vibecrafted doctor failed with exit $LASTEXITCODE"
+            # A runtime-receipt failure is attributable only from the receipt
+            # itself. Record the SHAPE of the publication/recovery markers it
+            # still carries (present / kind / truthy / count), never their values:
+            # config_transaction and config_conflicts hold paths and file bodies.
+            # The diagnostic must not mask the primary failure, so it is wrapped
+            # and the original doctor exit still reaches the throw below.
+            $receiptFile = Join-Path $env:LOCALAPPDATA "Vibecrafted\install-receipt.json"
+            $attribution = Join-Path $logDir "receipt-attribution.txt"
+            try {
+              if (-not (Test-Path -LiteralPath $receiptFile)) {
+                $rows = @("install-receipt.json missing")
+              } else {
+                $receiptDoc = Get-Content -LiteralPath $receiptFile -Raw | ConvertFrom-Json
+                $markers = @("install_pending", "config_transaction", "config_pending", "config_conflicts",
+                  "uninstall_pending", "rescue_pending", "candidate_conflicts",
+                  "retirement_registration_residuals", "retirement_last_result")
+                $rows = foreach ($marker in $markers) {
+                  $property = $receiptDoc.PSObject.Properties[$marker]
+                  if ($null -eq $property) { "$marker=absent"; continue }
+                  $value = $property.Value
+                  if ($null -eq $value) { $kind = "null"; $truthy = $false; $count = 0 }
+                  elseif ($value -is [bool]) { $kind = "bool"; $truthy = $value; $count = 0 }
+                  elseif ($value -is [string]) { $kind = "string"; $truthy = ($value.Length -gt 0); $count = $value.Length }
+                  elseif ($value -is [System.Array]) { $kind = "array"; $count = @($value).Count; $truthy = ($count -gt 0) }
+                  elseif ($value -is [System.Management.Automation.PSCustomObject]) { $kind = "object"; $count = @($value.PSObject.Properties).Count; $truthy = ($count -gt 0) }
+                  else { $kind = "scalar"; $count = 0; $truthy = ($value -ne 0) }
+                  "$marker=present kind=$kind truthy=$truthy count=$count"
+                }
+                $phase = $receiptDoc.PSObject.Properties["install_phase"]
+                if ($null -eq $phase) { $rows += "install_phase=absent" }
+                elseif (@("preparing", "ancillary") -contains [string]$phase.Value) { $rows += "install_phase=$($phase.Value)" }
+                else { $rows += "install_phase=other" }
+                $rows += "receipt_last_write_utc=" + (Get-Item -LiteralPath $receiptFile).LastWriteTimeUtc.ToString("o")
+              }
+            } catch {
+              $rows = @("receipt attribution failed: $($_.Exception.GetType().Name)")
+            }
+            try {
+              $rows | Set-Content -LiteralPath $attribution -Encoding utf8
+              $rows | ForEach-Object { Write-Host $_ }
+            } catch {
+              Write-Host "receipt attribution could not be written"
+            }
+            throw "vibecrafted doctor failed with exit $doctorExit"
           }
           $doctorText = Get-Content -LiteralPath $doctorLog -Raw
           $summary = @($doctorText -split "\r?\n" | Where-Object { $_ -match "summary:" })

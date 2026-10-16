@@ -5,6 +5,112 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- **Breaking:** execution permissions default to `auto`, not implicit bypass.
+  Explicit dispatch overrides provider configuration, then global configuration,
+  then `auto`; malformed or unsupported policies refuse launch. Direct launchers
+  use the same resolver, and admitted policy stays frozen through native resume.
+  Kimi/Copilot headless `auto` is unsupported; bypass requires explicit opt-in.
+
+### Added
+
+- OMP provider support with headless dispatch, native resume, and durable
+  inbox/checkpoint messaging (not live RPC steering). Auto uses native write
+  permissions, read-only uses a tool whitelist, and explicit bypass uses yolo;
+  headless execution refuses required exec prompts.
+
+### Fixed
+
+- OMP usage counts finalized assistant messages once, including tool turns and
+  errors, and the existing server collector includes its local sessions.
+- OMP telemetry follows native profiles and agent-directory overrides, retains
+  incomplete JSONL tails for the next scan, and refuses dedicated daemon mode.
+- Native continuation retains the selected parent's admitted policy; shared
+  session IDs cannot select another run's permissions. Interactive opt-ins stay
+  frozen through launch, and omitted public resume permissions no longer bypass
+  durable configuration.
+
+## [4.4.0] - Unreleased
+
+### Added
+
+- Bare `make install` can build its Runtime Pack from source. Frame and Terminal
+  revisions are pinned in `config/source-components.json`; available sibling
+  checkouts supply Git objects without changing their branches or working files.
+  Missing sources are fetched into temporary repositories. An explicit
+  `RUNTIME_PACK` continues to select an existing pack.
+  The source channel pins Frame 4.4.0 at `0b91c4f0806356b5c92e46c82bf0fdf0310c0222`,
+  which carries strider, the Launchpad landing page and the live Sessions rail
+  plus the Panels cohort; Terminal remains 0.18.0-dev at
+  `38ef2f918383ca4dde797d22869b619097c81d05`. The DMG, Linux and Windows
+  builders use the same pair.
+- Project Agents opens the interactive launcher. Launch preferences include
+  model and reasoning effort, with provider-specific effort transport verified
+  through interactive PTY fixtures.
+- `vibecrafted reinstall --clean` (also `vc-reinstall`) snapshots Frame
+  sessions, layouts, panes and provable native agent session IDs, replaces the
+  runtime, then rebuilds those sessions from the new generation. Live headless
+  dispatchers keep running on the previous generation. Without a checkout, it
+  fetches the active generation's exact source revision first.
+- Interactive Agents can run in a dedicated worktree or in the local container.
+  The container recipe now ships inside every installed generation; its image
+  is named by recipe digest and rebuilt only when the recipe changes.
+- The Workshop offers existing native Claude and Codex conversations for the
+  exact checkout, and returns to recent projects' conversations and shells
+  through their recorded workspace seats and pane IDs.
+- `init`, operator, partner and resume launches open the agent as a floating
+  pane titled `<repo> · <agent> · <model>`.
+- Quota and usage cover every provider pool: dispatch preflight, the server
+  quota board and the launcher picker select the same usage. Missing local
+  measurements stay unknown; a measured zero stays known.
+
+### Changed
+
+- The server supervisor runs Guardian recovery and housekeeping, and retires
+  accepted caches only under leases with live-use vetoes.
+- The installer deregisters retired app bundles from LaunchServices before
+  deleting them and on uninstall, supports explicit current-only retirement of
+  obsolete runtime generations, heals legacy receipt-ledger bloat at load, and
+  bounds configuration-recovery receipts.
+- Vibecrafted.app adopts the user's login-shell PATH before launching the
+  runtime. Single-instance ownership and quit bind to the signed Main
+  executable instead of the shared bundle ID.
+- The release publisher requires a gate rehearsal that passed on the exact
+  release SHA; the hosted source gate and the rehearsal share one gate
+  definition.
+
+### Fixed
+
+- Runtime-private `python` and `python3` select the pinned interpreter without
+  publishing Python aliases on the user's PATH.
+- Terminal theme projections preserve opacity and RGB values.
+- Project layouts leave Voc in the global top bar and release the fixed Shell
+  pane name so native agent titles can appear.
+- Vibecrafted.app accepts a verified manually installed runtime from another
+  build when the existing resolver confirms it is ready.
+- The partner skill keeps the interactive conversation available during longer
+  work, handles simple actions inline, and includes an executable delegation
+  example in English and Polish.
+- Native resume requires the provider's session files and binds the session to
+  its recorded checkout.
+- Quick-cmd panes close only from their owner process and survive a helper
+  shell exit. Scrollback viewing and clipboard copy target the selected pane.
+- `vibecrafted start` enters existing repository workspaces and launches the
+  owned terminal from foreign hosts.
+
+### Release candidate limitations
+
+- This entry describes the prepared source candidate, not a published release.
+  Signed carriers and cold installation remain release acceptance gates.
+- `https://vibecrafted.io/install.sh` still serves the 4.1.0 bootstrap. This
+  release's `install.sh` requires `channel/main.json` to bind both
+  `archive_url` and `runtime_pack_url`, and refuses an archive without
+  `source-provenance.json`. Until the website channel is republished in that
+  shape, `curl | bash` keeps installing 4.1.0.
+- Login Bash can still override runtime Python selection. The `vc-start`
+  workspace-name limit and live session/plugin generation concerns remain open.
+
 ## [4.3.3] - 2026-10-04
 
 ### Added

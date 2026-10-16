@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 TOKEN_FIELDS = (
@@ -52,7 +52,7 @@ def _as_int(value: object) -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def vibecrafted_home() -> Path:

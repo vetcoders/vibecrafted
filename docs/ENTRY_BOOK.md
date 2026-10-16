@@ -90,8 +90,8 @@ make install RUNTIME_PACK=/absolute/path/to/Vibecrafted_RuntimePack_linux-x64.ta
 ```
 
 **Expect:** successful checksum/signature/provenance checks and runtime
-publication. `make install` does not compile; `install-source` currently aliases
-it. Local compilation requires the separate Build from source recipe.
+publication. The explicit `RUNTIME_PACK` skips compilation. Bare `make install`
+builds this checkout first; `install-source` remains an alias.
 **Failure → fix:** missing signature or wrong trust anchor means the carrier
 cannot be admitted. Obtain the complete authenticated tuple. For your own
 locally signed build, use the `VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY` from Linux

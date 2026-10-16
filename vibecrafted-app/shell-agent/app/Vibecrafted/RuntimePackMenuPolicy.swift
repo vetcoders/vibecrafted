@@ -5,8 +5,8 @@ import Foundation
 /// After the dmg-first eradication the Runtime Pack is the product carrier and
 /// the App consumes it: the tray's supervision duty is to show which generation
 /// is live and whether it still matches the carrier this signed App shipped.
-/// Drift is expected when the runtime moves ahead of the App (runtime-first
-/// upgrades install straight from a tarball), so it surfaces as amber, not red.
+/// A verified source install may differ from the App's bundled carrier. The
+/// resolver decides whether that active installation is usable.
 struct RuntimePackMenuState {
   let header: String
   let detail: String
@@ -73,8 +73,8 @@ func deriveRuntimePackMenuState(
   }
   return RuntimePackMenuState(
     header: "Runtime Pack: \(generation)",
-    detail: "Carrier expects \(String(signed.prefix(8))) — the installed runtime moved; update the App to re-sync",
-    health: .transitioning,
+    detail: "Verified installed runtime from another build; this App uses the active generation",
+    health: .healthy,
     actionsEnabled: true)
 }
 
@@ -99,6 +99,19 @@ func runtimeIdentityBlob(
   lines.append("runtime-home: \(runtimeHome)")
   lines.append("config-home: \(productConfigHome)")
   return lines.joined(separator: "\n")
+}
+
+/// A verified installation may be usable without matching this signed App.
+/// Offer its carrier explicitly, without treating a hash as an ordering proof.
+/// Startup passes its presentation latch; an explicit repair can ask again.
+func shouldOfferRuntimeCarrier(
+  resolution: RuntimeResolution<String>, signedSourceRevision: String?,
+  alreadyOffered: Bool = false
+) -> Bool {
+  guard !alreadyOffered, case .ready(let generation) = resolution,
+    !generation.isEmpty, let source = signedSourceRevision, !source.isEmpty
+  else { return false }
+  return !runtimePackMatchesCarrier(generation: generation, signedSourceRevision: source)
 }
 
 /// Only a strictly newer release can trigger an upgrade offer. Different hashes

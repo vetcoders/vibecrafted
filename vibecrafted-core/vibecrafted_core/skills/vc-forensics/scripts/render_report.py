@@ -7,7 +7,7 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 STATES = (
@@ -91,7 +91,7 @@ def build_report(repo, head, baseline, loctree, prview, findings):
             raise ValueError("Manual findings describe a different repository")
     return {
         "schema": "vc-forensics.report.v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "repo": repo,
         "head": head,
         "baseline": baseline,

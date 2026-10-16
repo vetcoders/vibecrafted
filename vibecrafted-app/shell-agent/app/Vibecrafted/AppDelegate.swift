@@ -155,6 +155,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var lastTrayWork: TrayWorkObservation?
   private var canonicalInstall: CanonicalRuntimeInstall?
   private var canonicalRuntimeEnvironment: [String: String]?
+  private lazy var userShellPath = NativeUserShellPath { [unowned self] process, timeout, completion in
+    try self.runBounded(process, timeout: timeout, label: "user-shell-path", completion: completion)
+  }
   private var workspaceLaunchFailureReported = false
   private var eyeReconcileProcess: Process?
   private var runtimeResolveProcess: Process?
@@ -187,6 +190,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var serverStatusWindow: NSWindow?
   private var serverStatusHosting: NSHostingView<ServerStatusView>?
   private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
+  /// Cancel keeps the verified installation, without asking again this launch.
+  private var startupCarrierChoiceOffered = false
   /// Long-lived `vc-frame web` started from the App when `[tools.vc-frame]`
   /// names a loopback origin. Tabs never own this process; closing a tab does
   /// not stop it, and workers are not in this process group.
@@ -439,7 +444,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         self.renderServerStatus()
         return
       }
-      self.reconcileControlPlaneEye(install: install, environment: environment)
+      self.reconcileControlPlaneEye(install: install, environment: environment) { [weak self] result in
+        guard let self, self.eyeReconcileProcess == nil, let current = self.canonicalInstall,
+          shouldOfferRuntimeCarrier(
+            resolution: .ready(current.root.lastPathComponent),
+            signedSourceRevision: self.signedCarrierRevisions?.source,
+            alreadyOffered: self.startupCarrierChoiceOffered)
+        else { return }
+        let serviceFailure: String?
+        if case .failure(let failure) = result { serviceFailure = failure.message }
+        else { serviceFailure = nil }
+        self.offerRuntimePackReinstall(
+          configuration: "This App and the verified installed runtime come from different builds.",
+          serviceFailure: serviceFailure, startup: true)
+      }
       self.inspectConfigurationAtLaunch()
       self.ensureFrameWebClient(install: install, environment: environment)
       self.refreshServerStatus()
@@ -854,12 +872,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func checkTerminalRegistration() {
     guard let observation = terminalRegistration else { return }
     let launch = terminalLaunch
-    let application = launch.flatMap { NSRunningApplication(processIdentifier: $0.receipt.processIdentifier) }
+    // The wrapper's receipt names the host: the launcher itself (fresh) or the
+    // single admitted host it delivered a window to (reused). The kernel start
+    // token is revalidated on every tick; registration is never agent proof.
+    let hostState = launch?.hostState
+    let application = hostState?.hostProcessIdentifier.flatMap {
+      NSRunningApplication(processIdentifier: $0)
+    }
     let registered = application?.isTerminated == false
       && application?.executableURL?.resolvingSymlinksInPath()
         == launch?.receipt.specification.terminalHost.resolvingSymlinksInPath()
     let outcome = observation.observe(now: ProcessInfo.processInfo.systemUptime,
-      currentLaunchID: launch?.receipt.launchID, isRunning: launch?.isRunning == true,
+      currentLaunchID: launch?.receipt.launchID,
+      isRunning: hostState?.hostProcessIdentifier != nil,
       isRegistered: registered)
     guard outcome != .waiting else { return }
     terminalRegistrationTimer?.invalidate()
@@ -868,6 +893,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     if outcome == .ready, let application {
       terminalApplication = application
       application.activate(options: [])
+    } else if outcome == .ended, case .ended(let status?) = hostState, status != 0 {
+      // Reported here once; the status poll must not report the same refusal.
+      terminalLaunch = nil
+      showNativeMessage("Terminal window unconfirmed",
+        "The terminal launcher refused or could not confirm the window (status \(status)). "
+          + "No second terminal host was started. Run vc-terminal --doctor, then Open Terminal again.")
     } else if outcome == .timedOut {
       showNativeMessage("Terminal is still starting",
         "The process started, but its macOS application registration was not observed within 10 seconds. "
@@ -881,8 +912,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   ///
   /// Guest, not landlord: the base is the user's own environment — the app is
   /// launched from Finder/Dock, so this is the launchd user-session env, not a
-  /// login shell; `SSH_AUTH_SOCK`, the user's PATH and every user variable
-  /// flow through. Only the explicit deny-list below is scrubbed, then the
+  /// login shell. The shared contract recovers the user's login-shell PATH
+  /// before adoption; `SSH_AUTH_SOCK` and every other user variable flow
+  /// through. Only the explicit deny-list below is scrubbed, then the
   /// Vibecrafted pins overlay the result.
   private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
@@ -904,12 +936,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
     // `#!/usr/bin/env` shebangs resolve against exactly this PATH. The
-    // inherited PATH is never replaced: the generation's canonical bin is
-    // prepended so the runtime's own pinned tools resolve deterministically,
-    // and every user entry (Homebrew, ~/.local/bin, ~/.cargo/bin) survives
-    // behind it.
+    // login-shell PATH is acquired asynchronously before runtime-ready delivery;
+    // a failed probe preserves the inherited PATH. The generation's bin stays
+    // first while Homebrew, ~/.local/bin and ~/.cargo/bin survive behind it.
     environment["PATH"] = composedPath(
-      generation: install.root, inherited: host["PATH"])
+      generation: install.root,
+      inherited: userShellPath.cachedPath(generation: install.root, environment: host) ?? host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["XDG_CONFIG_HOME"] = install.configHome.path
@@ -983,23 +1015,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     forceRefresh: Bool = false,
     completion: @escaping (RuntimeContract) -> Void
   ) {
+    let preparedCompletion: (RuntimeContract) -> Void = { [weak self] resolution in
+      self?.prepareLaunchEnvironment(resolution, completion: completion)
+    }
     let runtimeHome = currentRuntimeHome()
     let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
     if runtimeResolveProcess != nil {
-      runtimeResolveWaiters.append(completion)
+      runtimeResolveWaiters.append(preparedCompletion)
       return
     }
     if !forceRefresh, let cached = cachedResolution,
       cached.reusable(for: fingerprint, now: ProcessInfo.processInfo.systemUptime) {
-      completion(cached.value)
+      preparedCompletion(cached.value)
       return
     }
     // Join first, then decide whether to ask. One serialization point means a
     // caller that arrives mid-flight is answered about the installation as it
     // stands when the answer lands, not about the one it happened to catch.
-    runtimeResolveWaiters.append(completion)
+    runtimeResolveWaiters.append(preparedCompletion)
     guard runtimeResolveProcess == nil else { return }
     beginRuntimeResolve(runtimeHome: runtimeHome, fingerprint: fingerprint, attempt: 0)
+  }
+
+  /// Keep first-launch and later subprocesses on the same recovered PATH,
+  /// without running an interactive login shell on the App's main thread.
+  private func prepareLaunchEnvironment(
+    _ resolution: RuntimeContract, completion: @escaping (RuntimeContract) -> Void
+  ) {
+    guard case .ready(let install) = resolution else {
+      completion(resolution)
+      return
+    }
+    let fingerprint = identityFingerprint(runtimeHome: install.runtimeHome)
+    userShellPath.resolve(generation: install.root, environment: ProcessInfo.processInfo.environment) {
+      [weak self] _ in
+      guard let self else { return }
+      // PATH discovery also takes time: publication during this probe must
+      // not bypass the resolver's existing identity-drift protection.
+      guard fingerprint == self.identityFingerprint(runtimeHome: install.runtimeHome) else {
+        self.resolveInstalledRuntime(forceRefresh: true, completion: completion)
+        return
+      }
+      completion(resolution)
+    }
   }
 
   /// Ask the owner once, about one identity, for everyone currently waiting.
@@ -1332,8 +1390,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         self.runtimeInstallProcess = nil
         let waiters = self.runtimeInstallWaiters
         self.runtimeInstallWaiters.removeAll()
-        completion(outcome)
-        waiters.forEach { $0(outcome) }
+        if case .success(let install) = outcome {
+          self.prepareLaunchEnvironment(.ready(install)) { prepared in
+            let ready: Result<CanonicalRuntimeInstall, Error>
+            if case .ready(let current) = prepared {
+              ready = .success(current)
+            } else {
+              ready = .failure(NSError(domain: "io.vetcoders.vibecrafted.install", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "runtime changed during PATH discovery"]))
+            }
+            completion(ready)
+            waiters.forEach { $0(ready) }
+          }
+        } else {
+          completion(outcome)
+          waiters.forEach { $0(outcome) }
+        }
       }
     } catch {
       completion(.failure(error))
@@ -1374,7 +1446,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     preferenceChoice: PreferenceResolutionChoice? = nil
   ) throws -> [String] {
     let terminalHost = appRoot.appendingPathComponent(
-      "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
+      "Contents/MacOS/vc-terminal")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
     var arguments = [
       "--pack", pack.path,
@@ -1514,12 +1586,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   /// The generation's canonical bin is prepended to the inherited PATH so the
   /// runtime's own pinned tools resolve deterministically; every user entry
-  /// survives behind it, and the minimal system set is the floor only when the
-  /// caller carried no PATH at all.
+  /// survives behind it. Deduplicate the user's PATH and append the system
+  /// floor for shells that intentionally expose only their custom tools.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let generationBin = generation.appendingPathComponent("bin").path
-    let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
-    let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
+    var seen: Set<String> = [generationBin]
+    let entries = ((inherited ?? "").split(separator: ":").map(String.init)
+      + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]).filter {
+        $0.hasPrefix("/") && seen.insert($0).inserted
+      }
     return ([generationBin] + entries).joined(separator: ":")
   }
 
@@ -1547,19 +1622,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let identifier = Bundle.main.bundleIdentifier ?? AppInstanceOwnership.productBundleIdentifier
     let selfPid = Int32(getpid())
     let selfURL = Bundle.main.bundleURL
+    let selfPeer = mainInstancePeer(NSRunningApplication.current, identifier: identifier)
     let peers = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
       .compactMap { app -> AppInstancePeer? in
-        guard app.processIdentifier != selfPid, let url = app.bundleURL else { return nil }
-        return AppInstancePeer(pid: app.processIdentifier, bundleURL: url)
+        guard app.processIdentifier != selfPid else { return nil }
+        return mainInstancePeer(app, identifier: identifier)
       }
     let lockURL = AppInstanceOwnership.lockFileURL(
       bundleIdentifier: identifier, home: FileManager.default.homeDirectoryForCurrentUser)
     let parsed = (try? String(contentsOf: lockURL, encoding: .utf8))
       .flatMap(AppInstanceOwnership.parseLockRecord)
-    var live = Set(peers.map(\.pid))
-    live.insert(selfPid)
-    if let pid = parsed?.pid, kill(pid_t(pid), 0) == 0 {
-      live.insert(pid)
+    let lockOwner = (peers + [selfPeer].compactMap { $0 }).first { peer in
+      peer.pid == parsed?.pid && peer.bundleURL.standardizedFileURL.path == parsed?.path
     }
     let decision = AppInstanceOwnership.decide(
       AppInstanceContext(
@@ -1567,16 +1641,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         selfBundleURL: selfURL,
         arguments: ProcessInfo.processInfo.arguments,
         peers: peers,
-        lockOwnerPid: parsed?.pid,
-        livePids: live))
+        lockOwnerPid: lockOwner?.pid,
+        livePids: Set(peers.map(\.pid)).union([selfPid]),
+        selfExecutableURL: selfPeer?.executableURL,
+        selfSignedMainExecutableURL: selfPeer?.signedMainExecutableURL))
     switch decision {
+    case .refuseOwnership:
+      lifecycleLog("instance refused Main executable evidence pid=\(selfPid) path=\(selfURL.path)")
+      exit(EXIT_FAILURE)
     case .becomeOwner:
       persistInstanceLock(lockURL, pid: Int32(selfPid), bundleURL: selfURL)
       lifecycleLog("instance owner pid=\(selfPid) path=\(selfURL.path)")
       return true
     case .activateExisting(let pid, let url):
-      lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
-      if let other = NSRunningApplication(processIdentifier: pid) {
+      if let selected = peers.first(where: { $0.pid == pid }),
+        let other = NSRunningApplication(processIdentifier: pid),
+        mainInstancePeer(other, identifier: identifier) == selected
+      {
+        lifecycleLog("instance handoff pid=\(pid) path=\(url.path)")
         other.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         exit(EXIT_SUCCESS)
       }
@@ -1584,6 +1666,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       lifecycleLog("instance owner after stale peer pid=\(selfPid) path=\(selfURL.path)")
       return true
     }
+  }
+
+  private func mainInstancePeer(_ app: NSRunningApplication, identifier: String) -> AppInstancePeer? {
+    guard !app.isTerminated, app.bundleIdentifier == identifier,
+      let url = app.bundleURL, let executable = app.executableURL,
+      let launchDate = app.launchDate,
+      let main = AppInstanceOwnership.signedMainExecutableURL(
+        bundleURL: url, bundleIdentifier: identifier)
+    else { return nil }
+    let peer = AppInstancePeer(
+      pid: app.processIdentifier, bundleURL: url, executableURL: executable,
+      signedMainExecutableURL: main, launchDate: launchDate)
+    return AppInstanceOwnership.isMainHost(peer) ? peer : nil
   }
 
   /// Best-effort owner record. The installer owns Application Support layout;
@@ -1874,6 +1969,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   private func presentHealthyRepairResult(note: String) {
     let identity = currentProductUpdateIdentity()
+    if let installed = identity.packGeneration,
+      shouldOfferRuntimeCarrier(
+        resolution: .ready(installed), signedSourceRevision: signedCarrierRevisions?.source) {
+      offerRuntimePackReinstall(configuration: note)
+      return
+    }
     runtimeAdvisory = (identity.packGeneration == identity.appGeneration
       ? "Runtime already current. " : "Configuration is current. ") + note
     applyRuntimePackMenuState()
@@ -2035,7 +2136,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// so replacing a runtime stays something the Founder asks for, with the
   /// generation that would be written named before the fact.
   private func offerRuntimePackReinstall(
-    configuration: String, serviceFailure: String? = nil, explicitRepublish: Bool = false
+    configuration: String, serviceFailure: String? = nil, explicitRepublish: Bool = false,
+    startup: Bool = false
   ) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
@@ -2049,13 +2151,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       self.updateDeckPresentation()
       self.presentRuntimePackReinstall(
         resolution: resolution, configuration: configuration,
-        serviceFailure: serviceFailure, explicitRepublish: explicitRepublish)
+        serviceFailure: serviceFailure, explicitRepublish: explicitRepublish, startup: startup)
     }
   }
 
   private func presentRuntimePackReinstall(
     resolution: RuntimeContract, configuration: String,
-    serviceFailure: String?, explicitRepublish: Bool
+    serviceFailure: String?, explicitRepublish: Bool, startup: Bool = false
   ) {
     guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
     else { return }
@@ -2073,6 +2175,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .unusable(let reason):
       presentationResolution = .unusable(reason)
       canUpgrade = false
+    }
+    if startup {
+      // The forced resolver may have observed a different generation since
+      // startup. Recheck before presenting, then latch only an actual choice.
+      guard shouldOfferRuntimeCarrier(
+        resolution: presentationResolution, signedSourceRevision: signedCarrierRevisions?.source,
+        alreadyOffered: startupCarrierChoiceOffered)
+      else { return }
+      startupCarrierChoiceOffered = true
     }
     let presentation = runtimeReinstallPresentation(
       resolution: presentationResolution, carrierGeneration: identity.appGeneration,
@@ -2647,8 +2758,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           do {
             let install = try self.decodeCanonicalRuntimeInstall(from: output)
             self.cachedResolution = nil
-            _ = self.applyResolution(.ready(install))
-            completion(.success(self.currentProductUpdateIdentity()))
+            self.prepareLaunchEnvironment(.ready(install)) { prepared in
+              guard self.applyResolution(prepared) != nil else {
+                completion(.failure(NSError(domain: "io.vetcoders.vibecrafted.update", code: 3,
+                  userInfo: [NSLocalizedDescriptionKey: "runtime changed during PATH discovery"])))
+                return
+              }
+              completion(.success(self.currentProductUpdateIdentity()))
+            }
           } catch { completion(.failure(error)) }
         }
       }

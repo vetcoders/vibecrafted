@@ -924,10 +924,10 @@ def test_new_pin_at_delete_recheck_is_retained(tmp_path, roots, capsys, monkeypa
     real = installer._runtime_retirement_references
     calls = 0
 
-    def race(paths, r):
+    def race(paths, r, **kwargs):
         nonlocal calls
         calls += 1
-        references = real(paths, r)
+        references = real(paths, r, **kwargs)
         if calls >= 2:
             references.append(("process:new-owner", str(old)))
         return references
@@ -1831,3 +1831,221 @@ def test_linux_zombie_leader_with_live_thread_refuses_retirement(
         owner.communicate("release\n", timeout=10)
     code, _ = retire(capsys)
     assert code == 0 and not old.exists()
+
+
+@pytest.mark.parametrize(
+    "reference", ["none", "literal", "numeric", "home", "escaped-home"]
+)
+def test_malformed_foreign_plist_conservatively_discovers_references(
+    roots, monkeypatch, quiet_census, reference
+):
+    current = roots["runtime_home"] / "releases/current"
+    current.mkdir(parents=True)
+    selector = roots["runtime_home"] / "tools/vibecrafted-current"
+    selector.parent.mkdir(parents=True)
+    selector.symlink_to(current)
+    old = roots["runtime_home"] / "releases/old"
+    spelling = str(old)
+    if reference == "none":
+        spelling = "/foreign/program"
+    elif reference == "numeric":
+        spelling = spelling.replace("/", "&#47;")
+    elif reference in {"home", "escaped-home"}:
+        spelling = "$HOME/" + str(old.relative_to(Path.home()))
+        if reference == "escaped-home":
+            spelling = spelling.replace("$", "&#36;").replace("/", "&#x2f;")
+    agents = Path.home() / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    foreign = agents / "foreign.plist"
+    raw = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict><key>Program</key><string>'
+        + spelling
+        + "</string><key>Foreign</key><string>bad & text</string></dict></plist>"
+    ).encode()
+    foreign.write_bytes(raw)
+    diagnostics = []
+    references = installer._runtime_retirement_references(
+        roots, {}, diagnostics=diagnostics
+    )
+    assert any(value == str(old) for _, value in references) is (reference != "none")
+    assert foreign.read_bytes() == raw
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["parse_error"] == "ExpatError"
+    assert diagnostics[0]["sha256"] == installer.hashlib.sha256(raw).hexdigest()
+    plan = installer._runtime_retirement_plan(roots, {})
+    assert json.loads(json.dumps(plan))["reference_diagnostics"] == diagnostics
+    assert "bad & text" not in json.dumps(plan)
+
+
+@pytest.mark.parametrize(
+    "shape", ["binary", "custom-dtd", "unknown-entity", "unreadable"]
+)
+def test_unsupported_foreign_plist_reference_evidence_fails_closed(
+    roots, monkeypatch, quiet_census, shape
+):
+    current = roots["runtime_home"] / "releases/current"
+    current.mkdir(parents=True)
+    selector = roots["runtime_home"] / "tools/vibecrafted-current"
+    selector.parent.mkdir(parents=True)
+    selector.symlink_to(current)
+    agents = Path.home() / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    foreign = agents / "foreign.plist"
+    raw = b"<plist><string>bad & text</string></plist>"
+    if shape == "binary":
+        raw = b"bplist00\xff\x00broken"
+    elif shape == "custom-dtd":
+        raw = b'<!DOCTYPE plist [<!ENTITY path "/hidden">]><plist><string>&path; & broken</string></plist>'
+    elif shape == "unknown-entity":
+        raw = b"<plist><string>&unknown; & broken</string></plist>"
+    foreign.write_bytes(raw)
+    if shape == "unreadable":
+        real_read = Path.read_bytes
+
+        def denied(path):
+            if path == foreign:
+                raise PermissionError("private foreign plist")
+            return real_read(path)
+
+        monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises((RuntimeError, PermissionError)):
+        installer._runtime_retirement_references(roots, {})
+    assert foreign.stat().st_size == len(raw)
+
+
+@pytest.mark.parametrize("live_pin", [False, True])
+def test_keep_current_only_archives_rollback_and_preserves_real_live_pins(
+    tmp_path, roots, capsys, monkeypatch, quiet_census, live_pin
+):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    current, _ = publish(tmp_path, roots, capsys, 1)
+    prior = receipt(roots)
+    original = installer._runtime_receipt_path(roots["runtime_home"]).read_bytes()
+    if not live_pin:
+        agents = Path.home() / "Library/LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        foreign = agents / "unrelated.plist"
+        foreign.write_bytes(b"<plist><string>/foreign/program & value</string></plist>")
+        foreign_before = foreign.read_bytes()
+    if live_pin:
+        real = installer._runtime_retirement_references
+        monkeypatch.setattr(
+            installer,
+            "_runtime_retirement_references",
+            lambda *a, **k: [*real(*a, **k), ("process:still-live", str(old))],
+        )
+    code, plan = retire(capsys, "--plan", "--keep-current-only")
+    assert code == 0
+    assert (
+        installer._runtime_receipt_path(roots["runtime_home"]).read_bytes() == original
+    )
+    assert not Path(plan["keep_current_only"]["rollback_archive"]).exists()
+    old_plan = next(row for row in plan["generations"] if row["path"] == str(old))
+    assert old_plan["action"] == ("pinned" if live_pin else "retire")
+    code, result = retire(capsys, "--keep-current-only")
+    assert code == 0, result
+    archive = Path(result["keep_current_only"]["rollback_archive"])
+    saved = json.loads(archive.read_text())
+    assert saved["released_rollback"] == prior["retirement_rollback"]
+    assert saved["binding"] == plan["keep_current_only"]["binding"]
+    if not live_pin:
+        assert foreign.read_bytes() == foreign_before
+        assert saved["reference_diagnostics"] == plan["reference_diagnostics"]
+        diagnostics = list(archive.parent.glob("reference-diagnostics-*.json"))
+        assert len(diagnostics) == 1
+        assert (
+            json.loads(diagnostics[0].read_text())["reference_diagnostics"]
+            == plan["reference_diagnostics"]
+        )
+    assert old.exists() is live_pin
+    assert current.is_dir()
+    assert "retirement_rollback" not in receipt(roots)
+    if live_pin:
+        monkeypatch.setattr(installer, "_runtime_retirement_references", real)
+        code, result = retire(capsys, "--keep-current-only")
+        assert code == 0 and not old.exists()
+    assert installer._runtime_rescue_verify_destination(roots)[0]
+
+
+@pytest.mark.parametrize("failure", ["pending", "changed-current", "checkpoint"])
+def test_keep_current_only_refusal_preserves_rollback_until_durable_release(
+    tmp_path, roots, capsys, monkeypatch, quiet_census, failure
+):
+    old, _ = publish(tmp_path, roots, capsys, 0)
+    current, _ = publish(tmp_path, roots, capsys, 1)
+    prior = receipt(roots)
+    if failure == "pending":
+        prior["install_pending"] = True
+        installer._checkpoint_runtime_install_receipt(roots["runtime_home"], prior)
+    elif failure == "changed-current":
+        (roots["runtime_home"] / "active.json").write_text("{}\n")
+    else:
+        checkpoint = installer._checkpoint_runtime_install_receipt
+
+        def interrupted(runtime_home, state):
+            if "retirement_rollback" not in state:
+                raise RuntimeError("interrupted pin-release checkpoint")
+            checkpoint(runtime_home, state)
+
+        monkeypatch.setattr(
+            installer, "_checkpoint_runtime_install_receipt", interrupted
+        )
+    code, result = retire(capsys, "--keep-current-only")
+    assert code == 2, result
+    assert receipt(roots)["retirement_rollback"] == prior["retirement_rollback"]
+    assert old.is_dir() and current.is_dir()
+    if failure == "checkpoint":
+        archives = list(
+            (roots["runtime_home"] / ".installer-backups/retirement").glob(
+                "accepted-current-*.json"
+            )
+        )
+        assert len(archives) == 1
+        assert (
+            json.loads(archives[0].read_text())["released_rollback"]
+            == prior["retirement_rollback"]
+        )
+        monkeypatch.setattr(
+            installer, "_checkpoint_runtime_install_receipt", checkpoint
+        )
+        code, result = retire(capsys, "--keep-current-only")
+        assert code == 0 and not old.exists()
+
+
+def test_keep_current_only_requires_retirement_owner():
+    with pytest.raises(SystemExit) as error:
+        installer.main(["runtime-repair", "--keep-current-only", "--plan", "--json"])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--legacy-inventory", "/unused"],
+        ["--legacy-evidence", "/unused"],
+        ["--admit-plan", "a" * 64],
+    ],
+)
+def test_keep_current_only_refuses_legacy_mode_combination(capsys, options):
+    code, result = retire(capsys, "--keep-current-only", "--plan", *options)
+    assert code == 2
+    assert "cannot be combined" in result["reason"]
+
+
+def test_owned_malformed_plist_remains_strict(roots, quiet_census):
+    current = roots["runtime_home"] / "releases/current"
+    current.mkdir(parents=True)
+    selector = roots["runtime_home"] / "tools/vibecrafted-current"
+    selector.parent.mkdir(parents=True)
+    selector.symlink_to(current)
+    agents = Path.home() / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    owned = agents / "owned.plist"
+    owned.write_bytes(b"<plist><string>bad & text</string></plist>")
+    with pytest.raises(RuntimeError, match="owned LaunchAgent is malformed"):
+        installer._runtime_retirement_references(
+            roots, {"owned_files": {str(owned): "a" * 64}}
+        )

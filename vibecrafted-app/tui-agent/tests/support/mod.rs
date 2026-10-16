@@ -12,7 +12,8 @@ use voc::catalog::LauncherCatalog;
 pub const CAPABILITIES_FIXTURE: &str = include_str!("../fixtures/capabilities.json");
 
 /// The launcher catalog as the fixture declares it: agents `agy, claude,
-/// codex, cursor, grok, junie, kimi` (grok deliberately unavailable), Living
+/// codex, cursor, grok, junie, kimi, copilot, omp` (grok deliberately
+/// unavailable), Living
 /// Tree and Fleet Worktrees available, Fleet VM refused with the launcher's
 /// reason.
 pub fn fixture_catalog() -> LauncherCatalog {

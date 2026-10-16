@@ -46,14 +46,13 @@ import http.client
 import json
 import logging
 import os
+import tomllib
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 from .server_config import config_path as operator_config_path
 
@@ -422,7 +421,7 @@ def search(
     cfg = config if config is not None else load_config()
     ns = namespace or cfg.default_namespace
     limit = max(1, min(int(limit), 50))
-    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    retrieved_at = datetime.now(UTC).isoformat(timespec="seconds")
 
     if mcp_call is not None:
         try:

@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .model import (
     STATE_FAILED,
@@ -236,4 +236,4 @@ def _text(value: object) -> str:
 
 def _now() -> str:
     """Return the current UTC timestamp in second-precision ISO 8601."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")

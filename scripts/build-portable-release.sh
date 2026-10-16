@@ -55,13 +55,28 @@ rm -f "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"
 # wildcard publish would ship. PORTABLE_READY flips only after every gate.
 PORTABLE_READY=0
 WORK_DIR=""
+# Trap-only cleanup follows the installer's bounded, status-preserving pattern.
+# shellcheck disable=SC2329,SC2317
 cleanup_failed_portable() {
-  if [[ -n "${WORK_DIR:-}" ]]; then
-    rm -rf "$WORK_DIR"
+  local status=$?
+  local _attempt
+  if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
+    for _attempt in 1 2 3; do
+      if rm -rf -- "$WORK_DIR" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if [[ -d "$WORK_DIR" ]]; then
+      printf 'Portable build warning: could not remove temporary directory: %s\n' \
+        "$WORK_DIR" >&2
+    fi
   fi
   if [[ "${PORTABLE_READY:-0}" != 1 ]]; then
-    rm -f "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT"
+    rm -f -- "$PORTABLE" "$PORTABLE_CHECKSUM" "$PORTABLE_OUTPUT" \
+      || printf 'Portable build warning: could not remove refused outputs\n' >&2
   fi
+  return "$status"
 }
 trap cleanup_failed_portable EXIT
 

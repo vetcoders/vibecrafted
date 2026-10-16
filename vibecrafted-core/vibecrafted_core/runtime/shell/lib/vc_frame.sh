@@ -141,12 +141,27 @@ _vetcoders_has_owned_vc_terminal_entry() {
   # Once accepted, retain the boundary only in this shell. Do not export it to
   # a provider or another agent generation: descendants have their own cwd and
   # surface contract and must be admitted independently.
-  [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" ]] && return 0
-  [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" ]] || return 1
+  # Both bash and zsh retain $$ in (...) descendants. Subshell depth changes
+  # even on macOS bash 3.2, which has no BASHPID; siblings cannot inherit each
+  # other's cache, so the copied parent depth must never admit a child.
+  local shell_identity="${BASHPID:-$$}:${BASH_SUBSHELL:-${ZSH_SUBSHELL:-0}}"
   local front_door=""
   front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
-  [[ -n "$front_door" && "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
+  [[ -n "$front_door" ]] || return 1
+  [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" &&
+    "${_VETCODERS_OWNED_TERMINAL_ENTRY_SHELL:-}" == "$shell_identity" &&
+    "${_VETCODERS_OWNED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] && return 0
+  [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" &&
+    "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
   _VETCODERS_OWNED_TERMINAL_ENTRY=1
+  _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL="$shell_identity"
+  _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER="$front_door"
+  # `set -a` must not turn a same-shell cache into descendant admission.
+  if [[ -n "${BASH_VERSION:-}" ]]; then
+    export -n _VETCODERS_OWNED_TERMINAL_ENTRY _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER
+  else
+    typeset +x _VETCODERS_OWNED_TERMINAL_ENTRY _VETCODERS_OWNED_TERMINAL_ENTRY_SHELL _VETCODERS_OWNED_TERMINAL_ENTRY_OWNER
+  fi
   unset VIBECRAFTED_TERMINAL_ENTRY VIBECRAFTED_TERMINAL_ENTRY_OWNER
   return 0
 }
@@ -392,9 +407,9 @@ PY
   # only the ABSENCE of a rejection — the shape a real window has, but not
   # proof of one, and it must not be reported as if we had seen it open.
   if [[ -n "$admit_status" ]]; then
-    printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
+    printf 'Opened the Vibecrafted terminal for this project.\n' >&2
   else
-    printf 'No TTY here — the Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2
+    printf 'The Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2
   fi
   printf '  project: %s\n' "$project_root" >&2
   printf '  entry:   %s' "${front_door##*/}" >&2
@@ -514,7 +529,7 @@ _vetcoders_normalize_declared_contract_root() {
 # resume: the declared root routes through the declared-workspace owner.
 _vetcoders_launch_interactive_declaration() {
   local verb="$1" runtime="$2" tab_name="$3" command_text="$4"
-  local declared_root="${5:-}" receipt="${6:-}"
+  local declared_root="${5:-}" receipt="${6:-}" agent="${7:-}" placement="${8:-}"
   _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$declared_root" "$verb" || return 1
   if [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
     printf '%s: no visible operator target could be prepared here; refusing to start %s in a session nobody can see.\n' \
@@ -522,7 +537,7 @@ _vetcoders_launch_interactive_declaration() {
     printf '  run the %s from a terminal, or let the public entry open one.\n' "$verb" >&2
     return 1
   fi
-  _vetcoders_spawn_into_operator_session "$tab_name" "$command_text" || return 1
+  _vetcoders_spawn_into_operator_session "$tab_name" "$command_text" "$agent" "$placement" || return 1
   printf '%s launched in workspace session: %s\n' "$verb" "$VIBECRAFTED_OPERATOR_SESSION"
   [[ -z "$declared_root" ]] || printf '  root:    %s\n' "$declared_root"
   [[ -z "$receipt" ]] || printf '%s\n' "$receipt"
@@ -1731,6 +1746,57 @@ _vetcoders_vc_frame_action_name_arg() {
   return 1
 }
 
+# Pane creation is not idempotent and a pane never appears in tab metadata.
+# Identity evidence is structured: exactly one live terminal pane in
+# `action list-panes --json --all` whose `terminal_command` IS the launch's own
+# script path. Frame builds that field from the pane's launch declaration
+# (RunCommand Display: command path, then space-joined args), and every
+# new-pane launch here passes one unique script with no arguments. Title, cwd,
+# tab name and live `pane_command` are not identity, and a substring of the raw
+# text proves nothing. A non-list, malformed or schema-mismatched answer, a
+# failed query, no interpreter, zero or duplicate matches are all "unknown";
+# there is no host-python fallback. The parser runs isolated (-I: no cwd on
+# sys.path, no PYTHONPATH/user site; -B: no bytecode writes) like the other
+# owned-interpreter probes, so a `json.py` in the caller's directory or on
+# PYTHONPATH cannot stand in for the stdlib and fabricate a match.
+_vetcoders_vc_frame_pane_present() {
+  local vc_frame_bin="${1:-}"
+  local session_name="${2:-}"
+  local pane_script="${3:-}"
+  local raw="" py=""
+  [[ -n "$vc_frame_bin" && -n "$pane_script" ]] || return 1
+  py="$(_vetcoders_internal_python 2>/dev/null)" || return 1
+  [[ -n "$py" ]] || return 1
+  if [[ -n "$session_name" ]]; then
+    raw="$("$vc_frame_bin" --session "$session_name" action list-panes --json --all 2>/dev/null)" || return 1
+  else
+    raw="$("$vc_frame_bin" action list-panes --json --all 2>/dev/null)" || return 1
+  fi
+  [[ -n "$raw" ]] || return 1
+  printf '%s' "$raw" | "$py" -I -B -c '
+import json, sys
+want = sys.argv[1]
+try:
+    panes = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(panes, list) or not all(isinstance(p, dict) for p in panes):
+    sys.exit(1)
+hits = 0
+for p in panes:
+    pid = p.get("id")
+    if (
+        isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and p.get("is_plugin") is False
+        and p.get("exited") is False
+        and p.get("terminal_command") == want
+    ):
+        hits += 1
+sys.exit(0 if hits == 1 else 1)
+' "$pane_script" 2>/dev/null
+}
+
 # Lightweight name presence via list-sessions/list-tabs JSON when available.
 _vetcoders_vc_frame_tab_present() {
   local vc_frame_bin="${1:-}"
@@ -1782,8 +1848,24 @@ _vetcoders_vc_frame_session_action() {
   [[ "$#" -ge 1 ]] || return 1
 
   local err_file out_file action_status=0 err=""
-  local tab_name=""
+  local tab_name="" pane_script="" is_new_pane=0 arg="" after_sep=0 after_count=0
   tab_name="$(_vetcoders_vc_frame_action_name_arg "$@" 2>/dev/null || true)"
+  # A new-pane may have landed even when its ACK was lost, so it is never
+  # reissued. Classify the ACTION (`action new-pane`), not any argv word: a
+  # tab merely NAMED new-pane is still a tab. The identity to look for is the
+  # single script argument after `--`.
+  if [[ "${1:-}" == action && "${2:-}" == new-pane ]]; then
+    is_new_pane=1
+    for arg in "$@"; do
+      if ((after_sep)); then
+        after_count=$((after_count + 1))
+        pane_script="$arg"
+      elif [[ "$arg" == -- ]]; then
+        after_sep=1
+      fi
+    done
+    ((after_count == 1)) || pane_script=""
+  fi
   # The X's must END the template: BSD mktemp(1) treats `XXXXXX.err` as a
   # literal name, so every action on the host shared ONE file, and two
   # launches at the same instant (two shells, a worker beside the Founder)
@@ -1801,6 +1883,16 @@ _vetcoders_vc_frame_session_action() {
 
   _vetcoders_vc_frame_ack_presence_ok() {
     local label="${1:-presence}"
+    if ((is_new_pane)); then
+      [[ -n "$pane_script" ]] || return 1
+      sleep 1
+      if _vetcoders_vc_frame_pane_present "$vc_frame_bin" "$session_name" "$pane_script"; then
+        printf 'vc-frame action ACK ambiguous (%s) but the pane for %s is present; treating as success\n' \
+          "$label" "$pane_script" >&2
+        return 0
+      fi
+      return 1
+    fi
     [[ -n "$tab_name" ]] || return 1
     sleep 1
     if _vetcoders_vc_frame_tab_present "$vc_frame_bin" "$session_name" "$tab_name"; then
@@ -1848,6 +1940,14 @@ _vetcoders_vc_frame_session_action() {
         rm -f "$err_file" "$out_file"
         return 0
       fi
+      if ((is_new_pane)); then
+        # Pane creation may already have been accepted: reissuing it could
+        # open a second provider. Report it unconfirmed instead.
+        VETCODERS_VC_FRAME_LAST_ERROR="${err:-vc-frame action exit ${action_status}}"$'\n'"new-pane ACK ambiguous and pane not confirmed; not reissued"
+        printf 'vc-frame new-pane ACK ambiguous and pane not confirmed; not reissued\n' >&2
+        rm -f "$err_file" "$out_file"
+        return "$action_status"
+      fi
       printf 'vc-frame action ACK timeout; one retry after brief backoff\n' >&2
       sleep 2
       action_status=0
@@ -1875,6 +1975,39 @@ _vetcoders_vc_frame_session_action() {
   return 0
 }
 
+# Readable identity of an interactive agent pane: `<repo> · <agent> · <model>`.
+# The repo is the checkout's own name (no org), the agent is the provider that
+# THIS launch starts, and the model is the explicit override the launch was
+# admitted with. No override means the model is not known here: `unknown`,
+# never a guess. Derived per launch, so a workspace reused by another provider
+# is retitled by the launch instead of inheriting the earlier occupant.
+#
+# The repo name is read from the same Git geometry repository_claims
+# canonical_repo_identity uses: the common Git dir's parent, so a linked
+# worktree (a run directory) and a nested cwd both name their repository, not
+# their checkout. A non-Git directory keeps its plain directory name; that is
+# a label, not a verified repository identity. Local Git reads only.
+_vetcoders_interactive_pane_title() {
+  local agent="${1:-}" root_dir="${2:-}" model="${3:-}"
+  local repo="" common="" top=""
+  common="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$root_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+  if [[ -n "$common" ]]; then
+    if [[ "$(basename "$common")" == .git ]]; then
+      repo="$(basename "$(dirname "$common")")"
+    else
+      top="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$root_dir" rev-parse --show-toplevel 2>/dev/null)" || top=""
+      [[ -z "$top" ]] || repo="$(basename "$top")"
+    fi
+  fi
+  [[ -n "$repo" ]] || repo="$(basename "$root_dir")"
+  printf '%s · %s · %s\n' "$repo" "$agent" "${model:-unknown}"
+}
+
+# Third argument `agent` is the explicit interactive opt-in: the provider is
+# projected as a titled float above the workspace's current content. Without it
+# (the Marbles orchestrator tab) the helper keeps its tab semantics. The fourth
+# argument is an explicit placement: `right` opens a right-hand pane, anything
+# else (including empty) keeps the floating default.
 _vetcoders_spawn_into_operator_session() {
   vc_raise_launcher_limits
   local PATH="${PATH:-}"
@@ -1882,6 +2015,7 @@ _vetcoders_spawn_into_operator_session() {
   export PATH
   local tab_name="$1"
   local command_text="$2"
+  local interactive_agent="${3:-}" interactive_placement="${4:-}"
   # Operator-UI path (vc-init / operator agent / resume): land in the prepared
   # operator seat. Skill *workers* use scripts/lib spawn_launch (G7 per-project
   # host). Optional: VIBECRAFTED_WORKER_SESSION forces the G7 worker host here
@@ -1919,6 +2053,29 @@ _vetcoders_spawn_into_operator_session() {
   # readable trail for debugging.
   cmd_script="$(_vetcoders_tmp_script_path "vc-spawn-cmd" "$root_dir")"
   _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
+  if [[ -n "$interactive_agent" ]]; then
+    local pane_title
+    pane_title="$(_vetcoders_interactive_pane_title "$interactive_agent" "$root_dir" "${_vetcoders_contract_model:-}")"
+    local -a pane_shape=(--floating --width 62% --height 80%)
+    [[ "$interactive_placement" != right ]] || pane_shape=(--direction right)
+    if _vetcoders_vc_frame_session_action "$vc_frame_bin" "$session_name" \
+      action new-pane "${pane_shape[@]}" \
+      --name "$pane_title" \
+      --cwd "$root_dir" \
+      -- "$cmd_script"; then
+      printf 'launch accepted: run_id=%s target=%s/%s watch=vc-frame attach %s\n' \
+        "$run_id" "$session_name" "$pane_title" "$session_name"
+      return 0
+    else
+      action_status=$?
+    fi
+    printf 'launch failed: run_id=%s target=%s/%s status=%s\n' \
+      "$run_id" "$session_name" "$pane_title" "$action_status" >&2
+    if [[ -n "${VETCODERS_VC_FRAME_LAST_ERROR:-}" ]]; then
+      printf '%s\n' "$VETCODERS_VC_FRAME_LAST_ERROR" >&2
+    fi
+    return "$action_status"
+  fi
   # --after-base (W2-B-4c): run tabs grow from the base card, newest right of
   # it, instead of drifting to the rail's far end. Probe the binary — a stale
   # install without the flag degrades to the old append placement.

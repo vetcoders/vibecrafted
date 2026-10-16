@@ -112,8 +112,8 @@ class Frame:
 
 
 def compact_bar() -> str:
-    left = " Vibecrafted. | L  ○ Start  ◉ Agents  ○ shell  ○ voc"
-    right = "Composer · cmd"
+    left = " Vibecrafted. | L  ○ Launchpad  ◉ Agents  ○ shell"
+    right = "Voc · Composer · cmd"
     return clip(lr(left, right, W), W)
 
 
@@ -139,10 +139,9 @@ def paint_rail(fr: Frame) -> None:
         "   · resume-grok",
         "   · resume-codex",
         "04 ◉ vc-release",
-        "   · Start here",
+        "   · Launchpad ",
         "   ◉ Agents",
         "   · shell",
-        "   · voc",
         "05 ○ vibecrafted-vc_",
         "   · resume-grok",
         "   · Shell",

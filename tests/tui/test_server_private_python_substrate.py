@@ -242,6 +242,131 @@ def test_server_private_python_pair_health_probe_uses_packaged_interpreter(
     _assert_sentinel_never_ran(substrate, before)
 
 
+@pytest.mark.parametrize("command", ["status", "supervisor-pair-health"])
+@pytest.mark.parametrize("deck", ["generation", "development", "packaged-owner"])
+def test_server_embedded_guardian_imports_selected_core_in_isolation(
+    substrate: _Substrate, command: str, deck: str
+) -> None:
+    """Actual selected core must report an unready pair, never fail its import."""
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+        substrate.generation / "vibecrafted-core/vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        dirs_exist_ok=True,
+    )
+    # An editable test environment would mask the missing -I module admission.
+    _write_executable(
+        substrate.packaged_python,
+        _witness_script(
+            substrate.own_witness,
+            f'exec {installer.shlex_quote(sys._base_executable)} "$@"',
+        ),
+    )
+    runtime_dir = substrate.home / ".vibecrafted/server"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "guardian.execution.json").write_text(
+        '{"ready": false}\n', encoding="utf-8"
+    )
+    (runtime_dir / "status.json").write_text(
+        '{"host": "127.0.0.1", "port": 3024}\n', encoding="utf-8"
+    )
+    hostile = substrate.scratch / "vibecrafted_core"
+    hostile.mkdir()
+    marker = substrate.scratch / "foreign-core-ran"
+    (hostile / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+        "raise RuntimeError('foreign core executed')\n",
+        encoding="utf-8",
+    )
+    environment = substrate.environment()
+    _write_executable(
+        substrate.home / ".local/bin/vc-server-supervisor", "#!/bin/sh\nexit 0\n"
+    )
+    environment.update(
+        PYTHONPATH=str(substrate.scratch),
+        PYTHONHOME=str(substrate.scratch / "foreign-python-home"),
+        VIBECRAFTED_CORE_DIR=str(substrate.scratch),
+        VIBECRAFTED_TOOLS_HOME=str(substrate.scratch),
+    )
+    entry = substrate.public_entry
+    if deck != "generation":
+        entry = (
+            LAUNCHER
+            if deck == "development"
+            else REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+        )
+        environment.update(
+            VIBECRAFTED_HOME=str(substrate.home / ".vibecrafted"),
+            VIBECRAFTED_RUNTIME_HOME=str(substrate.runtime_home),
+            VIBECRAFTED_PYTHON=sys._base_executable,
+        )
+    result = subprocess.run(
+        [str(entry), "server", command],
+        check=False,
+        cwd=substrate.scratch,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert "server or embedded Guardian is not ready" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not marker.exists()
+    assert "RUNNING" not in result.stdout
+
+
+@pytest.mark.parametrize("missing", ["__init__.py", "server_supervisor.py"])
+def test_server_embedded_guardian_missing_selected_module_fails_closed(
+    substrate: _Substrate, missing: str
+) -> None:
+    core = substrate.generation / "vibecrafted-core/vibecrafted_core"
+    for name in ("dispatcher.py", "__init__.py", "server_supervisor.py"):
+        (core / name).write_text("raise RuntimeError('unadmitted module')\n")
+    (core / missing).unlink()
+    runtime_dir = substrate.home / ".vibecrafted/server"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "guardian.execution.json").write_text("{}\n")
+
+    result = substrate.run("server", "supervisor-pair-health")
+
+    assert result.returncode == FAIL_CLOSED_EXIT, result.stdout + result.stderr
+    assert "selected launcher core missing" in result.stderr
+    assert "unadmitted module" not in result.stderr
+    assert "RUNNING" not in result.stdout
+
+
+@pytest.mark.parametrize("linked_directory", ["vibecrafted-core", "vibecrafted_core"])
+def test_server_embedded_guardian_rejects_foreign_package_directory(
+    substrate: _Substrate, linked_directory: str
+) -> None:
+    core = substrate.generation / "vibecrafted-core"
+    foreign = substrate.scratch / "foreign-core"
+    shutil.copytree(core, foreign)
+    marker = substrate.scratch / "foreign-core-ran"
+    package = foreign / "vibecrafted_core"
+    (package / "dispatcher.py").write_text("pass\n")
+    (package / "server_supervisor.py").write_text("pass\n")
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+    selected = (
+        core if linked_directory == "vibecrafted-core" else core / "vibecrafted_core"
+    )
+    target = foreign if linked_directory == "vibecrafted-core" else package
+    selected.rename(selected.with_name(f"{selected.name}-original"))
+    selected.symlink_to(target)
+    runtime_dir = substrate.home / ".vibecrafted/server"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "guardian.execution.json").write_text("{}\n")
+
+    result = substrate.run("server", "supervisor-pair-health")
+
+    assert result.returncode == FAIL_CLOSED_EXIT, result.stdout + result.stderr
+    assert "outside physical owner" in result.stderr
+    assert not marker.exists()
+
+
 def _corrupt_absent(python: Path) -> None:
     python.unlink()
 

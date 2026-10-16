@@ -17,6 +17,27 @@ import pytest
 from vibecrafted_core import server_supervisor as supervisor
 
 
+@pytest.fixture(autouse=True)
+def _isolated_recovery_for_legacy_supervisor_fixtures(monkeypatch):
+    """Legacy launcher doubles have no SSE server. Real embedding is covered
+    against an ephemeral socket in test_runtime_owners, never host port 3024."""
+
+    class RecoveryDouble:
+        def __init__(self, config, event):
+            pass
+
+        def start(self):
+            pass
+
+        def publish(self):
+            return False
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(supervisor, "EmbeddedGuardian", RecoveryDouble)
+
+
 def _executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -782,6 +803,7 @@ def test_zero_exit_without_verified_pid_pair_is_degraded(
     assert receipt["managed_pair"] == {
         "server_pid": None,
         "guardian_pid": None,
+        "guardian_owner_pid": None,
     }
     assert "without a verified live server and guardian PID pair" in str(
         receipt["last_error"]
@@ -830,6 +852,7 @@ def test_zero_exit_with_foreign_live_minimal_identities_is_degraded(
         assert snapshot == {
             "server_pid": strangers[0].pid,
             "guardian_pid": strangers[1].pid,
+            "guardian_owner_pid": None,
         }
         assert supervisor._managed_pair_healthy(snapshot)
 
@@ -1975,7 +1998,7 @@ def test_hermetic_service_upgrade_restarts_into_new_provenance(
             '-m vibecrafted_core.server_supervisor "$@"\n'
         ),
     )
-    config = _config(tmp_path, launcher)
+    config = replace(_config(tmp_path, launcher), port=1)
     # Keep this service test independent from both the operator's installed
     # tools stamp and a concurrently advancing checkout HEAD.  The spawned
     # supervisor resolves its version under the fixture's isolated runtime

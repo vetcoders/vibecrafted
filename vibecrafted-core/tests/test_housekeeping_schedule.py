@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import plistlib
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,41 +45,26 @@ def _paths(tmp_path: Path, script: Path) -> HousekeepingSchedulePaths:
     )
 
 
-def test_render_plist_omits_execute_without_auto_execute(tmp_path: Path) -> None:
-    script = _fake_script(tmp_path)
-    paths = _paths(tmp_path, script)
-    config = HousekeepingConfig(enabled=True, auto_execute=False, retention_days=9)
-
-    rendered = render_housekeeping_launch_agent_plist(config, paths)
-    payload = plistlib.loads(rendered)
-
-    assert payload["Label"] == schedule.HOUSEKEEPING_LAUNCH_AGENT_LABEL
-    assert payload["RunAtLoad"] is False
-    assert payload["StartInterval"] == 24 * 3600
-    arguments = payload["ProgramArguments"]
-    assert str(script) in arguments
-    assert "--retention-days" in arguments
-    assert arguments[arguments.index("--retention-days") + 1] == "9"
-    assert "--execute" not in arguments
-    assert "--confirm" not in arguments
-    assert FAKE_CONFIRM_TOKEN not in arguments
+def test_separate_daemon_plist_is_retired(tmp_path: Path) -> None:
+    paths = _paths(tmp_path, _fake_script(tmp_path))
+    with pytest.raises(HousekeepingScheduleError, match="retired"):
+        render_housekeeping_launch_agent_plist(HousekeepingConfig(enabled=True), paths)
+    assert not paths.launch_agent_file.exists()
 
 
-def test_render_plist_includes_confirm_token_only_with_auto_execute(
+def test_registration_preserves_config_and_records_supervisor_owner(
     tmp_path: Path,
 ) -> None:
     script = _fake_script(tmp_path)
     paths = _paths(tmp_path, script)
-    config = HousekeepingConfig(enabled=True, auto_execute=True, interval_hours=6)
-
-    rendered = render_housekeeping_launch_agent_plist(config, paths)
-    payload = plistlib.loads(rendered)
-
-    arguments = payload["ProgramArguments"]
-    assert payload["StartInterval"] == 6 * 3600
-    assert "--execute" in arguments
-    assert "--confirm" in arguments
-    assert arguments[arguments.index("--confirm") + 1] == FAKE_CONFIRM_TOKEN
+    config = HousekeepingConfig(enabled=True, auto_execute=False, retention_days=9)
+    install_housekeeping_schedule(config, paths, activate=False)
+    payload = json.loads(schedule._owner_file(paths).read_text())
+    assert payload["owner"] == "vc-server-supervisor"
+    assert payload["script"] == str(script)
+    assert payload["sha256"] == schedule._sha256_file(script)
+    assert config.auto_execute is False
+    assert not paths.launch_agent_file.exists()
 
 
 def test_install_refuses_when_not_enabled(tmp_path: Path) -> None:
@@ -105,7 +89,8 @@ def test_install_writes_plist_and_is_idempotent(tmp_path: Path) -> None:
     assert first is True
     assert second is False
     assert housekeeping_schedule_installed(paths)
-    assert paths.launch_agent_file.is_file()
+    assert schedule._owner_file(paths).is_file()
+    assert not paths.launch_agent_file.exists()
 
 
 def test_uninstall_removes_the_plist(tmp_path: Path) -> None:
@@ -122,20 +107,88 @@ def test_uninstall_removes_the_plist(tmp_path: Path) -> None:
     assert not housekeeping_schedule_installed(paths)
 
 
-def test_activate_and_deactivate_swallow_launchctl_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script = _fake_script(tmp_path)
+def test_legacy_migration_requires_exact_ownership_digest(tmp_path: Path) -> None:
+    paths = _paths(tmp_path, _fake_script(tmp_path))
+    paths.launch_agent_file.parent.mkdir(parents=True)
+    payload = plistlib.dumps(
+        {
+            "Label": schedule.HOUSEKEEPING_LAUNCH_AGENT_LABEL,
+            "ProgramArguments": ["foreign-command"],
+        }
+    )
+    paths.launch_agent_file.write_bytes(payload)
+    ownership = tmp_path / "install-receipt.json"
+    digest = schedule._sha256_file(paths.launch_agent_file)
+    with pytest.raises(HousekeepingScheduleError, match="ownership receipt missing"):
+        schedule.retire_legacy_schedule(
+            paths, expected_sha256=digest, ownership_receipt=ownership
+        )
+    with pytest.raises(HousekeepingScheduleError, match="migration required"):
+        install_housekeeping_schedule(
+            HousekeepingConfig(enabled=True), paths, activate=False
+        )
+    ownership.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.runtime-install.v1",
+                "owned_files": {str(paths.launch_agent_file): digest},
+            }
+        )
+    )
+    with pytest.raises(
+        HousekeepingScheduleError, match="receipt.*mismatched|digest mismatch"
+    ):
+        schedule.retire_legacy_schedule(
+            paths, expected_sha256="0" * 64, ownership_receipt=ownership
+        )
+    assert paths.launch_agent_file.read_bytes() == payload
+    digest = schedule._sha256_file(paths.launch_agent_file)
+    assert schedule.retire_legacy_schedule(
+        paths, expected_sha256=digest, ownership_receipt=ownership
+    )
+
+
+def test_schedule_respects_disabled_and_plan_only(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    script = tmp_path / "script.py"
+    marker = tmp_path / "executed"
+    script.write_text(f"""
+CONFIRM_TOKEN = 'token'
+def build_plan(*args): return {{'mode':'plan'}}
+def write_receipt(*args): pass
+def execute_plan(*args):
+ from pathlib import Path
+ Path({str(marker)!r}).touch()
+ return {{'executed':True}}
+""")
     paths = _paths(tmp_path, script)
-
-    def _boom(args: object) -> subprocess.CompletedProcess[str]:
-        raise schedule.SupervisorError("no launchctl in this sandbox", 78)
-
-    monkeypatch.setattr(schedule, "_launchctl", _boom)
-
-    # Neither call should raise, even though the fake launchctl always fails.
-    schedule._activate(paths)
-    schedule._deactivate(paths)
+    cfg = HousekeepingConfig(enabled=True, auto_execute=False, interval_hours=1)
+    monkeypatch.setattr(schedule, "load_housekeeping_config", lambda *a, **k: cfg)
+    install_housekeeping_schedule(cfg, paths, activate=False)
+    now = [0.0]
+    supervisor_config = SimpleNamespace(
+        config_file=None,
+        paths=SimpleNamespace(
+            home=paths.vibecrafted_home, operator_home=paths.operator_home
+        ),
+    )
+    scheduler = schedule.SupervisorHousekeeping(supervisor_config, clock=lambda: now[0])
+    assert scheduler.tick() is False
+    now[0] = 3600
+    assert scheduler.tick() is True
+    assert not marker.exists()
+    cfg = HousekeepingConfig(enabled=False, auto_execute=True, interval_hours=1)
+    now[0] = 7200
+    assert scheduler.tick() is False
+    now[0] = 100_000
+    assert scheduler.tick() is False
+    assert not marker.exists()
+    cfg = HousekeepingConfig(enabled=True, auto_execute=True, interval_hours=1)
+    assert scheduler.tick() is False
+    now[0] += 3600
+    assert scheduler.tick() is True
+    assert marker.exists()
 
 
 def test_default_paths_uses_environment_home(

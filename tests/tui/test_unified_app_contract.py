@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -12,8 +13,10 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
+import tomllib
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import tomllib
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 
@@ -35,8 +37,83 @@ SCHEMA_PATH = (
 )
 
 
+@pytest.mark.parametrize("tab_name", ["Launchpad", "Start here"])
+def test_onboarding_probe_requires_launchpad_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tab_name: str
+) -> None:
+    layout = tmp_path / "vc-frame/layouts/operator.kdl"
+    layout.parent.mkdir(parents=True)
+    payload = f'layout {{ tab name="{tab_name}" {{}} }}'.encode()
+    layout.write_bytes(payload)
+    help_output = b"Create a vc-frame workspace for a repository"
+    scenario = Namespace(product_config=tmp_path, launchers=tmp_path / "bin")
+
+    def command(_scenario, argv):
+        assert argv == [scenario.launchers / "vc-start", "--help"]
+        return subprocess.CompletedProcess(argv, 0, stdout=help_output)
+
+    monkeypatch.setattr(contract, "_scenario_command", command)
+    if tab_name == "Start here":
+        with pytest.raises(RuntimeError, match="has no Launchpad tab"):
+            contract._scenario_start_here(scenario)
+    else:
+        assert contract._scenario_start_here(scenario) == {
+            "onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()
+        }
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_swift_bootstrap_passes_existing_main_app_helper_argv(tmp_path: Path) -> None:
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is unavailable")
+    delegate = (
+        REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
+    ).read_text()
+    start = delegate.index(
+        "  private func runtimePackInstallArguments(\n    pack: URL,"
+    )
+    end = delegate.index("  private func decodeCanonicalRuntimeInstall", start)
+    function = delegate[start:end].replace("private func", "func", 1)
+    app = tmp_path / "Vibecrafted.app"
+    for relative in ("Contents/MacOS/vc-terminal", "Contents/Helpers/vc-frame"):
+        _write_executable(app / relative)
+    source = tmp_path / "bootstrap.swift"
+    source.write_text(
+        "import Foundation\n"
+        "struct PreferenceResolutionChoice { let action: String; let currentSha256: String; let incomingSha256: String; let path: String }\n"
+        + function
+        + "\nlet app = URL(fileURLWithPath: CommandLine.arguments[1])\n"
+        + 'let argv = try runtimePackInstallArguments(pack: app.appendingPathComponent("pack.tar.gz"), appRoot: app, sourceRevision: "source", terminalRevision: "terminal", frameRevision: "frame")\n'
+        + "print(String(data: try JSONEncoder().encode(argv), encoding: .utf8)!)\n"
+    )
+    executable = tmp_path / "bootstrap"
+    compiled = subprocess.run(
+        [swiftc, str(source), "-o", str(executable)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    result = subprocess.run(
+        [str(executable), str(app)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    argv = json.loads(result.stdout)
+    terminal = Path(argv[argv.index("--terminal-host") + 1])
+    frame = Path(argv[argv.index("--frame-helper") + 1])
+    assert terminal == app / "Contents/MacOS/vc-terminal"
+    assert frame == app / "Contents/Helpers/vc-frame"
+    assert terminal.is_file() and os.access(terminal, os.X_OK)
+    assert frame.is_file() and os.access(frame, os.X_OK)
+    assert argv[argv.index("--app-root") + 1] == str(app)
 
 
 def _prefixed_sha256(path: Path) -> str:
@@ -448,15 +525,17 @@ def _terminal_bundle_fixture(
 
 
 def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
-    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    terminal_relative = "Contents/MacOS/vc-terminal"
     for relative in (
         "Contents/MacOS/Vibecrafted",
+        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
         (app / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(macho_executable, app / relative)
     for relative in (
+        terminal_relative,
         "Contents/Helpers/vc-frame",
         "Contents/Resources/runtime/bin/vc-start",
     ):
@@ -465,14 +544,17 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
     primary_shell.parent.mkdir(parents=True, exist_ok=True)
     primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
     primary_shell.chmod(0o755)
-    # Both declared bundles: the App's Helpers copy and the one the Runtime
-    # Pack materializes for its own standalone install, which arrives inside
-    # the App because the whole pack payload is staged under Resources/runtime.
-    terminal_bundle_entries = [
-        entry
-        for bundle_relative in contract.TERMINAL_APP_BUNDLES
-        for entry in _terminal_bundle_fixture(app, bundle_relative, macho_executable)
-    ]
+    terminal_files = [_entry(app, terminal_relative, kind="executable")]
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
+    ):
+        relative = f"Contents/Resources/fonts/{name}"
+        resource = app / relative
+        resource.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / "assets/fonts/source-code-pro" / name, resource)
+        terminal_files.append(_entry(app, relative, kind="resource"))
     terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
     terminal_config.parent.mkdir(parents=True, exist_ok=True)
     terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -489,11 +571,12 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleIconFile": contract.PRODUCT_ICON_FILE,
                 "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1",
+                "ATSApplicationFontsPath": "fonts",
             },
             handle,
         )
     terminal_product_entry = next(
-        entry for entry in terminal_bundle_entries if entry["path"] == terminal_relative
+        entry for entry in terminal_files if entry["path"] == terminal_relative
     )
     frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
 
@@ -598,7 +681,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
                 kind="resource",
             ),
-            *terminal_bundle_entries,
+            *terminal_files,
             frame_product_entry,
             _entry(app, terminal_binding["manifest_path"], kind="config"),
             _entry(app, frame_binding["manifest_path"], kind="config"),
@@ -923,7 +1006,7 @@ def _developer_id_release_app(root: Path, macho_executable: Path) -> Path:
     app = root / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     nested = [
-        app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
+        app / "Contents/MacOS/vc-terminal",
         app / "Contents/Helpers/vc-frame",
         app / "Contents/Resources/runtime/bin/vc-start",
     ]
@@ -1109,7 +1192,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         ) : delegate.index("func applicationSupportsSecureRestorableState")
     ]
     assert "    false\n" in termination_handler
-    assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
+    assert "Contents/MacOS/vc-terminal" in delegate
     # A normal launch first asks the installer-owned read-only resolver which
     # generation is current. Only a truly absent runtime may bootstrap the
     # bundled carrier; an unusable one must be refused rather than overwritten.
@@ -1280,7 +1363,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "!entry.starts_with('/')" in launcher
 
 
-def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
+def test_tray_menu_accepts_verified_runtime_from_another_build() -> None:
     app_dir = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
     delegate = (app_dir / "AppDelegate.swift").read_text(encoding="utf-8")
     policy = (app_dir / "RuntimePackMenuPolicy.swift").read_text(encoding="utf-8")
@@ -1311,9 +1394,9 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
         in delegate
     )
     assert "generation: canonicalInstall?.root.lastPathComponent" in delegate
-    # The policy owns the drift rule: generation `X.Y.Z+g<sha>` vs the signed
-    # carrier's full manifest revision; drift is amber (runtime-first upgrades
-    # are legitimate), never silent.
+    # The policy shows carrier identity while the runtime resolver owns the
+    # readiness decision. A different SHA alone cannot make a usable install
+    # look unhealthy.
     assert "func generationRevisionToken(_ generation: String) -> String?" in policy
     assert (
         "func runtimePackMatchesCarrier(generation: String, signedSourceRevision: String) -> Bool"
@@ -1326,7 +1409,7 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     assert 'generation.range(of: "+g", options: .backwards)' in policy
     assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
     assert "Runtime already current" in policy
-    assert "the installed runtime moved; update the App to re-sync" in policy
+    assert "Verified installed runtime from another build" in policy
     # The durable lifecycle trail is supervision evidence, but it is not
     # installer behavior: it lives in its own unit so the AppDelegate hub stays
     # a UI/process host (the contract above forbids createDirectory there).
@@ -1346,19 +1429,12 @@ def test_runtime_pack_menu_policy_swift_behavior(tmp_path: Path) -> None:
         REPO_ROOT
         / "vibecrafted-app/shell-agent/app/Vibecrafted/RuntimePackMenuPolicy.swift"
     )
+    server_policy = policy.with_name("ServerMenuPolicy.swift")
     # Top-level expressions are only allowed in a file named main.swift.
     harness = tmp_path / "main.swift"
     harness.write_text(
         """
 import Foundation
-
-enum TrayServerHealth: String {
-  case checking
-  case healthy
-  case transitioning
-  case failed
-  case neutral
-}
 
 func expect(_ condition: Bool, _ label: String) {
   if !condition { fatalError(label) }
@@ -1396,8 +1472,8 @@ expect(synced.actionsEnabled, "synced actions enabled")
 let drifted = deriveRuntimePackMenuState(
   generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha, runtimeReady: true)
 expect(drifted.header == "Runtime Pack: 4.4.0+gdeadbeef", "drift header")
-expect(drifted.detail.contains("Carrier expects 0a5eaaea"), "drift detail names carrier")
-expect(drifted.health == .transitioning, "drift is amber, not red")
+expect(drifted.detail.contains("Verified installed runtime from another build"), "another build is identified")
+expect(drifted.health == .healthy, "verified runtime stays healthy")
 expect(drifted.actionsEnabled, "drift actions enabled")
 
 let unstamped = deriveRuntimePackMenuState(
@@ -1431,7 +1507,15 @@ print("runtime-pack-policy-ok")
     )
     binary = tmp_path / "runtime-pack-policy-check"
     compile_result = subprocess.run(
-        [swiftc, "-O", "-o", str(binary), str(policy), str(harness)],
+        [
+            swiftc,
+            "-O",
+            "-o",
+            str(binary),
+            str(policy),
+            str(server_policy),
+            str(harness),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -1888,6 +1972,394 @@ def test_valid_app_has_one_bundle_identity_and_three_bound_entrypoints(
     )
 
 
+def _native_python_library_source(
+    config_var: Callable[[str], Any] = sysconfig.get_config_var,
+    *,
+    platform_name: str = sys.platform,
+    base_prefix: str = sys.base_prefix,
+) -> Path:
+    """Locate the running interpreter's CPython library for a fixture copy.
+
+    Mirrors ``test_native_host_has_real_product_process_identity``: a Darwin
+    framework build reports LDLIBRARY relative to PYTHONFRAMEWORKPREFIX, any
+    other build relative to LIBDIR. Relocated standalone builds can still
+    report their build-time LIBDIR, so the interpreter's own prefix lib is the
+    second, never-borrowed candidate.
+    """
+    configured = str(config_var("LDLIBRARY"))
+    if platform_name == "darwin" and config_var("PYTHONFRAMEWORK"):
+        candidates = [Path(str(config_var("PYTHONFRAMEWORKPREFIX"))) / configured]
+    else:
+        candidates = [
+            Path(str(config_var("LIBDIR"))) / configured,
+            Path(base_prefix) / "lib" / configured,
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(f"no CPython library among {candidates}")
+
+
+# Stable-ABI symbols scripts/native-python-entrypoint.c links. Never executed.
+_LIBPYTHON_STAND_IN_SOURCE = """#include <stddef.h>
+#include <wchar.h>
+int Py_BytesMain(int argc, char **argv) { (void)argc; (void)argv; return 0; }
+wchar_t *Py_DecodeLocale(const char *arg, size_t *size) {
+  (void)arg; (void)size; return NULL;
+}
+void Py_SetPythonHome(const wchar_t *home) { (void)home; }
+void Py_SetPath(const wchar_t *path) { (void)path; }
+const char *Py_GetVersion(void) { return "3.14.0"; }
+"""
+
+
+def _native_python_payload_library(
+    library_dir: Path,
+    config_var: Callable[[str], Any] = sysconfig.get_config_var,
+    *,
+    platform_name: str = sys.platform,
+    base_prefix: str = sys.base_prefix,
+    version: tuple[int, int] = sys.version_info[:2],
+) -> Path:
+    """Write the payload CPython library the release producer would embed.
+
+    A portable interpreter's own library already has payload geometry and is
+    copied under its flat name. A Darwin framework library is host-bound by
+    construction (LC_RPATH into the package prefix, compiled-in Cellar
+    prefix), which the product contract rightly refuses; production embeds
+    python-build-standalone instead. That host gets an inert stand-in under
+    the production ``libpython3.N.dylib`` name exporting the linked ABI.
+    """
+    source = _native_python_library_source(
+        config_var, platform_name=platform_name, base_prefix=base_prefix
+    )
+    library_dir.mkdir(parents=True)
+    if platform_name == "darwin" and config_var("PYTHONFRAMEWORK"):
+        library = library_dir / f"libpython{version[0]}.{version[1]}.dylib"
+        _compile_macho(
+            library,
+            source=_LIBPYTHON_STAND_IN_SOURCE,
+            extra_args=("-dynamiclib", f"-Wl,-install_name,@rpath/{library.name}"),
+        )
+        return library
+    library = library_dir / source.name
+    shutil.copyfile(source, library)
+    return library
+
+
+def test_native_python_library_source_resolves_framework_geometry(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "opt/python@3.14/Frameworks"
+    base_prefix = frameworks / "Python.framework/Versions/3.14"
+    library = base_prefix / "Python"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"framework-python")
+    # Homebrew's geometry: the old base_prefix/lib join names a missing file.
+    assert not (base_prefix / "lib" / "Python.framework/Versions/3.14/Python").exists()
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(base_prefix / "lib"),
+    }
+
+    source = _native_python_library_source(
+        config.get, platform_name="darwin", base_prefix=str(base_prefix)
+    )
+
+    assert source == library
+    assert source.name == "Python"
+
+
+@pytest.mark.parametrize("libdir_state", ["reported", "build_time"])
+def test_native_python_library_source_resolves_portable_lib_geometry(
+    tmp_path: Path, libdir_state: str
+) -> None:
+    base_prefix = tmp_path / "cpython-3.14-macos-aarch64-none"
+    library = base_prefix / "lib/libpython3.14.dylib"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"portable-python")
+    config = {
+        "LDLIBRARY": "libpython3.14.dylib",
+        "PYTHONFRAMEWORK": "",
+        "PYTHONFRAMEWORKPREFIX": "",
+        "LIBDIR": (
+            str(library.parent)
+            if libdir_state == "reported"
+            else str(tmp_path / "install/lib")
+        ),
+    }
+
+    source = _native_python_library_source(
+        config.get, platform_name="darwin", base_prefix=str(base_prefix)
+    )
+
+    assert source == library
+    assert source.name == "libpython3.14.dylib"
+
+
+def test_native_python_library_source_refuses_missing_library(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "Frameworks"
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(tmp_path / "lib"),
+    }
+    # A framework build never falls back to an unrelated prefix library.
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/Python.framework/Versions/3.14").mkdir(parents=True)
+    (tmp_path / "lib/Python.framework/Versions/3.14/Python").write_bytes(b"x")
+
+    with pytest.raises(AssertionError, match="no CPython library"):
+        _native_python_library_source(
+            config.get, platform_name="darwin", base_prefix=str(tmp_path)
+        )
+
+
+def test_native_python_payload_replaces_host_bound_framework_library(
+    tmp_path: Path,
+) -> None:
+    frameworks = tmp_path / "opt/python@3.14/Frameworks"
+    framework_library = frameworks / "Python.framework/Versions/3.14/Python"
+    framework_library.parent.mkdir(parents=True)
+    framework_library.write_bytes(b"/opt/homebrew/Cellar/python@3.14 prefix")
+    config = {
+        "LDLIBRARY": "Python.framework/Versions/3.14/Python",
+        "PYTHONFRAMEWORK": "Python",
+        "PYTHONFRAMEWORKPREFIX": str(frameworks),
+        "LIBDIR": str(framework_library.parent / "lib"),
+    }
+
+    library = _native_python_payload_library(
+        tmp_path / "runtime/python/lib",
+        config.get,
+        platform_name="darwin",
+        base_prefix=str(framework_library.parent),
+        version=(3, 14),
+    )
+
+    assert library.name == "libpython3.14.dylib"
+    assert b"/opt/homebrew" not in library.read_bytes()
+    assert framework_library.read_bytes() != library.read_bytes()
+    assert {"_Py_BytesMain", "_Py_DecodeLocale", "_Py_SetPythonHome"} <= set(
+        subprocess.run(
+            ["nm", "-gjU", str(library)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+    )
+
+
+def test_native_python_payload_copies_portable_library_under_flat_name(
+    tmp_path: Path,
+) -> None:
+    base_prefix = tmp_path / "cpython-3.14-macos-aarch64-none"
+    portable_library = base_prefix / "lib/libpython3.14.dylib"
+    portable_library.parent.mkdir(parents=True)
+    portable_library.write_bytes(b"portable-python")
+    config = {
+        "LDLIBRARY": "libpython3.14.dylib",
+        "PYTHONFRAMEWORK": "",
+        "LIBDIR": "/install/lib",
+    }
+
+    library = _native_python_payload_library(
+        tmp_path / "runtime/python/lib",
+        config.get,
+        platform_name="darwin",
+        base_prefix=str(base_prefix),
+        version=(3, 14),
+    )
+
+    assert library == tmp_path / "runtime/python/lib/libpython3.14.dylib"
+    assert library.read_bytes() == b"portable-python"
+
+
+@pytest.fixture
+def native_python_contract_fixture(tmp_path: Path, macho_executable: Path):
+    """Run the actual Python producer block and compile its native host."""
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    runtime = app / "Contents/Resources/runtime"
+    library = _native_python_payload_library(runtime / "python/lib")
+    library_name = library.name
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    start = builder.index(
+        '  if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then'
+    )
+    end = builder.index("\n  fi", start) + len("\n  fi")
+    subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail\nruntime=$1; PORTABLE_PYTHON_DYLIB=$2\n"
+            + builder[start:end],
+            "python-producer",
+            str(runtime),
+            library_name,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _codesign_macho(library)
+    spec = importlib.util.spec_from_file_location(
+        "native_renderer", REPO_ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    renderer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(renderer)
+    host = runtime / "bin/vc-python"
+    with pytest.MonkeyPatch.context() as environment:
+        environment.setenv("MACOSX_DEPLOYMENT_TARGET", "14.0")
+        renderer.render_native_host(
+            host, "vibecrafted_core.cli:main", library_name, python_only=True
+        )
+    manifest["files"].extend(
+        [
+            _entry(app, host.relative_to(app).as_posix(), kind="executable"),
+            _entry(app, library.relative_to(app).as_posix(), kind="dylib"),
+        ]
+    )
+    _write_app_manifest(app, manifest, sign=True)
+    return app, manifest, host, library, renderer
+
+
+def test_native_python_host_supplies_real_macho_dependency_closure(
+    native_python_contract_fixture,
+):
+    app, manifest, host, library, _ = native_python_contract_fixture
+    assert contract.verify_app(app) == manifest
+    observed = contract._observed_macho(
+        host, relative=host.relative_to(app).as_posix(), kind="executable"
+    )
+    assert observed is not None
+    assert f"@rpath/{library.name}" in observed.dependencies
+    assert observed.rpaths == ("@executable_path/../python/lib",)
+
+
+def test_manifest_producer_inventories_native_runtime_doors_and_real_edges(
+    native_python_contract_fixture, macho_executable
+):
+    app, _, host, library, _ = native_python_contract_fixture
+    names = (
+        "vc-python",
+        "vc-server-supervisor",
+        "vc-guardian",
+        "vc-workflow",
+        "vibecrafted-resume",
+        "vc-build-lease",
+        "verify-vibecrafted-walkaround",
+    )
+    for name in names:
+        if name != host.name:
+            shutil.copyfile(host, host.with_name(name))
+            host.with_name(name).chmod(0o755)
+    script = host.with_name("vc-script-fixture")
+    _write_executable(script)
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            terminal_source=macho_executable,
+            frame_source=macho_executable,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
+        )
+    )
+    produced = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text()
+    )
+    files = {entry["path"]: entry for entry in produced["files"]}
+    for name in names:
+        entry = files[f"Contents/Resources/runtime/bin/{name}"]
+        assert entry["kind"] == "executable"
+        assert f"@rpath/{library.name}" in entry["dylibs"]
+    assert files[script.relative_to(app).as_posix()]["kind"] == "resource"
+    _codesign_app(app)
+    assert contract.verify_app(app) == produced
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_library",
+        "missing_host",
+        "orphan_library",
+        "wrong_code",
+        "wrong_host_code",
+        "host_as_resource",
+    ],
+)
+def test_native_python_closed_inventory_rejects_damage(
+    native_python_contract_fixture, damage
+):
+    app, manifest, host, library, _ = native_python_contract_fixture
+    if damage == "missing_library":
+        library.unlink()
+        code = contract.E_MISSING
+    elif damage == "missing_host":
+        host.unlink()
+        code = contract.E_MISSING
+    elif damage == "wrong_code":
+        _mutate_macho_code_byte(library)
+        code = contract.E_HASH
+    elif damage == "wrong_host_code":
+        _mutate_macho_code_byte(host)
+        code = contract.E_HASH
+    elif damage == "host_as_resource":
+        entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == host.relative_to(app).as_posix()
+        )
+        entry.update(kind="resource", dylibs=[])
+        _write_app_manifest(app, manifest, sign=True)
+        code = contract.E_DEPENDENCY
+    else:
+        orphan = library.with_name("liborphan.dylib")
+        _compile_macho(
+            orphan,
+            source="int orphan(void) { return 0; }\n",
+            extra_args=("-dynamiclib", "-Wl,-install_name,@rpath/liborphan.dylib"),
+        )
+        _codesign_macho(orphan)
+        manifest["files"].append(
+            _entry(app, orphan.relative_to(app).as_posix(), kind="dylib")
+        )
+        _write_app_manifest(app, manifest, sign=True)
+        code = contract.E_DEPENDENCY
+    _assert_error(code, lambda: contract.verify_app(app))
+
+
+@pytest.mark.parametrize("damage", ["missing_library", "wrong_install_name"])
+def test_native_python_renderer_refuses_wrong_library_before_compiling(
+    native_python_contract_fixture, damage
+):
+    _, _, host, library, renderer = native_python_contract_fixture
+    if damage == "missing_library":
+        library.unlink()
+        error = subprocess.CalledProcessError
+    else:
+        subprocess.run(
+            ["install_name_tool", "-id", "@loader_path/ambient.dylib", str(library)],
+            check=True,
+        )
+        error = ValueError
+    replacement = host.with_name("vc-invalid-library")
+    with pytest.raises(error):
+        renderer.render_native_host(
+            replacement, "vibecrafted_core.cli:main", library.name
+        )
+    assert not replacement.exists()
+
+
 def test_app_rejects_legacy_icon_resource(
     tmp_path: Path, macho_executable: Path
 ) -> None:
@@ -1948,7 +2420,7 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     elif mutation == "applications_path":
         launch["program"] = "/Applications/vc-terminal.app/Contents/MacOS/vc-terminal"
     elif mutation == "direct_alias_session":
-        launch["shell"]["argv"] = ["attach", "--create", "Start here"]
+        launch["shell"]["argv"] = ["attach", "--create", "Launchpad"]
     elif mutation == "unknown_environment":
         launch["environment"]["inject_bundle_paths"]["VC_FRAME_BIN"] = (
             "Contents/Helpers/vc-frame"
@@ -1965,9 +2437,12 @@ def test_app_launch_contract_rejects_noncanonical_product_entry(
     )
 
 
+@pytest.mark.parametrize("probe_user_path", [None, True])
 def test_launch_environment_is_the_users_environment_with_pins_overlaid(
     tmp_path: Path,
     macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
 ) -> None:
     """Guest, not landlord: the child environment is the user's own
     environment with the deny-list scrubbed and Vibecrafted pins overlaid;
@@ -1988,7 +2463,21 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
     }
 
-    child = contract.build_launch_environment(app, host_environment=host)
+    probed_path = (
+        f"{tmp_path}/.cargo/bin:{tmp_path}/.local/bin:/opt/homebrew/bin:/usr/bin"
+    )
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        assert environment == host
+        assert probe_user_path is True, (
+            "explicit host mappings must not probe implicitly"
+        )
+        return probed_path
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(
+        app, host_environment=host, probe_user_path=probe_user_path
+    )
 
     resolved = app.resolve()
     assert child == {
@@ -1997,7 +2486,7 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "LANG": "pl_PL.UTF-8",
         "PATH": (
             f"{resolved / 'Contents/Resources/runtime/bin'}:"
-            "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            f"{probed_path if probe_user_path else host['PATH']}:/bin:/usr/sbin:/sbin"
         ),
         "SSH_AUTH_SOCK": "/tmp/probe.sock",
         "GITHUB_TOKEN": "user-owned-flows-through",
@@ -2005,6 +2494,37 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "VIBECRAFTED_APP_ROOT": str(resolved),
         "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
+
+
+@pytest.mark.parametrize("probe_user_path", [None, False])
+def test_process_launch_environment_adopts_login_path_by_default(
+    tmp_path: Path,
+    macho_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_user_path: bool | None,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    host = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "PYTHONPATH": "/poison"}
+    monkeypatch.setattr(contract.os, "environ", host)
+    calls = []
+
+    def stub_probe(environment: dict[str, str]) -> str:
+        calls.append(environment)
+        return f"{tmp_path}/.cargo/bin:/usr/bin"
+
+    monkeypatch.setattr(contract, "resolve_login_shell_path", stub_probe)
+    child = contract.build_launch_environment(app, probe_user_path=probe_user_path)
+    assert calls == ([host] if probe_user_path is None else [])
+    expected = (
+        f"{tmp_path}/.cargo/bin:/usr/bin:/bin"
+        if probe_user_path is None
+        else host["PATH"]
+    )
+    assert child["PATH"] == (
+        f"{app.resolve()}/Contents/Resources/runtime/bin:{expected}:/usr/sbin:/sbin"
+    )
+    assert "PYTHONPATH" not in child
 
 
 @pytest.mark.parametrize("runtime_home", ["relative/runtime", "APP_DESCENDANT"])
@@ -2279,36 +2799,48 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _assert_error(expected_code, lambda: contract.verify_app(app))
 
 
-def test_app_accepts_both_declared_terminal_bundles(
+def test_app_accepts_fixed_main_app_terminal_and_font_resources(
     tmp_path: Path, macho_executable: Path
 ) -> None:
-    """The Runtime Pack's own bundle is product, not contraband.
-
-    Before this, `verify_app` compared every nested .app against a list holding
-    only the Helpers copy, so the moment the pack payload staged under
-    Resources/runtime brought its own vc-terminal.app the whole product was
-    rejected as carrying a forbidden nested bundle.
-    """
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-
-    nested = sorted(
-        path.relative_to(app).as_posix()
-        for path in app.rglob("*")
-        if path.is_dir() and path.suffix.lower() == ".app"
-    )
-    assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
+    assert not any(path.suffix.lower() == ".app" for path in app.rglob("*"))
+    assert manifest["entrypoints"]["terminal"] == "Contents/MacOS/vc-terminal"
+    assert manifest["launch_contract"]["program"] == manifest["entrypoints"]["terminal"]
     declared = {entry["path"] for entry in manifest["files"]}
-    for bundle in contract.TERMINAL_APP_BUNDLES:
-        assert f"{bundle}/Contents/MacOS/alacritty" in declared
-        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
-        assert (app / bundle / "Contents/_CodeSignature/CodeResources").is_file()
-        # The seal is proof, never payload: nothing under it may be inventoried.
-        assert not any(
-            item.startswith(f"{bundle}/Contents/_CodeSignature") for item in declared
-        )
-
+    for name in (
+        "SourceCodePro[wght].ttf",
+        "SourceCodePro-Italic[wght].ttf",
+        "OFL.txt",
+    ):
+        relative = f"Contents/Resources/fonts/{name}"
+        assert relative in declared
+        assert (app / relative).read_bytes() == (
+            REPO_ROOT / "assets/fonts/source-code-pro" / name
+        ).read_bytes()
     assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        "Contents/Helpers/vc-terminal.app",
+        "Contents/Resources/runtime/libexec/vc-terminal.app",
+    ],
+)
+def test_current_app_rejects_historical_nested_terminal_geometry(
+    tmp_path: Path, macho_executable: Path, bundle: str
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    manifest["files"].extend(_terminal_bundle_fixture(app, bundle, macho_executable))
+    seal = f"{bundle}/Contents/_CodeSignature/CodeResources"
+    manifest["files"].append(_entry(app, seal, kind="config"))
+    _write_app_manifest(app, manifest, sign=False)
+    with pytest.raises(contract.ProductContractError) as refused:
+        contract.verify_app(app)
+    assert refused.value.code == contract.E_BUNDLE
+    assert bundle in str(refused.value)
 
 
 @pytest.mark.parametrize("stranger", ["Stranger.app", "Stranger.APP"])
@@ -2363,72 +2895,73 @@ def test_app_refuses_an_undeclared_nested_bundle_in_any_suffix_case(
     assert f"Contents/Resources/{stranger}" in str(refused.value)
 
 
-@pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
-        ("wrong_identity", contract.E_BUNDLE),
-        ("wrong_display_name", contract.E_BUNDLE),
-        ("plist_is_not_a_dictionary", contract.E_BUNDLE),
-        ("plist_is_malformed_xml", contract.E_BUNDLE),
-        ("icon_absent_from_inventory", contract.E_INVENTORY),
-        ("bundle_seal_removed", contract.E_PROOF),
+        ("missing", contract.E_MISSING),
+        ("symlink", contract.E_MISSING),
+        ("code_mismatch", contract.E_HASH),
+        ("unsigned", contract.E_PROOF),
+        ("font_missing", contract.E_MISSING),
+        ("font_undeclared", contract.E_INVENTORY),
+        ("fonts_path", contract.E_BUNDLE),
     ],
 )
-def test_every_declared_terminal_bundle_is_held_to_one_identity(
-    tmp_path: Path,
-    macho_executable: Path,
-    bundle: str,
-    mutation: str,
-    expected_code: int,
+def test_fixed_terminal_and_resources_fail_closed(
+    tmp_path: Path, macho_executable: Path, mutation: str, expected_code: int
 ) -> None:
-    """Same canonical identity, same proof, whichever payload carries it.
-
-    Parametrized over both declared bundles on purpose: a check that only ever
-    ran against the Helpers copy is how the two assemblies drifted apart in the
-    first place. A malformed Info.plist is a contract failure with a code, not
-    an AttributeError escaping the verifier.
-    """
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    plist_path = app / bundle / "Contents/Info.plist"
-
-    def _reseal_plist(payload: Any) -> None:
-        with plist_path.open("wb") as handle:
-            plistlib.dump(payload, handle)
-        _resync_plist_entry()
-
-    def _resync_plist_entry() -> None:
-        relative = f"{bundle}/Contents/Info.plist"
-        entry = next(item for item in manifest["files"] if item["path"] == relative)
-        entry.update(_entry(app, relative, kind="config"))
-
-    if mutation == "wrong_identity":
-        with plist_path.open("rb") as handle:
-            info = plistlib.load(handle)
-        info["CFBundleIdentifier"] = "io.example.vc-terminal"
-        _reseal_plist(info)
-    elif mutation == "wrong_display_name":
-        with plist_path.open("rb") as handle:
-            info = plistlib.load(handle)
-        info["CFBundleDisplayName"] = "Alacritty"
-        _reseal_plist(info)
-    elif mutation == "plist_is_not_a_dictionary":
-        _reseal_plist(["not", "a", "dictionary"])
-    elif mutation == "plist_is_malformed_xml":
-        plist_path.write_bytes(b'<?xml version="1.0"?><plist version="1.0"><dict>\n')
-        _resync_plist_entry()
-    elif mutation == "icon_absent_from_inventory":
-        icon_relative = f"{bundle}/Contents/Resources/alacritty.icns"
-        (app / icon_relative).unlink()
-        manifest["files"] = [
-            item for item in manifest["files"] if item["path"] != icon_relative
-        ]
-    elif mutation == "bundle_seal_removed":
-        shutil.rmtree(app / bundle / "Contents/_CodeSignature")
-
+    terminal = app / "Contents/MacOS/vc-terminal"
+    font = "Contents/Resources/fonts/SourceCodePro[wght].ttf"
+    if mutation == "missing":
+        terminal.unlink()
+    elif mutation == "symlink":
+        terminal.unlink()
+        terminal.symlink_to(macho_executable)
+    elif mutation == "code_mismatch":
+        _mutate_macho_code_byte(terminal)
+    elif mutation == "unsigned":
+        subprocess.run(
+            ["/usr/bin/codesign", "--remove-signature", str(terminal)], check=True
+        )
+        entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == "Contents/MacOS/vc-terminal"
+        )
+        entry.update(_entry(app, entry["path"], kind="executable"))
+        binding = next(
+            item for item in manifest["modules"] if item["module"] == "vc-terminal"
+        )
+        assembly = json.loads((app / binding["assembly_receipt_path"]).read_text())
+        assembly["files"][0]["product_sha256"] = entry["sha256"]
+        _write_json(app / binding["assembly_receipt_path"], assembly)
+        binding["assembly_receipt_sha256"] = _sha256(
+            app / binding["assembly_receipt_path"]
+        )
+        receipt_entry = next(
+            item
+            for item in manifest["files"]
+            if item["path"] == binding["assembly_receipt_path"]
+        )
+        receipt_entry.update(_entry(app, receipt_entry["path"], kind="config"))
+    elif mutation == "font_missing":
+        (app / font).unlink()
+    elif mutation == "font_undeclared":
+        (app / font).unlink()
+        manifest["files"] = [item for item in manifest["files"] if item["path"] != font]
+    elif mutation == "fonts_path":
+        plist = app / "Contents/Info.plist"
+        info = plistlib.loads(plist.read_bytes())
+        info["ATSApplicationFontsPath"] = "elsewhere"
+        plist.write_bytes(plistlib.dumps(info))
+        entry = next(
+            item for item in manifest["files"] if item["path"] == "Contents/Info.plist"
+        )
+        entry.update(_entry(app, entry["path"], kind="config"))
+        manifest["outer_bundle_code"]["info_plist_sha256"] = _sha256(plist)
     _write_app_manifest(app, manifest, sign=False)
-
     _assert_error(expected_code, lambda: contract.verify_app(app))
 
 
@@ -2467,10 +3000,8 @@ def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
 
     declared = {entry["path"] for entry in produced["files"]}
     assert intruder in declared
-    for bundle in contract.TERMINAL_APP_BUNDLES:
-        assert f"{bundle}/Contents/_CodeSignature/CodeResources" not in declared
-        assert f"{bundle}/Contents/MacOS/alacritty" in declared
-        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
+    assert "Contents/MacOS/vc-terminal" in declared
+    assert "Contents/Resources/fonts/SourceCodePro[wght].ttf" in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(
@@ -3997,17 +4528,32 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert 'make -C "$TERMINAL_REPO"' in builder
     assert "release-bins" in builder
     assert 'chmod 0755 "$terminal_source"' in builder
-    assert 'local terminal_app="$APP/Contents/Helpers/vc-terminal.app"' in builder
-    assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
-    assert '"$terminal_app/Contents/Resources/alacritty.icns"' in builder
-    assert "Set :CFBundleDisplayName VC Terminal" in builder
-    assert "Set :CFBundleName VC Terminal" in builder
+    assert (
+        'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
+        in builder
+    )
+    assert 'embed_terminal_font_resources "$APP"' in builder
+    assert "materialize_vc_terminal_app_bundle" not in builder
     terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
         encoding="utf-8"
     )
-    assert "vc-terminal.app/Contents/MacOS/alacritty" in terminal_entry
+    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in terminal_entry
     assert "_vc_terminal_is_bundle_host" in terminal_entry
-    assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
+    assert "unset VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT" in terminal_entry
+    assert 'host_tail=(${1+"$@"})' in terminal_entry
+    assert (
+        'admission_args=(admit --wrapper-pid "$$" --host "$host" --config "$config")'
+        in terminal_entry
+    )
+    assert (
+        '"${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"}' in terminal_entry
+    )
+    assert (
+        'fresh) exec "$host" --config-file "$config" '
+        '${host_tail[@]+"${host_tail[@]}"} ;;' in terminal_entry
+    )
+    assert "--config-file | --config-file=*)" in terminal_entry
+    assert "--socket | --socket=*)" in terminal_entry
     assert "sign_nested_app_bundles" in builder
     assert "sign_helper_scripts" in builder
     assert builder.index("sign_nested_app_bundles") < builder.index(
@@ -4024,7 +4570,7 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "portable_python_load_pin" in builder
     assert "scripts/lib/portable-python.sh" in builder
     assert "uv python install 3.12.3" not in builder
-    assert 'install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}"' in builder
+    assert 'install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}"' in builder
     assert "python3.12" not in builder
     # The remaps are built from PATH_REMAPS rather than written as one literal
     # string, because the snapshot pair is conditional and because rustc applies
@@ -4058,9 +4604,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     light = (REPO_ROOT / "config/vc-terminal/themes/light.toml").read_text(
         encoding="utf-8"
     )
-    primary_shell = (REPO_ROOT / "config/alacritty/launch-primary-shell.zsh").read_text(
-        encoding="utf-8"
-    )
+    primary_shell = REPO_ROOT / "config/alacritty/launch-primary-shell.zsh"
     delegate = (
         REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
     ).read_text(encoding="utf-8")
@@ -4137,8 +4681,35 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
             'exec "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"',
         ],
     }
-    assert "${1##*/}" in primary_shell
-    assert '"$0" "$@"' in primary_shell
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # An interpreter handoff must execute its exact argument vector, even
+        # when its basename is not a VC command. Quiet startup keeps a broken
+        # handoff from opening a real workspace during this private probe.
+        arguments = ["with spaces", "$literal; untouched", 'quoted "value"']
+        handoff = subprocess.run(
+            [
+                "/bin/bash",
+                str(primary_shell),
+                sys.executable,
+                "-I",
+                "-c",
+                "import json, sys; print(json.dumps(sys.argv[1:]))",
+                *arguments,
+            ],
+            cwd=temp_dir,
+            env={
+                "HOME": temp_dir,
+                "PATH": "/usr/bin:/bin",
+                "TERM": "dumb",
+                "VIBECRAFTED_QUIET_START": "1",
+            },
+            input="",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        assert json.loads(handoff.stdout.strip()) == arguments
     terminal_launch = delegate[
         delegate.index("private func openWorkspaceTerminal") : delegate.index(
             "private func terminalIsLive"

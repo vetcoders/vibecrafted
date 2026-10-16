@@ -52,7 +52,7 @@ _vetcoders_skill_init() {
   local _vetcoders_interactive_skill=init
   init_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),
@@ -77,7 +77,7 @@ _vetcoders_skill_init() {
   # Prepare (create detached when absent) -> provider tab -> enter last. An
   # explicit --repo/--root is the declared workspace, exactly as for resume.
   _vetcoders_launch_interactive_declaration init "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }
 
 # Plain-terminal init: no vc-frame tab, no layout — the agent starts in this
@@ -137,7 +137,7 @@ _vetcoders_skill_operator() {
   local _vetcoders_interactive_skill=operator
   operator_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),
@@ -150,7 +150,7 @@ _vetcoders_skill_operator() {
   case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
   _vetcoders_launch_interactive_declaration operator "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }
 
 # vc-partner launcher — interactive partner session, same family as init.
@@ -183,7 +183,7 @@ _vetcoders_skill_partner() {
   local _vetcoders_interactive_skill=partner
   partner_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
-  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  [[ -n "$permissions" ]] || permissions="auto"
   command_text="$(_vetcoders_partner_command_text "$tool" "$partner_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
   # The declared root is the EXPLICIT --root/--repo only. Admission below
   # resolves every face's checkout into _vetcoders_contract_root (99e86e5b),
@@ -202,5 +202,5 @@ _vetcoders_skill_partner() {
   _vetcoders_require_vc_frame || return 1
 
   _vetcoders_launch_interactive_declaration partner "$runtime" \
-    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root"
+    "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "$explicit_root" "" "$tool"
 }

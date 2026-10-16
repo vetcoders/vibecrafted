@@ -686,7 +686,7 @@ def test_sync_state_gc_parks_with_settlement(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "60")
     monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "3600")
-    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     _write_meta(
         home,
@@ -722,7 +722,7 @@ def test_archive_settles_then_archives(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_RUN_SNAPSHOT_RETENTION_SECONDS", "3600")
     monkeypatch.setenv("VIBECRAFTED_RUN_SNAPSHOT_RETENTION_COUNT", "100")
-    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 5, 19, 6, 0, tzinfo=dt.UTC)
     monkeypatch.setattr(control_plane, "_now", lambda: now)
     runs_dir = home / "control_plane" / "runs"
     runs_dir.mkdir(parents=True)

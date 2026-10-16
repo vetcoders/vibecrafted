@@ -41,8 +41,8 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +108,7 @@ class WorkspaceInstanceBuildMismatch(WorkspaceCatalogError):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _new_uuid7_fallback() -> str:
@@ -1402,7 +1402,7 @@ def materialize_instance(
     session_id = (
         require_uuid(vibecrafted_session_id, field_name="vibecrafted_session_id")
         if vibecrafted_session_id
-        else new_uuid7()
+        else None
     )
     now = _now_iso()
     with _catalog_lock(exclusive=True):
@@ -1414,6 +1414,59 @@ def materialize_instance(
             raise WorkspaceCatalogError("cannot materialize a buried workspace")
 
         existing = _list_instances_unlocked(workspace_id=wid)
+        if session_id:
+            owners = [
+                item
+                for item in _list_instances_unlocked()
+                if item.vibecrafted_session_id == session_id
+            ]
+            if len(owners) > 1:
+                raise WorkspaceCatalogError(
+                    "workspace session has ambiguous instance ownership"
+                )
+            payload = _read_json(workspace_session_path(session_id))
+            if payload is not None and not owners:
+                raise WorkspaceCatalogError("workspace session has no owning instance")
+            if owners:
+                owner = owners[0]
+                if owner.workspace_id != wid:
+                    raise WorkspaceCatalogError(
+                        "workspace session belongs to another workspace"
+                    )
+                if payload is not None:
+                    session = WorkspaceSessionRecord.from_payload(payload)
+                    if (
+                        session.workspace_id != wid
+                        or session.workspace_instance_id != owner.workspace_instance_id
+                    ):
+                        raise WorkspaceCatalogError(
+                            "workspace session ownership is inconsistent"
+                        )
+                previous = owner.build_id
+                same_revision = (
+                    previous.git_commit == bid.git_commit
+                    and previous.package_version == bid.package_version
+                    and previous.root == bid.root
+                )
+                uncertain = DIRTY_UNKNOWN in (previous.dirty_digest, bid.dirty_digest)
+                if owner.status != INSTANCE_STATUS_LIVE or (
+                    not (previous.matches(bid) and previous.root == bid.root)
+                    and not (uncertain and same_revision)
+                ):
+                    # A logical session cannot migrate to another instance.
+                    # Reuse a current-build seat or mint a fresh pair below.
+                    session_id = None
+        matches = [
+            item
+            for item in existing
+            if item.status == INSTANCE_STATUS_LIVE
+            and item.build_id.matches(bid)
+            and item.build_id.root == bid.root
+        ]
+        if session_id is None and len(matches) > 1:
+            raise WorkspaceCatalogError(
+                "multiple live instances share this build; select an exact session"
+            )
         for instance in existing:
             if instance.status != INSTANCE_STATUS_LIVE:
                 continue
@@ -1429,8 +1482,16 @@ def materialize_instance(
                 and same_revision
                 and instance.vibecrafted_session_id == session_id
             )
-            if previous.matches(bid) or same_session_observation:
-                # Same build — refresh session stamp if provided.
+            if (
+                previous.matches(bid) and previous.root == bid.root
+            ) or same_session_observation:
+                if session_id and instance.vibecrafted_session_id != session_id:
+                    # An explicit new session is a separate seat, not a rename.
+                    continue
+                session_id = (
+                    instance.vibecrafted_session_id or session_id or new_uuid7()
+                )
+                # Same build — retain the logical session's ownership.
                 # An uncertain observation may refresh the same physical
                 # materialization/session; this does not attest build equality.
                 refreshed = WorkspaceInstance(
@@ -1464,7 +1525,7 @@ def materialize_instance(
             workspace_instance_id=new_uuid7(),
             workspace_id=wid,
             build_id=bid,
-            vibecrafted_session_id=session_id,
+            vibecrafted_session_id=session_id or new_uuid7(),
             status=INSTANCE_STATUS_LIVE,
             created_at=now,
             updated_at=now,
@@ -1515,6 +1576,97 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
                 f"workspace session record not found: {vibecrafted_session_id}"
             )
         return WorkspaceSessionRecord.from_payload(payload)
+
+
+def runtime_session_owner_root(
+    runtime_session_id: str, socket_dir: str, *, runtime_state: str = ""
+) -> str | None:
+    """Read current live ownership, or conservative history for an exited seat.
+
+    The caller supplies the engine's observed state. Historical missing/dead
+    attachments and stale instances cannot own a newly live incarnation.
+    An EXITED cache or unspecified observation has no current incarnation
+    proof, so keep its historical foreign-root fence until explicit recovery.
+    """
+    if runtime_state and runtime_state not in RUNTIME_SESSION_STATES:
+        raise WorkspaceCatalogError("invalid observed Frame state")
+    if runtime_state == "live":
+        seat = _runtime_workspace_identity(
+            root=None, runtime_session_id=runtime_session_id, socket_dir=socket_dir
+        )
+        return show_workspace(seat[0].workspace_id).canonical_root if seat else None
+
+    owners: set[str] = set()
+    for path in sessions_dir().glob("*.json"):
+        session = read_workspace_session(path.stem)
+        if any(
+            attachment.runtime == "vc-frame"
+            and attachment.runtime_session_id == runtime_session_id
+            and attachment.socket_dir == socket_dir
+            for attachment in session.attachments
+        ):
+            owners.add(show_workspace(session.workspace_id).canonical_root)
+    if len(owners) > 1:
+        raise WorkspaceCatalogError("physical Frame session has conflicting owners")
+    return next(iter(owners), None)
+
+
+def workspace_return_attachment(
+    workspace_id: str, *, env: Mapping[str, str] | None = None
+) -> RuntimeSessionAttachment | None:
+    """Read the exact WES seat for a project without materializing new identity.
+
+    A hosting instance is preferred only with its complete identity binding.
+    Ambiguous physical seats require an explicit choice on the Frame rail.
+    This is attachment evidence; callers still probe the physical runtime.
+    """
+    record = show_workspace(workspace_id)
+    if record.status != WORKSPACE_STATUS_ACTIVE:
+        raise WorkspaceCatalogError(
+            "Project is buried — recover it explicitly before returning"
+        )
+    environ = os.environ if env is None else env
+    candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
+    for instance in list_instances(workspace_id=record.workspace_id):
+        if (
+            instance.status != INSTANCE_STATUS_LIVE
+            or not instance.vibecrafted_session_id
+        ):
+            continue
+        if (
+            Path(instance.build_id.root).resolve()
+            != Path(record.canonical_root).resolve()
+        ):
+            continue
+        if not workspace_session_path(instance.vibecrafted_session_id).is_file():
+            continue
+        session = read_workspace_session(instance.vibecrafted_session_id)
+        if (
+            session.workspace_id != record.workspace_id
+            or session.workspace_instance_id != instance.workspace_instance_id
+            or session.session_id != instance.vibecrafted_session_id
+        ):
+            raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
+        candidates.extend(
+            (instance, attachment)
+            for attachment in session.attachments
+            if attachment.runtime == "vc-frame" and attachment.state == "live"
+        )
+    preferred = [
+        attachment
+        for instance, attachment in candidates
+        if environ.get(ENV_WORKSPACE_ID) == record.workspace_id
+        and environ.get(ENV_WORKSPACE_INSTANCE_ID) == instance.workspace_instance_id
+        and environ.get(ENV_VIBECRAFTED_SESSION_ID) == instance.vibecrafted_session_id
+        and attachment.runtime_session_id
+        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+    ]
+    seats = preferred or [attachment for _, attachment in candidates]
+    if len(seats) > 1:
+        raise WorkspaceCatalogError(
+            "Multiple workspaces are open for this project — choose one on the Frame rail"
+        )
+    return seats[0] if seats else None
 
 
 def record_runtime_session_attachment(
@@ -1671,11 +1823,74 @@ class RunWorkspaceIdentity:
         }
 
 
+def _runtime_workspace_identity(
+    *, root: Path | None, runtime_session_id: str, socket_dir: str
+) -> tuple[WorkspaceSessionRecord, WorkspaceInstance, RuntimeSessionAttachment] | None:
+    """Read one exact physical seat; historical receipts are never relabelled."""
+    candidates = []
+    with _catalog_lock(exclusive=False):
+        catalog = _load_catalog_unlocked()
+        for path in sessions_dir().glob("*.json"):
+            payload = _read_json(path)
+            if payload is None:
+                # The census observed a session record. A tolerant loader's
+                # missing/corrupt result cannot exclude a hidden live owner.
+                raise WorkspaceCatalogError(
+                    "physical Frame session ownership is unreadable"
+                )
+            session = WorkspaceSessionRecord.from_payload(payload)
+            attachments = [
+                item
+                for item in session.attachments
+                if item.runtime == "vc-frame"
+                and item.runtime_session_id == runtime_session_id
+                and item.socket_dir == socket_dir
+                and item.state == "live"
+            ]
+            if not attachments:
+                continue
+            record = catalog.workspaces.get(session.workspace_id)
+            instance_payload = _read_json(instance_path(session.workspace_instance_id))
+            if (
+                record is None
+                or record.status != WORKSPACE_STATUS_ACTIVE
+                or instance_payload is None
+            ):
+                raise WorkspaceCatalogError(
+                    "physical Frame session ownership is unavailable"
+                )
+            instance = WorkspaceInstance.from_payload(instance_payload)
+            # Match the existing workspace-return liveness criteria, without
+            # promoting historical STALE instances or rewriting their receipts.
+            if instance.status != INSTANCE_STATUS_LIVE:
+                continue
+            if (
+                instance.workspace_id != session.workspace_id
+                or instance.vibecrafted_session_id != session.session_id
+                or _canonical_root_key(instance.build_id.root)
+                != _canonical_root_key(record.canonical_root)
+                or (
+                    root is not None
+                    and _canonical_root_key(record.canonical_root) != str(root)
+                )
+            ):
+                raise WorkspaceCatalogError(
+                    "physical Frame session ownership does not match requested root"
+                )
+            candidates.extend((session, instance, item) for item in attachments)
+    if len(candidates) > 1:
+        raise WorkspaceCatalogError("physical Frame session has ambiguous live seats")
+    return next(iter(candidates), None)
+
+
 def resolve_run_workspace_identity(
     *,
     root: str | Path,
     env: Mapping[str, str] | None = None,
     create_if_missing: bool = True,
+    runtime_session_id: str = "",
+    socket_dir: str = "",
+    runtime_state: str = "",
 ) -> RunWorkspaceIdentity:
     """Resolve the workspace identity for a new run.
 
@@ -1692,6 +1907,30 @@ def resolve_run_workspace_identity(
         validate_workspace_root(resolved_root, env=environ)
     except RepoSelectionError as exc:
         raise WorkspaceCatalogError(str(exc)) from exc
+
+    if runtime_state and (
+        runtime_state not in RUNTIME_SESSION_STATES or not runtime_session_id
+    ):
+        raise WorkspaceCatalogError(
+            "observed Frame state requires an exact session name"
+        )
+    if (runtime_session_id or socket_dir) and not runtime_state:
+        raise WorkspaceCatalogError(
+            "exact Frame identity requires an observed runtime state"
+        )
+    seat = (
+        _runtime_workspace_identity(
+            root=resolved_root,
+            runtime_session_id=runtime_session_id,
+            socket_dir=socket_dir,
+        )
+        if runtime_state
+        else None
+    )
+    if runtime_state == "live" and seat is None:
+        raise WorkspaceCatalogError(
+            "live Frame session has no consistent live WES identity; explicit recovery required"
+        )
 
     env_wid = str(environ.get(ENV_WORKSPACE_ID) or "").strip()
     catalog = read_catalog()
@@ -1754,8 +1993,6 @@ def resolve_run_workspace_identity(
             select=True,
         )
 
-    bid = compute_build_id(resolved_root, exact=False)
-
     inherited_same_root = (
         record is not None
         and bool(env_wid)
@@ -1769,14 +2006,106 @@ def resolve_run_workspace_identity(
     session_id = (
         require_uuid(env_session, field_name=ENV_VIBECRAFTED_SESSION_ID)
         if env_session
-        else new_uuid7()
+        else None
     )
-    instance = materialize_instance(
-        workspace_id=record.workspace_id,
-        root=resolved_root,
-        vibecrafted_session_id=session_id,
-        build_id=bid,
+    env_iid = (
+        str(environ.get(ENV_WORKSPACE_INSTANCE_ID) or "").strip()
+        if inherited_same_root
+        else ""
     )
+    instances = list_instances()
+    if env_iid:
+        iid = require_uuid(env_iid, field_name=ENV_WORKSPACE_INSTANCE_ID)
+        owner = next(
+            (item for item in instances if item.workspace_instance_id == iid), None
+        )
+        if (
+            owner is None
+            or owner.workspace_id != record.workspace_id
+            or owner.vibecrafted_session_id != session_id
+        ):
+            raise WorkspaceCatalogError(
+                "inherited workspace instance/session ownership is inconsistent"
+            )
+    if session_id:
+        owners = [
+            item for item in instances if item.vibecrafted_session_id == session_id
+        ]
+        if len(owners) > 1 or any(
+            item.workspace_id != record.workspace_id for item in owners
+        ):
+            raise WorkspaceCatalogError(
+                "inherited workspace session ownership is inconsistent"
+            )
+        if workspace_session_path(session_id).is_file():
+            session = read_workspace_session(session_id)
+            if session.workspace_id != record.workspace_id or (
+                env_iid and session.workspace_instance_id != env_iid
+            ):
+                raise WorkspaceCatalogError(
+                    "inherited workspace session ownership is inconsistent"
+                )
+    if seat is not None and seat[0].workspace_id != record.workspace_id:
+        raise WorkspaceCatalogError(
+            "physical Frame session belongs to another workspace"
+        )
+    if runtime_state == "live":
+        assert seat is not None  # refused before any catalog mutation above
+        _, instance, _ = seat
+        bid = instance.build_id
+    else:
+        if runtime_state:
+            if seat is not None:
+                session, old_instance, attachment = seat
+                observed = record_runtime_session_attachment(
+                    workspace_id=session.workspace_id,
+                    vibecrafted_session_id=session.session_id,
+                    workspace_instance_id=old_instance.workspace_instance_id,
+                    runtime="vc-frame",
+                    runtime_session_id=runtime_session_id,
+                    state=runtime_state,
+                    socket_dir=socket_dir,
+                    replaces_runtime_session_id=attachment.replaces_runtime_session_id,
+                )
+                # Retire only the proven unavailable incarnation. Otherwise a
+                # same-build restoration leaves two LIVE instances and blocks
+                # the next fresh run. Other live attachments keep their seat.
+                if not any(item.state == "live" for item in observed.attachments):
+                    with _catalog_lock(exclusive=True):
+                        if (
+                            _read_json(
+                                instance_path(old_instance.workspace_instance_id)
+                            )
+                            != old_instance.to_payload()
+                            or _read_json(workspace_session_path(session.session_id))
+                            != observed.to_payload()
+                        ):
+                            raise WorkspaceCatalogError(
+                                "observed Frame seat changed during recovery"
+                            )
+                        _write_instance_unlocked(
+                            replace(
+                                old_instance,
+                                status=INSTANCE_STATUS_STALE,
+                                updated_at=_now_iso(),
+                            )
+                        )
+            # Restoration/new creation is a new physical observation, even if
+            # the project build is unchanged. Keep old attachments in place.
+            if seat is not None or any(
+                item.workspace_id == record.workspace_id
+                and item.vibecrafted_session_id
+                and workspace_session_path(item.vibecrafted_session_id).is_file()
+                for item in instances
+            ):
+                session_id = new_uuid7()
+        bid = compute_build_id(resolved_root, exact=False)
+        instance = materialize_instance(
+            workspace_id=record.workspace_id,
+            root=resolved_root,
+            vibecrafted_session_id=session_id,
+            build_id=bid,
+        )
     host = worker_host_session_name(
         workspace_id=record.workspace_id,
         display_label=record.display_label,
@@ -1787,7 +2116,9 @@ def resolve_run_workspace_identity(
     )
     return RunWorkspaceIdentity(
         workspace_id=record.workspace_id,
-        vibecrafted_session_id=instance.vibecrafted_session_id or session_id,
+        vibecrafted_session_id=instance.vibecrafted_session_id
+        or session_id
+        or new_uuid7(),
         workspace_instance_id=instance.workspace_instance_id,
         build_id=bid,
         display_label=record.display_label,
@@ -2310,6 +2641,11 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     add_repo_arguments(resolve_p)
     resolve_p.add_argument("--env", action="store_true")
     resolve_p.add_argument("--json", action="store_true")
+    resolve_p.add_argument("--runtime-session-id", default="")
+    resolve_p.add_argument("--socket-dir", default="")
+    resolve_p.add_argument(
+        "--runtime-state", choices=sorted(RUNTIME_SESSION_STATES), default=""
+    )
 
     attach_p = sub.add_parser(
         "session-attach", help="attach a physical runtime session to WES"
@@ -2325,6 +2661,15 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     attach_p.add_argument("--socket-dir", default="")
     attach_p.add_argument("--replaces-runtime-session-id", default="")
     attach_p.add_argument("--json", action="store_true")
+
+    owner_p = sub.add_parser(
+        "session-owner", help="read a physical Frame session owner"
+    )
+    owner_p.add_argument("--runtime-session-id", required=True)
+    owner_p.add_argument("--socket-dir", required=True)
+    owner_p.add_argument(
+        "--runtime-state", choices=sorted(RUNTIME_SESSION_STATES), default=""
+    )
 
     counts_p = sub.add_parser(
         "settlement-counts", help="F/X/N projection scoped to workspace_id"
@@ -2436,7 +2781,13 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             root = args.root or (
                 selected.canonical_root if selected is not None else os.getcwd()
             )
-            identity = resolve_run_workspace_identity(root=root, env=environ)
+            identity = resolve_run_workspace_identity(
+                root=root,
+                env=environ,
+                runtime_session_id=args.runtime_session_id,
+                socket_dir=args.socket_dir,
+                runtime_state=args.runtime_state,
+            )
             payload = {
                 **identity.to_env(),
                 "VIBECRAFTED_OPERATOR_SESSION": operator_session_name(
@@ -2462,6 +2813,15 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
                 replaces_runtime_session_id=(args.replaces_runtime_session_id or None),
             )
             return _emit(session.to_payload(), as_json=args.json)
+        if args.action == "session-owner":
+            owner = runtime_session_owner_root(
+                args.runtime_session_id,
+                args.socket_dir,
+                runtime_state=args.runtime_state,
+            )
+            if owner:
+                print(owner)
+            return 0
         if args.action == "settlement-counts":
             return _emit(
                 settlement_counts_for_workspace(args.workspace_id),
@@ -2529,6 +2889,7 @@ __all__ = [
     "worker_host_display_label",
     "worker_host_session_name",
     "workspace_cli_main",
+    "workspace_return_attachment",
     "workspace_session_path",
     "write_snapshot_manifest",
 ]

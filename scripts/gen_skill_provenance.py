@@ -76,7 +76,7 @@ import posixpath
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = "vibecrafted.skill-provenance.v3"
@@ -513,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = args.manifest or (store / MANIFEST_NAME)
 
     merged = build(repo, manifest_path, store)
-    rendered = render_manifest(merged, datetime.now(timezone.utc).date().isoformat())
+    rendered = render_manifest(merged, datetime.now(UTC).date().isoformat())
     if args.check:
         # The whole rendered document is the contract, not just "are all the
         # hashes there": an unsorted, duplicated or foreign entry is drift too,

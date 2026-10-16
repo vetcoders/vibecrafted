@@ -233,7 +233,7 @@
       "properties": {
         "schema": { "const": "io.vetcoders.vibecrafted.launch.v1" },
         "program": {
-          "const": "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+          "const": "Contents/MacOS/vc-terminal"
         },
         "argv": {
           "const": [

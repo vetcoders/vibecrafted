@@ -28,7 +28,9 @@ def epoch(value: object) -> float | None:
     try:
         if type(value) in (int, float):
             return float(value) / 1000 if math.isfinite(value) else None
-        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # Keep legacy date-only parsing and embedded-Z rejection.
+        normalized_timestamp = str(value).replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(normalized_timestamp)
         if parsed.tzinfo is None:
             return None
         return parsed.timestamp()

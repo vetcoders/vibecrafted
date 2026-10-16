@@ -24,5 +24,5 @@
     end
 ```
 
-Bieżący skład to ośmiu agentów: claude · codex · agy · junie · grok · cursor ·
-kimi · copilot. Wybieraj według bieżącej ekonomii Foundera, nie samej historycznej trójki.
+Bieżący skład to dziewięciu agentów: claude · codex · agy · junie · grok · cursor ·
+kimi · copilot · omp. Wybieraj według bieżącej ekonomii Foundera, nie samej historycznej trójki.

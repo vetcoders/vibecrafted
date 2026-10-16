@@ -316,12 +316,18 @@ verify_signed_app() {
     return 1
   fi
   local display
-  display="$(without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$app" 2>&1 || true)"
-  echo "$display" | /usr/bin/grep -q "^Identifier=${EXPECTED_IDENTIFIER}$" || {
+  display="$(without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$app" 2>&1)" || {
+    echo "codesign --display failed: $app" >&2
+    return 1
+  }
+  # grep -q on an echo pipeline can close the pipe before a long codesign
+  # display is written. Under pipefail that SIGPIPE falsely rejects a valid app.
+  # Literal full-line matches also keep identifier dots from becoming regexes.
+  /usr/bin/grep -Fx "Identifier=${EXPECTED_IDENTIFIER}" <<< "$display" >/dev/null || {
     echo "codesign identifier is not ${EXPECTED_IDENTIFIER}" >&2
     return 1
   }
-  echo "$display" | /usr/bin/grep -q "^TeamIdentifier=${EXPECTED_TEAM}$" || {
+  /usr/bin/grep -Fx "TeamIdentifier=${EXPECTED_TEAM}" <<< "$display" >/dev/null || {
     echo "codesign TeamIdentifier is not ${EXPECTED_TEAM}" >&2
     return 1
   }
@@ -329,7 +335,8 @@ verify_signed_app() {
 }
 
 app_cdhash() {
-  without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/{print $2; exit}'
+  # Drain display output for the same pipefail reason as verify_signed_app.
+  without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/ && !seen++ {print $2}'
 }
 
 app_identity_token() {
@@ -1269,7 +1276,7 @@ bind_resume_journal() {
 }
 
 restore_prior_runtime() {
-  local installer published terminal_host frame_helper public_key
+  local installer published terminal_host frame_helper public_key terminal_program
   installer="$(resolve_pack_installer)" || {
     write_journal "failed" "Runtime Pack installer owner is missing"
     write_admission "rejected" "historical rollback cannot find the installer owner"
@@ -1293,9 +1300,36 @@ restore_prior_runtime() {
     write_journal "runtime_restored" "installer already published prior generation ${PRIOR_GENERATION}"
     return 0
   fi
-  terminal_host="${SOURCE}/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+  # SOURCE is the exact signed prior.app captured by this transaction. New
+  # products own a flat host; historical signed apps retain their old geometry.
+  # Never select a legacy helper to excuse a broken current flat host.
+  terminal_host="${SOURCE}/Contents/MacOS/vc-terminal"
+  if [[ -f "$SOURCE/Contents/Resources/product-manifest.json" ]]; then
+    assert_no_symlink_components "$SOURCE/Contents/Resources/product-manifest.json"
+    terminal_program="$(/usr/bin/plutil -extract launch_contract.program raw -o - "$SOURCE/Contents/Resources/product-manifest.json")" || {
+      write_journal "failed" "owned prior.app launch authority is unreadable"
+      write_admission "rejected" "owned prior.app launch authority is unreadable"
+      echo "missing historical rollback data: prior.app launch authority is unreadable" >&2
+      exit 19
+    }
+    case "$terminal_program" in
+      Contents/MacOS/vc-terminal|Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty)
+        terminal_host="$SOURCE/$terminal_program" ;;
+      *)
+        write_journal "failed" "unknown owned prior.app terminal authority"
+        write_admission "rejected" "unknown owned prior.app terminal authority"
+        echo "missing historical rollback data: unknown prior.app terminal authority" >&2
+        exit 19 ;;
+    esac
+  elif [[ ! -e "$terminal_host" && ! -L "$terminal_host" ]]; then
+    # Pre-manifest historical Apps still have the exact signed capture and
+    # sealed carrier as authority. The installer proves their helper pairing.
+    terminal_host="${SOURCE}/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+  fi
+  assert_no_symlink_components "$terminal_host"
   frame_helper="${SOURCE}/Contents/Helpers/vc-frame"
-  if [[ ! -x "$terminal_host" || ! -x "$frame_helper" ]]; then
+  assert_no_symlink_components "$frame_helper"
+  if [[ ! -f "$terminal_host" || ! -x "$terminal_host" || ! -f "$frame_helper" || ! -x "$frame_helper" ]]; then
     write_journal "failed" "owned prior.app is missing matching helper binaries"
     write_admission "rejected" "owned prior.app is missing matching helper binaries"
     echo "missing historical rollback data: prior.app helpers are not executable" >&2
@@ -1871,7 +1905,7 @@ PY
 }
 
 complete_replacement() {
-  local pack installer
+  local pack installer terminal_host frame_helper
   pack="$(pack_payload_in_dir "$DESTINATION/Contents/Resources/runtime-pack")" || {
     echo "replacement incomplete: no unique bundled Runtime Pack; rollback retained" >&2
     return 20
@@ -1879,9 +1913,16 @@ complete_replacement() {
   installer="$DESTINATION/Contents/Resources/runtime-pack/install-runtime-pack.sh"
   assert_no_symlink_components "$installer"
   [[ -x "$installer" ]] || { echo "replacement incomplete: bundled installer missing" >&2; return 20; }
+  terminal_host="$DESTINATION/Contents/MacOS/vc-terminal"
+  frame_helper="$DESTINATION/Contents/Helpers/vc-frame"
+  assert_no_symlink_components "$terminal_host"
+  assert_no_symlink_components "$frame_helper"
+  [[ -f "$terminal_host" && -x "$terminal_host" && -f "$frame_helper" && -x "$frame_helper" ]] || {
+    echo "replacement incomplete: fixed main-app terminal or vc-frame missing; rollback retained" >&2
+    return 20
+  }
   without_update_lock_fd /bin/bash "$installer" --pack "$pack" --app-root "$DESTINATION" \
-    --terminal-host "$DESTINATION/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" \
-    --frame-helper "$DESTINATION/Contents/Helpers/vc-frame" || return "$?"
+    --terminal-host "$terminal_host" --frame-helper "$frame_helper" || return "$?"
 }
 
 finish_replacement() {

@@ -1,11 +1,4 @@
-# Pre-tag rehearsal of release.yml's source-gate. Four tags burned in one
-# night (v4.2.0..v4.2.3, 2026-08-21/22) because the only place the full gate
-# suite ever ran on a bare macOS image was the immutable tag itself — each tag
-# died one step further along. The previous incarnation (core-macos.yml,
-# 870fb9b0) covered only `make test-core` and was deleted in 7da2e376 without
-# a note; v4.2.2/v4.2.3 died in `make test`, which it never ran anyway.
-# This workflow runs the same gate steps, same runner, on the release PR —
-# so the tag confirms a green check instead of discovering the suite.
+# Rehearse the same source gate used by tags, before tagging the exact SHA.
 name: Release gate rehearsal (macOS)
 
 on:
@@ -28,6 +21,7 @@ on:
       - "docs/RELEASE_KICKOFF.md"
       - ".github/workflows/release.yml"
       - ".github/workflows/gate-rehearsal.yml"
+      - ".github/workflows/source-gate.yml"
   workflow_dispatch:
 
 permissions:
@@ -39,68 +33,6 @@ concurrency:
 
 jobs:
   gate-rehearsal:
-    runs-on: macos-15
-    timeout-minutes: 180
-    env:
-      RUSTUP_TOOLCHAIN: "1.97.0"
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - name: Install shellcheck
-        run: brew install shellcheck
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-
-      - name: Provision pinned Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown wasm32-wasip1
-          rustup default "$RUSTUP_TOOLCHAIN"
-
-      # The same steps release.yml's source-gate runs after its immutable-tag
-      # preamble, in the same order, so a red here is a red there.
-      - name: Run shell checks
-        run: make check
-
-      - name: Run unified product contract gate
-        run: make unified-product-contract-gate
-
-      - name: Run core runtime tests
-        run: make test-core
-
-      - name: Run Semgrep security gate
-        run: make semgrep
-
-      - name: Run installer and product tests
-        timeout-minutes: 120
-        run: make test-source
-        env:
-          PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"
-          # macos-latest images stopped shipping a rustup default toolchain
-          # (first seen 2026-10-06): test_voc_core_contract and
-          # test_operator_mode shell out to cargo/rustc through rustup shims,
-          # which then refuse to pick a version. Server rust-toolchain.toml
-          # pins 1.97.0 and install-linux.yml provisions 1.97.0; pin the exact
-          # toolchain instead of depending on the moving stable channel.
-          RUSTUP_TOOLCHAIN: "1.97.0"
-
-      - name: Build the portable release channel
-        run: make portable
-
-      - name: Confirm publication boundary for both channels
-        run: |
-          set -euo pipefail
-          test -x scripts/publish-vibecrafted-release.sh
-          test -x scripts/build-portable-release.sh
-          grep -nE 'Vibecrafted_.*YYYYMMDD|DMG_NAME|\.dmg\.sha256' \
-            scripts/build-vibecrafted-release.sh \
-            scripts/publish-vibecrafted-release.sh \
-            docs/RELEASE_KICKOFF.md
-          grep -nE 'PORTABLE_NAME|portable\.tar\.gz|portable-output\.json' \
-            scripts/build-portable-release.sh \
-            scripts/publish-vibecrafted-release.sh \
-            docs/RELEASE_KICKOFF.md
+    uses: ./.github/workflows/source-gate.yml
+    with:
+      verify_tag: false

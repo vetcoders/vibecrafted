@@ -75,6 +75,32 @@ canonical_dir() {
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# A regular shared build lease covers the complete chain, including gaps and
+# child commands. A marker/env boolean cannot stand in for an inherited FD.
+if ! "$REPO_ROOT/scripts/project-python" - "$REPO_ROOT/build/.vc-build-lease" \
+  "${VIBECRAFTED_BUILD_LEASE_FD:-}" <<'PY'
+import fcntl, os, stat, sys
+try:
+    fd = int(sys.argv[2])
+    current = os.lstat(sys.argv[1])
+    held = os.fstat(fd)
+    if not stat.S_ISREG(current.st_mode) or held.st_nlink != 1 or held.st_uid != os.getuid() or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+        raise ValueError('not the build lease')
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except (ValueError, OSError):
+    raise SystemExit(1)
+PY
+then
+  lease_roots=()
+  [[ -z "${CARGO_TARGET_DIR:-}" ]] || lease_roots+=(--lease-root "$CARGO_TARGET_DIR")
+  for donor in "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}" \
+    "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}"; do
+    [[ ! -d "$donor" ]] || lease_roots+=(--lease-root "$donor/target")
+  done
+  exec "$REPO_ROOT/scripts/vc-build-lease" --root "$REPO_ROOT/build" \
+    "${lease_roots[@]}" -- /bin/bash "$REPO_ROOT/scripts/build-vibecrafted-release.sh" "$@"
+fi
+
 # The build -> install handoff record is owned by this library, and it is loaded
 # HERE rather than beside the other libraries further down: the claim it makes
 # has to happen before the first thing that can fail, and the donor roots, the
@@ -589,7 +615,7 @@ PY
 # - the interpreter links libpython statically, so the shared libpython is an
 #   embedding artifact nothing loads. It stays when the interpreter links it.
 prune_embedded_python_unreachable() {
-  local python="$1" interpreter="$2" libpython="$3"
+  local python="$1" libpython="$3"
   local path restore_nullglob
   # `shopt -p` exits 1 for an option that is off; under `set -e` that silently
   # ended release #8 right after the interpreter download.
@@ -607,11 +633,8 @@ prune_embedded_python_unreachable() {
   done
   eval "$restore_nullglob"
   [[ -f "$python/lib/$libpython" ]] || return 0
-  local links
-  links="$(otool -L "$python/bin/$interpreter")" || return 1
-  if [[ "$links" != *"$libpython"* ]]; then
-    rm -f "$python/lib/$libpython"
-  fi
+  # The native vc-server-supervisor embeds this library even when the ordinary
+  # interpreter links Python statically. It belongs to the signed closure.
 }
 
 run_bundled_verifier() {
@@ -746,51 +769,6 @@ sign_helper_scripts() {
   done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
 }
 
-# materialize_vc_terminal_app_bundle <bundle> <terminal binary> <role>
-#
-# The product's Finder/Dock terminal identity, materialized the one way. Two
-# payloads carry a vc-terminal.app — Vibecrafted.app in Contents/Helpers, and
-# the Runtime Pack beside its flat native host in libexec — and until this
-# boundary existed they were assembled by two copies of the same block. They
-# had already drifted: the helper was stamped VC Terminal while the Runtime
-# Pack bundle shipped the donor's own CFBundleName, so the same binary appeared
-# in the Dock under two names depending on which payload the operator installed.
-# One function, one identity, both callers; the role only names the payload in
-# a failure message.
-materialize_vc_terminal_app_bundle() {
-  local terminal_app="$1" terminal_binary="$2" role="$3"
-  /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
-  mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
-  install -m 0755 "$terminal_binary" "$terminal_app/Contents/MacOS/alacritty"
-  "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
-    "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
-    "$terminal_app/Contents/Resources/alacritty.icns" \
-    "$TERMINAL_REPO/assets/icon/terminal.png"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
-    || die "$role vc-terminal bundle executable contract is invalid"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
-    || die "$role vc-terminal bundle icon contract is invalid"
-  [[ -s "$terminal_app/Contents/Resources/alacritty.icns" ]] \
-    || die "$role vc-terminal bundle icon is missing"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName VC Terminal" \
-    "$terminal_app/Contents/Info.plist" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string VC Terminal" \
-      "$terminal_app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName VC Terminal" \
-    "$terminal_app/Contents/Info.plist" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string VC Terminal" \
-      "$terminal_app/Contents/Info.plist"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
-    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
-    || die "$role vc-terminal display name is not canonical"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
-    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
-    || die "$role vc-terminal bundle name is not canonical"
-  embed_terminal_font_resources "$terminal_app"
-}
-
 remove_ambient_swift_rpath() {
   local executable="$APP/Contents/MacOS/Vibecrafted"
   local rpaths
@@ -828,11 +806,11 @@ materialize_donor_snapshots() {
     || die "main snapshot HEAD $DONOR_SNAPSHOT_HEAD is not the bound release revision $ROOT_SHA"
   log "vibecrafted snapshot at $DONOR_SNAPSHOT_HEAD"
   if (( SNAPSHOT_DONORS )); then
-    log "Snapshotting donors at HEAD; their dirty working trees stay untouched"
+    log "Snapshotting donors at the selected commits; their dirty working trees stay untouched"
     local terminal_head frame_head
-    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO"
+    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"
     terminal_head="$DONOR_SNAPSHOT_HEAD"
-    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO"
+    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"
     frame_head="$DONOR_SNAPSHOT_HEAD"
     log "vc-terminal snapshot at $terminal_head"
     log "vc-frame snapshot at $frame_head"
@@ -948,10 +926,21 @@ materialize_runtime_payload() {
   local control_observe_source="$9"
   local admin_source="${10}"
   local procs_source="${11}"
-  local canonical_deck python_seed seed_python python_home
+  local canonical_deck python_seed seed_python python_home _attempt
 
   log "Materializing the App-independent Runtime Pack payload"
-  rm -rf "$runtime"
+  [[ "$runtime" == "$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime" ]] \
+    || die "refusing to clear unowned Runtime Pack payload: $runtime"
+  # Host metadata can recreate .DS_Store during removal. Unlike EXIT cleanup,
+  # this reset must succeed before any bytes are materialized into the payload.
+  for _attempt in 1 2 3; do
+    if rm -rf -- "$runtime" 2>/dev/null; then
+      break
+    fi
+    [[ "$_attempt" != 3 ]] \
+      || die "could not clear owned Runtime Pack payload after 3 attempts: $runtime"
+    sleep 0.05
+  done
   mkdir -p "$runtime/bin" "$runtime/libexec" "$runtime/scripts" \
     "$runtime/vibecrafted-core" "$runtime/vibecrafted-mcp" \
     "$runtime/config" "$runtime/server/site"
@@ -964,6 +953,8 @@ materialize_runtime_payload() {
   # Pack carries the foundations INSTALLER, never the foundations (Maciej 2026-10-07).
   install -m 0755 "$SOURCE_ROOT/scripts/install-foundations.sh" \
     "$runtime/scripts/install-foundations.sh"
+  install -m 0755 "$SOURCE_ROOT/scripts/vibecrafted_housekeeping.py" \
+    "$runtime/scripts/vibecrafted_housekeeping.py"
   mkdir -p "$runtime/scripts/lib"
   install -m 0644 "$SOURCE_ROOT/scripts/lib/runtime-roots.sh" \
     "$runtime/scripts/lib/runtime-roots.sh"
@@ -1008,16 +999,9 @@ materialize_runtime_payload() {
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
   install -m 0755 "$control_observe_source" "$runtime/bin/control-observe"
   install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
-  # A Runtime Pack is independently launchable: it cannot borrow the enclosing
-  # Vibecrafted.app helper merely to retain Finder/Dock identity.  Materialize
-  # the same branded bundle beside the generation's native fallback so the
-  # public product entry selects generation-owned bytes after a standalone
-  # install as well.  Linux keeps the flat native host because .app identity is
-  # a Darwin-only product contract.
-  if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
-    materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app" \
-      "$terminal_source" "Runtime Pack"
-  fi
+  # Generations are internal payloads, never separate macOS app/Dock identities.
+  # The macOS public entry requires the fixed Applications host; Linux keeps
+  # the flat native host. A standalone pack must disclose this GUI requirement.
   install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
     "$runtime/bin/vc-terminal"
   install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
@@ -1054,7 +1038,7 @@ materialize_runtime_payload() {
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
     'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'fastmcp>=2.0,<3'
   if [[ -f "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}" ]]; then
-    install_name_tool -id "@loader_path/${PORTABLE_PYTHON_DYLIB}" \
+    install_name_tool -id "@rpath/${PORTABLE_PYTHON_DYLIB}" \
       "$runtime/python/lib/${PORTABLE_PYTHON_DYLIB}"
   fi
   rm -rf "$runtime/python-site/bin"
@@ -1079,11 +1063,11 @@ materialize_runtime_payload() {
   "$SOURCE_ROOT/scripts/project-python" \
     "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$SOURCE_ROOT/vibecrafted-core/pyproject.toml" \
-    --bin-dir "$runtime/bin"
+    --bin-dir "$runtime/bin" --native-library "$PORTABLE_PYTHON_DYLIB"
   "$SOURCE_ROOT/scripts/project-python" \
     "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$SOURCE_ROOT/vibecrafted-mcp/pyproject.toml" \
-    --bin-dir "$runtime/bin"
+    --bin-dir "$runtime/bin" --native-library "$PORTABLE_PYTHON_DYLIB"
 
   # Every executable this payload carries — the ones compiled above and the
   # donors' — goes through one debug-record boundary before the gate reads the bytes and
@@ -1091,7 +1075,7 @@ materialize_runtime_payload() {
   # candidate: two named files here left six others carrying the rustup
   # sysroot and the Cargo target directory in linker stabs.
   log "Stripping linker debug records from the Runtime Pack executables"
-  strip_macho_debug_tree "$runtime/bin" "$runtime/libexec" \
+  strip_macho_debug_tree "$runtime/bin" "$runtime/libexec" "$runtime/python" \
     || die "Runtime Pack payload debug-record strip failed"
   if find "$runtime" -type l -print -quit | grep -q .; then
     die "Runtime Pack payload contains symlinks"
@@ -1257,6 +1241,10 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" \
       "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Vibecrafted" \
+    "$APP/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Vibecrafted" \
+      "$APP/Contents/Info.plist"
   # Decyzja Macieja 2026-10-06: full Dock identity; an explicit false keeps
   # a regression back to the tray-only accessory loud at build time.
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' \
@@ -1268,10 +1256,11 @@ build_product() {
 
   log "Embedding the already-materialized Runtime Pack payload"
   local runtime="$resources/runtime"
-  local terminal_app="$APP/Contents/Helpers/vc-terminal.app"
   mkdir -p "$APP/Contents/Helpers" "$resources/terminal"
   /usr/bin/ditto "$RUNTIME_PAYLOAD" "$runtime"
-  materialize_vc_terminal_app_bundle "$terminal_app" "$terminal_source" "helper"
+  # Both native executables live under one physical signed app identity.
+  install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"
+  embed_terminal_font_resources "$APP"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
   install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 

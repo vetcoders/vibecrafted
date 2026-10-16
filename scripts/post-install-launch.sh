@@ -2,7 +2,7 @@
 # post-install-launch.sh — backyard product spine end of install (SF-3 / SF-4)
 #
 # After foundations + tools are on disk: offer to open the operator session
-# with the Start here layout (operator.kdl / default_layout vibecrafted).
+# with the Launchpad layout (operator.kdl / default_layout vibecrafted).
 #
 # Does NOT claim full agent-process restore — see docs/installer/RESTORE_CONTRACT.md.
 set -euo pipefail
@@ -23,7 +23,7 @@ done
 
 if [[ "$NO_LAUNCH" == "1" ]]; then
   info "Launch skipped (--no-launch / VIBECRAFTED_NO_LAUNCH=1)."
-  info "When ready: vc-start    # operator session · Start here tab"
+  info "When ready: vc-start    # operator session · Launchpad tab"
   exit 0
 fi
 
@@ -58,7 +58,7 @@ else
   printf '\n'
   printf 'Install complete.\n'
   printf '  Frame:     %s\n' "$(command -v vc-frame)"
-  printf '  Cockpit:   operator session with tab "Start here" (map of the workspace)\n'
+  printf '  Cockpit:   operator session with tab "Launchpad" (map of the workspace)\n'
   printf '  Restore:   layout/session resurrection is frame-level — not a full agent\n'
   printf '             process freeze. See docs/installer/RESTORE_CONTRACT.md\n'
   printf '\n'

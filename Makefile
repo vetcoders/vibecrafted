@@ -43,7 +43,7 @@ help:
 	@printf "\n"
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. %s\033[0m\n" "$$(cat $(VERSION_FILE) 2>/dev/null || echo dev)"
 	@printf "\n"
-	@printf "  make install      \033[2mInstall the receipted Runtime Pack\033[0m\n"
+	@printf "  make install      \033[2mBuild this checkout and install its receipted Runtime Pack\033[0m\n"
 	@printf "  make doctor       \033[2mHealth check\033[0m\n"
 	@printf "  make runtime-cleanup-plan \033[2mShow obsolete payloads and live pins; read-only\033[0m\n"
 	@printf "  make runtime-cleanup \033[2mRetire verified unpinned payloads; preserve current/rollback\033[0m\n"
@@ -150,7 +150,14 @@ release-prereqs:
 		exit 0; \
 	fi; \
 	vibecrafted_release_verify_darwin_linker; \
-	command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'FATAL: rustup is required for release' >&2; exit 1; }; \
+	if ! command -v rustup >/dev/null 2>&1 && [ -x "$$HOME/.cargo/bin/rustup" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH"; export PATH; \
+	fi; \
+	command -v rustup >/dev/null 2>&1 || { \
+		printf '%s\n' "FATAL: rustup is required for release (an ambient Homebrew rust cannot provide the pinned toolchain $$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN)" >&2; \
+		printf '%s\n' 'FIX: brew install rustup-init && rustup-init -y   (or https://rustup.rs), then re-run' >&2; \
+		exit 1; \
+	}; \
 	toolchain="$$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"; \
 	if ! rustup which --toolchain "$$toolchain" rustc >/dev/null 2>&1; then \
 		printf '==> Installing pinned release toolchain %s\n' "$$toolchain"; \
@@ -425,21 +432,24 @@ endif
 # `curl ... | bash` path ran `make install-auto` as a silent no-op.
 install-auto: install
 
-# RUNTIME_PACK stays authoritative when given, including to install a different
-# signed generation on purpose. Left empty, the installer asks the build
-# selection record which pack the last `make runtime-pack` actually completed;
-# an incomplete or foreign build fails visibly there rather than resolving into
-# some older archive that merely looks plausible. install.sh hands a verified
-# public candidate's pack over as RUNTIME_PACK together with the source
-# revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
+# An explicit RUNTIME_PACK remains authoritative for a verified external
+# carrier. Bare make install builds this checkout with its versioned Frame and
+# Terminal pins, then publishes through the same Runtime Pack installer. The
+# installer reads the exact build-selection record; it never chooses a pack by
+# mtime, name or glob. install.sh supplies RUNTIME_PACK for a public candidate.
 install:
+	@if [ -z "$(RUNTIME_PACK)" ]; then \
+		if [ "$$(uname -s)" = Darwin ]; then \
+			$(PYTHON) scripts/build-source-runtime-pack.py; \
+		else \
+			$(MAKE) --no-print-directory runtime-pack; \
+		fi; \
+	fi
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)") $(if $(RUNTIME_PACK_CHECKSUM),--checksum "$(RUNTIME_PACK_CHECKSUM)") $(if $(RUNTIME_PACK_SIGNATURE),--signature "$(RUNTIME_PACK_SIGNATURE)") $(if $(RUNTIME_PACK_CARRIER_BASENAME),--carrier-basename "$(RUNTIME_PACK_CARRIER_BASENAME)") $(if $(RUNTIME_PACK_BOOTSTRAP_INSTALLER),--bootstrap-installer "$(RUNTIME_PACK_BOOTSTRAP_INSTALLER)") $(if $(RUNTIME_PACK_BOOTSTRAP_SHA256),--bootstrap-installer-sha256 "$(RUNTIME_PACK_BOOTSTRAP_SHA256)")
 	@bash scripts/install-foundations.sh loctree aicx prview screenscribe
 	@$(MAKE) --no-print-directory reconcile-server-service
 
-# Retained public spelling: configuration and runtime publication have one
-# installer. Build the appropriate carrier separately, then supply it through
-# `make install RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz`.
+# Retained public spelling: the source lane has one builder and one installer.
 install-source: install
 
 # The explicit source/compiler lane calls `install-python-tools`; retain the

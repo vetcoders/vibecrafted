@@ -16,9 +16,152 @@ import time
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import private_child_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "scripts" / "vibecrafted"
+PACKAGED_LAUNCHER = REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+
+
+def _private_init_command(
+    tmp_path, source, arguments, *, installed=True, wrapper=False
+):
+    """Run the public deck with private helper/provider/Frame capture boundaries."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True)
+    entry = scripts / ("vc-init" if wrapper else "vibecrafted")
+    entry.write_bytes(source.read_bytes())
+    entry.chmod(0o755)
+    _seed_launcher_ulimits(entry)
+    helper = tmp_path / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        'printf loaded > "$HELPER_LOADED"\n'
+        "junie-skill-init() {\n"
+        '  printf "%s\\0" "$@" > "$HELPER_CAPTURE"\n'
+        '  vc-frame "$@"\n'
+        '  junie "$@"\n'
+        "}\n"
+    )
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    witnesses = []
+    for name, variable in (
+        ("junie", "PROVIDER_CAPTURE"),
+        ("vc-frame", "FRAME_CAPTURE"),
+    ):
+        if name == "junie" and not installed:
+            continue
+        path = binaries / name
+        path.write_text(f'#!/bin/bash\nprintf "%s\\0" "$@" > "${variable}"\n')
+        path.chmod(0o755)
+        witnesses.append(path)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "PATH": f"{binaries}:/usr/bin:/bin",
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        **{
+            name: str(tmp_path / name)
+            for name in (
+                "HELPER_LOADED",
+                "HELPER_CAPTURE",
+                "PROVIDER_CAPTURE",
+                "FRAME_CAPTURE",
+            )
+        },
+    }
+    argv = ([] if wrapper else ["init"]) + arguments
+    result = subprocess.run(
+        private_child_command(
+            ["/bin/bash", str(entry), *argv], allowed=tuple(witnesses)
+        ),
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result, env
+
+
+def test_private_init_execution_fence_controls(tmp_path):
+    allowed, refused = tmp_path / "allowed", tmp_path / "refused"
+    for path in (allowed, refused):
+        path.write_text("#!/bin/bash\nprintf 'private-init-canary\\n'\n")
+        path.chmod(0o755)
+    positive = subprocess.run(
+        private_child_command([str(allowed)], allowed=(allowed,)),
+        capture_output=True,
+        text=True,
+    )
+    assert positive.returncode == 0 and positive.stdout == "private-init-canary\n"
+    if sys.platform == "darwin":
+        negative = subprocess.run(
+            private_child_command([str(refused)], allowed=(allowed,)),
+            capture_output=True,
+            text=True,
+        )
+        assert negative.returncode != 0 and "Operation not permitted" in negative.stderr
+        assert not negative.stdout
+
+
+@pytest.mark.parametrize(
+    "source", [LAUNCHER, PACKAGED_LAUNCHER], ids=["source", "packaged"]
+)
+@pytest.mark.parametrize(
+    "arguments,installed,wrapper",
+    [
+        (["junie", "--help"], True, False),
+        (["junie", "-h"], True, False),
+        (["junie", "--help"], False, False),
+        (["junie", "-h"], False, False),
+        (["--help"], False, False),
+        (["-h"], False, False),
+        (["help"], False, False),
+        (["junie", "--help"], True, True),
+        (["junie", "-h"], False, True),
+    ],
+)
+def test_public_init_help_never_enters_private_launch(
+    tmp_path, source, arguments, installed, wrapper
+):
+    result, env = _private_init_command(
+        tmp_path, source, arguments, installed=installed, wrapper=wrapper
+    )
+    assert result.returncode == 0, result.stderr
+    assert "vibecrafted init [claude|codex|agy|junie" in result.stdout
+    assert "Starting" not in result.stdout
+    assert all(
+        not Path(env[name]).exists()
+        for name in (
+            "HELPER_LOADED",
+            "HELPER_CAPTURE",
+            "PROVIDER_CAPTURE",
+            "FRAME_CAPTURE",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "source", [LAUNCHER, PACKAGED_LAUNCHER], ids=["source", "packaged"]
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [[], ["--prompt", "--help"], ["--prompt=--help"], ["--", "--help"], ["--", "-h"]],
+)
+def test_public_init_preserves_launch_and_literal_help_data(
+    tmp_path, source, arguments
+):
+    result, env = _private_init_command(tmp_path, source, ["junie", *arguments])
+    assert result.returncode == 0, result.stderr
+    assert "Starting" in result.stdout
+    assert Path(env["HELPER_LOADED"]).is_file()
+    for name in ("HELPER_CAPTURE", "PROVIDER_CAPTURE", "FRAME_CAPTURE"):
+        captured = Path(env[name]).read_bytes().decode().split("\0")[:-1]
+        assert captured == (arguments or [""])
+
 
 _GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
     "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
@@ -838,7 +981,7 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
         "--runtime",
         "local-native",
         "--permissions",
-        "bypass",
+        "auto",
         "--token-budget",
         "unmetered",
         "--operator",
@@ -850,19 +993,16 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
     assert "--print" not in tokens
 
 
-def test_init_shell_and_deck_accept_the_same_typed_continuity_flags() -> None:
+def test_init_shell_and_deck_accept_the_same_typed_continuity_flags(tmp_path) -> None:
     expected = "--continuity full-lineage --continuity-parent <run-id>"
     for launcher in (
         LAUNCHER,
         REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
     ):
-        result = subprocess.run(
-            ["bash", str(launcher), "init", "--help"],
-            check=True,
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
+        result, _env = _private_init_command(
+            tmp_path / launcher.parent.name, launcher, ["--help"], installed=False
         )
+        assert result.returncode == 0, result.stderr
         assert "--continuity full-lineage|fresh|bare-fork" in result.stdout
         assert expected in result.stdout
         assert "bare-fork is expert-only" in result.stdout
@@ -1076,7 +1216,9 @@ def test_vc_help_wrapper_forwards_topic_help(tmp_path: Path) -> None:
     )
 
     assert "Start an interactive repository orientation session" in result.stdout
-    assert "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot]" in result.stdout
+    assert (
+        "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]" in result.stdout
+    )
     assert "Ship cycle:" not in result.stdout
 
 
@@ -1930,9 +2072,7 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
         env=env,
     )
 
-    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
-        encoding="utf-8"
-    )
+    assert not python_capture.exists(), "Voc must draw before a blocking CLI sync"
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert f"--state-root {installed_root / 'control_plane'}" in tui_args
     assert f"--deck {current_root / 'scripts' / 'vibecrafted'}" in tui_args
@@ -2066,9 +2206,7 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
         env=env,
     )
 
-    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
-        encoding="utf-8"
-    )
+    assert not python_capture.exists(), "Voc owns asynchronous projection refresh"
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert "--runtime headless" in tui_args
     assert f"--deck {current_root / 'scripts' / 'vibecrafted'}" in tui_args
@@ -2136,8 +2274,8 @@ def test_gui_help_exposes_local_server_flags() -> None:
 @pytest.mark.parametrize(
     ("topic", "expected"),
     [
-        ("init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot]"),
-        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot]"),
+        ("init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]"),
+        ("vc-init", "vc-init [claude|codex|agy|junie|grok|cursor|kimi|copilot|omp]"),
         ("vc-review", 'vibecrafted review codex --prompt "Review PR #14"'),
         ("status", "vibecrafted stats"),
     ],
@@ -2228,11 +2366,11 @@ def test_implement_help_is_the_canonical_autonomous_delivery_surface() -> None:
     assert "implement" in result.stdout
     assert "VC-ship WRITE stage: structured end-to-end implementation" in result.stdout
     assert (
-        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vibecrafted implement <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in result.stdout
     )
     assert (
-        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vc-implement <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in result.stdout
     )
     assert "Not the same skill as justdo." in result.stdout
@@ -2250,11 +2388,11 @@ def test_justdo_help_is_a_distinct_standalone_posture() -> None:
     assert "justdo" in result.stdout
     assert "Standalone Just Do posture" in result.stdout
     assert (
-        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vibecrafted justdo <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in result.stdout
     )
     assert (
-        "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        "vc-justdo <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in result.stdout
     )
     assert "Not implement." in result.stdout
@@ -2446,7 +2584,7 @@ def test_skill_wrapper_help_is_human_readable_without_agent(
     assert skill in result.stdout
     assert description in result.stdout
     assert (
-        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi|copilot> [flags]"
+        f"{wrapper_name} <claude|codex|agy|junie|grok|cursor|kimi|copilot|omp> [flags]"
         in result.stdout
     )
 
@@ -3408,10 +3546,9 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     assert payload[:3] == ["--session", "operator-test", "action"]
     assert "new-pane" in payload
     assert "new-tab" not in payload
-    assert payload[payload.index("--direction") + 1] == "right"
-    assert payload[payload.index("--name") + 1] == (
-        f"codex fork @Loctree/aicx {expected_session}"
-    )
+    assert "--floating" in payload
+    assert "--direction" not in payload
+    assert payload[payload.index("--name") + 1] == "aicx · codex · gpt-test"
     separator = payload.index("--")
     command_body = Path(payload[separator + 1]).read_text(encoding="utf-8")
     import shlex

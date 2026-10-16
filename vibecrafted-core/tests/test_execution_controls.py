@@ -120,9 +120,12 @@ def test_claude_sandbox_true_emits_the_documented_no_fallback_hard_gate() -> Non
 
 def test_claude_sandbox_false_is_explicit_not_omitted() -> None:
     controls = resolve_execution_controls("claude", sandbox=False)
-    assert controls.permissions_effective == "bypass"
+    # Fleet doctrine (Founder 13716da4a2b8af7049ea1565): omission resolves auto.
+    assert controls.permissions_effective == "auto"
+    assert controls.permissions_source == "default"
     assert controls.sandbox_effective == "disabled"
     assert controls.provider_flags[-2:] == ("--settings", CLAUDE_SANDBOX_OFF)
+    assert controls.provider_flags[:2] == ("--permission-mode", "auto")
     # Disabling touches one scalar key only; no hard-gate keys leak into "off".
     assert json.loads(controls.provider_flags[-1]) == {"sandbox": {"enabled": False}}
     assert claude_sandbox_settings(False) == {"sandbox": {"enabled": False}}
@@ -130,17 +133,22 @@ def test_claude_sandbox_false_is_explicit_not_omitted() -> None:
 
 
 def test_omitted_controls_keep_provider_defaults() -> None:
+    # Fleet doctrine (Founder 13716da4a2b8af7049ea1565): omission resolves the
+    # shared ``auto`` default for every provider — no bypass fallbacks.
     claude = resolve_execution_controls("claude")
     assert not claude.requested
     assert claude.permissions_requested == ""
-    assert claude.permissions_effective == "bypass"
+    assert claude.permissions_effective == "auto"
+    assert claude.permissions_source == "default"
     assert claude.sandbox_effective == "provider-default"
-    assert claude.provider_flags == ("--permission-mode", "bypassPermissions")
+    assert claude.provider_flags == ("--permission-mode", "auto")
     assert claude.boundary == SANDBOX_BOUNDARY["claude"]
 
     # Omission stays provider-default for agy too: the launcher neither emits
     # nor infers anything about agy's persistent terminal-sandbox settings.
     agy = resolve_execution_controls("agy")
+    assert agy.permissions_effective == "auto"
+    assert agy.provider_flags == ()
     assert agy.sandbox_effective == "provider-default"
     assert "--sandbox" not in agy.provider_flags
     assert "agy's own settings" in agy.behavior
@@ -150,9 +158,11 @@ def test_omitted_controls_keep_provider_defaults() -> None:
     assert junie.provider_flags == ()
 
     codex = resolve_execution_controls("codex")
-    # Truth, not a label: the default codex bypass runs without a sandbox.
-    assert codex.sandbox_effective == "disabled"
-    assert codex.provider_flags == ("--dangerously-bypass-approvals-and-sandbox",)
+    # Default auto lands on the codex exec overlay: automatic review inside the
+    # workspace-write sandbox (never the bypass flag).
+    assert codex.permissions_effective == "auto"
+    assert codex.sandbox_effective == "enabled"
+    assert codex.provider_flags == ("--approve-for-me",)
 
 
 def test_codex_headless_auto_uses_exec_surface_not_interactive_flags() -> None:
@@ -215,7 +225,9 @@ def test_grok_and_cursor_and_agy_sandbox_words() -> None:
     cursor_on = resolve_execution_controls("cursor", permissions="auto", sandbox=True)
     assert cursor_on.provider_flags == ("--trust", "--sandbox", "enabled")
     cursor_off = resolve_execution_controls("cursor", sandbox=False)
-    assert cursor_off.provider_flags == ("--force", "--trust", "--sandbox", "disabled")
+    # Doctrine default is auto (Founder 13716da4a2b8af7049ea1565): cursor's
+    # auto cell is --trust only — no --force without an explicit opt-in.
+    assert cursor_off.provider_flags == ("--trust", "--sandbox", "disabled")
 
     agy_on = resolve_execution_controls("agy", permissions="auto", sandbox=True)
     assert agy_on.provider_flags == ("--sandbox",)
@@ -243,7 +255,11 @@ def test_agy_sandbox_false_fails_closed_instead_of_claiming_disabled() -> None:
     assert "sandboxMode" in resolve_execution_controls("agy").evidence
 
 
-def test_stdin_command_default_shape_is_unchanged() -> None:
+def test_stdin_command_default_shape_carries_the_auto_doctrine() -> None:
+    """No-control launches resolve the shared auto default (Founder
+    13716da4a2b8af7049ea1565): claude gets --permission-mode auto, codex gets
+    --approve-for-me inside its workspace-write sandbox. No bypass literals.
+    """
     assert spawn._stdin_command("claude") == [
         "claude",
         "-p",
@@ -251,14 +267,22 @@ def test_stdin_command_default_shape_is_unchanged() -> None:
         "stream-json",
         "--verbose",
         "--permission-mode",
-        "bypassPermissions",
+        "auto",
     ]
     assert spawn._stdin_command("codex") == [
         "codex",
         "exec",
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--approve-for-me",
         "-",
+    ]
+    assert spawn._stdin_command("omp") == [
+        "omp",
+        "-p",
+        "--mode",
+        "json",
+        "--approval-mode",
+        "write",
     ]
 
 
@@ -281,7 +305,8 @@ def test_stdin_command_carries_resolved_controls_verbatim() -> None:
     )
     assert codex == ["codex", "exec", "--json", "--approve-for-me", "-"]
     grok = spawn._stdin_command(
-        "grok", controls=resolve_execution_controls("grok", sandbox=True)
+        "grok",
+        controls=resolve_execution_controls("grok", permissions="bypass", sandbox=True),
     )
     assert grok[:6] == [
         "grok",
@@ -405,8 +430,10 @@ def test_normalize_launch_spec_parses_and_refuses_before_launch(
 def test_build_launch_command_injects_controls_only_when_requested(
     tmp_path: Path,
 ) -> None:
+    # Doctrine: the default IS the shared auto policy, so default launches do
+    # carry the auto argv; "requested" changes the word, not the wiring.
     default = workflow.build_launch_command(_spec(), tmp_path)
-    assert default[-2:] == ["--permission-mode", "bypassPermissions"]
+    assert default[-2:] == ["--permission-mode", "auto"]
     assert "--settings" not in default
 
     founder = workflow.build_launch_command(
@@ -436,7 +463,8 @@ def test_launch_execution_controls_receipt_states_defaults_and_requests(
     default = workflow.launch_execution_controls(_spec())
     assert default is not None
     assert default.receipt()["permissions_requested"] == ""
-    assert default.receipt()["permissions_effective"] == "bypass"
+    assert default.receipt()["permissions_effective"] == "auto"
+    assert default.receipt()["permissions_source"] == "default"
     assert default.receipt()["sandbox_requested"] == ""
     assert default.receipt()["sandbox_effective"] == "provider-default"
 
@@ -473,25 +501,28 @@ def test_machine_launch_receipt_projects_execution_controls() -> None:
     )
 
 
-def test_kimi_defaults_are_never_ask_print_mode_with_provider_default_sandbox() -> None:
-    """kimi -p is never-ask by construction; no flags are needed or possible.
+def test_kimi_default_headless_auto_is_refused_with_the_explicit_alternative() -> None:
+    """Doctrine default meets kimi's recorded native contract, honestly.
 
-    All three interactive permission flags (--yolo/--auto/--plan) conflict with
-    --prompt (OptionConflictError), so the headless bypass cell is the bare
-    print invocation and interactive-only policies are refused, not silently
-    downgraded.
+    Omission now resolves the fleet ``auto`` default (Founder
+    13716da4a2b8af7049ea1565). kimi print mode rejects every permission flag
+    with --prompt (OptionConflictError) and never prompts, so headless auto
+    has no enforceable mapping: the launch refuses and names the opt-in
+    (explicit bypass stays the never-ask bare print invocation), never a
+    silent downgrade.
     """
-    controls = resolve_execution_controls("kimi")
-    assert not controls.requested
-    assert controls.permissions_effective == "bypass"
-    assert controls.sandbox_effective == "provider-default"
-    assert controls.provider_flags == ()
-    assert controls.boundary == SANDBOX_BOUNDARY["kimi"]
-    assert "OptionConflictError" in controls.evidence
+    with pytest.raises(ExecutionControlsError) as excinfo:
+        resolve_execution_controls("kimi")
+    message = str(excinfo.value)
+    assert message.startswith("kimi:")
+    assert "interactive-only" in message
+    assert "supported: bypass" in message
 
     bypass = resolve_execution_controls("kimi", permissions="bypass")
     assert bypass.provider_flags == ()
+    assert bypass.permissions_source == "dispatch"
     assert bypass.sandbox_effective == "provider-default"
+    assert "OptionConflictError" in bypass.evidence
 
 
 @pytest.mark.parametrize("permissions", ["auto", "read-only"])
@@ -515,11 +546,143 @@ def test_kimi_accept_edits_is_refused_without_a_native_policy() -> None:
 
 @pytest.mark.parametrize("sandbox", [True, False])
 def test_kimi_sandbox_words_are_refused_without_a_control(sandbox: bool) -> None:
-    """kimi 0.42.0 exposes no sandbox surface at all (probed --help + binary)."""
+    """kimi 0.42.0 exposes no sandbox surface at all (probed --help + binary).
+
+    Permissions are pinned to the enforceable bypass opt-in so the refusal
+    under test is the sandbox axis, not the headless-auto default refusal.
+    """
     word = "true" if sandbox else "false"
     with pytest.raises(ExecutionControlsError) as excinfo:
-        resolve_execution_controls("kimi", sandbox=sandbox)
+        resolve_execution_controls("kimi", permissions="bypass", sandbox=sandbox)
     message = str(excinfo.value)
     assert message.startswith("kimi: kimi 0.42.0 exposes no sandbox control")
     assert f"--sandbox {word} cannot be enforced" in message
     assert "Omit --sandbox" in message
+
+
+# ---------------------------------------------------------------------------
+# omp (oh-my-pi 18.11.0): native tier ladder + the auto-first doctrine
+# ---------------------------------------------------------------------------
+
+
+def test_omp_cells_map_vc_words_onto_the_native_tier_ladder() -> None:
+    """omp approval modes are capability-tier ceilings (read < write < exec):
+    pi-coding-agent tools/approval.ts APPROVAL_MODE_MAX_TIER maps
+    always-ask→read, write→write, yolo→exec, and modeApprovesTier auto-allows
+    every tier at or below the mode's ceiling. The VC words land on that
+    ladder as: bypass→yolo, auto→write (routine read+write runs, exec asks),
+    accept-edits→write, read-only→the --tools read-tier whitelist. Both
+    --approval-mode and --tools combine with -p (probed 2026-10-15, rc 0), so
+    the headless overlay keeps the same argv with a fail-closed prompt note.
+    """
+    bypass = resolve_execution_controls("omp", permissions="bypass")
+    assert bypass.provider_flags == ("--approval-mode", "yolo")
+    assert bypass.permissions_source == "dispatch"
+
+    auto = resolve_execution_controls("omp", permissions="auto")
+    assert auto.provider_flags == ("--approval-mode", "write")
+    assert auto.permissions_effective == "auto"
+    # The receipt separates the requested word from the native mapping.
+    assert "fails closed headless" in auto.behavior
+
+    accept_edits = resolve_execution_controls("omp", permissions="accept-edits")
+    assert accept_edits.provider_flags == ("--approval-mode", "write")
+
+    read_only = resolve_execution_controls("omp", permissions="read-only")
+    assert read_only.provider_flags == ("--tools", "read,grep,glob,find")
+
+
+def test_omp_default_is_auto_and_sandbox_words_refuse() -> None:
+    default = resolve_execution_controls("omp")
+    assert default.permissions_effective == "auto"
+    assert default.permissions_source == "default"
+    assert default.provider_flags == ("--approval-mode", "write")
+
+    with pytest.raises(ExecutionControlsError) as excinfo:
+        resolve_execution_controls("omp", sandbox=True)
+    message = str(excinfo.value)
+    assert message.startswith("omp: omp 18.11.0 exposes no sandbox control")
+    assert "Omit --sandbox" in message
+
+
+def test_durable_config_opt_in_beats_default_and_loses_to_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Precedence: explicit dispatch > [agents.<x>] > top-level > fleet auto."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "vibecrafted"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        'permissions = "read-only"\n[agents.omp]\npermissions = "bypass"\n',
+        encoding="utf-8",
+    )
+
+    durable = workflow.launch_execution_controls(_spec(agent="omp"))
+    assert durable is not None
+    assert durable.permissions_effective == "bypass"
+    assert durable.permissions_source == "config:agents.omp"
+    assert durable.provider_flags == ("--approval-mode", "yolo")
+
+    global_only = workflow.launch_execution_controls(_spec(agent="claude"))
+    assert global_only is not None
+    assert global_only.permissions_effective == "read-only"
+    assert global_only.permissions_source == "config:global"
+
+    dispatch_wins = workflow.launch_execution_controls(
+        _spec(agent="omp", permissions="auto")
+    )
+    assert dispatch_wins is not None
+    assert dispatch_wins.permissions_effective == "auto"
+    assert dispatch_wins.permissions_source == "dispatch"
+
+    # Counterexample 1: malformed durable word refuses before launch.
+    (config_dir / "config.toml").write_text('permissions = "yolo"\n', encoding="utf-8")
+    with pytest.raises(Exception, match="permissions"):
+        workflow.launch_execution_controls(_spec(agent="claude"))
+
+    # Counterexample 2: an enforceable-in-principle but unrecorded combination
+    # (sandbox on omp) refuses instead of silently ignoring the request.
+    (config_dir / "config.toml").write_text("", encoding="utf-8")
+    with pytest.raises(ExecutionControlsError, match="no sandbox control"):
+        workflow.launch_execution_controls(_spec(agent="omp", sandbox=True))
+
+
+def test_admission_frozen_decision_survives_a_later_config_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review counterexample: one frozen decision rides admission → argv/meta.
+
+    Resolving a spec under durable read-only, then flipping the config to
+    bypass, must not change what the admitted spec emits.
+    """
+    config_dir = tmp_path / "xdg" / "vibecrafted"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        'permissions = "read-only"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    payload = {
+        "agent": "claude",
+        "mode": "workflow",
+        "skill": "workflow",
+        "prompt": "go",
+        "file": "",
+        "runtime": "headless",
+        "root": "/tmp/repo",
+    }
+    spec = workflow.normalize_launch_spec(payload, tmp_path)
+    frozen = spec.execution_controls_frozen
+    assert frozen is not None
+    assert frozen["permissions_effective"] == "read-only"
+    assert frozen["permissions_source"] == "config:global"
+
+    (config_dir / "config.toml").write_text(
+        'permissions = "bypass"\n', encoding="utf-8"
+    )
+    controls = workflow.launch_execution_controls(spec)
+    assert controls is not None
+    assert controls.permissions_effective == "read-only"
+    command = workflow.build_launch_command(spec, tmp_path)
+    assert "plan" in command
+    assert "bypassPermissions" not in command

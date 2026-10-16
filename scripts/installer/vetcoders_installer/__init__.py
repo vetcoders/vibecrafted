@@ -31,12 +31,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from datetime import timezone as timezone
 from pathlib import Path
 from typing import Any
-
-import tomllib
 
 try:
     import termios
@@ -931,7 +931,7 @@ def _open_log(manifest: Manifest) -> tuple[Path | None, Any | None]:
     """Open a timestamped log file per manifest.log_pattern, or (None, None) if unset."""
     if not manifest.log_pattern:
         return None, None
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     expanded = os.path.expanduser(manifest.log_pattern.format(ts=ts))
     log_path = Path(expanded)
     log_path.parent.mkdir(parents=True, exist_ok=True)

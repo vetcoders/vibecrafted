@@ -1,6 +1,7 @@
 """Operator-owned `~/.config/vibecrafted/config.toml`: the `[server]` table
 (load, validate, seed-once), the optional `[tools]` table naming served tool
-consoles the native App may open in a tab, and the optional
+consoles the native App may open in a tab, the optional `[terminal]` table
+specifying terminal preferences (such as `quick_cmd_profile`), and the optional
 `[agents.<agent>]` fleet model/effort defaults and `[agents.copilot.provider]`
 table pinning a BYOK provider for the `copilot` agent."""
 
@@ -12,11 +13,10 @@ import shlex
 import stat
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
-
-import tomllib
 
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 3024
@@ -41,6 +41,9 @@ DEFAULT_HOUSEKEEPING_INTERVAL_HOURS = 24
 #:   start ``vc-frame web`` on the named loopback HTTP origin; it never guesses
 #:   a port and never starts the service from a tab.
 TOOL_DESTINATION_KEYS: tuple[str, ...] = ("slack-console", "vc-frame")
+
+DEFAULT_QUICK_CMD_PROFILE = "product"
+VALID_QUICK_CMD_PROFILES: frozenset[str] = frozenset({"product", "personal"})
 
 
 class ServerConfigError(ValueError):
@@ -111,10 +114,27 @@ def _load_config_payload(resolved: Path) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class AgentLaunchConfig:
-    """Optional fleet cost controls, independent of interactive CLI defaults."""
+    """Optional fleet launch controls, independent of interactive CLI defaults.
+
+    ``permissions`` is the durable opt-in for one provider (Founder decision
+    13716da4a2b8af7049ea1565): empty means the fleet default (``auto``).
+    """
 
     model: str = ""
     effort: str = ""
+    permissions: str = ""
+
+
+def validate_permissions_word(value: object, label: str) -> str:
+    """Validate a durable permission word; malformed values refuse, never revert."""
+    from .execution_controls import PERMISSION_POLICIES
+
+    word = str(value).strip().lower() if isinstance(value, str) else ""
+    if word not in PERMISSION_POLICIES:
+        raise ServerConfigError(
+            f"{label} must be one of {'|'.join(PERMISSION_POLICIES)}, got: {value!r}"
+        )
+    return word
 
 
 def validate_agent_pin(value: object, label: str) -> str:
@@ -147,7 +167,9 @@ def load_agent_launch_config(
     section = agents.get(agent, {})
     if not isinstance(section, dict):
         raise ServerConfigError(f"[agents.{agent}] must be a TOML table")
-    allowed = {"model", "effort"} | ({"provider"} if agent == "copilot" else set())
+    allowed = {"model", "effort", "permissions"} | (
+        {"provider"} if agent == "copilot" else set()
+    )
     unknown = sorted(set(section) - allowed)
     if unknown:
         raise ServerConfigError(
@@ -158,9 +180,47 @@ def load_agent_launch_config(
         for key in ("model", "effort")
         if key in section
     }
+    if "permissions" in section:
+        values["permissions"] = validate_permissions_word(
+            section["permissions"], f"agents.{agent}.permissions"
+        )
     if agent == "copilot" and "provider" in section:
         load_copilot_provider_config(resolved)
     return AgentLaunchConfig(**values)
+
+
+def load_global_permission_default(
+    path: Path | None = None, *, operator_home: Path | None = None
+) -> str:
+    """Read the top-level ``permissions`` word applying to every provider.
+
+    Founder decision 13716da4a2b8af7049ea1565: the fleet default is ``auto``;
+    this key is the one durable place to choose another mode once. Empty when
+    unset; a malformed word refuses (never silently reverts to a default).
+    """
+    resolved = path or config_path(operator_home=operator_home)
+    payload = _load_config_payload(resolved)
+    if "permissions" not in payload:
+        return ""
+    return validate_permissions_word(payload["permissions"], "permissions")
+
+
+def durable_permission_selection(
+    agent: str, path: Path | None = None, *, operator_home: Path | None = None
+) -> tuple[str, str]:
+    """Resolve the durable permission opt-in for one provider.
+
+    Precedence inside the config: ``[agents.<agent>].permissions`` beats the
+    top-level ``permissions``. Returns ``(word, source)``; ``("", "")`` when no
+    durable selection exists (the caller's fleet default then applies).
+    """
+    agent_config = load_agent_launch_config(agent, path, operator_home=operator_home)
+    if agent_config.permissions:
+        return agent_config.permissions, f"config:agents.{agent}"
+    global_word = load_global_permission_default(path, operator_home=operator_home)
+    if global_word:
+        return global_word, "config:global"
+    return "", ""
 
 
 def load_server_config(
@@ -366,6 +426,47 @@ def _validate_tool_url(key: str, value: object) -> str:
     except ValueError as exc:
         raise ServerConfigError(f"tools.{key}.url has an invalid port: {exc}") from exc
     return value.strip()
+
+
+@dataclass(frozen=True)
+class TerminalConfig:
+    """Validated `[terminal]` table: operator preferences for terminal surfaces."""
+
+    quick_cmd_profile: str = DEFAULT_QUICK_CMD_PROFILE
+
+    def __post_init__(self) -> None:
+        """Validate quick_cmd_profile; raises `ServerConfigError` otherwise."""
+        if not isinstance(self.quick_cmd_profile, str):
+            raise ServerConfigError("terminal.quick_cmd_profile must be a string")
+        if self.quick_cmd_profile not in VALID_QUICK_CMD_PROFILES:
+            raise ServerConfigError(
+                f"unsupported terminal.quick_cmd_profile: {self.quick_cmd_profile!r} "
+                f"(expected one of: {', '.join(sorted(VALID_QUICK_CMD_PROFILES))})"
+            )
+
+
+def load_terminal_config(
+    path: Path | None = None,
+    *,
+    operator_home: Path | None = None,
+) -> TerminalConfig:
+    """Load and validate the `[terminal]` table from the TOML config file at
+    `path` (or the resolved default); returns defaults when the file or table
+    is absent. Raises `ServerConfigError` on unreadable/invalid TOML, unsupported
+    keys, or invalid values."""
+
+    resolved = path or config_path(operator_home=operator_home)
+    payload = _load_config_payload(resolved)
+    section = payload.get("terminal")
+    if section is None:
+        return TerminalConfig()
+    if not isinstance(section, dict):
+        raise ServerConfigError("[terminal] must be a TOML table")
+    unknown = sorted(set(section) - {"quick_cmd_profile"})
+    if unknown:
+        raise ServerConfigError("unsupported [terminal] key(s): " + ", ".join(unknown))
+    profile = section.get("quick_cmd_profile", DEFAULT_QUICK_CMD_PROFILE)
+    return TerminalConfig(quick_cmd_profile=profile)
 
 
 #: Env var name for each `[agents.copilot.provider]` TOML key, in the order
@@ -715,5 +816,42 @@ def origin_for(host: str, port: int) -> str:
     return f"http://{rendered_host}:{port}"
 
 
+def _terminal_quick_cmd_profile_cli(argv: list[str]) -> int:
+    """`python -m vibecrafted_core.server_config quick-cmd-profile`: print
+    the active quick_cmd_profile preference ("product" or "personal")."""
+    if argv:
+        print(
+            "usage: python -m vibecrafted_core.server_config quick-cmd-profile",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        config = load_terminal_config()
+    except ServerConfigError as exc:
+        print(f"vibecrafted: invalid terminal config: {exc}", file=sys.stderr)
+        return 1
+    print(config.quick_cmd_profile)
+    return 0
+
+
+def _main_cli(argv: list[str]) -> int:
+    if not argv:
+        print(
+            "usage: python -m vibecrafted_core.server_config <copilot-provider-env|quick-cmd-profile>",
+            file=sys.stderr,
+        )
+        return 2
+    subcommand = argv[0]
+    if subcommand == "copilot-provider-env":
+        return _copilot_provider_env_cli(argv)
+    if subcommand in {"quick-cmd-profile", "terminal-quick-cmd-profile"}:
+        return _terminal_quick_cmd_profile_cli(argv[1:])
+    print(
+        f"usage: python -m vibecrafted_core.server_config <copilot-provider-env|quick-cmd-profile> (got {subcommand!r})",
+        file=sys.stderr,
+    )
+    return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(_copilot_provider_env_cli(sys.argv[1:]))
+    raise SystemExit(_main_cli(sys.argv[1:]))

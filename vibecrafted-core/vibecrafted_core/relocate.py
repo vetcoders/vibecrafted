@@ -67,7 +67,7 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 DAY_S = 86400
@@ -434,9 +434,7 @@ def collect_sessions(now: float, max_age_s: float, home: Path) -> list[dict]:
                     "transcript": str(f),
                     "rel_transcript": f"{provider}/{f.relative_to(root)}",
                     "cwd": cwd,
-                    "mtime": datetime.fromtimestamp(
-                        st.st_mtime, timezone.utc
-                    ).isoformat(),
+                    "mtime": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(),
                     "size": st.st_size,
                     "resume": vc_resume,
                     "resume_native": native_resume,
@@ -523,7 +521,7 @@ def do_snapshot(
     if repos is None:
         repos = code_repos()
 
-    now = datetime.now(timezone.utc).astimezone()
+    now = datetime.now(UTC).astimezone()
     stamp = now.strftime("%Y-%m-%dT%H%M%S")
     root = out_root or vibecrafted_home() / "snapshots"
     snap_dir = root / f"relocate-{stamp}"

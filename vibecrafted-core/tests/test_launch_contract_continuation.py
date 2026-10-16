@@ -508,11 +508,31 @@ def test_interactive_admission_snapshot_and_private_command(
     assert body not in admission_path.read_text()
 
 
-@pytest.mark.parametrize("skill", ["init", "partner", "operator", "resume"])
-@pytest.mark.parametrize("attached", [False, True])
-@pytest.mark.parametrize("provider_exit", [0, 7])
+@pytest.mark.parametrize(
+    "skill,attached,provider_exit,provider_name,effort,shell",
+    [
+        (skill, attached, exit_code, "codex", "high", "bash")
+        for skill in ("init", "partner", "operator", "resume")
+        for attached in (False, True)
+        for exit_code in (0, 7)
+    ]
+    + [
+        ("init", True, 0, provider, "medium", shell)
+        for provider in (
+            "codex",
+            "claude",
+            "agy",
+            "grok",
+            "junie",
+            "copilot",
+            "kimi",
+            "cursor",
+        )
+        for shell in ("bash", "zsh")
+    ],
+)
 def test_public_interactive_shell_pty_admission(
-    tmp_path, monkeypatch, skill, attached, provider_exit
+    tmp_path, monkeypatch, skill, attached, provider_exit, provider_name, effort, shell
 ):
     import json
     import os
@@ -522,6 +542,10 @@ def test_public_interactive_shell_pty_admission(
     import sys
 
     from vibecrafted_core import control_plane
+    from vibecrafted_core.effort_overrides import EFFORT_OVERRIDE_STYLES
+    from vibecrafted_core.model_overrides import MODEL_OVERRIDE_FLAGS
+
+    supported = provider_name in EFFORT_OVERRIDE_STYLES
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -547,18 +571,26 @@ def test_public_interactive_shell_pty_admission(
     capture = tmp_path / "provider.json"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    provider = bin_dir / "codex"
+    provider = bin_dir / (
+        "cursor-agent" if provider_name == "cursor" else provider_name
+    )
     provider.write_text(
         f"#!{sys.executable}\n"
         + """import json,os,sys
 from pathlib import Path
+if '--help' in sys.argv:
+    print('--session-id <uuid> --model <model> --effort <level>')
+    raise SystemExit(0)
+if '--version' in sys.argv:
+    print('2.1.232')
+    raise SystemExit(0)
 Path(os.environ['PROVIDER_CAPTURE']).write_text(json.dumps({'argv': sys.argv, 'run_id': os.environ['VIBECRAFTED_RUN_ID'], 'tty': [os.isatty(i) for i in (0,1,2)]}))
 print('fixture-provider-completed', flush=True)
 raise SystemExit(int(os.environ['PROVIDER_EXIT']))
 """
     )
     provider.chmod(0o700)
-    body = '\ufeff---\r\nagent: codex\r\nmodel: exact-codex\r\n---\r\n Żółć "quoted"\r\n\r\n'
+    body = f'\ufeff---\r\nagent: {provider_name}\r\nmodel: exact-{provider_name}\r\n---\r\n Żółć "quoted"\r\n\r\n'
     plan = tmp_path / "plan.md"
     plan.write_bytes(body.encode())
     script = "\n".join(
@@ -573,6 +605,9 @@ raise SystemExit(int(os.environ['PROVIDER_EXIT']))
         ]
     )
     script += '\n_vetcoders_core_python_spec() { printf "%s\\t%s\\n" "$FIXTURE_PYTHON" "$FIXTURE_CORE"; }\n'
+    # Keep host startup files from replacing the fake-provider PATH.
+    script += '\nexport PATH="$FIXTURE_BIN:$PATH"\n'
+    script += '\n[[ "$(command -v "$FIXTURE_PROVIDER")" == "$FIXTURE_PROVIDER_PATH" ]] || { echo "fixture provider PATH mismatch" >&2; exit 91; }\n'
     script += """
 _vetcoders_needs_vc_terminal_entry() { return 1; }
 _vetcoders_vc_frame_bin() { printf /fixture-frame; }
@@ -585,15 +620,19 @@ _vetcoders_spawn_into_operator_session() { _vetcoders_exec_admitted_interactive 
 _vetcoders_attach_prepared_vc_frame_session() { return 0; }
 """
     if skill == "resume":
-        script += '_vetcoders_resume_agent codex --session 11111111-2222-4333-8444-555555555555 --repo "$FIXTURE_REPO" --model exact-codex --token-budget unmetered\n'
+        script += f'_vetcoders_resume_agent codex --session 11111111-2222-4333-8444-555555555555 --repo "$FIXTURE_REPO" --model exact-codex --effort {effort} --token-budget unmetered\n'
     else:
-        script += f'_vetcoders_skill_{skill} codex --repo "$FIXTURE_REPO" --file "$FIXTURE_PLAN" --token-budget unmetered\n'
+        script += f'_vetcoders_skill_{skill} {provider_name} --repo "$FIXTURE_REPO" --file "$FIXTURE_PLAN" --effort {effort} --token-budget unmetered\n'
     env = {
         **os.environ,
         "FIXTURE_PYTHON": sys.executable,
         "FIXTURE_CORE": str(core),
         "FIXTURE_REPO": str(repo),
         "FIXTURE_PLAN": str(plan),
+        "FIXTURE_BIN": str(bin_dir),
+        "FIXTURE_PROVIDER": provider.name,
+        "FIXTURE_PROVIDER_PATH": str(provider),
+        "HOME": str(tmp_path / "provider-home"),
         "PROVIDER_CAPTURE": str(capture),
         "PROVIDER_EXIT": str(provider_exit),
         "VIBECRAFTED_RUN_ID": "work-parent",
@@ -601,6 +640,10 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
         "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
     }
     env.pop("PYTHONPATH", None)
+    env.pop("BASH_ENV", None)
+    env.pop("CODEX_HOME", None)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env["ZDOTDIR"] = str(tmp_path / "zsh-home")
     if attached:
         env.update(VC_FRAME="1", VC_FRAME_SESSION_NAME="fixture", VC_FRAME_PANE_ID="7")
     parent_paths = [
@@ -614,7 +657,11 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen(
-            ["bash", "-c", script], env=env, stdin=slave, stdout=slave, stderr=slave
+            [shell, "-f", "-c", script],
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
         )
         os.close(slave)
         slave = -1
@@ -636,20 +683,54 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
                 output.extend(data)
             if proc.poll() is not None:
                 break
-        assert (proc.wait(timeout=2) == 0) == (provider_exit == 0), output.decode(
-            errors="replace"
+        assert (proc.wait(timeout=2) == 0) == (supported and provider_exit == 0), (
+            output.decode(errors="replace")
         )
         assert all(
             parent_path.read_bytes() == parent_bytes for parent_path in parent_paths
         )
+        if not supported:
+            assert (
+                f"Effort is unavailable for provider {provider_name}" in output.decode()
+            )
+            assert not capture.exists()
+            assert (
+                list(control_plane.control_plane_home().glob("runtime_runs/init-*"))
+                == []
+            )
+            return
         result = json.loads(capture.read_text())
+        assert result["argv"][0] == str(provider)
         assert result["tty"] == [True, True, True]
         assert result["run_id"] != "work-parent"
         assert body not in " ".join(result["argv"])
-        assert result["argv"][result["argv"].index("-m") + 1] == "exact-codex"
+        model_flag = MODEL_OVERRIDE_FLAGS[provider_name]
+        assert (
+            result["argv"][result["argv"].index(model_flag) + 1]
+            == f"exact-{provider_name}"
+        )
+        if provider_name == "codex":
+            assert result["argv"].count(f"model_reasoning_effort={effort}") == 1
+        elif provider_name == "junie":
+            assert result["argv"].count(f"--effort={effort}") == 1
+        else:
+            effort_flag = EFFORT_OVERRIDE_STYLES[provider_name][1]
+            assert result["argv"].count(effort_flag) == 1
+            assert result["argv"][result["argv"].index(effort_flag) + 1] == effort
         run_dir = control_plane.control_plane_home() / "runtime_runs" / result["run_id"]
         meta = json.loads((run_dir / "meta.json").read_text())
         assert meta["skill"] == skill
+        admission = json.loads((run_dir / "admission.json").read_text())
+        for receipt in (admission, meta):
+            assert (
+                receipt["model_requested"]
+                == receipt["model_effective"]
+                == f"exact-{provider_name}"
+            )
+            assert receipt["effort_requested"] == receipt["effort_effective"] == effort
+            assert receipt["effort_source"] == "cli"
+            assert receipt["effort_override_supported"] is True
+            assert receipt["effort_override_skipped"] is False
         assert meta["status"] == ("completed" if provider_exit == 0 else "failed")
         assert "fixture-provider-completed" in Path(meta["transcript"]).read_text()
         assert body not in Path(meta["transcript"]).read_text()
@@ -660,7 +741,7 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
                 / (result["run_id"] + ".json")
             ).read_text()
         )
-        assert projection["agent"] == "codex"
+        assert projection["agent"] == provider_name
         assert projection["state"] == ("completed" if provider_exit == 0 else "failed")
         if skill == "resume":
             assert "resume" in result["argv"]

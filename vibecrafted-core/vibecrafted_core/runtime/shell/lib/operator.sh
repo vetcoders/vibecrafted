@@ -58,7 +58,7 @@ _vetcoders_init_command_text() {
   local tool="$1"
   local init_prompt="$2"
   local policy_runtime="${3:-local-native}"
-  local permissions="${4:-bypass}"
+  local permissions="${4:-}"
   local token_budget="${5:-unmetered}"
   local operator_policy="${6:-none}"
   local continuity="${7:-fresh}"
@@ -70,6 +70,7 @@ _vetcoders_init_command_text() {
   [[ -z "$continuity_parent" ]] || continuity_args+=(--continuity-parent "$continuity_parent")
   [[ -z "${_vetcoders_contract_file:-}" ]] || continuity_args+=(--file "$_vetcoders_contract_file")
   [[ -z "${_vetcoders_contract_model:-}" ]] || continuity_args+=(--model "$_vetcoders_contract_model")
+  [[ -z "${_vetcoders_contract_effort:-}" ]] || continuity_args+=(--effort "$_vetcoders_contract_effort")
   [[ -z "${_vetcoders_contract_base:-}" ]] || continuity_args+=(--base "$_vetcoders_contract_base")
   [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || continuity_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
   [[ -z "${_vetcoders_contract_worktree:-}" ]] || continuity_args+=(--worktree "$_vetcoders_contract_worktree")
@@ -83,7 +84,9 @@ _vetcoders_init_command_text() {
   import_root="${python_spec#*$'\t'}"
   local root_arg="${_vetcoders_contract_repo:-${_vetcoders_contract_root:-$PWD}}"
   [[ -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" ]] || root_arg="${_vetcoders_contract_root:-}"
-  local -a command=("$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --operator "$operator_policy" "${continuity_args[@]}" --root "$root_arg")
+  # Omission belongs to the durable resolver, not an explicit shell default.
+  local -a command=("$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --token-budget "$token_budget" --operator "$operator_policy" "${continuity_args[@]}" --root "$root_arg")
+  [[ -z "$permissions" ]] || command+=(--permissions "$permissions")
   if [[ -n "$import_root" ]]; then
     printf '%s' "$init_prompt" | VIBECRAFTED_INTERACTIVE_IMPORT_ROOT="$import_root" \
       PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${command[@]}"
@@ -114,7 +117,7 @@ _vetcoders_operator_runtime() {
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 _vetcoders_partner_runtime() {
@@ -124,7 +127,7 @@ _vetcoders_partner_runtime() {
 _vetcoders_partner_command_text() {
   local tool="$1"
   local partner_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 
@@ -140,6 +143,7 @@ _vetcoders_enter_admitted_interactive() {
     command=(/usr/bin/env "PYTHONPATH=$import_root" "${command[@]}")
   fi
   _vetcoders_contract_root="$("${command[@]}" --root-only)" || return 1
+  _vetcoders_interactive_run_id="$("${command[@]}" --run-id-only)" || return 1
   if _vetcoders_needs_vc_terminal_entry; then
     # Fork from a resolved live host is a panel in that host. Opening a
     # second terminal here starts a CLI client that the frame warden can
