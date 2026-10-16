@@ -354,6 +354,61 @@ def test_user_rc_dotfile_composes_without_restricting(tmp_path: Path) -> None:
     assert "zdot=UNSET pyhome=UNSET pypath=UNSET" in result.stdout
 
 
+def test_user_rc_never_outranks_the_users_own_resolution(tmp_path: Path) -> None:
+    """The reviewer's counterexample, closed: the user's own python3/uv live in
+    a user directory that PATH already resolves first, and ~/.local/bin carries
+    its own copies. Sourcing rc.sh must leave the user's winner untouched —
+    the launcher bin joins only at the END of PATH, and a VC-only tool still
+    becomes available through it (composition, not takeover)."""
+
+    home = tmp_path / "home"
+    home.mkdir()
+    preferred_bin = home / "preferred"
+    _fake_tool(preferred_bin, "python3", "PREFERRED_PYTHON3")
+    _fake_tool(preferred_bin, "uv", "PREFERRED_UV")
+    local_bin = home / ".local" / "bin"
+    _fake_tool(local_bin, "python3", "LOCAL_BIN_PYTHON3")
+    _fake_tool(local_bin, "uv", "LOCAL_BIN_UV")
+    _fake_tool(local_bin, "vc-guest-tool", "VC_GUEST_TOOL_RAN")
+    (home / ".zprofile").write_text(f'export PATH="{preferred_bin}:$PATH"\n')
+    (home / ".zshrc").write_text(f'source "{USER_RC}"\n')
+    env = {
+        "HOME": str(home),
+        "USER": os.environ.get("USER", "composition"),
+        "PATH": "/usr/bin:/bin",
+        "TERM": "dumb",
+        "SHELL": "/bin/zsh",
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+    }
+    result = _run(
+        [
+            "/bin/zsh",
+            "-l",
+            "-i",
+            "-c",
+            (
+                "command -v python3; python3 probe; command -v uv; uv probe; "
+                "command -v vc-guest-tool; "
+                'print -r -- "path=$PATH"'
+            ),
+        ],
+        env,
+        home,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"{preferred_bin}/python3" in result.stdout
+    assert "PREFERRED_PYTHON3=probe" in result.stdout
+    assert "LOCAL_BIN_PYTHON3" not in result.stdout
+    assert f"{preferred_bin}/uv" in result.stdout
+    assert "PREFERRED_UV=probe" in result.stdout
+    assert "LOCAL_BIN_UV" not in result.stdout
+    assert f"{local_bin}/vc-guest-tool" in result.stdout
+    path_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("path=")
+    )
+    assert path_line.index(str(preferred_bin)) < path_line.index(str(local_bin))
+
+
 def test_user_rc_dotfile_parses_as_posix_sh_and_zsh() -> None:
     for parser in ("/bin/sh", "/bin/bash", "/bin/zsh"):
         if not Path(parser).exists():

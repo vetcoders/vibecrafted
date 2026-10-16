@@ -341,6 +341,63 @@ def test_install_launcher_replaces_old_blind_local_bin_path(
     assert zshrc_content.count(vetcoders_install._launcher_path_line()) == 1
 
 
+def test_install_launcher_wires_the_shell_guest_line_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The managed guest line is appended exactly once, never creates or
+    reorders the user's file, stages a live rc.sh, and returns the receipt of
+    what changed."""
+
+    home = tmp_path / "home"
+    repo_root = tmp_path / "repo"
+    launcher_src = repo_root / "scripts" / "vibecrafted"
+    rc_source = (
+        repo_root
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "shell"
+        / "rc.sh"
+    )
+    zshrc = home / ".zshrc"
+
+    launcher_src.parent.mkdir(parents=True)
+    launcher_src.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    rc_source.parent.mkdir(parents=True)
+    rc_source.write_text("# guest rc\n", encoding="utf-8")
+    home.mkdir()
+    original = '# user config\nexport PATH="$HOME/cargo/bin:$PATH"'
+    zshrc.write_text(original, encoding="utf-8")  # no trailing newline
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    _write_installed_runtime_deck(home)
+
+    line = vetcoders_install._user_rc_guest_line()
+    first = vetcoders_install._install_launcher(
+        repo_root, dry_run=False, update_rc=True
+    )
+
+    staged = home / ".config" / "vibecrafted" / "shell" / "rc.sh"
+    assert staged.read_bytes() == rc_source.read_bytes()
+    content = zshrc.read_text(encoding="utf-8")
+    assert content.startswith(original + "\n")
+    assert content.count(line) == 1
+    assert content.count(f"# {vetcoders_install._USER_RC_GUEST_COMMENT}") == 1
+    assert not (home / ".bashrc").exists()  # never create the user's rc file
+    actions = {(record["path"], record["action"]) for record in first}
+    assert (str(staged), "staged") in actions
+    assert (str(zshrc), "appended") in actions
+
+    second = vetcoders_install._install_launcher(
+        repo_root, dry_run=False, update_rc=True
+    )
+    assert zshrc.read_text(encoding="utf-8") == content
+    actions = {(record["path"], record["action"]) for record in second}
+    assert (str(staged), "current") in actions
+    assert (str(zshrc), "present") in actions
+
+
 def test_pipeline_category_describes_release_not_removed_ship_skill() -> None:
     description = vetcoders_install.SKILL_CATEGORIES["pipeline"]["description"]
 

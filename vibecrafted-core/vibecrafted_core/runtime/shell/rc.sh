@@ -10,15 +10,18 @@
 # This file composes, never restricts: it does not move ZDOTDIR, export
 # PYTHONHOME/PYTHONPATH, unset, alias, or reorder anything the user already
 # has. The only mutation is the launcher directory joining PATH when missing —
-# the user's own tools keep their names and their order, and `python3`, `uv`
-# and friends still resolve exactly where they did without Vibecrafted.
+# at the END, with lower priority than every entry the user already has, so a
+# tool resolves through Vibecrafted only when the user's own PATH cannot
+# resolve it. The user's own tools keep their names and their order, and
+# `python3`, `uv` and friends still resolve exactly where they did without
+# Vibecrafted.
 
 # shellcheck shell=sh
 
 case ":${PATH}:" in
 *":${HOME}/.local/bin:"*) ;;
 *)
-  PATH="${HOME}/.local/bin${PATH:+:${PATH}}"
+  PATH="${PATH:+${PATH}:}${HOME}/.local/bin"
   export PATH
   ;;
 esac

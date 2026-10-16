@@ -805,6 +805,7 @@ class InstallState:
     product_tools: dict[str, dict[str, str]] = field(default_factory=dict)
     layout_transfers: list[dict[str, str]] = field(default_factory=list)
     shell_helpers: bool = False
+    shell_rc: list[dict[str, str]] = field(default_factory=list)
     install_path: str = ""
 
     @classmethod
@@ -2293,11 +2294,99 @@ def _legacy_launcher_path_lines() -> list[str]:
     return ['export PATH="$HOME/.local/bin:$PATH"']
 
 
+# The plain-ASCII marker survives our own legacy-rc cleanup (which strips every
+# fancy-brand comment), so the managed line keeps its provenance between
+# installs while uninstall still removes comment and line together.
+_USER_RC_GUEST_COMMENT = "Vibecrafted shell guest"
+
+
+def _user_rc_guest_line() -> str:
+    """The one managed guest line sourcing the product shell rc (rc.sh).
+
+    POSIX-safe (sh/bash/zsh) and guarded, so it is inert until rc.sh exists.
+    rc.sh itself only appends the launcher directory at the END of PATH — the
+    user's own resolution order always outranks Vibecrafted availability.
+    """
+    return (
+        '[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/rc.sh" ]'
+        ' && . "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/shell/rc.sh"'
+    )
+
+
+def _user_rc_guest_target() -> Path:
+    """Where the product shell rc (rc.sh) is staged for the guest line to find."""
+    return xdg_config_home() / "vibecrafted" / "shell" / "rc.sh"
+
+
+def _stage_user_rc_guest(repo_root: Path, dry_run: bool) -> dict[str, str]:
+    """Stage rc.sh next to the helper shim so the managed guest line is live.
+
+    Returns the receipt record for the file: `staged` (bytes written),
+    `current` (already identical), `missing-source`, or `would-stage`.
+    """
+    target = _user_rc_guest_target()
+    source = (
+        repo_root
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "shell"
+        / "rc.sh"
+    )
+    if not source.is_file():
+        return {"path": str(target), "action": "missing-source"}
+    payload = source.read_bytes()
+    record = {"path": str(target), "sha256": hashlib.sha256(payload).hexdigest()}
+    if target.is_file() and target.read_bytes() == payload:
+        return {**record, "action": "current"}
+    if dry_run:
+        return {**record, "action": "would-stage"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return {**record, "action": "staged"}
+
+
+def _ensure_user_rc_guest_line(dry_run: bool) -> list[dict[str, str]]:
+    """Append the one managed guest line to the user's existing rc files.
+
+    Idempotent and collision-preserving: a file already carrying the line is
+    left byte-identical, a missing rc file is never created, a locked file is
+    reported, and an append never rewrites or reorders the user's own bytes.
+    Returns one receipt record per rc file touched or found compliant.
+    """
+    line = _user_rc_guest_line()
+    receipts: list[dict[str, str]] = []
+    for rcname in (".bashrc", ".zshrc"):
+        rcfile = Path.home() / rcname
+        if not rcfile.exists():
+            continue
+        existing = rcfile.read_text(encoding="utf-8")
+        if line in existing:
+            receipts.append({"path": str(rcfile), "action": "present"})
+            continue
+        if not _is_writable(rcfile):
+            receipts.append({"path": str(rcfile), "action": "locked"})
+            continue
+        if dry_run:
+            receipts.append({"path": str(rcfile), "action": "would-append"})
+            continue
+        if existing and not existing.endswith("\n"):
+            prefix = "\n\n"
+        elif existing:
+            prefix = "\n"
+        else:
+            prefix = ""
+        with open(rcfile, "a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}# {_USER_RC_GUEST_COMMENT}\n{line}\n")
+        receipts.append({"path": str(rcfile), "action": "appended"})
+    return receipts
+
+
 def _doctor_repair_rc_content(
     content: str, *, ensure_helper: bool, ensure_path: bool
 ) -> str:
     """Rebuild rc-file content with legacy Vibecrafted blocks stripped and (if `ensure_path`)
-    the canonical launcher PATH guard appended.
+    the canonical launcher PATH guard and managed shell guest line appended.
     """
     _ = ensure_helper  # legacy API: host-shell helper sourcing is intentionally retired
     repaired, _removed = _clean_legacy_rc_entries(content)
@@ -2306,6 +2395,7 @@ def _doctor_repair_rc_content(
     blocks: list[tuple[str, str]] = []
     if ensure_path:
         blocks.append(("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher", _launcher_path_line()))
+        blocks.append((_USER_RC_GUEST_COMMENT, _user_rc_guest_line()))
 
     if not blocks:
         return repaired
@@ -2384,7 +2474,7 @@ def _doctor_fix_rc_files() -> list[DoctorFinding]:
                 "ok",
                 f"rc-fix:{rcname}",
                 "removed product helper sourcing and restored the PATH-only "
-                f"launcher hint (backup: {backup.name})",
+                f"launcher hint and shell guest line (backup: {backup.name})",
             )
         )
 
@@ -2817,7 +2907,7 @@ def _strip_rc_entry(
         idx += 1
 
     rebuilt = "\n".join(kept)
-    if content.endswith("\n"):
+    if content.endswith("\n") and not rebuilt.endswith("\n"):
         rebuilt += "\n"
     return rebuilt, removed
 
@@ -3165,6 +3255,7 @@ def _uninstall_rc_entries() -> list[tuple[str, str]]:
         (_old_zshrc_source_line(), "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. shell helpers"),
         (_old_zshrc_source_line(), "Vetcoders shell helpers"),
         (_launcher_path_line(), "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher"),
+        (_user_rc_guest_line(), _USER_RC_GUEST_COMMENT),
     ]
     entries.extend(
         (legacy_line, "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher")
@@ -14987,7 +15078,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         print()
 
     # --- Execute: vibecrafted launcher ---
-    _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
+    shell_rc_receipts = _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
     if current_tools is not None:
         moved_agency = cleanse_state_home_agency(current_tools, dry_run=dry_run)
         if moved_agency:
@@ -15014,6 +15105,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
         foundations=installed_foundations,
         product_tools=snapshot_product_tool_state(),
         shell_helpers=install_shell,
+        shell_rc=shell_rc_receipts,
         install_path=str(store_path),
     )
     if not dry_run:
@@ -15063,8 +15155,16 @@ def _launcher_symlink_target(repo_root: Path) -> Path:
     )
 
 
-def _install_launcher(repo_root: Path, dry_run: bool, update_rc: bool = False) -> None:
-    """Install vibecrafted launcher to portable and compat bin surfaces."""
+def _install_launcher(
+    repo_root: Path, dry_run: bool, update_rc: bool = False
+) -> list[dict[str, str]]:
+    """Install vibecrafted launcher to portable and compat bin surfaces.
+
+    Returns the shell-guest receipt: the staged rc.sh record plus, when
+    `update_rc` consents to rc writes, one record per user rc file the managed
+    guest line was appended to or found present in.
+    """
+    receipts: list[dict[str, str]] = []
     launcher_src = repo_root / "scripts" / "vibecrafted"
     if launcher_src.exists():
         if not dry_run:
@@ -15123,12 +15223,19 @@ def _install_launcher(repo_root: Path, dry_run: bool, update_rc: bool = False) -
                     create_symlink(
                         Path("vibecrafted"), launcher_bin_dir / wrapper, dry_run=True
                     )
+        # The guest rc.sh is inert until the user's rc sources it; stage it
+        # unconditionally so even the manual opt-in line below is live.
+        receipts.append(_stage_user_rc_guest(repo_root, dry_run))
         # Ensure $HOME/.local/bin is in PATH via shell rc files only when the
         # caller has explicit consent. Otherwise leave a copyable instruction.
         canonical_path_line = _launcher_path_line()
         path_lines = [canonical_path_line, *_legacy_launcher_path_lines()]
         path_comment = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher"
         if update_rc:
+            # The guest line goes in first: the launcher lane below converges
+            # its own block to the end of the file (strip + re-append), so
+            # running the guest ensure after it would leapfrog on every pass.
+            receipts.extend(_ensure_user_rc_guest_line(dry_run))
             for rcname in (".bashrc", ".zshrc"):
                 rcfile = Path.home() / rcname
                 if rcfile.exists():
@@ -15153,6 +15260,7 @@ def _install_launcher(repo_root: Path, dry_run: bool, update_rc: bool = False) -
             print("  Shell rc files unchanged. To expose launchers, add:")
             print(f"    {canonical_path_line}")
         print()
+    return receipts
 
 
 def _print_unicode_summary(
@@ -15526,8 +15634,11 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         # A source carrier can install and verify its skill views without
         # claiming that it is a complete native Runtime Pack. Product launchers
         # remain generation-owned and are installed only by the Runtime Pack.
+        shell_rc_receipts: list[dict[str, str]] = []
         if not skills_only:
-            _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
+            shell_rc_receipts = _install_launcher(
+                repo_root, dry_run, update_rc=write_shell_rc
+            )
         if current_tools is not None:
             moved_agency = cleanse_state_home_agency(current_tools, dry_run=dry_run)
             print(f"  state agency moved: {moved_agency}")
@@ -15556,6 +15667,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
             foundations=installed_foundations,
             product_tools=snapshot_product_tool_state(),
             shell_helpers=install_shell,
+            shell_rc=shell_rc_receipts,
             install_path=str(store_path),
         )
         if not dry_run:
