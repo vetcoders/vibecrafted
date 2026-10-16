@@ -108,26 +108,76 @@ if [[ -n "$_vc_quick_core_sh" ]] && source "$_vc_quick_core_sh" 2>/dev/null; the
     _vc_quick_owned_py="$_py"
   fi
   if [[ -n "$_py" && -x "$_py" && -n "$_core_dir" && -d "$_core_dir" ]]; then
-    _pref_err=""
-    if command -v mktemp >/dev/null 2>&1; then
-      _pref_err="$(mktemp "${TMPDIR:-/tmp}/vc_quick_pref.XXXXXX" 2>/dev/null || true)"
-    fi
     _pref_out=""
     _pref_rc=0
-    if [[ -n "$_pref_err" ]]; then
-      _pref_out="$("$_py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from vibecrafted_core.server_config import _main_cli; raise SystemExit(_main_cli(sys.argv[1:]))' "$_core_dir" quick-cmd-profile 2>"$_pref_err")" || _pref_rc=$?
-    else
-      _pref_out="$("$_py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from vibecrafted_core.server_config import _main_cli; raise SystemExit(_main_cli(sys.argv[1:]))' "$_core_dir" quick-cmd-profile 2>/dev/null)" || _pref_rc=$?
-    fi
-    if (( _pref_rc == 0 )) && [[ -n "$_pref_out" ]]; then
+    _pref_out="$("$_py" -I - "$_core_dir" <<'PY'
+import os
+import sys
+import tomllib
+
+sys.path.insert(0, sys.argv[1])
+from vibecrafted_core import server_config
+
+# Use the public loader of the selected generation, independently of its CLI.
+# Retained cores predating terminal preferences still own config_path().
+loader = getattr(server_config, "load_terminal_config", None)
+try:
+    if loader is not None:
+        profile = loader().quick_cmd_profile
+    else:
+        resolved = server_config.config_path()
+        try:
+            raw = resolved.read_bytes()
+        except FileNotFoundError:
+            raw = b""
+        except OSError as exc:
+            raise server_config.ServerConfigError(
+                f"cannot read server config at {resolved}: {exc}"
+            ) from exc
+        try:
+            payload = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise server_config.ServerConfigError(
+                f"invalid TOML in server config at {resolved}: {exc}"
+            ) from exc
+        section = payload.get("terminal", {})
+        if not isinstance(section, dict):
+            raise server_config.ServerConfigError("[terminal] must be a TOML table")
+        unknown = sorted(set(section) - {"quick_cmd_profile"})
+        if unknown:
+            raise server_config.ServerConfigError(
+                "unsupported [terminal] key(s): " + ", ".join(unknown)
+            )
+        profile = section.get("quick_cmd_profile", "product")
+    if not isinstance(profile, str) or profile not in {"product", "personal"}:
+        raise server_config.ServerConfigError(
+            "terminal.quick_cmd_profile must be product or personal"
+        )
+except server_config.ServerConfigError as exc:
+    print(f"vc-quick-cmd: invalid terminal config: {exc}", file=sys.stderr)
+    print("product")
+    raise SystemExit(0) from exc
+
+if loader is None and profile == "personal":
+    root = os.environ.get("VIBECRAFTED_RUNTIME_ROOT", sys.argv[1])
+    print(
+        f"vc-quick-cmd: selected runtime {root} does not support personal Quick cmd "
+        "preferences; using product. Open a new session on an updated runtime "
+        "to apply terminal.quick_cmd_profile=personal.",
+        file=sys.stderr,
+    )
+    print("product")
+    raise SystemExit(0)
+print(profile)
+PY
+)" || _pref_rc=$?
+    if (( _pref_rc == 0 )) && [[ "$_pref_out" == product || "$_pref_out" == personal ]]; then
       _vc_quick_profile_preference="$_pref_out"
-    elif (( _pref_rc != 0 )) && [[ -n "$_pref_err" && -s "$_pref_err" ]]; then
-      cat "$_pref_err" >&2
+    else
+      printf 'vc-quick-cmd: profile resolution failed; refusing an unverified profile\n' >&2
+      exit 1
     fi
-    if [[ -n "$_pref_err" && -f "$_pref_err" ]]; then
-      rm -f "$_pref_err"
-    fi
-    unset _pref_err _pref_out _pref_rc
+    unset _pref_out _pref_rc
   fi
   unset _py _core_dir
 fi

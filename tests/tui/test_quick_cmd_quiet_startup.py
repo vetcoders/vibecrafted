@@ -8,12 +8,17 @@ stub on PATH instead of a substituted $SHELL.
 
 from __future__ import annotations
 
+import ast
+import io
 import json
 import shutil
 import subprocess
 import time
 import venv
+import zipfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BANNER_LINES = (
@@ -1032,6 +1037,7 @@ def _make_installed_generation(
     *,
     version: str = "4.4.0",
     valid_python: bool = True,
+    core_revision: str | None = None,
 ) -> Path:
     """Create a private copied-owner installed runtime generation fixture.
 
@@ -1045,11 +1051,197 @@ def _make_installed_generation(
     if valid_python:
         venv.EnvBuilder(with_pip=False, symlinks=True).create(gen)
     core_root = gen / "vibecrafted-core"
-    shutil.copytree(
-        REPO_ROOT / "vibecrafted-core/vibecrafted_core",
-        core_root / "vibecrafted_core",
-    )
+    if core_revision in {None, "without-terminal-preferences"}:
+        shutil.copytree(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core",
+            core_root / "vibecrafted_core",
+        )
+        if core_revision == "without-terminal-preferences":
+            # Keep absence coverage in shallow source checkouts too.
+            owner = core_root / "vibecrafted_core/server_config.py"
+            tree = ast.parse(owner.read_text())
+            retired = {
+                "TerminalConfig",
+                "load_terminal_config",
+                "_main_cli",
+                "_terminal_quick_cmd_profile_cli",
+            }
+            tree.body = [
+                node for node in tree.body if getattr(node, "name", "") not in retired
+            ]
+            owner.write_text(ast.unparse(tree) + "\n")
+    else:
+        available = subprocess.run(
+            ["git", "cat-file", "-e", f"{core_revision}^{{commit}}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        if available.returncode:
+            pytest.skip(
+                "Historical core object unavailable; absent-capability fixture still runs"
+            )
+        archive = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=zip",
+                core_revision,
+                "vibecrafted-core/vibecrafted_core",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        )
+        # Trusted, pinned repository snapshot, extracted only into this fixture.
+        with zipfile.ZipFile(io.BytesIO(archive.stdout)) as snapshot:
+            snapshot.extractall(gen)
     return gen
+
+
+@pytest.mark.parametrize(
+    "core_revision",
+    [
+        "without-terminal-preferences",
+        "3ff1a3f5d6b10b8181b89cb5f8066b2e068a2344",
+    ],
+)
+@pytest.mark.parametrize(
+    ("settings", "diagnostic"),
+    [
+        ("", ""),
+        ('[terminal]\nquick_cmd_profile = "product"\n', ""),
+        ('[terminal]\nquick_cmd_profile = "personal"\n', "does not support personal"),
+        ('[terminal]\nquick_cmd_profile = "invalid"\n', "invalid terminal config"),
+        (
+            '[terminal\nquick_cmd_profile = "personal"\n',
+            "invalid TOML in server config",
+        ),
+        ('terminal = "personal"\n', "invalid terminal config"),
+        ("[terminal]\nquick_cmd_profile = 1\n", "invalid terminal config"),
+        ("[terminal]\nunknown = true\n", "invalid terminal config"),
+    ],
+)
+def test_quick_cmd_retained_generation_profile_resolution(
+    tmp_path: Path,
+    settings: str,
+    diagnostic: str,
+    core_revision: str,
+) -> None:
+    """Exercise both the historical core and an always-available API fixture."""
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(
+        tmp_path,
+        version="4.4.0+g3ff1a3f5",
+        core_revision=core_revision,
+    )
+    config = tmp_path / "private-config" / "vibecrafted"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text(settings, encoding="utf-8")
+    sentinel = tmp_path / "personal.log"
+    (tmp_path / ".zshrc").write_text(f'print loaded >> "{sentinel}"\n')
+    pin = gen / "config/runtime-pin/pin.zsh"
+    pin.parent.mkdir(parents=True)
+    pin.write_text("export RETAINED_PIN=selected\n")
+    hostile = tmp_path / "hostile" / "vibecrafted_core"
+    hostile.mkdir(parents=True)
+    (hostile / "__init__.py").write_text(
+        "raise RuntimeError('ambient core imported')\n"
+    )
+    ambient_python = tmp_path / "ambient-python"
+    ambient_python.write_text("#!/bin/sh\nexit 79\n")
+    ambient_python.chmod(0o755)
+    result, events = _run_quick_cmd(
+        tmp_path,
+        'print -r -- "PROFILE=$_VC_QUICK_CMD_PROFILE ROOT=$VIBECRAFTED_RUNTIME_ROOT '
+        'PY=$_VC_QUICK_PYTHON PIN=$RETAINED_PIN"; probe retained\nprobe skipped\n',
+        panes=[{"id": "terminal_18", "is_pinned": False}],
+        extra_env={
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "XDG_CONFIG_HOME": str(config.parent),
+            "PYTHONPATH": str(hostile.parent),
+            "VIBECRAFTED_CORE_DIR": str(REPO_ROOT / "vibecrafted-core"),
+            "VIBECRAFTED_PYTHON": str(ambient_python),
+        },
+        cwd=hostile.parent,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+    assert diagnostic in result.stderr
+    if not diagnostic:
+        assert "vc-quick-cmd:" not in result.stderr, result.stderr
+    if "does not support personal" in diagnostic:
+        assert "new session" in result.stderr
+        assert str(gen) in result.stderr
+    assert (
+        f"PROFILE=product ROOT={gen} PY={gen}/bin/python3 PIN=selected" in result.stdout
+    )
+    assert not sentinel.exists()
+    assert events == [
+        "ran retained",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+def test_quick_cmd_public_profile_loader_works_without_private_cli(
+    tmp_path: Path,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_owner = gen / "vibecrafted-core/vibecrafted_core/server_config.py"
+    config_owner.write_text(
+        config_owner.read_text().replace("def _main_cli(", "def _retired_cli(")
+    )
+    (tmp_path / ".config/vibecrafted/config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n'
+    )
+    sentinel = tmp_path / "personal.log"
+    (tmp_path / ".zshrc").write_text(f'print loaded >> "{sentinel}"\n')
+    result, events = _run_quick_cmd(
+        tmp_path,
+        'print -r -- "PROFILE=$_VC_QUICK_CMD_PROFILE"; probe one\nprobe two\nexit\n',
+        panes=[{"id": "terminal_18", "is_pinned": True}],
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+    assert "PROFILE=personal" in result.stdout
+    assert sentinel.read_text().splitlines() == ["loaded"]
+    assert events == [
+        "ran one",
+        "frame action list-panes --json --state",
+        "ran two",
+        "frame action list-panes --json --state",
+        "frame action close-pane --pane-id terminal_18",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["import", "loader", "exit"])
+def test_quick_cmd_internal_profile_errors_are_not_optional_feature_fallback(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    _install_interactive_profile(tmp_path)
+    gen = _make_installed_generation(tmp_path)
+    config_owner = gen / "vibecrafted-core/vibecrafted_core/server_config.py"
+    broken = "raise RuntimeError('internal profile failure')\n"
+    if failure == "loader":
+        broken = "def load_terminal_config():\n    " + broken
+    elif failure == "exit":
+        broken = "def load_terminal_config():\n    raise SystemExit(2)\n"
+    config_owner.write_text(config_owner.read_text() + "\n" + broken)
+    result, events = _run_quick_cmd(
+        tmp_path,
+        "probe must_not_run\n",
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+    assert result.returncode != 0
+    if failure != "exit":
+        assert "internal profile failure" in result.stderr
+    assert "profile resolution failed" in result.stderr
+    assert "does not support personal" not in result.stderr
+    assert events == []
 
 
 def test_quick_cmd_untouched_product_preference_does_not_source_user_zshrc(
