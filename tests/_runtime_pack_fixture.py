@@ -48,11 +48,16 @@ def private_native_copy(
     """Copy one named system executable to a private path where it really runs.
 
     The copy is ad-hoc signed locally, then accepted only after an actual exec
-    with ``probe_args`` returns 0 and prints. Candidates: the whole file, then
-    the host-native thin slice when the file carries one; never an emulated
-    architecture. Every candidate is built in a private directory this call
-    creates and removes; ``destination`` is linked in only if it does not
-    already exist (symlinks included), so a refusal never touches it.
+    with ``probe_args`` returns 0 and prints. Candidates, in order: the whole
+    file; the host-native thin slice when the file carries one; an x86_64 thin
+    slice as an optional real execution probe on whatever translation the host
+    already has. Nothing is installed or enabled, and an absent translation is
+    just a recorded failed attempt, never a skip or a mock. This is fixture
+    acceptance, not portable native product proof. Every candidate is built in
+    a private directory this call creates and removes; ``destination`` is
+    linked in only if it does not already exist (symlinks included), and
+    neither the source itself nor anything under /Applications is a valid
+    destination, so a refusal never touches anything.
 
     Hosted macOS 15 killed the whole-file copy of /bin/ps and /bin/bash
     (SIGKILL before main). Working hypothesis, unproven until that runner
@@ -63,16 +68,19 @@ def private_native_copy(
     assert sys.platform == "darwin"
     if os.path.lexists(destination):
         raise AssertionError(f"refusing to replace pre-existing {destination}")
+    target = destination.parent.resolve() / destination.name
+    if target == source.resolve() or target.is_relative_to(Path("/Applications")):
+        raise AssertionError(f"refusing destination {destination}")
     archs = subprocess.run(
         ["/usr/bin/lipo", "-archs", str(source)],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.split()
-    candidates: list[str | None] = [
-        None,
-        *(arch for arch in (platform.machine(),) if arch in archs),
-    ]
+    candidates: list[str | None] = [None]
+    for arch in (platform.machine(), "x86_64"):
+        if arch in archs and arch not in candidates:
+            candidates.append(arch)
     attempts: list[str] = []
     work = Path(tempfile.mkdtemp(prefix=".native-copy-", dir=destination.parent))
     try:

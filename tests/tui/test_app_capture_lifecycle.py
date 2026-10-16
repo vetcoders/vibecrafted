@@ -179,6 +179,12 @@ def test_private_native_copy_never_replaces_existing_destination(
     for target in (sentinel, link):
         with pytest.raises(AssertionError, match="refusing to replace"):
             private_native_copy(Path("/bin/ps"), target, ("-axo", "pid=,command="))
+    for refused_target in (Path("/bin/ps"), Path("/Applications/vc-never-created")):
+        with pytest.raises(AssertionError, match="refusing"):
+            private_native_copy(
+                Path("/bin/ps"), refused_target, ("-axo", "pid=,command=")
+            )
+    assert not Path("/Applications/vc-never-created").exists()
     assert sentinel.read_bytes() == b"keep me"
     assert link.is_symlink() and outside.read_bytes() == b"foreign"
     assert not list(tmp_path.glob(".native-copy-*"))
