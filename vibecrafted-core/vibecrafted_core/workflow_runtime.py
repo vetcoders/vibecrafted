@@ -20,10 +20,10 @@ from pathlib import Path
 from .effort_overrides import _with_effort_override
 from .execution_controls import ExecutionControls
 from .marbles_reception import SCHEMA as RECEPTION_SCHEMA
-from .marbles_reception import read_evidence, readonly_command, receive, tree_receipt
+from .marbles_reception import readonly_command, tree_receipt
 from .model_overrides import _with_model_override
 from .package_resources import package_root
-from .report_contract import parse_report_path, stamp_launcher_report_identity
+from .report_contract import parse_report_path
 from .research_config import (
     SUPPORTED_RESEARCH_AGENTS,
     ResearchAgentSelection,
@@ -1264,6 +1264,8 @@ def _write_parent_report(
     synthesis: ChildResult | None = None,
     research_selection: ResearchAgentSelection | None = None,
     reception: dict[str, object] | None = None,
+    write_cycle: dict[str, object] | None = None,
+    lifecycle: dict[str, object] | None = None,
     receivers: Sequence[ChildResult] = (),
     status_override: str = "",
 ) -> None:
@@ -1456,6 +1458,22 @@ def _write_parent_report(
                 "",
             ]
         )
+    for title, value in (
+        ("Cumulative WRITE cycle", write_cycle),
+        ("Lifecycle", lifecycle),
+    ):
+        if value is not None:
+            lines.extend(
+                [
+                    "",
+                    f"## {title}",
+                    "",
+                    "```json",
+                    json.dumps(value, indent=2),
+                    "```",
+                    "",
+                ]
+            )
     lines.extend(_parent_footer(_parent_run_id(), status, receipt))
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     from .control_plane import control_plane_home
@@ -1504,6 +1522,8 @@ def _write_parent_report(
         "lanes_failed": lanes_failed,
         "synthesis": _result_meta(synthesis) if synthesis is not None else {},
         "children": [_result_meta(result) for result in results],
+        **({"write_cycle": write_cycle} if write_cycle is not None else {}),
+        **({"lifecycle": lifecycle} if lifecycle is not None else {}),
         **(
             {
                 "reception": reception,
@@ -1698,13 +1718,15 @@ def _reception_prompt(
             )
         },
     }
-    return f"""You are the informed READ-only Marbles receiver, not a WRITE worker.
+    return f"""You are the informed READ-only cycle auditor, independent of all WRITE workers.
 Work only against the assigned repository: {root}
 Do not edit code, commit, switch branch, launch workers, or write a next plan.
 Emit your verified report as the final stdout response. The runtime persists it
 at VIBECRAFTED_REPORT_PATH; do not write the report or any other file yourself.
 {WORKER_SIGNAL_DISCIPLINE}
 Read the candidate report completely: {candidate.report}
+Read every WRITE worker report in the whole cycle below. Verify its full SHA chain,
+including the initial input and the last output; evaluate the complete series.
 Verify the actual current files, diff/commit and relevant gates against this unchanged task:
 {prompt}
 
@@ -1718,7 +1740,7 @@ For Python checks disable source caches (PYTHONDONTWRITEBYTECODE=1, pytest
 If a required gate cannot run without source writes, report gate unknown and
 scope_verified false with the exact blocker; never substitute a green guess.
 
-Reception alone remembers prior accepted evidence (never sent to fresh WRITE workers):
+Whole WRITE cycle evidence (never sent to fresh WRITE workers):
 {json.dumps(list(rounds), indent=2)}
 
 Re-evaluate unresolved findings and regressions; absence from this report does not resolve them.
@@ -1759,244 +1781,171 @@ async def run_marbles(
     workflow: str = "marbles",
     model_requested: str = "",
 ) -> int:
-    """Bounded fresh WRITE rounds, each followed by awaited informed reception.
+    """Run the entire cumulative WRITE cycle; lifecycle owns its following READ.
 
-    Exit 0 means completed execution (possibly budget exhausted); only the
-    separately recorded verified verdict can attest convergence. Polarize
-    retains its own fixed-count contract.
+    Each fresh worker sees the unchanged task and exact predecessor source,
+    never prior reports. A retained prefix is evidence, not permission to replay.
     """
+    from .marbles_reception import WRITE_CYCLE_SCHEMA, validate_write_transition
+
     model_requested = _remember_runtime_model_request(model_requested)
     kind = _safe_label(workflow) or "marbles"
     results: list[ChildResult] = []
-    receivers: list[ChildResult] = []
-    rounds: list[dict[str, object]] = []
-    state: dict[str, object] | None = None
-    final: dict[str, object] = {
-        "verdict": "not_converged",
-        "reason": "round_budget_exhausted",
-    }
-    status = "completed"
-    for index in range(1, max(count, 1) + 1):
-        before: dict[str, str] | None = None
-        if kind == "marbles":
-            try:
-                before = await asyncio.to_thread(tree_receipt, root)
-            except (
-                OSError,
-                ValueError,
-                TypeError,
-                subprocess.SubprocessError,
-            ) as error:
-                final = {
-                    "verdict": "blocked",
-                    "decision": "escalate",
-                    "reason": f"substrate_unverifiable:{error}",
-                }
-                status = "blocked"
-                break
-        loop_prompt = _loop_prompt(kind, prompt, index, count, depth)
-        result = await _run_child(
-            kind=kind,
-            label=f"{kind}-L{index}",
-            agent=agent,
-            root=root,
-            prompt=loop_prompt,
-            model_requested=model_requested,
+    cycle_path = _child_dir() / "write-cycle.json"
+    if cycle_path.exists():
+        raise ValueError(
+            "write_cycle_already_exists: preserve prefix; automatic replay/adoption unsupported"
         )
-        results.append(result)
-        if result.exit_code != 0 or not result.artifact_ok:
-            status = "failed"
-            final = {
-                "verdict": "blocked",
-                "decision": "escalate",
-                "reason": "worker_execution_or_artifact_failed",
+    cycle: dict[str, object] = {
+        "schema": WRITE_CYCLE_SCHEMA,
+        "root": str(Path(root).resolve()),
+        "run_id": _parent_run_id(),
+        "workflow": kind,
+        "count": max(count, 1),
+        "workers": [],
+        "status": "running",
+    }
+    workers: list[dict[str, object]] = []
+    status = "completed"
+    expected = None
+    try:
+        expected = await asyncio.to_thread(tree_receipt, root)
+        if expected.get("status"):
+            raise ValueError("write_cycle_requires_clean_source")
+        cycle["input"] = expected
+        for index in range(1, max(count, 1) + 1):
+            before = await asyncio.to_thread(tree_receipt, root)
+            if before != expected:
+                raise ValueError("write_cycle_predecessor_drift")
+            worker: dict[str, object] = {
+                "index": index,
+                "input": before,
+                "status": "running",
             }
-            break
-        if _child_report_status(result) in _LOOP_STOP_REPORT_STATUSES:
-            status = _child_report_status(result)
-            final = {
-                "verdict": "blocked",
-                "decision": "escalate",
-                "reason": f"worker_report_{status}",
-            }
-            break
-        if kind != "marbles":
-            continue
-        try:
-            tree = await asyncio.to_thread(tree_receipt, root)
-            if before is None or tree["branch"] != before["branch"]:
-                raise ValueError("assigned_branch_changed")
-            ancestry = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    "git",
-                    "-C",
-                    root,
-                    "merge-base",
-                    "--is-ancestor",
-                    before["head"],
-                    tree["head"],
-                ],
-                check=False,
-                capture_output=True,
-                timeout=15,
-            )
-            if ancestry.returncode != 0:
-                raise ValueError("candidate_replaced_baseline_history")
-            if (
-                tree["source_hash"] != before["source_hash"]
-                and tree["head"] == before["head"]
-            ):
-                raise ValueError("candidate_cut_not_committed")
-            # A receiver never edits the candidate. Check the full content
-            # fingerprint on both sides of READ, not just HEAD or clean status.
-            try:
-                from .execution_controls import resolve_execution_controls
-
-                # The reception resume must keep the fresh receiver's admitted
-                # policy: codex's receiver guard (readonly_command) requires the
-                # bypass opt-in; without it the default auto argv drops
-                # --dangerously-bypass-approvals-and-sandbox and the run blocks
-                # on receiver_codex_inner_sandbox_not_disabled.
-                command = native_resume_argv(
-                    agent,
-                    result.agent_session_id,
-                    controls=resolve_execution_controls("codex", permissions="bypass")
-                    if agent == "codex"
-                    else None,
-                )
-                receiver_mode = "native_resume"
-            except ValueError:
-                command = None
-                receiver_mode = "fresh_informed"
-            receiver = await _run_child(
-                kind="marbles-reception",
-                label=f"marbles-L{index}-reception",
+            workers.append(worker)
+            cycle["workers"] = workers
+            _write_json(cycle_path, cycle)
+            loop_prompt = _loop_prompt(kind, prompt, index, count, depth)
+            loop_prompt += f"\nExact cumulative input SHA: {before['head']}\nKeep the assigned branch; commit all authored output before finishing.\n"
+            result = await _run_child(
+                kind=kind,
+                label=f"{kind}-L{index}",
                 agent=agent,
                 root=root,
-                prompt=prompt,
-                command=command,
+                prompt=loop_prompt,
                 model_requested=model_requested,
-                prompt_body=_reception_prompt(root, prompt, result, tree, rounds),
             )
-            receivers.append(receiver)
+            results.append(result)
+            after = await asyncio.to_thread(tree_receipt, root)
+            worker.update(_result_meta(result), output=after)
+            if result.exit_code != 0 or not result.artifact_ok:
+                worker["status"] = status = "failed"
+                raise ValueError("worker_execution_or_artifact_failed")
+            declared = _child_report_status(result)
+            if declared in _LOOP_STOP_REPORT_STATUSES:
+                worker["status"] = status = declared
+                raise ValueError(f"worker_report_{declared}")
+            report = parse_report_path(result.report)
             if (
-                receiver_mode == "native_resume"
-                and receiver.agent_session_id != result.agent_session_id
+                not report.ok
+                or declared != "completed"
+                or report.fields.get("finalized") != "true"
+                or not report.claim
             ):
-                raise ValueError("receiver_native_session_identity_mismatch")
-            if await asyncio.to_thread(tree_receipt, root) != tree:
-                raise ValueError("receiver_modified_assigned_tree")
-            if receiver.exit_code != 0 or not receiver.artifact_ok:
-                raise ValueError("receiver_execution_or_artifact_failed")
-            evidence = read_evidence(
-                receiver.report, candidate_run_id=result.run_id, tree=tree
-            )
-            candidate_state = receive(
-                state,
-                evidence,
-                report=receiver.report,
-                no_source_progress=tree["source_hash"] == before["source_hash"],
-            )
-            declared = _child_report_status(receiver)
-            if declared == "failed" or (
-                declared == "blocked" and candidate_state["verdict"] != "blocked"
-            ):
-                raise ValueError(f"receiver_report_{declared}_contradicts_reception")
-            # Stdout-only READ artifacts are persisted by the runtime. Attest
-            # only after schema, candidate identity and source immutability
-            # were checked; process exit zero alone never finalizes a claim.
-            phase_status = (
-                "blocked" if candidate_state["verdict"] == "blocked" else "completed"
-            )
-            stamp_launcher_report_identity(
-                receiver.report,
-                run_id=receiver.run_id,
-                session_id=parse_report_path(receiver.report).fields.get(
-                    "session_id", ""
-                ),
-                agent=receiver.agent,
-                skill="marbles-reception",
-                status=phase_status,
-                runtime_fields={
-                    "status": phase_status,
-                    "claim_status": phase_status,
-                    "finalized": "true",
-                    "claim_kind": "marbles-reception",
-                    "claim": f"Validated READ evidence for {result.run_id} at {tree['head']}; gate {candidate_state['gate']}, verdict {candidate_state['verdict']}.",
-                    "reception_verdict": str(candidate_state["verdict"]),
-                    "reception_gate": str(candidate_state["gate"]),
-                },
-            )
-            state = candidate_state
-            rounds.append(
-                {
-                    **state,
-                    "receiver_mode": receiver_mode,
-                    "receiver_run_id": receiver.run_id,
-                    "source": tree,
-                }
-            )
-            final = {**state, "rounds": rounds, "execution_status": "completed"}
-            _write_json(_child_dir() / "reception.json", final)
-            print(
-                json.dumps(
-                    {
-                        "type": "workflow.reception",
-                        "round": index,
-                        "decision": state["decision"],
-                        "verdict": state["verdict"],
-                    }
-                ),
-                flush=True,
-            )
-            if state["decision"] == "escalate":
-                status = "blocked"
-                break
-            if state["decision"] == "stop":
-                break
-            # Surface-shift recommendations remain inside the unchanged plan;
-            # never inject prior findings/rankings into the next WRITE context.
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
-            final = {
-                "verdict": "blocked",
-                "decision": "escalate",
-                "reason": str(error),
-                "rounds": rounds,
-                "execution_status": "completed",
-                "open_findings": (state or {}).get("open_findings", []),
-            }
+                raise ValueError("worker_report_unattested")
+            await asyncio.to_thread(validate_write_transition, root, before, after)
+            worker["status"] = "completed"
+            expected = after
+            _write_json(cycle_path, cycle)
+        if await asyncio.to_thread(tree_receipt, root) != expected:
+            raise ValueError("write_cycle_final_source_drift")
+        cycle["output"] = expected
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        if status == "completed":
             status = "blocked"
-            break
-    if kind == "marbles":
-        final.setdefault("rounds", rounds)
-        final["round_budget"] = max(count, 1)
-        final["rounds_completed"] = len(results)
-        if status == "completed" and final.get("verdict") != "converged":
-            final.update(decision="stop", reason="round_budget_exhausted")
-        _write_json(_child_dir() / "reception.json", final)
-        _write_parent_report(
-            kind,
-            root,
-            prompt,
-            results,
-            reception=final,
-            receivers=receivers,
-            status_override=status,
-        )
-        return 0 if status == "completed" else 1
-    _write_parent_report(kind, root, prompt, results)
-    return (
-        0
-        if len(results) == count
-        and all(
-            result.exit_code == 0
-            and result.artifact_ok
-            and _child_report_status(result) not in _LOOP_STOP_REPORT_STATUSES
-            for result in results
-        )
-        else 1
+        if workers and workers[-1]["status"] == "running":
+            workers[-1].update(status="blocked", reason=str(error))
+        cycle["reason"] = str(error)
+    cycle["output"] = await asyncio.to_thread(tree_receipt, root)
+    cycle.update(
+        status=status,
+        workers=workers,
+        workers_completed=sum(w.get("status") == "completed" for w in workers),
     )
+    _write_json(cycle_path, cycle)
+    _write_parent_report(
+        kind, root, prompt, results, write_cycle=cycle, status_override=status
+    )
+    return 0 if status == "completed" else 1
+
+
+async def run_counted_lifecycle(
+    root, agent, prompt, count, depth, workflow, model_requested=""
+):
+    """Use the existing lifecycle stage owner inside the public supervised launch."""
+    from .control_plane import control_plane_home
+    from .lifecycle_control import interrupt_workflow
+    from .lifecycle_runner import LifecycleRunner, LifecycleRunSpec
+
+    spec = LifecycleRunSpec(
+        workflow_id=f"vc-{workflow}",
+        run_id=_parent_run_id(),
+        agent=agent,
+        prompt=prompt,
+        root=root,
+        count=count,
+        depth=depth,
+        await_stages=True,
+        stage_models={workflow: model_requested, "audit": model_requested}
+        if model_requested
+        else {},
+        effort=os.environ.get("VIBECRAFTED_EFFORT_REQUESTED", ""),
+    )
+    state_path = control_plane_home() / "lifecycle_runs" / spec.run_id / "state.json"
+    try:
+        state = await LifecycleRunner().run(spec)
+    except BaseException:
+        # The public dispatcher owns this adapter; the existing lifecycle
+        # control owns its active stage. Preserve that ownership on cancellation.
+        if state_path.is_file():
+            state = json.loads(state_path.read_text())
+            await asyncio.shield(
+                asyncio.to_thread(interrupt_workflow, state_path, state)
+            )
+        raise
+    results = []
+    for stage in state["stages"]:
+        meta = stage["launch"].get("meta")
+        cycle = stage.get("write_cycle")
+        if cycle:
+            for worker in cycle["workers"]:
+                if worker.get("report"):
+                    child = _child_result_from_meta(
+                        f"{stage['id']}-L{worker['index']}",
+                        Path(worker["report"]).with_suffix(".meta.json"),
+                    )
+                    if child is not None:
+                        results.append(child)
+        elif meta:
+            child = _child_result_from_meta(stage["id"], Path(meta))
+            if child is not None:
+                # The existing aggregate verifier reads sibling receipt paths.
+                # Alias the sole runtime-owned stage meta; do not copy its truth.
+                sibling = child.report.with_suffix(".meta.json")
+                if not sibling.exists():
+                    sibling.symlink_to(Path(meta).resolve())
+                elif not sibling.samefile(meta):
+                    raise ValueError("stage_receipt_alias_conflict")
+                results.append(child)
+    _write_parent_report(
+        workflow,
+        root,
+        prompt,
+        results,
+        status_override=str(state["status"]),
+        lifecycle=state,
+    )
+    return 0 if state["status"] == "completed" else 1
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -2028,6 +1977,7 @@ def _parser() -> argparse.ArgumentParser:
     research_synthesis.add_argument("--synthesizer-model", default="")
     marbles = sub.add_parser("marbles")
     marbles.add_argument("--workflow", default="marbles")
+    marbles.add_argument("--lifecycle", action="store_true")
     marbles.add_argument("--agent", default="codex")
     marbles.add_argument("--root", required=True)
     marbles.add_argument("--prompt", default="")
@@ -2097,7 +2047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prompt = ns.prompt or _read_prompt_file(ns.prompt_file)
         return asyncio.run(
             _with_shutdown(
-                run_marbles(
+                (run_counted_lifecycle if ns.lifecycle else run_marbles)(
                     ns.root,
                     ns.agent,
                     prompt,

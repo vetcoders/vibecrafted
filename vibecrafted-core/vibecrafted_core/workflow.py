@@ -182,6 +182,7 @@ class WorkflowLaunchSpec:
     # launch belongs to a lifecycle run, this carries the lifecycle state.json
     # path so the dispatcher can write the worker's terminal truth into it.
     lifecycle_state_path: str = ""
+    source_readonly: bool = False
     # Machine-owned mission binding for lifecycle stage reports. The worker may
     # attest success, but it cannot choose which mission that attestation closes.
     claim_digest: str = ""
@@ -216,6 +217,8 @@ class WorkflowLaunchSpec:
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
         payload = {**asdict(self), "prompt": "", "plan_source": None}
+        if not self.source_readonly:
+            payload.pop("source_readonly", None)
         if not self.remediate_trust_block:
             payload.pop("remediate_trust_block", None)
             payload.pop("remediation_reason", None)
@@ -2169,6 +2172,8 @@ def build_launch_command(
         ]
         if spec.model:
             launch_command.extend(["--model", spec.model])
+        if not spec.lifecycle_state_path:
+            launch_command.append("--lifecycle")
         return launch_command
 
     worker_agent = spec.agent
@@ -3106,6 +3111,7 @@ def recover_legacy_dispatch_identity(
                 stored_spec.get("research_synthesizer_model") or ""
             ),
             lifecycle_state_path=str(stored_spec.get("lifecycle_state_path") or ""),
+            source_readonly=bool(stored_spec.get("source_readonly")),
             claim_digest=str(stored_spec.get("claim_digest") or ""),
             run_id=str(stored_spec.get("run_id") or ""),
         )
@@ -3435,6 +3441,15 @@ def launch_workflow(
         merged_env = selected_runtime_environment(merged_env)
         merged_env["PATH"] = agent_tool_search_path(merged_env)
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
+        if spec.source_readonly:
+            from .marbles_reception import readonly_command
+
+            worker_command, receiver_guard = readonly_command(
+                spec.root, worker_command, spec.agent
+            )
+            merged_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            initial_meta["receiver_guard"] = receiver_guard
+            atomic_write_json(artifacts["meta"], initial_meta)
     except (FileNotFoundError, ValueError) as exc:
         return _finish_launch_idempotency(
             idem_key,
@@ -3492,7 +3507,8 @@ def launch_workflow(
         quiet=spec.runtime in {"terminal", "visible"},
         lifecycle_state_path=spec.lifecycle_state_path,
         salvage_report_from_stream=bool(
-            (launch_meta or {}).get("native_resume")
+            spec.source_readonly
+            or (launch_meta or {}).get("native_resume")
             or (launch_meta or {}).get("native_fork")
         ),
     )

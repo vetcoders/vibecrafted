@@ -33,7 +33,8 @@ from .lifecycle_fleet import (
     stage_fleet_progress,
     stage_worker_may_launch_agent_lines,
 )
-from .report_contract import parse_report_path
+from .marbles_reception import read_evidence, read_write_cycle, receive, tree_receipt
+from .report_contract import parse_report_path, stamp_launcher_report_identity
 from .stage_cast import (
     _mission_stage_agents,
     _mission_stage_models,
@@ -68,7 +69,7 @@ def _lifecycle_stage_run_id(
     material = f"{lifecycle_run_id}\n{stage_id}\n{occurrence}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
     prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", stage_id).strip("-._") or "stage"
-    return f"{prefix[:24]}-{digest}"
+    return f"{lifecycle_run_id}-{prefix[:24]}-{digest}"
 
 
 def delivery_axes_for_receipt(
@@ -219,7 +220,15 @@ def _capture_stage_completion(
     ``code_mutation`` report claim is the attribution source.
     """
     record["await"] = await_result
-    record["status"] = "completed" if await_result.get("artifact_ok") else "failed"
+    run = await_result.get("run") or {}
+    exit_code = await_result.get("exit_code")
+    if exit_code is None:
+        exit_code = run.get("exit_code")
+    record["status"] = (
+        "completed"
+        if await_result.get("artifact_ok") and exit_code in (None, 0)
+        else "failed"
+    )
     record["commit_after"] = _git_head(repo_root)
     record["git_after"] = _git_status(repo_root)
     record["git_snapshot_after"] = _git_worktree_snapshot(
@@ -244,6 +253,80 @@ def _capture_stage_completion(
         str(record.get("commit_before") or ""),
         str(record.get("commit_after") or ""),
     )
+    if record.get("workflow") in {"marbles", "polarize"}:
+        meta = (record.get("launch") or {}).get("meta")
+        try:
+            cycle = read_write_cycle(
+                str(meta or ""),
+                run_id=str(record["launch"]["run_id"]),
+                workflow=record["workflow"],
+                root=str(repo_root.resolve()),
+                count=record.get("count"),
+            )
+            record["write_cycle"] = cycle
+            if cycle["status"] != "completed":
+                record["status"] = "failed"
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            subprocess.SubprocessError,
+        ) as error:
+            record["status"] = "failed"
+            record["cycle_receipt_error"] = str(error)
+    if record.get("cycle_read"):
+        try:
+            cycle = record["cycle_read"]
+            tree = tree_receipt(str(repo_root))
+            if tree != cycle["output"]:
+                raise ValueError("receiver_modified_assigned_tree")
+            report = Path(str(await_result.get("report") or record["launch"]["report"]))
+            evidence = read_evidence(
+                report, candidate_run_id=cycle["run_id"], tree=tree
+            )
+            verdict = receive(None, evidence, report=report, no_source_progress=False)
+            record["cycle_read_evidence"] = verdict
+            if verdict["verdict"] != "converged":
+                raise ValueError("whole_cycle_read_not_verified")
+            if record["status"] != "completed":
+                raise ValueError("receiver_execution_or_artifact_failed")
+            declared = (
+                parse_report_path(report).fields.get("status", "").strip().lower()
+            )
+            if declared in {"blocked", "failed"}:
+                raise ValueError(f"receiver_report_{declared}_contradicts_reception")
+            stamp_launcher_report_identity(
+                report,
+                run_id=record["launch"]["run_id"],
+                session_id=parse_report_path(report).fields.get("session_id", ""),
+                agent=str(record.get("agent") or ""),
+                skill=str(record.get("workflow") or "audit"),
+                status="completed",
+                runtime_fields={
+                    "finalized": "true",
+                    "claim_status": "completed",
+                    "claim_kind": "cycle-read",
+                    "claim": f"Verified complete {cycle['workflow']} cycle {cycle['run_id']} at {tree['head']} under the source/Git write guard.",
+                },
+            )
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            subprocess.SubprocessError,
+        ) as error:
+            record["status"] = "failed"
+            record["cycle_read_error"] = str(error)
+            return True
+    elif (
+        record.get("read_source")
+        and tree_receipt(str(repo_root)) != record["read_source"]
+    ):
+        record["status"] = "failed"
+        record["cycle_read_error"] = "receiver_modified_assigned_tree"
+        return True
     if record.get("phase") != "read":
         return False
 
@@ -255,6 +338,8 @@ def _capture_stage_completion(
         else []
     )
     record["read_phase_violation"] = bool(evidence["hard_violation"])
+    if record["read_phase_violation"]:
+        record["status"] = "failed"
     return bool(evidence["hard_violation"])
 
 
@@ -302,6 +387,8 @@ def _read_phase_evidence(
 
 def _read_phase_violation_error(record: dict[str, Any]) -> str:
     """Human-readable error message describing why a READ-phase stage failed hard."""
+    if record.get("cycle_read_error"):
+        return f"READ stage {record.get('id')}: {record['cycle_read_error']}"
     evidence_value = record.get("read_phase_evidence")
     evidence = evidence_value if isinstance(evidence_value, dict) else {}
     claim = str(evidence.get("worker_claim") or "invalid")
@@ -347,6 +434,9 @@ class LifecycleRunSpec:
     # Operator-declared per-stage model requests: {stage_id: model}. Explicit
     # mission frontmatter wins over manifest defaults; empty = runner default.
     stage_models: dict[str, str] = field(default_factory=dict)
+    write_cycle: dict[str, Any] = field(default_factory=dict)
+    failed_stages: tuple[str, ...] = ()
+    effort: str = ""
 
 
 def _lifecycle_run_id(workflow_id: str) -> str:
@@ -712,6 +802,7 @@ class LifecycleRunner:
         previous_reports: list[str] = [
             str(path).strip() for path in spec.previous_reports if str(path).strip()
         ]
+        pending_cycle = dict(spec.write_cycle)
         state: dict[str, Any] = {
             "schema": LIFECYCLE_SCHEMA_ID,
             "run_id": run_id,
@@ -734,6 +825,7 @@ class LifecycleRunner:
                 "start_stage": current_stage,
                 "count": spec.count,
                 "depth": spec.depth,
+                "effort": spec.effort,
                 "previous_reports": list(previous_reports),
                 "stage_agents": encode_stage_cast(stage_cast),
                 "stage_models": dict(stage_models),
@@ -761,6 +853,7 @@ class LifecycleRunner:
             },
             "stages": [],
             "accepted_dou_findings": [],
+            "failed_stages": list(spec.failed_stages),
         }
         self._write_state(state_path, state)
 
@@ -780,21 +873,36 @@ class LifecycleRunner:
                 state["status"] = "failed"
                 state["error"] = f"unknown lifecycle stage: {current}"
                 break
-            record = await self._start_stage(
-                manifest=manifest,
-                stage=stage,
-                spec=spec,
-                # Operator-declared casting wins for a stage it names; then
-                # manifest defaults; then the baton's current agent.
-                agent=stage_agents.get(current) or stage.agent or current_agent,
-                model=stage_models.get(current) or stage.model,
-                source_prompt=source_prompt,
-                root=root,
-                previous_reports=previous_reports,
-                context=context,
-                state_path=state_path,
-                lifecycle_run_id=run_id,
-            )
+            if stage.phase == "write" and state["failed_stages"]:
+                state["status"] = "failed"
+                state["error"] = "failed_stage_cannot_advance_to_write"
+                break
+            try:
+                record = await self._start_stage(
+                    manifest=manifest,
+                    stage=stage,
+                    spec=spec,
+                    # Operator-declared casting wins for a stage it names; then
+                    # manifest defaults; then the baton's current agent.
+                    agent=stage_agents.get(current) or stage.agent or current_agent,
+                    model=stage_models.get(current) or stage.model,
+                    source_prompt=source_prompt,
+                    root=root,
+                    previous_reports=previous_reports,
+                    context=context,
+                    state_path=state_path,
+                    lifecycle_run_id=run_id,
+                    write_cycle=pending_cycle,
+                )
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                subprocess.SubprocessError,
+            ) as error:
+                state["status"] = "failed"
+                state["error"] = str(error)
+                break
             state["stages"].append(record)
             record.update(delivery_axes_for_receipt("launching", record.get("launch")))
             state.update(delivery_axes_for_receipt("launching", record))
@@ -825,6 +933,10 @@ class LifecycleRunner:
             self._write_state(state_path, state)
             await_result = await asyncio.to_thread(self.awaiter, record["launch"])
             read_violation = _capture_stage_completion(record, await_result, root)
+            if record.get("write_cycle"):
+                pending_cycle = dict(record["write_cycle"])
+            if (record.get("cycle_read_evidence") or {}).get("verdict") == "converged":
+                pending_cycle["read_attestation"] = record["cycle_read_evidence"]
             reported_dou = _surfaced_dou_index(await_result)
             if reported_dou is not None:
                 record["dou_index"] = reported_dou
@@ -833,9 +945,19 @@ class LifecycleRunner:
                     "stage": stage.id,
                     "report": str(record["launch"].get("report") or ""),
                 }
-            if read_violation:
+            if record["status"] != "completed":
+                state["failed_stages"].append(stage.id)
                 state["status"] = "failed"
-                state["error"] = _read_phase_violation_error(record)
+                state.pop("lifecycle_seal", None)
+                record.update(delivery_axes_for_receipt("failed", await_result))
+                state.update(delivery_axes_for_receipt("failed", record))
+                state["error"] = f"stage_failed:{stage.id}"
+            if read_violation or record.get("cycle_receipt_error"):
+                state["error"] = (
+                    _read_phase_violation_error(record)
+                    if read_violation
+                    else f"write_cycle_receipt_invalid:{record['cycle_receipt_error']}"
+                )
                 break
             # Delivery kernel: only after report validation and after the
             # stage's actual commit/worktree provenance is captured. Never
@@ -853,7 +975,11 @@ class LifecycleRunner:
                 await_result["claim_digest"] = seal_result.claim_digest
             record.update(delivery_axes_for_receipt(record["status"], await_result))
             state.update(delivery_axes_for_receipt(record["status"], record))
-            if seal_result is not None and seal_result.granted:
+            if (
+                seal_result is not None
+                and seal_result.granted
+                and not state["failed_stages"]
+            ):
                 # Propagate seal to the lifecycle run receipt (final stage wins).
                 state.update(seal_result.axes_payload())
                 state["claim_digest"] = seal_result.claim_digest
@@ -881,6 +1007,7 @@ class LifecycleRunner:
                 dou_index=_state_dou_value(state),
                 reason="awaited_stage_completed",
             )
+            state["baton"]["write_cycle"] = pending_cycle
             if not next_stage:
                 state["status"] = (
                     "completed" if record["status"] == "completed" else "failed"
@@ -890,6 +1017,10 @@ class LifecycleRunner:
         else:
             state["status"] = "completed"
 
+        if state["failed_stages"]:
+            state["status"] = "failed"
+            state.update(delivery_axes_for_receipt("failed"))
+            state.pop("lifecycle_seal", None)
         self._write_state(state_path, state)
         self._write_report(report_path, state)
         return state
@@ -908,20 +1039,50 @@ class LifecycleRunner:
         context: dict[str, Any],
         state_path: Path | None = None,
         lifecycle_run_id: str = "",
+        write_cycle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the stage prompt, capture the pre-launch git baseline, and launch the
         stage worker; returns the initial stage record (before await/completion)."""
         cuts = mission_stage_cuts(source_prompt, stage.id)
+        if stage.phase == "write" and write_cycle:
+            attestation = write_cycle.get("read_attestation") or {}
+            if attestation.get("verdict") != "converged" or attestation.get(
+                "candidate_sha"
+            ) != (write_cycle.get("output") or {}).get("head"):
+                raise ValueError("cycle_read_required_before_next_write")
+            if tree_receipt(str(root)) != write_cycle.get("output"):
+                raise ValueError("verified_cycle_source_drift_before_next_write")
         prompt = self._stage_prompt(
             manifest=manifest,
             stage=stage,
             source_prompt=source_prompt,
-            previous_reports=previous_reports,
+            previous_reports=[]
+            if stage.workflow in {"marbles", "polarize"}
+            else previous_reports,
             context=context,
             cuts=cuts,
             lifecycle_run_id=lifecycle_run_id,
         )
         stage_definition = workflow_definition(stage.workflow)
+        guarded_read = dict(write_cycle or {}) if stage.phase == "read" else {}
+        cycle_read = guarded_read if guarded_read.get("status") == "completed" else {}
+        read_source = tree_receipt(str(root)) if guarded_read else None
+        if guarded_read:
+            from types import SimpleNamespace
+
+            from .workflow_runtime import _reception_prompt
+
+            if cycle_read and read_source != cycle_read.get("output"):
+                raise ValueError("cycle_read_candidate_drift")
+            prompt = _reception_prompt(
+                str(root),
+                prompt,
+                SimpleNamespace(
+                    run_id=guarded_read["run_id"], report=previous_reports[-1]
+                ),
+                read_source,
+                [guarded_read],
+            )
         launch_spec = WorkflowLaunchSpec(
             agent=agent,
             mode=stage.workflow,
@@ -941,7 +1102,10 @@ class LifecycleRunner:
                 else None
             ),
             model=model,
+            effort=spec.effort,
             lifecycle_state_path=str(state_path or ""),
+            source_readonly=bool(guarded_read),
+            permissions="bypass" if guarded_read and agent == "codex" else "",
             claim_digest=claim_digest_for_text(source_prompt),
             run_id=_lifecycle_stage_run_id(
                 lifecycle_run_id,
@@ -987,6 +1151,9 @@ class LifecycleRunner:
             "agent": agent,
             "model_requested": model,
             "phase": stage.phase,
+            "count": (launch_spec.count or 3)
+            if stage.workflow in {"marbles", "polarize"}
+            else None,
             "can_modify_code": stage.can_modify_code,
             "tooling": list(stage.tooling),
             "transition_conditions": list(stage.transition_conditions),
@@ -999,6 +1166,8 @@ class LifecycleRunner:
             "git_snapshot_before": git_snapshot_before,
             "launch": launch,
             "status": "launching",
+            **({"cycle_read": cycle_read} if cycle_read else {}),
+            **({"read_source": read_source} if read_source else {}),
         }
         if fleet.children:
             record["fleet"] = {
@@ -1145,6 +1314,12 @@ Operator prompt:
         """Resolve the next stage id: worker-requested steering wins if manifest-known,
         else fall back to the fallback_stage on a failed artifact, else audit_after,
         else the manifest's default next_stage."""
+        if stage.workflow in {"marbles", "polarize"}:
+            following = stage.audit_after or stage.next_stage
+            target = manifest.stage(following)
+            if target is None or target.phase != "read":
+                raise ValueError("counted_cycle_requires_following_read_stage")
+            return following
         requested = str(await_result.get("next_stage") or "").strip()
         if requested and manifest.stage(requested) is not None:
             return requested
@@ -1328,7 +1503,7 @@ def record_stage_worker_completion(
         }
 
     seal_result = None
-    if not read_violation:
+    if not read_violation and not working_record.get("cycle_receipt_error"):
         spec = state.get("spec")
         spec_payload = spec if isinstance(spec, dict) else {}
         seal_result = _maybe_seal_awaited_stage(
@@ -1408,6 +1583,10 @@ def record_stage_worker_completion(
         "execution_state",
         "proof_state",
         "delivery_state",
+        "write_cycle",
+        "cycle_read_evidence",
+        "cycle_read_error",
+        "cycle_receipt_error",
     )
     for key in completion_keys:
         if key in working_record:
@@ -1423,6 +1602,12 @@ def record_stage_worker_completion(
         "settlement_sync": settlement_sync,
     }
     latest_record["worker_completion"] = completion_receipt
+    if latest_record.get("write_cycle"):
+        latest.setdefault("baton", {})["write_cycle"] = latest_record["write_cycle"]
+    if (latest_record.get("cycle_read_evidence") or {}).get("verdict") == "converged":
+        latest.setdefault("baton", {}).setdefault("write_cycle", {})[
+            "read_attestation"
+        ] = latest_record["cycle_read_evidence"]
     latest["stage_completion"] = {
         **completion_receipt,
         "stage": str(latest_record.get("id") or ""),
@@ -1440,13 +1625,28 @@ def record_stage_worker_completion(
     latest.update(
         delivery_axes_for_receipt(str(latest.get("status") or ""), latest_record)
     )
-    if seal_result is not None and seal_result.granted:
+    prior_failure = bool(latest.get("failed_stages")) or any(
+        stage.get("status") == "failed" for stage in latest_stages
+    )
+    if seal_result is not None and seal_result.granted and not prior_failure:
         latest.update(seal_result.axes_payload())
         latest["claim_digest"] = seal_result.claim_digest
         latest["lifecycle_seal"] = seal_result.to_payload()
-    if read_violation:
+    interrupted = latest.get("status") in {"interrupted", "stopped"}
+    if read_violation and not interrupted:
         latest["status"] = "failed"
         latest["error"] = _read_phase_violation_error(latest_record)
+    if failed or latest_record.get("status") == "failed":
+        if not interrupted:
+            latest["status"] = "failed"
+        failures = latest.setdefault("failed_stages", [])
+        if latest_record.get("id") not in failures:
+            failures.append(latest_record.get("id"))
+    if prior_failure or latest.get("failed_stages"):
+        latest.pop("lifecycle_seal", None)
+        latest.update(delivery_axes_for_receipt("failed"))
+        if interrupted:
+            latest["execution_state"] = ExecutionState.INTERRUPTED.value
 
     try:
         write_lifecycle_state(path, latest)
