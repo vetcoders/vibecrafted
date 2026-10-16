@@ -789,3 +789,316 @@ fn projection_cache_detects_a_replacement_that_preserves_the_mtime() {
     );
     fs::remove_dir_all(home).ok();
 }
+
+fn big_noise(bytes: usize) -> serde_json::Value {
+    json!(
+        (0..bytes / 80)
+            .map(|i| json!({"k": i, "v": "x".repeat(60)}))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// A lifecycle container the size of the real ones (`p50` ~172 KB, `p95` ~933 KB).
+fn write_big_lifecycle(
+    home: &Path,
+    run_id: &str,
+    status: &str,
+    updated_at: &str,
+    pid: Option<u32>,
+    bytes: usize,
+) -> PathBuf {
+    let dir = home.join("control_plane/lifecycle_runs").join(run_id);
+    fs::create_dir_all(&dir).unwrap();
+    let report = dir.join("report.md");
+    fs::write(&report, "---\ndou_index: 0\n---\n# report\n").unwrap();
+    let state = dir.join("state.json");
+    fs::write(
+        &state,
+        json!({
+            "run_id": run_id, "workflow": "vc-ship", "agent": "codex", "root": "/repo",
+            "status": status, "updated_at": updated_at, "pid": pid,
+            "human_controls": ["approve_transition"], "state_path": state.to_string_lossy(),
+            "report_path": report.to_string_lossy(), "transcript_path": "",
+            "spec": big_noise(bytes / 4), "context_atlas": big_noise(bytes / 4), "manifest": big_noise(bytes / 4),
+            "baton": {"from_stage": "scaffold", "next_stage": "implement", "next_agent": "codex", "dou_index": 1},
+            "stages": [{"id": "scaffold", "workflow": "scaffold", "phase": "read", "agent": "codex",
+                "status": "completed", "launch": {"report": report.to_string_lossy(), "argv": big_noise(bytes / 8)},
+                "await": {"exit_code": 0, "tail": big_noise(bytes / 8)}, "dou_index": 0}],
+            "accepted_dou_findings": [], "error": ""
+        })
+        .to_string(),
+    )
+    .unwrap();
+    state
+}
+
+fn event_line(run_id: &str, kind: &str, beat: u64) -> String {
+    format!(
+        "{}\n",
+        json!({"ts": Utc::now().to_rfc3339(), "run_id": run_id, "kind": kind,
+            "message": format!("beat {beat}"), "payload": {"beat": beat}})
+    )
+}
+
+fn append(path: &Path, text: &str) {
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+}
+
+#[test]
+fn projection_cache_matches_canonical_at_real_lifecycle_and_event_sizes() {
+    let home = temp_home("cache-realistic");
+    let now = Utc::now();
+    let old = iso_ago(now, 3600);
+    let fresh = iso_ago(now, 5);
+    let mut states = Vec::new();
+    for i in 0..20 {
+        states.push(write_big_lifecycle(
+            &home,
+            &format!("life-done-{i:02}"),
+            "completed",
+            &old,
+            None,
+            170 * 1024,
+        ));
+    }
+    states.push(write_big_lifecycle(
+        &home,
+        "life-big",
+        "completed",
+        &old,
+        None,
+        900 * 1024,
+    ));
+    states.push(write_big_lifecycle(
+        &home,
+        "life-stale",
+        "launching",
+        &old,
+        None,
+        170 * 1024,
+    ));
+    states.push(write_big_lifecycle(
+        &home,
+        "life-fresh",
+        "launching",
+        &fresh,
+        None,
+        170 * 1024,
+    ));
+    states.push(write_big_lifecycle(
+        &home,
+        "life-owned",
+        "running",
+        &old,
+        Some(std::process::id()),
+        170 * 1024,
+    ));
+    let aged = SystemTime::now() - StdDuration::from_secs(3600);
+    for state in &states {
+        fs::File::options()
+            .write(true)
+            .open(state)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+    }
+    let events = home.join("control_plane/events.jsonl");
+    let mut seed = String::new();
+    for i in 0..20_000 {
+        seed.push_str(&event_line(&format!("life-done-{:02}", i % 20), "state", i));
+    }
+    fs::write(&events, seed).unwrap();
+    assert!(fs::metadata(&events).unwrap().len() > 2_000_000);
+
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(cache.stats().event_full_reads, 1);
+    let cold = cache.stats().reads;
+    assert!(
+        cold >= states.len() as u64,
+        "every state parsed once: {cold}"
+    );
+    // The retained estimate is far below the 21 MB of text a pass used to parse.
+    let text_bytes: u64 = states.iter().map(|s| fs::metadata(s).unwrap().len()).sum();
+    eprintln!(
+        "lifecycle text {} KiB, cache charge {} KiB",
+        text_bytes / 1024,
+        cache.charged_bytes() / 1024
+    );
+
+    // Unchanged: nothing re-read or re-parsed, only the event tail asked for.
+    let before = cache.stats();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let after = cache.stats();
+    assert_eq!(
+        after.reads, before.reads,
+        "unchanged lifecycle states stay parsed"
+    );
+    assert_eq!(after.event_full_reads, 1);
+    assert!(after.event_tail_reads > before.event_tail_reads);
+
+    // Heartbeats append events; the prefix is never read again.
+    for beat in 0..5 {
+        append(&events, &event_line("life-owned", "heartbeat", beat));
+        assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    }
+    assert_eq!(
+        cache.stats().event_full_reads,
+        1,
+        "appends read only the tail"
+    );
+
+    // A half-written final line is not an event yet, and completes later.
+    append(
+        &events,
+        "{\"ts\":\"2026-10-16T00:00:00Z\",\"run_id\":\"life-owned\",\"kind\":\"hea",
+    );
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    append(&events, "rtbeat\",\"message\":\"late\",\"payload\":{}}\n");
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    assert_eq!(cache.stats().event_full_reads, 1);
+
+    // A lifecycle rewrite announced by the watcher is one read.
+    let before = cache.stats();
+    write_big_lifecycle(&home, "life-fresh", "completed", &fresh, None, 170 * 1024);
+    cache.invalidate_paths(std::slice::from_ref(&states[22]));
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    assert_eq!(reads_since(&cache, before), 1);
+
+    // Time alone turns the stale fresh container into an abandoned one, and a
+    // live owner keeps its container: both are decided on every pass.
+    let later = now + Duration::seconds(control_core::RUN_STALL_SECONDS + 10);
+    let before = cache.stats();
+    assert_cached_matches_canonical(&home, &cached, &sources, later);
+    assert_eq!(reads_since(&cache, before), 0);
+
+    // Rotation: the stream is replaced; the retained prefix must not survive it.
+    fs::rename(&events, home.join("control_plane/events.jsonl.archived")).unwrap();
+    fs::write(&events, event_line("life-owned", "state", 1)).unwrap();
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    assert_eq!(
+        cache.stats().event_full_reads,
+        2,
+        "a new inode reads in full"
+    );
+
+    // Truncation below the retained cursor, then regrowth past it.
+    fs::write(&events, "").unwrap();
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    for beat in 0..40 {
+        append(&events, &event_line("life-owned", "state", beat));
+    }
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+
+    // An in-place rewrite of the same length on the same inode.
+    let text = fs::read_to_string(&events).unwrap();
+    let rewritten = text.replacen("\"beat\":39", "\"beat\":38", 1);
+    assert_eq!(text.len(), rewritten.len());
+    assert_ne!(text, rewritten);
+    let mut file = fs::OpenOptions::new().write(true).open(&events).unwrap();
+    std::io::Write::write_all(&mut file, rewritten.as_bytes()).unwrap();
+    drop(file);
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+
+    // An explicit refresh forgets the stream too.
+    cache.invalidate_paths(&[]);
+    let before = cache.stats();
+    assert_cached_matches_canonical(&home, &cached, &sources, Utc::now());
+    assert_eq!(cache.stats().event_full_reads, before.event_full_reads + 1);
+    fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn projection_cache_of_another_home_is_never_consulted_through_the_public_call() {
+    let (home_a, home_b) = (temp_home("foreign-a"), temp_home("foreign-b"));
+    let now = Utc::now();
+    write_runtime_meta(&home_a, "only-in-a", "running", 0);
+    write_runtime_meta(&home_b, "only-in-b", "running", 0);
+    let (_, cache_a) = cached_plane(&home_a, StdDuration::from_secs(30));
+    cache_a.set_event_trust(true);
+    // A plane for B handed A's cache: it must read B, and never touch A's cache.
+    let plane_b = ControlPlane::new(&home_b).with_cache(cache_a.clone());
+    let sources = plane_b.discover_raw_sources();
+    let view = plane_b.compute_view_with_raw_sources(now, &sources);
+    assert_eq!(
+        format!("{view:?}"),
+        format!("{:?}", ControlPlane::new(&home_b).compute_view(now))
+    );
+    assert!(view.recent_runs.iter().any(|run| run.run_id == "only-in-b"));
+    assert!(!view.recent_runs.iter().any(|run| run.run_id == "only-in-a"));
+    assert_eq!(
+        cache_a.stats(),
+        CacheStats::default(),
+        "foreign cache untouched"
+    );
+    fs::remove_dir_all(home_a).ok();
+    fs::remove_dir_all(home_b).ok();
+}
+
+/// Back-date a directory's own mtime (the receipt writes inside it moved it).
+#[cfg(unix)]
+fn age_dir(path: &Path, seconds: i64) {
+    let at = (SystemTime::now() - StdDuration::from_secs(u64::try_from(seconds).unwrap()))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as libc::time_t;
+    let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+    let tv = [
+        libc::timeval {
+            tv_sec: at,
+            tv_usec: 0,
+        },
+        libc::timeval {
+            tv_sec: at,
+            tv_usec: 0,
+        },
+    ];
+    // SAFETY: valid NUL-terminated path and a two-element timeval array.
+    assert_eq!(unsafe { libc::utimes(c.as_ptr(), tv.as_ptr()) }, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn only_a_fresh_unmerged_runtime_directory_surfaces_as_a_launch() {
+    let home = temp_home("cache-fresh-launch");
+    let now = Utc::now();
+    let stale = write_runtime_meta(&home, "stale-launch", "running", 0);
+    let fresh = write_runtime_meta(&home, "fresh-launch", "running", 0);
+    // A directory without a merged snapshot: only recent movement makes it live.
+    age_file(&stale, 3600);
+    age_file(&stale.with_file_name("transcript.log"), 3600);
+    age_dir(stale.parent().unwrap(), 3600);
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    let view = cached.compute_view_with_raw_sources(now, &sources);
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let seen = |id: &str| {
+        view.active_runs
+            .iter()
+            .chain(&view.stalled_runs)
+            .chain(&view.recent_runs)
+            .any(|run| run.run_id == id)
+    };
+    assert!(seen("fresh-launch"), "a just-written launch surfaces");
+    assert!(
+        !seen("stale-launch"),
+        "an old unmerged directory is history"
+    );
+    // The stale directory was refused before its receipt was ever read.
+    let reads = cache.stats().reads;
+    fs::write(&fresh, fs::read_to_string(&fresh).unwrap()).unwrap();
+    cache.invalidate_paths(std::slice::from_ref(&fresh));
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert!(cache.stats().reads - reads <= 3, "{:?}", cache.stats());
+    fs::remove_dir_all(home).ok();
+}

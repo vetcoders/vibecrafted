@@ -91,8 +91,9 @@ pub struct ControlPlane {
 }
 
 /// A file's identity and contents-age as one `stat` reports it. Two equal
-/// stamps mean the same inode, size, mtime and ctime, so a rewrite, an atomic
-/// replacement or a swapped symlink target cannot pass for the cached bytes.
+/// stamps with native identity mean the same inode, size, mtime and ctime, so a
+/// rewrite, an atomic replacement or a swapped symlink target cannot pass for
+/// the cached bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     device: u64,
@@ -100,38 +101,55 @@ struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
     changed_ns: i128,
+    /// Whether `device`, `inode` and `changed_ns` are real operating-system
+    /// identity. Where the platform offers none, two different same-size files
+    /// with an equal mtime are indistinguishable, so an equal stamp certifies
+    /// nothing and the bytes are read again.
+    native_identity: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets unit tests exercise the platform branch that has no native identity.
+    static NO_NATIVE_IDENTITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl FileStamp {
     fn of(path: &Path) -> Option<Self> {
         let meta = fs::metadata(path).ok()?;
         #[cfg(unix)]
-        let (device, inode, changed_ns) = {
+        let (device, inode, changed_ns, native_identity) = {
             use std::os::unix::fs::MetadataExt;
             (
                 meta.dev(),
                 meta.ino(),
                 i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+                true,
             )
         };
         #[cfg(not(unix))]
-        let (device, inode, changed_ns) = (0, 0, 0);
+        let (device, inode, changed_ns, native_identity) = (0, 0, 0, false);
+        #[cfg(test)]
+        let native_identity = native_identity && !NO_NATIVE_IDENTITY.with(std::cell::Cell::get);
         Some(Self {
             device,
             inode,
             len: meta.len(),
             modified: meta.modified().ok(),
             changed_ns,
+            native_identity,
         })
     }
 
-    /// A stamp is only proof of unchanged bytes once its mtime tick is behind
-    /// us: a write in the same tick would leave the stamp unchanged.
-    fn is_settled(&self, now: SystemTime) -> bool {
-        self.modified.is_some_and(|modified| {
-            now.duration_since(modified)
-                .is_ok_and(|age| age >= PROJECTION_CACHE_SETTLE)
-        })
+    /// Whether this stamp may later certify "unchanged bytes". It needs native
+    /// identity, and its mtime tick must be behind us: a write in the same tick
+    /// would leave the stamp unchanged.
+    fn can_certify(&self, now: SystemTime) -> bool {
+        self.native_identity
+            && self.modified.is_some_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age >= PROJECTION_CACHE_SETTLE)
+            })
     }
 }
 
@@ -141,10 +159,29 @@ const PROJECTION_CACHE_SETTLE: Duration = Duration::from_secs(2);
 /// Bounds on what one reader may retain; past either the cache starts over
 /// instead of growing with the machine's whole run history.
 const PROJECTION_CACHE_MAX_ENTRIES: usize = 32_768;
+/// Approximate heap budget. Retained text counts once; a parsed `Value` is
+/// charged `PROJECTION_CACHE_PARSED_FACTOR` times its text (it is built lazily,
+/// so the charge is made up front), and a slimmed lifecycle run is charged by
+/// the same factor over its serialized size. This is an estimate, not an
+/// allocator-enforced cap: measured parsed-heap/text ratios were 1.5x for a
+/// receipt dominated by one long string, 7x for 120 short fields and 38x for
+/// arrays of tiny objects, so only `PROJECTION_CACHE_MAX_PARSED_TEXT` bounds
+/// the pathological case (per file, not in total).
 const PROJECTION_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
+/// A file larger than this is read every time and never retained.
 const PROJECTION_CACHE_MAX_FILE: usize = 4 * 1024 * 1024;
+/// A `Value` parse is retained only for texts up to this size (run receipts and
+/// snapshots are a few KB; anything larger is parsed per use and not kept).
+const PROJECTION_CACHE_MAX_PARSED_TEXT: usize = 16 * 1024;
+/// Charge factor for a retained parse: covers receipt-shaped data (1.5x-7x).
+const PROJECTION_CACHE_PARSED_FACTOR: usize = 8;
 /// More changed paths than this in one wake is a storm, not a delta.
 const PROJECTION_CACHE_MAX_INVALIDATIONS: usize = 64;
+/// The active event stream is retained incrementally only up to this size
+/// (retained events cost several times their text; not part of the budget above).
+const PROJECTION_CACHE_MAX_EVENT_BYTES: u64 = 32 * 1024 * 1024;
+/// Bytes compared at both ends of a retained event prefix before extending it.
+const EVENT_FINGERPRINT_BYTES: u64 = 128;
 
 /// How many file reads a [`ProjectionCache`] absorbed or performed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -157,6 +194,10 @@ pub struct CacheStats {
     pub stamp_hits: u64,
     /// Entries dropped because a change notification named them.
     pub invalidations: u64,
+    /// Whole-file reads of the active event stream.
+    pub event_full_reads: u64,
+    /// Reads of only the bytes appended to a retained event prefix.
+    pub event_tail_reads: u64,
 }
 
 /// One file's bytes, plus its parse when a `Value` consumer asked for it.
@@ -178,38 +219,86 @@ impl CachedBody {
             .get_or_init(|| serde_json::from_str(&self.text).ok())
             .as_ref()
     }
+
+    /// Whether the parse is kept with the bytes (small receipts) or rebuilt on
+    /// each use (large payloads that would pin far more heap than their text).
+    fn retains_parse(&self) -> bool {
+        self.text.len() <= PROJECTION_CACHE_MAX_PARSED_TEXT
+    }
 }
 
-/// A file's JSON, parsed once per distinct content and shared by reference.
-struct JsonDoc(Arc<CachedBody>);
+/// A file's JSON as a `Value`: shared with the cache for small receipts, owned
+/// for large payloads.
+enum JsonDoc {
+    Shared(Arc<CachedBody>),
+    Owned(serde_json::Value),
+}
 
 impl std::ops::Deref for JsonDoc {
     type Target = serde_json::Value;
     fn deref(&self) -> &serde_json::Value {
         static NULL: serde_json::Value = serde_json::Value::Null;
-        self.0.value().unwrap_or(&NULL)
+        match self {
+            Self::Shared(body) => body.value().unwrap_or(&NULL),
+            Self::Owned(value) => value,
+        }
     }
 }
 
-struct CachedRead {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retained {
+    Body,
+    Lifecycle,
+}
+
+struct Slot {
+    kind: Retained,
     /// `None` records that the file was absent or unreadable when last read.
     body: Option<Arc<CachedBody>>,
+    /// The slimmed, projected lifecycle run (`Retained::Lifecycle` only).
+    lifecycle: Option<Arc<LifecycleRun>>,
     /// Stamp taken before the read; `None` when the file did not stat.
     stamp: Option<FileStamp>,
-    /// Whether `stamp` outlived the settle window and may prove unchanged bytes.
-    settled: bool,
+    /// Whether `stamp` may certify unchanged bytes (see [`FileStamp::can_certify`]).
+    certifies: bool,
     /// Whether change notifications cover this path, so absence of one is evidence.
     watched: bool,
     verified: Instant,
     seen: u64,
+    /// Approximate heap this slot pins.
+    charge: usize,
+}
+
+/// The reusable part of a [`Slot`].
+struct Hit {
+    body: Option<Arc<CachedBody>>,
+    lifecycle: Option<Arc<LifecycleRun>>,
+}
+
+/// The active event stream, retained so only appended bytes are read again.
+struct EventMemo {
+    device: u64,
+    inode: u64,
+    /// End of the last complete line already folded into `events`.
+    cursor: u64,
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    events: Arc<Vec<Event>>,
 }
 
 struct CacheInner {
-    entries: HashMap<PathBuf, CachedRead>,
+    entries: HashMap<PathBuf, Slot>,
+    events: Option<EventMemo>,
     bytes: usize,
     pass: u64,
     trusting_events: bool,
     stats: CacheStats,
+}
+
+impl CacheInner {
+    fn recount(&mut self) {
+        self.bytes = self.entries.values().map(|slot| slot.charge).sum();
+    }
 }
 
 /// A watching reader's memo of file *contents* between control-plane reads.
@@ -222,7 +311,8 @@ struct CacheInner {
 /// a cache is unchanged. An entry is reused on watcher evidence only while the
 /// caller vouches that the watcher is live and only for paths it covers; for
 /// everything else, and once the trust window lapses, a matching stamp (inode,
-/// size, mtime, ctime) older than the settle window is required.
+/// size, mtime, ctime) older than the settle window is required. A cache is
+/// bound to the one home it was built for: a plane of any other home ignores it.
 pub struct ProjectionCache {
     home: PathBuf,
     canonical_home: PathBuf,
@@ -260,6 +350,7 @@ impl ProjectionCache {
             watched: Box::new(watched),
             inner: Mutex::new(CacheInner {
                 entries: HashMap::new(),
+                events: None,
                 bytes: 0,
                 pass: 0,
                 trusting_events: false,
@@ -278,6 +369,12 @@ impl ProjectionCache {
         self.lock().stats
     }
 
+    /// Approximate heap currently charged to retained files (see the budget note).
+    #[must_use]
+    pub fn charged_bytes(&self) -> usize {
+        self.lock().bytes
+    }
+
     /// Whether silence from the change watcher may stand in for a `stat`.
     /// Off while no watcher is registered: such a reader has no evidence at all.
     pub fn set_event_trust(&self, enabled: bool) {
@@ -289,6 +386,7 @@ impl ProjectionCache {
         let mut inner = self.lock();
         inner.stats.invalidations += inner.entries.len() as u64;
         inner.entries.clear();
+        inner.events = None;
         inner.bytes = 0;
     }
 
@@ -316,11 +414,7 @@ impl ProjectionCache {
             .retain(|key, _| !local.iter().any(|path| key.starts_with(path)));
         let removed = before - inner.entries.len();
         inner.stats.invalidations += removed as u64;
-        inner.bytes = inner
-            .entries
-            .values()
-            .map(|entry| entry.body.as_ref().map_or(0, |body| body.text.len()))
-            .sum();
+        inner.recount();
     }
 
     fn begin_pass(&self) {
@@ -332,93 +426,255 @@ impl ProjectionCache {
     fn end_pass(&self) {
         let mut inner = self.lock();
         let pass = inner.pass;
-        inner.entries.retain(|_, entry| entry.seen == pass);
-        inner.bytes = inner
-            .entries
-            .values()
-            .map(|entry| entry.body.as_ref().map_or(0, |body| body.text.len()))
-            .sum();
+        inner.entries.retain(|_, slot| slot.seen == pass);
+        inner.recount();
+    }
+
+    /// The retained read for `path` when it may stand in for reading it.
+    fn lookup(&self, path: &Path, kind: Retained) -> Option<Hit> {
+        let now = Instant::now();
+        let mut inner = self.lock();
+        let pass = inner.pass;
+        let trusting = inner.trusting_events;
+        let trust = self.event_trust;
+        let mut verdict = None;
+        if let Some(slot) = inner.entries.get_mut(path).filter(|slot| slot.kind == kind) {
+            slot.seen = pass;
+            if trusting && slot.watched && now.duration_since(slot.verified) < trust {
+                verdict = Some((slot.body.clone(), slot.lifecycle.clone(), true));
+            } else {
+                let unchanged = match (slot.stamp, FileStamp::of(path)) {
+                    (None, None) => true,
+                    (Some(cached), Some(current)) => slot.certifies && cached == current,
+                    _ => false,
+                };
+                if unchanged {
+                    slot.verified = now;
+                    verdict = Some((slot.body.clone(), slot.lifecycle.clone(), false));
+                }
+            }
+        }
+        match verdict {
+            Some((body, lifecycle, trusted)) => {
+                if trusted {
+                    inner.stats.trusted_hits += 1;
+                } else {
+                    inner.stats.stamp_hits += 1;
+                }
+                Some(Hit { body, lifecycle })
+            }
+            None => {
+                inner.stats.reads += 1;
+                None
+            }
+        }
+    }
+
+    /// Retain a fresh read. `stamp` was taken before the read: a write in
+    /// between leaves a stamp older than the bytes, which can only cost one
+    /// extra read, never a stale hit.
+    fn store(
+        &self,
+        path: &Path,
+        kind: Retained,
+        hit: Hit,
+        stamp: Option<FileStamp>,
+        charge: usize,
+    ) {
+        let certifies = stamp.is_some_and(|stamp| stamp.can_certify(SystemTime::now()));
+        let watched = (self.watched)(path);
+        let mut inner = self.lock();
+        if inner.entries.len() >= PROJECTION_CACHE_MAX_ENTRIES
+            || inner.bytes + charge > PROJECTION_CACHE_MAX_BYTES
+        {
+            inner.entries.clear();
+            inner.bytes = 0;
+        }
+        let pass = inner.pass;
+        inner.entries.insert(
+            path.to_path_buf(),
+            Slot {
+                kind,
+                body: hit.body,
+                lifecycle: hit.lifecycle,
+                stamp,
+                certifies,
+                watched,
+                verified: Instant::now(),
+                seen: pass,
+                charge,
+            },
+        );
+        inner.recount();
     }
 
     /// The file's text, or `None` when it cannot be read — exactly what
     /// `fs::read_to_string(path).ok()` would answer, at a fraction of the cost
     /// whenever nothing changed.
     fn read_body(&self, path: &Path) -> Option<Arc<CachedBody>> {
-        let now = Instant::now();
-        {
-            let mut inner = self.lock();
-            let pass = inner.pass;
-            let trusting = inner.trusting_events;
-            let trust = self.event_trust;
-            let mut verdict = None;
-            if let Some(entry) = inner.entries.get_mut(path) {
-                entry.seen = pass;
-                if trusting && entry.watched && now.duration_since(entry.verified) < trust {
-                    verdict = Some((entry.body.clone(), true));
-                } else {
-                    let current = FileStamp::of(path);
-                    let unchanged = match (entry.stamp, current) {
-                        (None, None) => true,
-                        (Some(cached), Some(current)) => entry.settled && cached == current,
-                        _ => false,
-                    };
-                    if unchanged {
-                        entry.verified = now;
-                        verdict = Some((entry.body.clone(), false));
-                    }
-                }
-            }
-            match verdict {
-                Some((body, trusted)) => {
-                    if trusted {
-                        inner.stats.trusted_hits += 1;
-                    } else {
-                        inner.stats.stamp_hits += 1;
-                    }
-                    return body;
-                }
-                None => inner.stats.reads += 1,
-            }
+        if let Some(hit) = self.lookup(path, Retained::Body) {
+            return hit.body;
         }
-        // The stamp precedes the read: a write in between leaves a stamp older
-        // than the bytes, which can only cost one extra read, never a stale hit.
         let stamp = FileStamp::of(path);
-        let body: Option<Arc<CachedBody>> = fs::read_to_string(path)
+        let body = fs::read_to_string(path)
             .ok()
             .map(|text| Arc::new(CachedBody::new(text)));
-        let settled = stamp.is_some_and(|stamp| stamp.is_settled(SystemTime::now()));
-        let watched = (self.watched)(path);
         let size = body.as_ref().map_or(0, |body| body.text.len());
-        let mut inner = self.lock();
-        if size > PROJECTION_CACHE_MAX_FILE {
-            inner.entries.remove(path);
-            return body;
-        }
-        if inner.entries.len() >= PROJECTION_CACHE_MAX_ENTRIES
-            || inner.bytes + size > PROJECTION_CACHE_MAX_BYTES
-        {
-            inner.entries.clear();
-            inner.bytes = 0;
-        }
-        let pass = inner.pass;
-        let replaced = inner.entries.insert(
-            path.to_path_buf(),
-            CachedRead {
-                body: body.clone(),
+        if size <= PROJECTION_CACHE_MAX_FILE {
+            let charge = match &body {
+                Some(body) if body.retains_parse() => size * (1 + PROJECTION_CACHE_PARSED_FACTOR),
+                _ => size,
+            };
+            self.store(
+                path,
+                Retained::Body,
+                Hit {
+                    body: body.clone(),
+                    lifecycle: None,
+                },
                 stamp,
-                settled,
-                watched,
-                verified: now,
-                seen: pass,
-            },
-        );
-        inner.bytes += size;
-        if let Some(old) = replaced {
-            inner.bytes = inner
-                .bytes
-                .saturating_sub(old.body.as_ref().map_or(0, |body| body.text.len()));
+                charge,
+            );
         }
         body
+    }
+
+    /// A lifecycle `state.json` as the view needs it: parsed, delivery axes
+    /// projected, and slimmed of everything `to_run_status` never reads. The
+    /// text is not retained; only this derived run is.
+    fn read_lifecycle(&self, path: &Path) -> Option<Arc<LifecycleRun>> {
+        if let Some(hit) = self.lookup(path, Retained::Lifecycle) {
+            return hit.lifecycle;
+        }
+        let stamp = FileStamp::of(path);
+        let run = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<LifecycleRun>(&text).ok())
+            .map(|run| Arc::new(slim_lifecycle(prepare_lifecycle_run(run, path))));
+        let charge = run.as_ref().map_or(0, |run| {
+            serde_json::to_vec(&**run).map_or(0, |bytes| bytes.len())
+                * PROJECTION_CACHE_PARSED_FACTOR
+        });
+        self.store(
+            path,
+            Retained::Lifecycle,
+            Hit {
+                body: None,
+                lifecycle: run.clone(),
+            },
+            stamp,
+            charge,
+        );
+        run
+    }
+
+    /// The active event stream exactly as `read_since(0)` returns it, reading
+    /// only appended bytes while the retained prefix still matches the file:
+    /// same inode, no shrink, identical bytes at both ends of the prefix. A
+    /// rotation, truncation or rewrite fails one of those and reads in full.
+    fn read_events(
+        &self,
+        path: &Path,
+        read_since: impl Fn(u64) -> std::io::Result<crate::events::EventBatch>,
+    ) -> Arc<Vec<Event>> {
+        let full = |cache: &Self| -> Arc<Vec<Event>> {
+            cache.lock().stats.event_full_reads += 1;
+            Arc::new(read_since(0).map(|batch| batch.events).unwrap_or_default())
+        };
+        let Some((device, inode, len)) = event_file_identity(path) else {
+            self.lock().events = None;
+            return full(self);
+        };
+        let memo = self.lock().events.take();
+        let mut memo = memo.filter(|memo| {
+            memo.device == device
+                && memo.inode == inode
+                && len >= memo.cursor
+                && event_fingerprint(path, memo.cursor)
+                    .is_some_and(|(head, tail)| head == memo.head && tail == memo.tail)
+        });
+        let mut extended = false;
+        if let Some(retained) = memo.as_mut() {
+            self.lock().stats.event_tail_reads += 1;
+            match read_since(retained.cursor) {
+                Ok(batch)
+                    if batch.cursor >= retained.cursor
+                        && batch
+                            .events
+                            .first()
+                            .is_none_or(|event| event.cursor > retained.cursor) =>
+                {
+                    Arc::make_mut(&mut retained.events).extend(batch.events);
+                    retained.cursor = batch.cursor;
+                    extended = true;
+                }
+                _ => {}
+            }
+        }
+        if !extended {
+            self.lock().stats.event_full_reads += 1;
+            memo = match read_since(0) {
+                Ok(batch) => Some(EventMemo {
+                    device,
+                    inode,
+                    cursor: batch.cursor,
+                    head: Vec::new(),
+                    tail: Vec::new(),
+                    events: Arc::new(batch.events),
+                }),
+                Err(_) => None,
+            };
+        }
+        let Some(mut memo) = memo else {
+            return Arc::new(Vec::new());
+        };
+        let events = Arc::clone(&memo.events);
+        if len <= PROJECTION_CACHE_MAX_EVENT_BYTES {
+            if let Some((head, tail)) = event_fingerprint(path, memo.cursor) {
+                memo.head = head;
+                memo.tail = tail;
+                self.lock().events = Some(memo);
+            }
+        }
+        events
+    }
+}
+
+/// `(device, inode, len)` of the active event stream, where the platform has
+/// native identity; `None` makes the caller read in full.
+fn event_file_identity(path: &Path) -> Option<(u64, u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).ok()?;
+        meta.is_file().then(|| (meta.dev(), meta.ino(), meta.len()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// The first and last bytes of the first `cursor` bytes of the stream: a
+/// rotation to a new generation changes the header line, an in-place rewrite
+/// changes the tail.
+fn event_fingerprint(path: &Path, cursor: u64) -> Option<(Vec<u8>, Vec<u8>)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let file = fs::File::open(path).ok()?;
+        let mut head = vec![0; usize::try_from(cursor.min(EVENT_FINGERPRINT_BYTES)).ok()?];
+        file.read_exact_at(&mut head, 0).ok()?;
+        let tail_len = cursor.min(EVENT_FINGERPRINT_BYTES);
+        let mut tail = vec![0; usize::try_from(tail_len).ok()?];
+        file.read_exact_at(&mut tail, cursor - tail_len).ok()?;
+        Some((head, tail))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, cursor);
+        None
     }
 }
 
@@ -441,6 +697,58 @@ impl Drop for CachePass<'_> {
             cache.end_pass();
         }
     }
+}
+
+/// The time-independent first half of the lifecycle read overlay: delivery
+/// axes projected onto the run and its stages, and the state path filled in.
+fn prepare_lifecycle_run(mut run: LifecycleRun, state_path: &Path) -> LifecycleRun {
+    run.project_delivery_axes();
+    if run.state_path.trim().is_empty() {
+        run.state_path = state_path.display().to_string();
+    }
+    run
+}
+
+/// The mutation an abandoned container reads with: never a human control to
+/// approve, and the reason named.
+fn mark_lifecycle_abandoned(run: &mut LifecycleRun, age: &str) {
+    run.status = "abandoned".to_string();
+    run.human_controls.clear();
+    run.error = format!("no live owner for {age}");
+}
+
+/// Drop what the flat view never reads from a prepared lifecycle run:
+/// `to_run_status`, `summary`, the abandonment overlay and the report-path
+/// helpers use run-level fields and only the *last* stage's id, dou index,
+/// `await.exit_code` and `launch.report`. The equivalence is pinned by
+/// `slim_lifecycle_run_projects_identically`; extend both together.
+fn slim_lifecycle(mut run: LifecycleRun) -> LifecycleRun {
+    run.spec = serde_json::Value::Null;
+    run.context_atlas = serde_json::Value::Null;
+    run.manifest = serde_json::Value::Null;
+    run.accepted_dou = Some(
+        run.accepted_dou
+            .unwrap_or(i64::try_from(run.accepted_dou_findings.len()).unwrap_or(i64::MAX)),
+    );
+    run.accepted_dou_findings = Vec::new();
+    run.baton.previous_reports = Vec::new();
+    if run.stages.len() > 1 {
+        run.stages.drain(..run.stages.len() - 1);
+    }
+    if let Some(stage) = run.stages.last_mut() {
+        let keep = |value: &serde_json::Value, key: &str| {
+            let mut kept = serde_json::Map::new();
+            if let Some(found) = value.get(key) {
+                kept.insert(key.to_string(), found.clone());
+            }
+            serde_json::Value::Object(kept)
+        };
+        stage.launch = keep(&stage.launch, "report");
+        stage.await_result = keep(&stage.await_result, "exit_code");
+        stage.changed_files = Vec::new();
+        stage.new_commits = Vec::new();
+    }
+    run
 }
 
 /// Opaque raw-source inventory for a watching reader. Paths are scoped to the
@@ -522,10 +830,12 @@ impl ControlPlane {
     }
 
     /// The same plane reading through a long-lived reader's [`ProjectionCache`].
-    /// The cache must have been built for this plane's home.
+    /// A cache is bound to the home it was built for; for a plane of any other
+    /// home it is ignored (fail closed), so another plane's receipts can never
+    /// be served here.
     #[must_use]
     pub fn with_cache(mut self, cache: Arc<ProjectionCache>) -> Self {
-        self.cache = Some(cache);
+        self.cache = (cache.home == self.home).then_some(cache);
         self
     }
 
@@ -543,8 +853,12 @@ impl ControlPlane {
     /// plane has a cache. `None` for an unreadable file or invalid JSON.
     fn read_value_at(&self, path: &Path) -> Option<JsonDoc> {
         let body = self.read_text_at(path)?;
-        body.value()?;
-        Some(JsonDoc(body))
+        if body.retains_parse() {
+            body.value()?;
+            Some(JsonDoc::Shared(body))
+        } else {
+            serde_json::from_str(&body.text).ok().map(JsonDoc::Owned)
+        }
     }
 
     fn read_run_status_at(&self, path: &Path, probe_worker_alive: bool) -> Option<RunStatus> {
@@ -1039,13 +1353,18 @@ impl ControlPlane {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if known.contains(&name) {
+            // Cheapest refusals first: a stale directory is history, not a
+            // fresh launch, and resolving one reads, parses and projects its
+            // receipt only to have it dropped. `resolve_runtime_run` has no
+            // side effects, so the order cannot change the result.
+            if known.contains(&name)
+                || !is_safe_run_id(&name)
+                || !self.runtime_run_is_fresh(&name, now)
+            {
                 continue;
             }
             if let Some(run) = self.resolve_runtime_run(&name) {
-                if !runs.iter().any(|existing| existing.run_id == run.run_id)
-                    && self.runtime_run_is_fresh(&run.run_id, now)
-                {
+                if !runs.iter().any(|existing| existing.run_id == run.run_id) {
                     runs.push(run);
                 }
             }
@@ -1067,10 +1386,12 @@ impl ControlPlane {
         let mut routes = BTreeMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(directory_meta) = fs::symlink_metadata(&path) else {
+            // The entry's own type (never followed), straight from the
+            // directory listing instead of one `lstat` per run directory.
+            let Ok(directory_type) = entry.file_type() else {
                 continue;
             };
-            if directory_meta.file_type().is_symlink() || !directory_meta.is_dir() {
+            if directory_type.is_symlink() || !directory_type.is_dir() {
                 continue;
             }
             let Some(directory_run_id) = entry.file_name().to_str().map(str::to_string) else {
@@ -1109,7 +1430,7 @@ impl ControlPlane {
             return None;
         }
         let state_path = self.lifecycle_run_dir(target).join("state.json");
-        let run = self.read_json_at::<LifecycleRun>(&state_path)?;
+        let run = read_json::<LifecycleRun>(&state_path)?;
         if run.run_id == target {
             Some(self.project_lifecycle_read(run, &state_path, Utc::now()))
         } else {
@@ -1131,7 +1452,7 @@ impl ControlPlane {
                 continue;
             }
             let state_path = entry.path().join("state.json");
-            let Some(run) = self.read_json_at::<LifecycleRun>(&state_path) else {
+            let Some(run) = read_json::<LifecycleRun>(&state_path) else {
                 continue;
             };
             if !is_safe_run_id(&run.run_id) {
@@ -1180,7 +1501,7 @@ impl ControlPlane {
         state_paths
             .into_iter()
             .filter_map(|(_, state_path)| {
-                let run = self.read_json_at::<LifecycleRun>(&state_path)?;
+                let run = read_json::<LifecycleRun>(&state_path)?;
                 if run.run_id.is_empty() {
                     return None;
                 }
@@ -1215,41 +1536,83 @@ impl ControlPlane {
     /// derivation as [`Self::compute_view`], not a second policy.
     fn project_lifecycle_read(
         &self,
-        mut run: LifecycleRun,
+        run: LifecycleRun,
         state_path: &Path,
         now: DateTime<Utc>,
     ) -> LifecycleRun {
-        run.project_delivery_axes();
-        if run.state_path.trim().is_empty() {
-            run.state_path = state_path.display().to_string();
+        let mut run = prepare_lifecycle_run(run, state_path);
+        if let Some(age) = self.lifecycle_abandoned_age(&run, now) {
+            mark_lifecycle_abandoned(&mut run, &age);
         }
+        run
+    }
+
+    /// The age label when a prepared lifecycle container has become abandoned:
+    /// not final, no live owner pid, and no movement past [`RUN_STALL_SECONDS`].
+    /// Time- and liveness-dependent, so it is decided on every read.
+    fn lifecycle_abandoned_age(&self, run: &LifecycleRun, now: DateTime<Utc>) -> Option<String> {
         if is_final_state(&run.status) {
-            return run;
+            return None;
         }
         let owner_live = [run.pid, run.owner_pid, run.launcher_pid]
             .into_iter()
             .flatten()
             .any(pid_is_alive);
         if owner_live {
-            return run;
+            return None;
         }
         let updated_at = if run.updated_at.trim().is_empty() {
-            self.lifecycle_run_updated_at(&run)
+            self.lifecycle_run_updated_at(run)
         } else {
             run.updated_at.clone()
         };
         let age_secs = parse_iso(&updated_at)
             .map(|updated| (now - updated).num_seconds())
             .unwrap_or(i64::MAX);
-        if age_secs > RUN_STALL_SECONDS {
-            let age = parse_iso(&updated_at)
+        (age_secs > RUN_STALL_SECONDS).then(|| {
+            parse_iso(&updated_at)
                 .map(|updated| age_label(updated, now))
-                .unwrap_or_else(|| "unknown age".to_string());
-            run.status = "abandoned".to_string();
-            run.human_controls.clear();
-            run.error = format!("no live owner for {age}");
+                .unwrap_or_else(|| "unknown age".to_string())
+        })
+    }
+
+    /// [`Self::iter_lifecycle_run_status`] for a plane with a cache: the same
+    /// directory walk, ordering and abandonment overlay, but each state file is
+    /// parsed once per distinct content and shared, never cloned unless the
+    /// container is abandoned this pass.
+    fn lifecycle_run_statuses(&self) -> Vec<RunStatus> {
+        let Some(cache) = &self.cache else {
+            return self.iter_lifecycle_run_status();
+        };
+        let Ok(entries) = fs::read_dir(self.lifecycle_runs_dir()) else {
+            return Vec::new();
+        };
+        let mut runs = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let state_path = entry.path().join("state.json");
+            let Some(run) = cache.read_lifecycle(&state_path) else {
+                continue;
+            };
+            if !is_safe_run_id(&run.run_id) {
+                continue;
+            }
+            let run = match self.lifecycle_abandoned_age(&run, Utc::now()) {
+                Some(age) => {
+                    let mut abandoned = (*run).clone();
+                    mark_lifecycle_abandoned(&mut abandoned, &age);
+                    Arc::new(abandoned)
+                }
+                None => run,
+            };
+            runs.push((modified_at(&state_path), run));
         }
-        run
+        runs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        runs.iter()
+            .map(|(_, run)| self.lifecycle_run_status(run))
+            .collect()
     }
 
     /// One run as [`compute_view`] would show it, else the single-id lookup.
@@ -1352,7 +1715,7 @@ impl ControlPlane {
     }
 
     fn append_discoverable_lifecycle_runs(&self, merged: &mut Vec<RunStatus>) {
-        for mut run in self.iter_lifecycle_run_status() {
+        for mut run in self.lifecycle_run_statuses() {
             let abandoned = run.state == "abandoned";
             if !merged.iter().any(|existing| existing.run_id == run.run_id)
                 && (run.is_terminal() || abandoned || run.health == "active")
@@ -1368,6 +1731,23 @@ impl ControlPlane {
                 }
                 merged.push(run);
             }
+        }
+    }
+
+    /// The whole active event segment, as `read_since(0)` reads it. A plane
+    /// with a cache reads only the bytes appended since its last pass.
+    fn read_active_events(&self) -> Arc<Vec<Event>> {
+        let stream = self.events();
+        match &self.cache {
+            Some(cache) => cache.read_events(&self.event_stream_path(), |cursor| {
+                stream.read_since(cursor, &[])
+            }),
+            None => Arc::new(
+                stream
+                    .read_since(0, &[])
+                    .map(|batch| batch.events)
+                    .unwrap_or_default(),
+            ),
         }
     }
 
@@ -1505,12 +1885,12 @@ impl ControlPlane {
         // Python sync_state folds the event stream after raw sources. The
         // Mission Control active total must use the same projection; counting
         // every durable runtime_runs/ directory resurrects old workers.
-        let mut events = self
-            .events()
-            .read_since(0, &[])
-            .map(|batch| batch.events)
-            .unwrap_or_default();
-        events.retain(|event| !event_has_test_provenance(event, &self.home));
+        let all_events = self.read_active_events();
+        // Borrowed, never cloned: only the tail the view shows is copied out.
+        let events: Vec<&Event> = all_events
+            .iter()
+            .filter(|event| !event_has_test_provenance(event, &self.home))
+            .collect();
         let worker_pid_candidates: HashSet<(String, i64)> = events
             .iter()
             .filter(|event| event_owner_pid(event).is_none_or(pid_is_alive))
@@ -1601,7 +1981,13 @@ impl ControlPlane {
         quarantine_test_runs(&mut merged);
 
         sort_recent_first(&mut merged);
-        (merged, settlement_counts, events)
+        // Both callers show at most the last EVENT_TAIL_LIMIT events.
+        let keep = events.len().saturating_sub(crate::model::EVENT_TAIL_LIMIT);
+        let tail: Vec<Event> = events[keep..]
+            .iter()
+            .map(|event| (*event).clone())
+            .collect();
+        (merged, settlement_counts, tail)
     }
 
     fn project_view(&self, runs: Vec<RunStatus>, settlement_counts: SettlementBoard) -> StateView {
@@ -4064,5 +4450,194 @@ mod rglob_listing_tests {
         assert_eq!(metas(&root), ["org/repo/2026_0925/c.meta.json"]);
         fs::remove_dir_all(&root).unwrap();
         assert!(metas(&root).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod projection_cache_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_home(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "control-core-cache-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(home.join("control_plane")).expect("home");
+        home
+    }
+
+    fn cache_for(home: &Path) -> (ControlPlane, Arc<ProjectionCache>) {
+        let plain = ControlPlane::new(home);
+        let cache = Arc::new(ProjectionCache::new(
+            &plain,
+            Duration::from_secs(30),
+            |_| true,
+        ));
+        (plain.with_cache(Arc::clone(&cache)), cache)
+    }
+
+    fn age(path: &Path, mtime: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_stamp_without_native_identity_never_certifies_unchanged_bytes() {
+        let home = temp_home("no-identity");
+        let file = home.join("control_plane/receipt.json");
+        let aged = SystemTime::now() - Duration::from_secs(3600);
+        fs::write(&file, r#"{"owner":"first!"}"#).unwrap();
+        age(&file, aged);
+        let (_, cache) = cache_for(&home);
+
+        // Control: with native identity the settled stamp is reused.
+        assert!(cache.read_body(&file).is_some());
+        assert!(cache.read_body(&file).is_some());
+        assert_eq!(cache.stats().stamp_hits, 1, "native identity certifies");
+
+        // Counterexample: where the platform offers no identity, a different
+        // same-size file carrying the same mtime is indistinguishable by stamp.
+        NO_NATIVE_IDENTITY.with(|flag| flag.set(true));
+        cache.clear();
+        let before = cache.stats();
+        assert_eq!(
+            cache.read_body(&file).unwrap().text,
+            r#"{"owner":"first!"}"#
+        );
+        let staged = file.with_extension("next");
+        fs::write(&staged, r#"{"owner":"other!"}"#).unwrap();
+        age(&staged, aged);
+        fs::rename(&staged, &file).unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().len(), 18);
+        let reread = cache.read_body(&file).unwrap();
+        NO_NATIVE_IDENTITY.with(|flag| flag.set(false));
+        assert_eq!(
+            reread.text, r#"{"owner":"other!"}"#,
+            "the replacement is read"
+        );
+        let after = cache.stats();
+        assert_eq!(
+            after.stamp_hits, before.stamp_hits,
+            "no stamp certified anything"
+        );
+        assert_eq!(after.reads - before.reads, 2);
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn a_stamp_proves_nothing_until_its_tick_is_behind_us() {
+        let now = SystemTime::now();
+        let stamp = |modified: SystemTime, native| FileStamp {
+            device: 1,
+            inode: 2,
+            len: 3,
+            modified: Some(modified),
+            changed_ns: 4,
+            native_identity: native,
+        };
+        assert!(stamp(now - Duration::from_secs(5), true).can_certify(now));
+        assert!(!stamp(now - Duration::from_secs(1), true).can_certify(now));
+        assert!(!stamp(now - Duration::from_secs(5), false).can_certify(now));
+        assert!(!stamp(now + Duration::from_secs(5), true).can_certify(now));
+    }
+
+    #[test]
+    fn a_cache_is_ignored_by_a_plane_of_another_home() {
+        let (home_a, home_b) = (temp_home("home-a"), temp_home("home-b"));
+        let (_, cache_a) = cache_for(&home_a);
+        let foreign = ControlPlane::new(&home_b).with_cache(Arc::clone(&cache_a));
+        assert!(foreign.cache.is_none(), "a foreign cache fails closed");
+        let own = ControlPlane::new(&home_a).with_cache(cache_a);
+        assert!(own.cache.is_some());
+        fs::remove_dir_all(home_a).ok();
+        fs::remove_dir_all(home_b).ok();
+    }
+
+    fn heavy_lifecycle(status: &str, stages: usize) -> LifecycleRun {
+        let noise = |n: usize| {
+            json!(
+                (0..n)
+                    .map(|i| json!({"k": i, "v": "x".repeat(64)}))
+                    .collect::<Vec<_>>()
+            )
+        };
+        let stage = |i: usize| {
+            json!({
+                "id": format!("stage-{i}"), "name": "S", "workflow": "implement", "phase": "write",
+                "agent": "codex", "status": "completed",
+                "launch": {"report": "/nonexistent/stage-report.md", "argv": noise(30)},
+                "await": {"exit_code": 3 + i, "tail": noise(30)},
+                "commit_before": "a", "commit_after": "b",
+                "changed_files": ["a", "b"], "new_commits": ["c"],
+                "transition": {"next_stage": "audit", "requested_next_stage": "", "next_agent": "codex",
+                    "requested_next_agent": "", "conditions": ["x"], "fallback_stage": "", "audit_after": ""},
+                "dou_index": i
+            })
+        };
+        serde_json::from_value(json!({
+            "run_id": "heavy", "workflow": "vc-ship", "agent": "codex", "root": "/repo",
+            "status": status, "updated_at": "2026-01-01T00:00:00Z", "pid": null,
+            "operator_actions": [{"action": "approve_transition", "at": "t", "details": noise(5)}],
+            "spec": noise(40), "context_atlas": noise(80), "manifest": noise(80),
+            "human_controls": ["approve_transition"], "state_path": "", "report_path": "/nonexistent/report.md",
+            "transcript_path": "/nonexistent/t.log",
+            "baton": {"from_stage": "scaffold", "next_stage": "implement", "next_agent": "codex",
+                "previous_reports": ["/a", "/b"], "dou_index": 2},
+            "stages": (0..stages).map(stage).collect::<Vec<_>>(),
+            "accepted_dou_findings": noise(25), "error": "boom"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn slim_lifecycle_run_projects_identically() {
+        let state_path = Path::new("/h/control_plane/lifecycle_runs/heavy/state.json");
+        let now = Utc::now();
+        for status in [
+            "launching",
+            "running",
+            "completed",
+            "failed",
+            "abandoned",
+            "",
+        ] {
+            for stages in [0, 1, 5] {
+                let full = prepare_lifecycle_run(heavy_lifecycle(status, stages), state_path);
+                let slim = slim_lifecycle(full.clone());
+                assert!(slim.stages.len() <= 1 && slim.context_atlas.is_null());
+                for (updated, dou) in [
+                    ("2026-01-01T00:00:00Z", None),
+                    ("fresh", Some(0)),
+                    ("", Some(4)),
+                ] {
+                    assert_eq!(
+                        format!("{:?}", full.to_run_status(updated.to_string(), dou)),
+                        format!("{:?}", slim.to_run_status(updated.to_string(), dou)),
+                        "status={status} stages={stages} updated={updated:?}"
+                    );
+                    assert_eq!(
+                        format!("{:?}", full.summary(updated.to_string(), dou)),
+                        format!("{:?}", slim.summary(updated.to_string(), dou)),
+                    );
+                }
+                assert_eq!(
+                    crate::model::lifecycle_next_action(&full, "2026-01-01T00:00:00Z", now),
+                    crate::model::lifecycle_next_action(&slim, "2026-01-01T00:00:00Z", now)
+                );
+                assert_eq!(
+                    full.stages.last().and_then(|s| s.launch.get("report")),
+                    slim.stages.last().and_then(|s| s.launch.get("report"))
+                );
+            }
+        }
     }
 }
