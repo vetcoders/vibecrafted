@@ -1024,11 +1024,25 @@ def test_pinned_pane_stays_when_a_helper_subshell_exits(tmp_path: Path) -> None:
     ]
 
 
-def _install_interactive_profile(tmp_path: Path) -> Path:
+def _install_interactive_profile(
+    tmp_path: Path,
+    *,
+    source_revision: str | None = None,
+) -> Path:
     product = tmp_path / ".config" / "vibecrafted" / "vc-terminal"
     product.mkdir(parents=True, exist_ok=True)
     target = product / "interactive.zsh"
-    target.write_text(PROFILE.read_text(encoding="utf-8"), encoding="utf-8")
+    if source_revision is None:
+        source = PROFILE.read_text(encoding="utf-8")
+    else:
+        source = subprocess.run(
+            ["git", "show", f"{source_revision}:config/vc-terminal/interactive.zsh"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    target.write_text(source, encoding="utf-8")
     return target
 
 
@@ -1111,7 +1125,7 @@ def _make_installed_generation(
     [
         ("", ""),
         ('[terminal]\nquick_cmd_profile = "product"\n', ""),
-        ('[terminal]\nquick_cmd_profile = "personal"\n', "does not support personal"),
+        ('[terminal]\nquick_cmd_profile = "personal"\n', ""),
         ('[terminal]\nquick_cmd_profile = "invalid"\n', "invalid terminal config"),
         (
             '[terminal\nquick_cmd_profile = "personal"\n',
@@ -1129,11 +1143,21 @@ def test_quick_cmd_retained_generation_profile_resolution(
     core_revision: str,
 ) -> None:
     """Exercise both the historical core and an always-available API fixture."""
-    _install_interactive_profile(tmp_path)
     gen = _make_installed_generation(
         tmp_path,
         version="4.4.0+g3ff1a3f5",
         core_revision=core_revision,
+    )
+    _install_interactive_profile(
+        tmp_path,
+        source_revision=None
+        if core_revision == "without-terminal-preferences"
+        else core_revision,
+    )
+    expected_profile = (
+        "personal"
+        if 'quick_cmd_profile = "personal"' in settings and not diagnostic
+        else "product"
     )
     config = tmp_path / "private-config" / "vibecrafted"
     config.mkdir(parents=True)
@@ -1154,8 +1178,8 @@ def test_quick_cmd_retained_generation_profile_resolution(
     result, events = _run_quick_cmd(
         tmp_path,
         'print -r -- "PROFILE=$_VC_QUICK_CMD_PROFILE ROOT=$VIBECRAFTED_RUNTIME_ROOT '
-        'PY=$_VC_QUICK_PYTHON PIN=$RETAINED_PIN"; probe retained\nprobe skipped\n',
-        panes=[{"id": "terminal_18", "is_pinned": False}],
+        'PY=$_VC_QUICK_PYTHON PIN=$RETAINED_PIN"; probe retained\nprobe second\n',
+        panes=[{"id": "terminal_18", "is_pinned": expected_profile == "personal"}],
         extra_env={
             "VIBECRAFTED_RUNTIME_ROOT": str(gen),
             "XDG_CONFIG_HOME": str(config.parent),
@@ -1170,15 +1194,45 @@ def test_quick_cmd_retained_generation_profile_resolution(
     assert diagnostic in result.stderr
     if not diagnostic:
         assert "vc-quick-cmd:" not in result.stderr, result.stderr
-    if "does not support personal" in diagnostic:
-        assert "new session" in result.stderr
-        assert str(gen) in result.stderr
     assert (
-        f"PROFILE=product ROOT={gen} PY={gen}/bin/python3 PIN=selected" in result.stdout
+        f"PROFILE={expected_profile} ROOT={gen} PY={gen}/bin/python3 PIN=selected"
+        in result.stdout
     )
+    expected_events = ["ran retained", "frame action list-panes --json --state"]
+    if expected_profile == "personal":
+        assert sentinel.read_text().splitlines() == ["loaded"]
+        expected_events += ["ran second", "frame action list-panes --json --state"]
+    else:
+        assert not sentinel.exists()
+    assert events == expected_events + ["frame action close-pane --pane-id terminal_18"]
+
+
+def test_quick_cmd_reports_actual_missing_personal_shell_capability(
+    tmp_path: Path,
+) -> None:
+    profile = _install_interactive_profile(tmp_path)
+    profile.write_text("# Retained product profile without personal-shell support.\n")
+    gen = _make_installed_generation(tmp_path)
+    (tmp_path / ".config/vibecrafted/config.toml").write_text(
+        '[terminal]\nquick_cmd_profile = "personal"\n'
+    )
+    sentinel = tmp_path / "personal.log"
+    (tmp_path / ".zshrc").write_text(f'print loaded >> "{sentinel}"\n')
+    result, events = _run_quick_cmd(
+        tmp_path,
+        'print -r -- "PROFILE=$_VC_QUICK_CMD_PROFILE"; probe product\nprobe skipped\n',
+        panes=[{"id": "terminal_18", "is_pinned": False}],
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(gen)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "does not support personal" in result.stderr
+    assert str(profile) in result.stderr
+    assert "Update the product profile" in result.stderr
+    assert "PROFILE=product" in result.stdout
     assert not sentinel.exists()
     assert events == [
-        "ran retained",
+        "ran product",
         "frame action list-panes --json --state",
         "frame action close-pane --pane-id terminal_18",
     ]

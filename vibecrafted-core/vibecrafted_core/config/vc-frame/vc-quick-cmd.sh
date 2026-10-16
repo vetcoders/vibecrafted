@@ -111,7 +111,6 @@ if [[ -n "$_vc_quick_core_sh" ]] && source "$_vc_quick_core_sh" 2>/dev/null; the
     _pref_out=""
     _pref_rc=0
     _pref_out="$("$_py" -I - "$_core_dir" <<'PY'
-import os
 import sys
 import tomllib
 
@@ -120,6 +119,7 @@ from vibecrafted_core import server_config
 
 # Use the public loader of the selected generation, independently of its CLI.
 # Retained cores predating terminal preferences still own config_path().
+# Validate this setting locally when that core has no terminal config loader.
 loader = getattr(server_config, "load_terminal_config", None)
 try:
     if loader is not None:
@@ -158,16 +158,6 @@ except server_config.ServerConfigError as exc:
     print("product")
     raise SystemExit(0) from exc
 
-if loader is None and profile == "personal":
-    root = os.environ.get("VIBECRAFTED_RUNTIME_ROOT", sys.argv[1])
-    print(
-        f"vc-quick-cmd: selected runtime {root} does not support personal Quick cmd "
-        "preferences; using product. Open a new session on an updated runtime "
-        "to apply terminal.quick_cmd_profile=personal.",
-        file=sys.stderr,
-    )
-    print("product")
-    raise SystemExit(0)
 print(profile)
 PY
 )" || _pref_rc=$?
@@ -218,6 +208,9 @@ _vc_quick_profile="$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"
 if [[ "${_VC_QUICK_CMD_PROFILE:-product}" == "personal" ]] && [[ -z "${_VC_TERMINAL_PERSONAL_SHELL:-}" ]]; then
   if (( $+functions[personal-shell] )); then
     personal-shell
+  else
+    print -u2 -r -- "vc-quick-cmd: product profile ${_vc_quick_profile} does not support personal Quick cmd (personal-shell is unavailable); using product. Update the product profile and open a new session to apply terminal.quick_cmd_profile=personal."
+    export _VC_QUICK_CMD_PROFILE=product
   fi
 fi
 
