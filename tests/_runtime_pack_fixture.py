@@ -22,6 +22,93 @@ from scripts import vetcoders_install as installer
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def framework_python_delegate() -> Path | None:
+    """The exact Framework app a Homebrew ``python3.x`` trampoline posix_spawns.
+
+    ``bin/python3.14`` admitted alone is not enough under a process-exec fence:
+    it immediately spawns this one executable. Nothing broader is implied.
+    """
+    if not sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        return None
+    delegate = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+    assert delegate.is_file()
+    return delegate.resolve()
+
+
+def private_native_copy(
+    source: Path,
+    destination: Path,
+    probe_args: tuple[str, ...],
+    *,
+    sign_command: Callable[[list[str]], list[str]] = lambda command: command,
+) -> Path:
+    """Copy a system executable to a private path where it really executes.
+
+    The copied platform binary is ad-hoc signed locally, then exec-probed with
+    ``probe_args``. macOS 15 ships these tools as x86_64 + arm64e only, and a
+    non-Apple arm64e slice is killed (SIGKILL) at exec, so the whole-file copy
+    can be unrunnable there. Falling back to a thin slice runs the genuine
+    native bytes (x86_64 via Rosetta) with their real behavior. A candidate is
+    accepted only after an actual execution; none runnable is a loud failure.
+    """
+    assert sys.platform == "darwin"
+    archs = subprocess.run(
+        ["/usr/bin/lipo", "-archs", str(source)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # arm64e is never retried thin: the whole copy already carries that slice.
+    candidates: list[str | None] = [
+        None,
+        *(a for a in ("arm64", "x86_64") if a in archs),
+    ]
+    attempts: list[str] = []
+    for arch in candidates:
+        label = arch or "whole-file"
+        destination.unlink(missing_ok=True)
+        if arch is None:
+            shutil.copyfile(source, destination)
+            assert destination.read_bytes() == source.read_bytes()
+        else:
+            subprocess.run(
+                [
+                    "/usr/bin/lipo",
+                    str(source),
+                    "-thin",
+                    arch,
+                    "-output",
+                    str(destination),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        destination.chmod(0o755)
+        subprocess.run(
+            sign_command(
+                ["/usr/bin/codesign", "--force", "--sign", "-", str(destination)]
+            ),
+            check=True,
+            capture_output=True,
+        )
+        probe = subprocess.run(
+            [str(destination), *probe_args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            return destination
+        attempts.append(
+            f"{label}: rc={probe.returncode} {probe.stderr.strip()[:120]!r}"
+        )
+    destination.unlink(missing_ok=True)
+    raise AssertionError(
+        f"no runnable private copy of {source} (archs={archs}): " + "; ".join(attempts)
+    )
+
+
 def private_child_command(
     command: list[str],
     *,
@@ -88,12 +175,8 @@ def private_child_command(
         for p in (Path(tool), Path(tool).resolve())
     }
     paths.update((Path(sys.executable).resolve(), *(p.resolve() for p in allowed)))
-    if sysconfig.get_config_var("PYTHONFRAMEWORK"):
-        framework_python = (
-            Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
-        )
-        assert framework_python.is_file()
-        paths.add(framework_python.resolve())
+    if framework_python := framework_python_delegate():
+        paths.add(framework_python)
     for python in (
         Path("/Library/Developer/CommandLineTools/usr/bin/python3"),
         Path(

@@ -60,7 +60,11 @@ import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import bind_private_terminal_wrapper, private_child_command
+from _runtime_pack_fixture import (
+    bind_private_terminal_wrapper,
+    private_child_command,
+    private_native_copy,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_CORE_DIR = REPO_ROOT / "vibecrafted-core"
@@ -4185,16 +4189,16 @@ def _run_with_owned_terminal_ancestor(
     # There is a real PTY and real kernel process ancestry; no GUI/provider.
     host = host or scene.generation / "libexec/vc-terminal"
     host.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile("/bin/bash", host)
-    host.chmod(0o755)
     if sys.platform == "darwin":
         # Apple's copied platform binary otherwise dies before main. This
-        # private process fixture gets a local ad-hoc signature, no app build.
-        subprocess.run(
-            ["/usr/bin/codesign", "--force", "--sign", "-", str(host)],
-            check=True,
-            capture_output=True,
+        # private process fixture gets a local ad-hoc signature, no app build;
+        # macOS 15's arm64e-only slice is replaced by one that really executes.
+        private_native_copy(
+            Path("/bin/bash"), host, ("--noprofile", "--norc", "-c", "echo ready")
         )
+    else:
+        shutil.copyfile("/bin/bash", host)
+        host.chmod(0o755)
     script = _entry_script(scene, invocation)
     child = shlex.join(_shell_argv("bash", script))
     parent = [str(host), "--noprofile", "--norc", "-c", child + "; :"]

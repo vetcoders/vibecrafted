@@ -9,6 +9,92 @@ Workerzy są ślepi z premedytacją.
 
 Warstwa odbioru wyników (reception) to jedyne miejsce, któremu wolno pamiętać.
 
+## Obecny sekwencyjny kontrakt core
+
+`workflow_runtime.run_marbles` jest właścicielem sekwencji WRITE → READ →
+reception → następny WRITE. Czeka na każdą fazę; nie używa dawnego shellowego
+watchera ani weryfikacji „odpal i zapomnij". Research i polarize zachowują własne
+kontrakty.
+
+Każdy worker WRITE dostaje niezmienione zadanie i aktualne przydzielone drzewo,
+jeden ograniczony cut, commit i raport. Odbiorca może wznowić ukończoną sesję
+providera przez zweryfikowany natywny adapter; w przeciwnym razie startuje świeżą,
+poinformowaną sesję READ u tego samego providera. Ten fallback jest zapisywany,
+nigdy nie jest przedstawiany jako natywny resume. Poprzednie raporty, findingi
+i metryki należą wyłącznie do warstwy odbioru.
+
+Odbiorca emituje raport przez stdout; artefakt zapisuje runtime. Na macOS profil
+write-deny `sandbox-exec` chroni przydzielone źródła i współdzielone metadane Gita,
+niezależnie od flag uprawnień providera. Artefakty i magazyny providera poza tą
+granicą pozostają zapisywalne. Wewnętrzny sandbox narzędzi Codexa jest jawnie
+omijany **wyłącznie wewnątrz tej zewnętrznej granicy źródeł/Gita**, istniejącą
+kanoniczną komendą bypass. Zagnieżdżone restrykcyjne profile sandboxa Codexa
+kończą się błędem przed startem komend; samo natywne read-only odmawia też
+zewnętrznych wyjść bramek. Potwierdzenie zapisuje zewnętrzne wymuszenie i wewnętrzny
+bypass osobno. Nieopłacana regresja natywnych komend dowodzi, że odczyty i zewnętrzne
+wyjścia działają, a zapisy do źródeł i współdzielonego Gita są odrzucane. Potwierdzenie
+treści/gałęzi/HEAD sprzed i po READ musi się zgadzać.
+Linux i inne hosty bez zweryfikowanego strażnika źródeł na razie blokują reception
+kodem `receiver_source_guard_unavailable`; przenośne wymuszenie pozostaje niezweryfikowane.
+
+READ nigdy nie dziedziczy instrukcji edycji/commitu/touch z zadania jako uprawnienia
+do zapisu. Weryfikacja musi używać zwykłych dzierżaw współdzielonego targetu
+i istniejących zewnętrznych ścieżek wyjścia. Wyłącz cache źródeł Pythona, a tymczasowe
+wyjścia umieszczaj poza źródłami. Jeśli bramka wymaga dotykania źródeł lub
+niedostępnego wykonania, zapisz bramkę jako nieznaną, a zakres jako niepełny. Nigdy
+nie osłabiaj strażnika źródeł ani nie wymyślaj zaliczonego sprawdzenia.
+
+Raport musi zawierać dokładnie jeden ogrodzony dokument JSON `marbles-reception`:
+
+```json
+{
+  "schema": "vibecrafted.marbles-reception.v1",
+  "candidate_run_id": "exact WRITE run id",
+  "candidate_sha": "exact current full HEAD",
+  "root": "exact assigned absolute root",
+  "scope_verified": true,
+  "scope_evidence": "Concrete coverage evidence for the assigned acceptance",
+  "gate": "pass",
+  "checks": [
+    { "command": "exact command", "exit_code": 0, "evidence": "actual result" }
+  ],
+  "blocker": "",
+  "attacked": [],
+  "resolved": [],
+  "still_open": [],
+  "discovered": [],
+  "regressions": []
+}
+```
+
+Każdy finding to `{id, severity, cluster, evidence}` o stabilnej tożsamości
+i severity `high`, `medium` albo `low`. Każdy zaatakowany finding wymaga jawnej
+dyspozycji: rozwiązany albo otwarty. Rozwiązania muszą być zaatakowane i nie mogą
+być jednocześnie otwarte. Brakujące pola, zduplikowane tożsamości/klucze JSON,
+sprzeczne sprawdzenia bramki, nieobsługiwany schemat lub niezgodna tożsamość
+kandydata blokują zbieżność. Narracyjna proza i exit zero workera nigdy nie są
+zamieniane w ustrukturyzowane fakty.
+
+Odbiorca poświadcza weryfikację; runtime sprawdza transport, schemat, niezmienność
+źródeł i algebrę rejestru. To nie jest niezależny dowód, że provider faktycznie
+uruchomił każdą zadeklarowaną komendę; prawdziwa akceptacja providera pozostaje
+punktem kontrolnym Operatora. Ta ścieżka sekwencyjna nie implementuje automatycznej
+akceptacji długu operatora ani rankingu równoległych kandydatów.
+
+`reception.json` zapisuje po każdej rundzie przyjęte raporty, nierozwiązane findingi,
+regresje, deltę/stepper, routing i werdykt. Dwie nieudane bramki z tego samego
+klastra, dwie ujemne delty albo dwie rundy bez postępu w źródłach/backlogu kończą
+się eskalacją. Rekomendacje zmiany powierzchni pozostają w ramach niezmienionego
+zadania. Maksymalna liczba rund kończy wykonanie, nie zbieżność: `completed` +
+`not_converged` jest poprawne. Tylko zweryfikowany pusty rejestr z zaliczoną bramką
+kończy się jako `converged`. Niekompletna lub zniekształcona weryfikacja daje
+`blocked`, zachowując potwierdzenie wykonania WRITE. Frontmatter odbiorcy podany
+wyłącznie przez stdout runtime finalizuje dopiero po zweryfikowaniu dokumentu,
+tożsamości kandydata i niezmienionych źródeł. Poprawny, lecz niekompletny dowód
+READ dostaje niepusty claim `blocked`; zniekształcony lub brakujący dowód nie jest
+promowany do przyjętego sfinalizowanego claimu. Ukończenie procesu odbiorcy pozostaje
+osobnym faktem względem tej semantycznej atestacji.
+
 Warstwa odbioru posiada:
 
 - autorytatywny rejestr otwartych findingów

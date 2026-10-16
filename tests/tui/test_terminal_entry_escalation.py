@@ -50,6 +50,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import framework_python_delegate
 
 # --import-mode=importlib: the shared fixture module is loaded by file.
 _GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
@@ -3184,6 +3185,9 @@ def _terminal_path_fence(
         Path("/usr/libexec/PlistBuddy"),
         *(path.resolve() for path in witnesses),
     }
+    # Homebrew's python3.x trampoline posix_spawns exactly this Framework app.
+    if framework_python := framework_python_delegate():
+        allowed.add(framework_python)
     literals = " ".join(
         f"(literal {json.dumps(str(path))})" for path in sorted(allowed)
     )
@@ -3191,6 +3195,37 @@ def _terminal_path_fence(
         f"(version 1)(allow default)(deny process-exec)(allow process-exec {literals})"
     )
     return [str(sandbox), "-p", profile, str(entry)]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS execution sandbox")
+def test_terminal_path_fence_admits_only_the_exact_framework_delegate(
+    tmp_path: Path,
+) -> None:
+    delegate = framework_python_delegate()
+    entry = tmp_path / "entry"
+    _write(entry, "#!/bin/bash\n")
+    profile = _terminal_path_fence(entry, entry)[2]
+    if delegate is None:
+        pytest.skip("interpreter is not a macOS Framework build")
+    assert profile.count(json.dumps(str(delegate))) == 1
+    assert delegate.is_relative_to(Path(sys.base_prefix).resolve())
+    assert "/Applications" not in profile and "(subpath" not in profile
+    # The trampoline itself must really exec under this very fence.
+    probe = subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            profile,
+            str(Path(sys.executable).resolve()),
+            "-c",
+            "print('framework-ok')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.stdout.strip() == "framework-ok", probe.stderr
 
 
 def _terminal_path_bind_bundle(source: str, bundle: Path) -> str:
