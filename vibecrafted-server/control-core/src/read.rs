@@ -180,7 +180,9 @@ const PROJECTION_CACHE_PARSED_FACTOR: usize = 8;
 const PROJECTION_CACHE_MAX_INVALIDATIONS: usize = 64;
 /// The active event stream is retained incrementally only while the file is at
 /// most this large (an input size, not a heap size: retained events cost
-/// `PROJECTION_CACHE_EVENT_FACTOR` times their text).
+/// `PROJECTION_CACHE_EVENT_FACTOR` times their text). The bound is applied on
+/// every read, not only when the memo is created: a retained stream that grows
+/// past it is released, and an oversized one is read in full each pass.
 const PROJECTION_CACHE_MAX_EVENT_FILE: u64 = 32 * 1024 * 1024;
 /// Estimated retained heap per byte of event file. Measured on 9.9 MB files of
 /// `Vec<Event>`: 6.5x with 2-field payloads, 5.2x with 12-field payloads.
@@ -612,7 +614,9 @@ impl ProjectionCache {
                 return Arc::new(Vec::new());
             };
             let events = Arc::new(batch.events);
-            if stamp.len <= PROJECTION_CACHE_MAX_EVENT_FILE {
+            // The stamp precedes the read, so a stream that grew during it is
+            // judged by the bytes actually folded in, not by the stale length.
+            if stamp.len.max(batch.cursor) <= PROJECTION_CACHE_MAX_EVENT_FILE {
                 if let Some((head, tail)) = event_fingerprint(path, batch.cursor) {
                     cache.lock().events = Some(EventMemo {
                         stamp,
@@ -634,6 +638,7 @@ impl ProjectionCache {
             return full(self, current);
         };
         let believable = current.native_identity
+            && current.len <= PROJECTION_CACHE_MAX_EVENT_FILE
             && memo.stamp.native_identity
             && memo.stamp.device == current.device
             && memo.stamp.inode == current.inode
@@ -664,6 +669,11 @@ impl ProjectionCache {
             {
                 Arc::make_mut(&mut memo.events).extend(batch.events);
                 memo.cursor = batch.cursor;
+                if memo.cursor > PROJECTION_CACHE_MAX_EVENT_FILE {
+                    // Grew past the bound while it was being read: serve this
+                    // pass, retain nothing, and let the next one read in full.
+                    return Arc::clone(&memo.events);
+                }
                 memo.file_len = current.len;
                 memo.stamp = current;
                 if let Some((head, tail)) = event_fingerprint(path, memo.cursor) {
@@ -4663,5 +4673,98 @@ mod projection_cache_tests {
                 );
             }
         }
+    }
+
+    fn note_line(i: usize, pad: usize) -> String {
+        format!(
+            "{}\n",
+            json!({"ts": "2026-10-16T00:00:00Z", "run_id": "mid-run", "kind": "note",
+                "message": format!("note {i:05}"), "payload": {"pad": "x".repeat(pad)}})
+        )
+    }
+
+    /// The stream grows past the bound *during* the read that would retain it:
+    /// the stamp (taken first) is under the bound, the batch cursor is over it.
+    #[test]
+    fn a_stream_that_outgrows_the_bound_during_a_full_read_is_not_retained() {
+        let home = temp_home("event-bound-full-race");
+        let events = home.join("control_plane/events.jsonl");
+        fs::write(&events, note_line(0, 16)).unwrap();
+        let (plain, cache) = cache_for(&home);
+        let stream = plain.events();
+        let grown = (0..1050)
+            .map(|i| note_line(i + 1, 32 * 1024))
+            .collect::<String>();
+        let read = cache.read_events(&events, |cursor| {
+            if cursor == 0 {
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&events)
+                    .unwrap()
+                    .write_all(grown.as_bytes())
+                    .unwrap();
+            }
+            stream.read_since(cursor, &[])
+        });
+        assert_eq!(read.len(), 1051, "the projection still carries every event");
+        assert!(fs::metadata(&events).unwrap().len() > PROJECTION_CACHE_MAX_EVENT_FILE);
+        assert_eq!(
+            cache.estimated_charge(),
+            0,
+            "a cursor past the bound is not retained"
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    /// Same race on the incremental path: the file was under the bound at the
+    /// stamp, and the appended tail carries the cursor over it.
+    #[test]
+    fn a_stream_that_outgrows_the_bound_during_a_tail_read_is_dropped() {
+        let home = temp_home("event-bound-tail-race");
+        let events = home.join("control_plane/events.jsonl");
+        fs::write(&events, note_line(0, 16)).unwrap();
+        let (plain, cache) = cache_for(&home);
+        let stream = plain.events();
+        let first = cache.read_events(&events, |cursor| stream.read_since(cursor, &[]));
+        assert_eq!(first.len(), 1);
+        assert!(cache.estimated_charge() > 0);
+
+        let small = note_line(1, 16);
+        let grown = (0..1050)
+            .map(|i| note_line(i + 2, 32 * 1024))
+            .collect::<String>();
+        {
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&events)
+                .unwrap()
+                .write_all(small.as_bytes())
+                .unwrap();
+        }
+        let read = cache.read_events(&events, |cursor| {
+            if cursor > 0 {
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&events)
+                    .unwrap()
+                    .write_all(grown.as_bytes())
+                    .unwrap();
+            }
+            stream.read_since(cursor, &[])
+        });
+        assert_eq!(read.len(), 1052);
+        assert_eq!(
+            cache.estimated_charge(),
+            0,
+            "an oversized cursor drops the memo"
+        );
+        // The next pass reads the whole stream and still refuses retention.
+        let again = cache.read_events(&events, |cursor| stream.read_since(cursor, &[]));
+        assert_eq!(again.len(), 1052);
+        assert_eq!(cache.estimated_charge(), 0);
+        fs::remove_dir_all(home).ok();
     }
 }

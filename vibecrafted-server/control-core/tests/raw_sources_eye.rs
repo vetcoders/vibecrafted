@@ -1236,3 +1236,96 @@ fn projection_cache_leaves_public_typed_lifecycle_reads_full() {
     );
     fs::remove_dir_all(home).ok();
 }
+
+/// One ~32 KiB `note` record: 1 050 of them push the stream past the 32 MiB
+/// event-file bound the cache advertises.
+fn bulky_note(i: usize) -> String {
+    format!(
+        "{}\n",
+        json!({"ts": "2026-10-16T00:00:00Z", "run_id": "mid-run", "kind": "note",
+            "message": format!("bulk {i:05}"), "payload": {"pad": "x".repeat(32 * 1024)}})
+    )
+}
+
+const EVENT_FILE_BOUND: u64 = 32 * 1024 * 1024;
+
+/// Append enough 32 KiB notes to cross the bound; returns the new file length.
+fn grow_past_event_bound(events: &Path) -> u64 {
+    let batch: String = (0..1050).map(bulky_note).collect();
+    append(events, &batch);
+    let len = fs::metadata(events).unwrap().len();
+    assert!(
+        len > EVENT_FILE_BOUND,
+        "fixture must cross the bound: {len}"
+    );
+    len
+}
+
+#[cfg(unix)]
+#[test]
+fn projection_cache_refuses_event_retention_when_a_warm_stream_grows_past_the_bound() {
+    let home = temp_home("cache-event-bound-grown");
+    let now = Utc::now();
+    let events = home.join("control_plane/events.jsonl");
+    fs::write(&events, numbered_events(1)).unwrap();
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let warm = cache.estimated_charge();
+    assert!(warm > 0, "a small stream is retained: {warm}");
+
+    let len = grow_past_event_bound(&events);
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(
+        cache.estimated_charge(),
+        0,
+        "a stream of {len} bytes is over the bound and must not stay retained"
+    );
+
+    // The refusal holds on every later read, and the events still project.
+    append(&events, &bulky_note(9_999));
+    let view = cached.compute_view_with_raw_sources(now, &sources);
+    assert!(view.events.iter().any(|e| e.message == "bulk 09999"));
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(cache.estimated_charge(), 0);
+
+    // A fresh cache on the identical oversized file agrees.
+    let (fresh, fresh_cache) = cached_plane(&home, StdDuration::from_secs(30));
+    fresh_cache.set_event_trust(true);
+    assert_cached_matches_canonical(&home, &fresh, &fresh.discover_raw_sources(), now);
+    assert_eq!(fresh_cache.estimated_charge(), 0);
+    fs::remove_dir_all(home).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn projection_cache_resumes_event_retention_when_an_oversized_stream_is_rotated_small() {
+    let home = temp_home("cache-event-bound-rotated");
+    let now = Utc::now();
+    let events = home.join("control_plane/events.jsonl");
+    fs::write(&events, numbered_events(1)).unwrap();
+    let (cached, cache) = cached_plane(&home, StdDuration::from_secs(30));
+    cache.set_event_trust(true);
+    let sources = cached.discover_raw_sources();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    grow_past_event_bound(&events);
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert_eq!(cache.estimated_charge(), 0);
+
+    // Rotation back under the bound: retention and tail-only reads return.
+    fs::rename(&events, home.join("control_plane/events.jsonl.archived")).unwrap();
+    fs::write(&events, numbered_events(3)).unwrap();
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    assert!(
+        cache.estimated_charge() > 0,
+        "a small stream is retained again"
+    );
+    let before = cache.stats();
+    append(&events, &event_n(3));
+    assert_cached_matches_canonical(&home, &cached, &sources, now);
+    let after = cache.stats();
+    assert_eq!(after.event_full_reads, before.event_full_reads);
+    assert_eq!(after.event_tail_reads, before.event_tail_reads + 1);
+    fs::remove_dir_all(home).ok();
+}
