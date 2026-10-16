@@ -1443,3 +1443,179 @@ def test_live_session_owner_refuses_unreadable_session_record(
     with pytest.raises(wc.WorkspaceCatalogError, match="ownership is unreadable"):
         wc.runtime_session_owner_root("current", "/socket", runtime_state="live")
     assert path.read_bytes() == before
+
+
+def _destination_seat(root: Path, name: str, socket_dir: str):
+    identity = wc.resolve_run_workspace_identity(root=root, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id=name,
+        state="live",
+        socket_dir=socket_dir,
+    )
+    return identity
+
+
+def test_destination_preserves_foreign_basename_and_reuses_verified_custom_seat(
+    home, tmp_path
+):
+    target, foreign = tmp_path / "project", tmp_path / "elsewhere"
+    target.mkdir()
+    foreign.mkdir()
+    _destination_seat(foreign, "project", "/private/frame")
+    custom = _destination_seat(target, "my-work", "/private/frame")
+    before = {p: p.read_bytes() for p in wc.sessions_dir().glob("*.json")}
+    route = wc.resolve_project_destination(
+        root=target,
+        requested="project",
+        live_names=["project", "my-work"],
+        occupied_names=[],
+        socket_dir="/private/frame",
+        env={},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "my-work"
+    assert route["VIBECRAFTED_REQUESTED_FRAME_SESSION"] == "project"
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "owned-live-seat"
+    assert (
+        wc.read_workspace_session(custom.vibecrafted_session_id).attachments[0].state
+        == "live"
+    )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_destination_stale_recent_is_reconciled_by_existing_missing_lifecycle(
+    home, tmp_path
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    old = _destination_seat(root, "project-old", "/private/frame")
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="project",
+        live_names=["vc-host"],
+        occupied_names=[],
+        socket_dir="/private/frame",
+        env={},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "project-old"
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "stale-seat-restore"
+    assert (
+        wc.read_workspace_session(old.vibecrafted_session_id).attachments[0].state
+        == "live"
+    )
+    restored = wc.resolve_run_workspace_identity(
+        root=root,
+        env={},
+        runtime_session_id="project-old",
+        socket_dir="/private/frame",
+        runtime_state="missing",
+    )
+    assert restored.vibecrafted_session_id != old.vibecrafted_session_id
+    assert (
+        wc.read_workspace_session(old.vibecrafted_session_id).attachments[0].state
+        == "missing"
+    )
+    assert (
+        wc._runtime_workspace_identity(
+            root=root.resolve(),
+            runtime_session_id="project-old",
+            socket_dir="/private/frame",
+        )
+        is None
+    )
+
+
+def test_destination_unknown_live_name_gets_free_route_without_adoption(home, tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="project",
+        live_names=["project"],
+        occupied_names=[],
+        socket_dir="/private/frame",
+        env={},
+    )
+    alternate = route["VIBECRAFTED_OPERATOR_SESSION"]
+    assert alternate != "project" and alternate.startswith("project-")
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "occupied-name-preserved"
+    assert not wc.list_instances() and not wc.read_catalog().workspaces
+    retry = wc.resolve_project_destination(
+        root=root,
+        requested="project",
+        live_names=["project", alternate],
+        occupied_names=[],
+        socket_dir="/private/frame",
+        env={},
+    )
+    assert retry["VIBECRAFTED_OPERATOR_SESSION"] != alternate
+
+
+def test_destination_ambiguous_or_unreadable_identity_cannot_be_readiness(
+    home, tmp_path
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    first = _destination_seat(root, "custom-a", "/private/frame")
+    wc.record_runtime_session_attachment(
+        workspace_id=first.workspace_id,
+        vibecrafted_session_id=first.vibecrafted_session_id,
+        workspace_instance_id=first.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="custom-b",
+        state="live",
+        socket_dir="/private/frame",
+    )
+    before = wc.workspace_session_path(first.vibecrafted_session_id).read_bytes()
+    with pytest.raises(wc.WorkspaceCatalogError, match="multiple live"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="project",
+            live_names=["custom-a", "custom-b"],
+            occupied_names=[],
+            socket_dir="/private/frame",
+            env={},
+        )
+    assert (
+        wc.workspace_session_path(first.vibecrafted_session_id).read_bytes() == before
+    )
+    wc.workspace_session_path(first.vibecrafted_session_id).write_text("{")
+    with pytest.raises(wc.WorkspaceCatalogError, match="unreadable"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="project",
+            live_names=["custom-a"],
+            occupied_names=[],
+            socket_dir="/private/frame",
+            env={},
+        )
+
+
+def test_concurrent_first_project_resolution_has_one_catalog_owner(
+    home, tmp_path, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    root = tmp_path / "first-project"
+    root.mkdir()
+    entering_create = Barrier(2)
+    create = wc.create_workspace
+
+    def concurrent_create(**kwargs):
+        entering_create.wait(timeout=10)
+        return create(**kwargs)
+
+    monkeypatch.setattr(wc, "create_workspace", concurrent_create)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: wc.resolve_run_workspace_identity(root=root, env={}), range(2)
+            )
+        )
+    assert results[0].workspace_id == results[1].workspace_id
+    assert results[0].workspace_instance_id == results[1].workspace_instance_id
+    assert len(wc.read_catalog().workspaces) == 1

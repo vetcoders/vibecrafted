@@ -164,10 +164,10 @@ from vibecrafted_core.spawn import (
 from vibecrafted_core.workspace_catalog import (
     WORKSPACE_STATUS_ACTIVE,
     WorkspaceCatalogError,
-    operator_session_name,
     read_catalog,
     read_workspace_session,
     resolve_operator_place_session,
+    runtime_session_owner_root,
 )
 
 AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie", "kimi", "copilot", "omp")
@@ -383,7 +383,7 @@ def owned_current_destination(
     environ = env if env is not None else os.environ
     current = current_frame_session(env=environ)
     session_id = str(environ.get("VIBECRAFTED_SESSION_ID") or "").strip()
-    if not current or not session_id:
+    if not current or current == "vc-host" or not session_id:
         return ""
     try:
         receipt = read_workspace_session(session_id)
@@ -402,6 +402,13 @@ def owned_current_destination(
                 and item.state == "live"
                 for item in receipt.attachments
             )
+            and runtime_session_owner_root(
+                current,
+                environ.get("VC_FRAME_SOCKET_DIR")
+                or environ.get("ZELLIJ_SOCKET_DIR", ""),
+                runtime_state="live",
+            )
+            == str(workspace)
         ):
             return current
     except (OSError, WorkspaceCatalogError):
@@ -411,19 +418,20 @@ def owned_current_destination(
 
 def catalog_owns_destination(workspace: Path, session: str) -> bool:
     """A fallback basename is not evidence that a live seat belongs to this root."""
-    if session and owned_current_destination(workspace) == session:
-        return True
+    if session == "vc-host":
+        return False
+    if (
+        current_frame_session() == session
+        and os.environ.get("VIBECRAFTED_SESSION_ID")
+        and owned_current_destination(workspace) != session
+    ):
+        return False
     try:
-        catalog = read_catalog()
-        return any(
-            record.status == WORKSPACE_STATUS_ACTIVE
-            and Path(record.canonical_root).resolve() == workspace
-            and operator_session_name(
-                record.workspace_id, display_label=record.display_label, catalog=catalog
-            )
-            == session
-            for record in catalog.workspaces.values()
+        socket_dir = os.environ.get("VC_FRAME_SOCKET_DIR") or os.environ.get(
+            "ZELLIJ_SOCKET_DIR", ""
         )
+        owner = runtime_session_owner_root(session, socket_dir, runtime_state="live")
+        return owner is not None and Path(owner).resolve() == workspace
     except (OSError, WorkspaceCatalogError):
         return False
 
@@ -469,13 +477,8 @@ def ensure_live_destination(
     session = str(session or "").strip()
     if not session:
         raise ValueError("could not resolve a Frame session for that project")
-    if session in live_names:
-        if catalog_owns_destination(workspace, session):
-            return LiveDestination(session, None)
-        raise ValueError(
-            "Project could not be opened: a live Frame session has this name, "
-            "but the workspace catalog does not bind it to this project"
-        )
+    if session in live_names and catalog_owns_destination(workspace, session):
+        return LiveDestination(session, None)
     try:
         env = selected_runtime_environment()
         root = env.get("VIBECRAFTED_RUNTIME_ROOT", "")
@@ -525,6 +528,12 @@ def ensure_live_destination(
         ):
             raise ValueError("workspace preparation returned invalid identity")
         env.update({key: identity[key] for key in keys})
+        for key in (
+            "VIBECRAFTED_REQUESTED_FRAME_SESSION",
+            "VIBECRAFTED_FRAME_DESTINATION_REASON",
+        ):
+            if isinstance(identity.get(key), str):
+                env[key] = identity[key]
         deadline = time.monotonic() + PROJECT_LIVE_TIMEOUT
         while True:
             names, error = list_live_frame_sessions(env=env)
@@ -552,7 +561,9 @@ def ensure_live_destination(
                     and item.runtime_session_id in names
                 }
                 if len(destinations) == 1:
-                    return LiveDestination(destinations.pop(), env)
+                    destination = destinations.pop()
+                    env["VIBECRAFTED_OPERATOR_SESSION"] = destination
+                    return LiveDestination(destination, env)
                 if len(destinations) > 1:
                     raise ValueError(
                         "multiple live Frame destinations belong to this project"
@@ -586,15 +597,17 @@ def workspace_shell_argv(
     if prepare:
         script += (
             '_vetcoders_start_validate_workspace_name "$3" || exit $?; '
-            '_vetcoders_start_read_inventory_state "$3"; '
+            '_vetcoders_prepare_project_destination "$2" "$3" || exit $?; '
+            'target="$VIBECRAFTED_OPERATOR_SESSION"; '
+            '_vetcoders_start_read_inventory_state "$target"; '
             'state="$_vetcoders_start_inventory_state"; '
-            'if [[ "$state" == error ]]; then _vetcoders_start_refuse_inventory "$3"; exit $?; fi; '
+            'if [[ "$state" == error ]]; then _vetcoders_start_refuse_inventory "$target"; exit $?; fi; '
             'if [[ "$state" == live || "$state" == dead ]]; then '
-            '_vetcoders_start_check_existing_owner "$3" "$state" "$2" || exit $?; fi; '
-            '_vetcoders_product_entry_prepare "$2" "$3" "$state" || exit $?; '
-            '_vetcoders_start_launch_workspace "$3" "$2" background >&2 || exit $?; '
+            '_vetcoders_start_check_existing_owner "$target" "$state" "$2" || exit $?; fi; '
+            '_vetcoders_product_entry_prepare "$2" "$target" "$state" || exit $?; '
+            '_vetcoders_start_launch_workspace "$target" "$2" background >&2 || exit $?; '
             '_vetcoders_product_core_cli workspace resolve --root "$2" --json '
-            '--runtime-session-id "$3" --socket-dir "$(_vetcoders_vc_frame_socket_dir)" --runtime-state live'
+            '--runtime-session-id "$target" --socket-dir "$(_vetcoders_vc_frame_socket_dir)" --runtime-state live'
         )
     else:
         script += '_vetcoders_start_enter_workspace_session "$4" "$3"'
@@ -2786,13 +2799,16 @@ class Workshop:
         try:
             destination = destination_session_for_workspace(workspace)
         except ValueError as exc:
-            self.error = public_reason(str(exc)) or str(exc)
+            reason = f"Project could not be opened: {exc}"
+            self.error = public_reason(reason) or reason
             return
         live, listing_error = list_live_frame_sessions()
         if listing_error:
             self.error = listing_error
             return
-        if destination not in live:
+        if destination not in live or not catalog_owns_destination(
+            workspace, destination
+        ):
             self.error = ""
             self.notice = "Opening project…"
             self.draw()

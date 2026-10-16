@@ -1008,6 +1008,123 @@ def operator_session_name(
     return f"{short_label}-{token}"
 
 
+def resolve_project_destination(
+    *,
+    root: str | Path,
+    requested: str,
+    live_names: Sequence[str],
+    occupied_names: Sequence[str],
+    socket_dir: str,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Choose a project route from physical inventory and the existing WES ledger.
+
+    This is read-only: a choice reserves nothing and does not attest readiness.
+    The existing create lock and exact-seat lifecycle must admit it afterwards.
+    Names and historical LIVE records alone never admit an occupied seat.
+    """
+    resolved = validate_workspace_root(root)
+    requested = str(requested or "").strip() or _place_label_for_workspace(
+        canonical_root=str(resolved)
+    )
+    environ = os.environ if env is None else env
+    live = set(live_names)
+    # The product's Operator host never becomes a project, even when an older
+    # reinstall left a coherent but incorrect project binding on that seat.
+    occupied = set(occupied_names) | live | {"vc-host"}
+    owned: dict[str, WorkspaceSessionRecord] = {}
+    for name in sorted(live):
+        if name == "vc-host":
+            continue
+        seat = _runtime_workspace_identity(
+            root=None, runtime_session_id=name, socket_dir=socket_dir
+        )
+        if (
+            seat
+            and Path(show_workspace(seat[0].workspace_id).canonical_root).resolve()
+            == resolved
+        ):
+            owned[name] = seat[0]
+    preferred = [
+        name
+        for name, session in owned.items()
+        if name
+        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+        and session.workspace_id == environ.get(ENV_WORKSPACE_ID)
+        and session.session_id == environ.get(ENV_VIBECRAFTED_SESSION_ID)
+        and session.workspace_instance_id == environ.get(ENV_WORKSPACE_INSTANCE_ID)
+    ]
+    if preferred:
+        effective, reason = preferred[0], "owned-current-seat"
+    elif len(owned) > 1:
+        raise WorkspaceCatalogError(
+            "multiple live Frame destinations belong to this project"
+        )
+    elif owned:
+        effective, reason = next(iter(owned)), "owned-live-seat"
+    else:
+        catalog = read_catalog()
+        records = [
+            r
+            for r in catalog.workspaces.values()
+            if r.status == WORKSPACE_STATUS_ACTIVE
+            and Path(r.canonical_root).resolve() == resolved
+        ]
+        if len(records) > 1:
+            raise WorkspaceCatalogError("multiple active workspaces share this root")
+        recent = (
+            workspace_return_attachment(records[0].workspace_id, env=environ)
+            if records
+            else None
+        )
+        if recent is not None and recent.socket_dir != socket_dir:
+            raise WorkspaceCatalogError(
+                "project Frame destination belongs to another socket namespace"
+            )
+        if recent is not None and recent.runtime_session_id not in occupied:
+            return {
+                "VIBECRAFTED_REQUESTED_FRAME_SESSION": requested,
+                "VIBECRAFTED_OPERATOR_SESSION": recent.runtime_session_id,
+                "VIBECRAFTED_FRAME_DESTINATION_REASON": "stale-seat-restore",
+            }
+        effective, reason = requested, "restore-or-create"
+    owned_exited = (
+        not owned
+        and requested != "vc-host"
+        and requested in occupied
+        and requested not in live
+        and runtime_session_owner_root(requested, socket_dir, runtime_state="dead")
+        == str(resolved)
+    )
+    if not owned and (requested not in occupied or owned_exited):
+        # A missing recent name is a recovery request, never physical proof.
+        # EXITED ownership still goes through the existing conservative fence.
+        effective, reason = requested, "restore-or-create"
+    elif not owned:
+        token = hashlib.sha256(str(resolved).encode()).hexdigest()[:8]
+        label = _sanitize_worker_host_label(
+            resolved.name, max_len=_MAX_PLACE_SESSION_LEN - 9
+        )
+        effective = f"{label}-{token}"
+        for suffix in range(100):
+            candidate = (
+                effective
+                if suffix == 0
+                else f"{effective[: _MAX_PLACE_SESSION_LEN - len(str(suffix)) - 1]}-{suffix}"
+            )
+            if candidate not in occupied:
+                effective = candidate
+                break
+        else:
+            raise WorkspaceCatalogError("no free project Frame destination")
+        reason = "occupied-name-preserved"
+    return {
+        "VIBECRAFTED_REQUESTED_FRAME_SESSION": requested,
+        "VIBECRAFTED_OPERATOR_SESSION": effective,
+        "VIBECRAFTED_FRAME_DESTINATION_REASON": reason,
+    }
+
+
 def resolve_operator_place_session(
     *,
     root: str | Path,
@@ -1017,11 +1134,24 @@ def resolve_operator_place_session(
 
     environ = dict(env) if env is not None else dict(os.environ)
     try:
-        identity = resolve_run_workspace_identity(
-            root=root, env=environ, create_if_missing=False
+        resolved = validate_workspace_root(root)
+        catalog = read_catalog()
+        matches = [
+            record
+            for record in catalog.workspaces.values()
+            if record.status == WORKSPACE_STATUS_ACTIVE
+            and Path(record.canonical_root).resolve() == resolved
+        ]
+        preferred = environ.get(ENV_WORKSPACE_ID) or catalog.selected_workspace_id
+        record = next(
+            (item for item in matches if item.workspace_id == preferred), None
         )
+        if record is None:
+            if len(matches) != 1:
+                raise WorkspaceCatalogError("no unambiguous project place")
+            record = matches[0]
         return operator_session_name(
-            identity.workspace_id, display_label=identity.display_label
+            record.workspace_id, display_label=record.display_label, catalog=catalog
         )
     except (WorkspaceCatalogError, WorkspaceNotFound):
         return _sanitize_worker_host_label(
@@ -1096,6 +1226,7 @@ def create_workspace(
     workspace_id: str | None = None,
     notes: str = "",
     select: bool = True,
+    _reuse_root: bool = False,
 ) -> WorkspaceRecord:
     """Create a durable workspace. workspace_id is never derived from root."""
 
@@ -1123,6 +1254,19 @@ def create_workspace(
     )
     with _catalog_lock(exclusive=True):
         catalog = _load_catalog_unlocked()
+        if _reuse_root:
+            matches = [
+                item
+                for item in catalog.workspaces.values()
+                if item.status == WORKSPACE_STATUS_ACTIVE
+                and _canonical_root_key(item.canonical_root) == str(resolved)
+            ]
+            if len(matches) > 1:
+                raise WorkspaceCatalogError(
+                    "multiple active workspaces share this root"
+                )
+            if matches:
+                return matches[0]
         if wid in catalog.workspaces:
             raise WorkspaceCatalogError(f"workspace_id already exists: {wid}")
         workspaces = dict(catalog.workspaces)
@@ -1414,6 +1558,30 @@ def materialize_instance(
             raise WorkspaceCatalogError("cannot materialize a buried workspace")
 
         existing = _list_instances_unlocked(workspace_id=wid)
+        # Old reinstalls could lend project identity to the Operator host.
+        # Preserve that historical receipt without letting project preparation
+        # reuse, refresh or stale it. Correcting its role is not a relabelling.
+        host_instances = set()
+        for item in existing:
+            payload = (
+                _read_json(workspace_session_path(item.vibecrafted_session_id))
+                if item.vibecrafted_session_id
+                else None
+            )
+            if payload is None:
+                continue
+            logical = WorkspaceSessionRecord.from_payload(payload)
+            if (
+                logical.workspace_id == wid
+                and logical.workspace_instance_id == item.workspace_instance_id
+                and any(
+                    a.runtime == "vc-frame"
+                    and a.runtime_session_id == "vc-host"
+                    and a.state == "live"
+                    for a in logical.attachments
+                )
+            ):
+                host_instances.add(item.workspace_instance_id)
         if session_id:
             owners = [
                 item
@@ -1456,10 +1624,17 @@ def materialize_instance(
                     # A logical session cannot migrate to another instance.
                     # Reuse a current-build seat or mint a fresh pair below.
                     session_id = None
+        if any(
+            item.workspace_instance_id in host_instances
+            and item.vibecrafted_session_id == session_id
+            for item in existing
+        ):
+            session_id = new_uuid7()
         matches = [
             item
             for item in existing
             if item.status == INSTANCE_STATUS_LIVE
+            and item.workspace_instance_id not in host_instances
             and item.build_id.matches(bid)
             and item.build_id.root == bid.root
         ]
@@ -1468,6 +1643,8 @@ def materialize_instance(
                 "multiple live instances share this build; select an exact session"
             )
         for instance in existing:
+            if instance.workspace_instance_id in host_instances:
+                continue
             if instance.status != INSTANCE_STATUS_LIVE:
                 continue
             previous = instance.build_id
@@ -1650,7 +1827,9 @@ def workspace_return_attachment(
         candidates.extend(
             (instance, attachment)
             for attachment in session.attachments
-            if attachment.runtime == "vc-frame" and attachment.state == "live"
+            if attachment.runtime == "vc-frame"
+            and attachment.state == "live"
+            and attachment.runtime_session_id != "vc-host"
         )
     preferred = [
         attachment
@@ -1991,6 +2170,7 @@ def resolve_run_workspace_identity(
             root=resolved_root,
             display_label=resolved_root.name or "workspace",
             select=True,
+            _reuse_root=True,
         )
 
     inherited_same_root = (
@@ -2643,6 +2823,10 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     resolve_p.add_argument("--json", action="store_true")
     resolve_p.add_argument("--runtime-session-id", default="")
     resolve_p.add_argument("--socket-dir", default="")
+    resolve_p.add_argument("--destination", action="store_true")
+    resolve_p.add_argument("--requested-session", default="")
+    resolve_p.add_argument("--live-session", action="append", default=[])
+    resolve_p.add_argument("--occupied-session", action="append", default=[])
     resolve_p.add_argument(
         "--runtime-state", choices=sorted(RUNTIME_SESSION_STATES), default=""
     )
@@ -2775,6 +2959,20 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             return _emit(instance.to_payload(), as_json=args.json)
         if args.action == "resolve":
             environ = dict(os.environ)
+            if args.destination:
+                payload = resolve_project_destination(
+                    root=args.root or os.getcwd(),
+                    requested=args.requested_session,
+                    live_names=args.live_session,
+                    occupied_names=args.occupied_session,
+                    socket_dir=args.socket_dir,
+                    env=environ,
+                )
+                if args.env:
+                    for key, value in payload.items():
+                        print(f"{key}={value}")
+                    return 0
+                return _emit(payload, as_json=args.json)
             selected = selected_workspace()
             if not environ.get(ENV_WORKSPACE_ID) and selected is not None:
                 environ[ENV_WORKSPACE_ID] = selected.workspace_id
@@ -2790,12 +2988,20 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             )
             payload = {
                 **identity.to_env(),
-                "VIBECRAFTED_OPERATOR_SESSION": operator_session_name(
+                "VIBECRAFTED_OPERATOR_SESSION": args.runtime_session_id
+                if args.runtime_state == "live"
+                else operator_session_name(
                     identity.workspace_id,
                     display_label=identity.display_label,
                 ),
                 "VIBECRAFTED_WORKSPACE_ROOT": str(Path(root).expanduser().resolve()),
             }
+            for key in (
+                "VIBECRAFTED_REQUESTED_FRAME_SESSION",
+                "VIBECRAFTED_FRAME_DESTINATION_REASON",
+            ):
+                if environ.get(key):
+                    payload[key] = environ[key]
             if args.env:
                 for key, value in payload.items():
                     print(f"{key}={value}")

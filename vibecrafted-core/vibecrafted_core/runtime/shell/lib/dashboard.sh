@@ -940,7 +940,16 @@ _vetcoders_resume_operator_session() {
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 1
   }
-  _vetcoders_resume_workspace "$session_name"
+  # Public project return shares start's locked physical admission. Preserve
+  # EXITED evidence, but never publish a concurrent creator by name alone.
+  _vetcoders_start_read_inventory_state "$session_name"
+  if [[ "$_vetcoders_start_inventory_state" == dead ]]; then
+    local dead_name="$session_name"
+    _vetcoders_record_vc_frame_attachment dead "$dead_name" || return $?
+    session_name="$(_vetcoders_recovery_vc_frame_session_name "$dead_name")"
+    printf "Session '%s' is dead; preserving it and creating '%s'.\n" "$dead_name" "$session_name" >&2
+  fi
+  _vetcoders_start_launch_workspace "$session_name" "$VIBECRAFTED_WORKSPACE_ROOT"
 }
 
 # Resume an ordinary durable workspace. Native switching moves only the caller's
@@ -993,9 +1002,9 @@ _vetcoders_resume_workspace() {
 #   1. root  -- explicit --repo/--root, else the Git top-level of the caller's
 #               directory, else that directory. Never the runtime generation
 #               or an ambient wrapper root: those name sessions after releases.
-#   2. name  -- the explicit bare argument, else the root's basename VERBATIM,
-#               validated once. A repository whose name is not a legal session
-#               name is refused with the explicit-name form, never normalized.
+#   2. name  -- the explicit bare argument stays verbatim, validated once.
+#               Automatic entry requests the basename and reports the canonical
+#               resolver's effective owned/free project destination and reason.
 #   3. check -- the selected engine's own `list-sessions` in the product socket
 #               namespace, markers cleared. An unreadable inventory refuses
 #               (exit 4): doubt is not permission to duplicate.
@@ -1128,6 +1137,7 @@ _vetcoders_start_read_inventory_state() {
   }
   listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
   _vetcoders_start_cached_live_hosts=""
+  _vetcoders_start_cached_occupied_hosts=""
   _vetcoders_start_inventory_cache_valid=0
   if ((rc != 0)); then
     if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
@@ -1152,6 +1162,7 @@ _vetcoders_start_read_inventory_state() {
         ;;
     esac
     name="${line%% \[Created *}"
+    _vetcoders_start_cached_occupied_hosts+="${name}"$'\n'
     if [[ "$line" != *"(EXITED"* ]]; then
       _vetcoders_start_cached_live_hosts+="${name}"$'\n'
     fi
@@ -1783,6 +1794,7 @@ _vetcoders_start_launch_workspace() {
   }
   _vetcoders_load_frontier_sidecars
 
+  export VIBECRAFTED_OPERATOR_SESSION="$session_name"
   _vetcoders_start_read_inventory_state "$session_name"
   state="$_vetcoders_start_inventory_state"
   if [[ "$state" == live || "$state" == dead ]]; then
@@ -2117,7 +2129,15 @@ _vetcoders_start_entry() {
       _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
       [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
     fi
-    _vetcoders_product_entry_prepare "$root" || return $?
+    local return_session="" return_state=""
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 ]]; then
+      _vetcoders_prepare_project_destination "$root" "" || return $?
+      return_session="$VIBECRAFTED_OPERATOR_SESSION"
+      _vetcoders_start_read_inventory_state "$return_session"
+      return_state="$_vetcoders_start_inventory_state"
+    fi
+    _vetcoders_product_entry_prepare "$root" "$return_session" "$return_state" || return $?
+    [[ -z "$return_session" ]] || export VIBECRAFTED_OPERATOR_SESSION="$return_session"
     if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
       _vetcoders_product_entry_probe_print
       return $?
@@ -2140,6 +2160,10 @@ _vetcoders_start_entry() {
   session_name="${_vetcoders_start_workspace_name:-}"
   if [[ -z "$session_name" ]]; then
     session_name="$(_vetcoders_start_default_workspace_name "$root")" || return $?
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 ]]; then
+      _vetcoders_prepare_project_destination "$root" "$session_name" || return $?
+      session_name="$VIBECRAFTED_OPERATOR_SESSION"
+    fi
   fi
 
   # Tests/doctor: preparation effects only; no inventory, no create, no attach.

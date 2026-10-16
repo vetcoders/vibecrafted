@@ -16,8 +16,9 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
 * **root** -- explicit `--repo` (legacy `--root`) wins; otherwise the Git
   top-level of the caller's directory (a subdirectory names the SAME
   workspace); outside Git, the directory itself. Never the runtime generation.
-* **name** -- the explicit bare argument or the root's basename, verbatim,
-  validated once (exit 2), never truncated, normalized or suffixed.
+* **name** -- an explicit bare argument stays verbatim and is validated once
+  (exit 2). Automatic entry treats the basename as a request; the catalog
+  resolver reports its effective owned or free project destination and reason.
 * **inventory first** -- the engine's own `list-sessions` is read before any
   window. An unreadable inventory refuses with exit 4. A known WES binding
   for another repository keeps the name collision as an explicit choice.
@@ -502,13 +503,21 @@ if [[ "$1 $2" == "workspace session-attach" ]]; then
 fi
 if [[ "$1 $2" == "workspace resolve" ]]; then
   shift 2
-  root=""
+  root="" destination=0 requested=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --root) root="$2"; shift 2 ;;
+      --destination) destination=1; shift ;;
+      --requested-session) requested="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
+  if ((destination)); then
+    echo "VIBECRAFTED_REQUESTED_FRAME_SESSION=$requested"
+    echo "VIBECRAFTED_OPERATOR_SESSION=$requested"
+    echo "VIBECRAFTED_FRAME_DESTINATION_REASON=fixture-owned-route"
+    exit 0
+  fi
   tag="$(basename "$root")"
   tag="$(printf '%s' "$tag" | tr -c 'A-Za-z0-9\\n' '-')"
   echo "VIBECRAFTED_WORKSPACE_ID=ws-$tag"
@@ -2290,11 +2299,10 @@ def test_engine_create_failure_is_reported_as_the_engines_words_not_as_a_conflic
 # --------------------------------------------------------------------------
 
 
-def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_option(
+def test_explicit_same_name_from_a_different_repository_is_a_conflict_with_a_rename_option(
     tmp_path: Path,
 ) -> None:
-    """Baseline let the catalogue append `-token` silently. Now: `mlx` from
-    repo A owns the name; `mlx` from repo B is refused with the rename form
+    """An explicit `mlx` from repo A owns the name; `mlx` from repo B is refused with the rename form
     quoting repo B, and nothing is created under any other name."""
     repo_a = tmp_path / "a" / "mlx"
     repo_b = tmp_path / "b" / "mlx"
@@ -2302,7 +2310,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     repo_b.mkdir(parents=True)
     scene = Scene(tmp_path, project="unused")
 
-    first = _run(scene, "vc-start", cwd=repo_a)
+    first = _run(scene, "vc-start mlx", cwd=repo_a)
     assert _rc(first) == 0, first.stderr
     assert scene.workspaces() == ["mlx"]
     _assert_host_first(scene, "mlx")
@@ -2310,7 +2318,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     # repository with the same basename tries to enter.
     child = _run(
         scene,
-        f"vc-start --repo {shlex.quote(str(repo_a))}",
+        f"vc-start mlx --repo {shlex.quote(str(repo_a))}",
         cwd=repo_a,
         tty=True,
         owned_terminal=True,
@@ -2322,7 +2330,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     )
     assert _rc(child) == 0, child.stdout + child.stderr
 
-    second = _run(scene, "vc-start", cwd=repo_b)
+    second = _run(scene, "vc-start mlx", cwd=repo_b)
     assert _rc(second) == EXIT_EXISTS, second.stdout + second.stderr
     assert "workspace mlx already exists in vc-frame" in second.stderr
     assert (
@@ -2789,6 +2797,15 @@ def test_the_terminal_child_enters_the_session_its_parent_created(
     owners = [c for c in scene.owner_calls() if c.startswith("workspace session-owner")]
     assert owners and all("--runtime-state live" in call for call in owners)
     resolves = [c for c in scene.owner_calls() if c.startswith("workspace resolve")]
+    assert resolves, scene.owner_calls()
+    routes = [call for call in resolves if "--destination" in call]
+    assert routes, scene.owner_calls()
+    for route in routes:
+        assert f"--root {scene.root}" in route, route
+        assert "--requested-session mlx-batch-runner" in route, route
+        assert "--live-session mlx-batch-runner" in route, route
+        assert f"--socket-dir {scene.tmp_path / 'sock'}" in route, route
+    resolves = [call for call in resolves if "--destination" not in call]
     assert resolves, scene.owner_calls()
     for resolve in resolves:
         assert f"--root {scene.root}" in resolve, resolve
