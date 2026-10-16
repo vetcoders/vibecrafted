@@ -60,7 +60,11 @@ import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import bind_private_terminal_wrapper, private_child_command
+from _runtime_pack_fixture import (
+    bind_private_terminal_wrapper,
+    private_child_command,
+    private_native_copy,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_CORE_DIR = REPO_ROOT / "vibecrafted-core"
@@ -4185,16 +4189,21 @@ def _run_with_owned_terminal_ancestor(
     # There is a real PTY and real kernel process ancestry; no GUI/provider.
     host = host or scene.generation / "libexec/vc-terminal"
     host.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile("/bin/bash", host)
-    host.chmod(0o755)
     if sys.platform == "darwin":
         # Apple's copied platform binary otherwise dies before main. This
         # private process fixture gets a local ad-hoc signature, no app build.
-        subprocess.run(
-            ["/usr/bin/codesign", "--force", "--sign", "-", str(host)],
-            check=True,
-            capture_output=True,
+        # The helper keeps the authentic bash code bytes (whole file, else the
+        # host-native thin slice) and accepts a copy only after a real exec.
+        # The scene's own stub is the only thing replaced; the helper itself
+        # refuses any pre-existing destination.
+        assert host.parent.resolve().is_relative_to(scene.generation.parent.resolve())
+        host.unlink(missing_ok=True)
+        private_native_copy(
+            Path("/bin/bash"), host, ("--noprofile", "--norc", "-c", "echo ready")
         )
+    else:
+        shutil.copyfile("/bin/bash", host)
+        host.chmod(0o755)
     script = _entry_script(scene, invocation)
     child = shlex.join(_shell_argv("bash", script))
     parent = [str(host), "--noprofile", "--norc", "-c", child + "; :"]

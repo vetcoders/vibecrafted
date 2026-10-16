@@ -22,6 +22,7 @@ from _runtime_pack_fixture import (
     bind_private_child_installer,
     fixed_terminal_fixture,
     private_child_command,
+    private_native_copy,
     private_runtime_pack_seed,
     seed_runtime_pack,
 )
@@ -102,19 +103,17 @@ def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     if not Path("/usr/bin/codesign").exists():
         pytest.skip("requires macOS strict codesign")
     fixed_terminal_fixture(monkeypatch, tmp_path / "paired-host")
-    # Seatbelt refuses the system setuid ps. Borrow its exact native bytes
-    # without privilege in this private fixture, retaining the real census.
-    private_ps = tmp_path / "ps"
-    shutil.copyfile("/bin/ps", private_ps)
-    private_ps.chmod(0o755)
-    assert private_ps.read_bytes() == Path("/bin/ps").read_bytes()
-    subprocess.run(
-        private_child_command(
-            ["/usr/bin/codesign", "--force", "--sign", "-", str(private_ps)],
-            allowed=(Path("/usr/bin/codesign"),),
+    # Seatbelt refuses the system setuid ps. Run the authentic selected ps code
+    # bytes (whole file, else the host-native thin slice) from a private,
+    # locally ad-hoc-signed copy without privilege, retaining the real census.
+    # The helper accepts a copy only after a real exec of the census command.
+    private_ps = private_native_copy(
+        Path("/bin/ps"),
+        tmp_path / "ps",
+        ("-axo", "pid=,command="),
+        sign_command=lambda command: private_child_command(
+            command, allowed=(Path("/usr/bin/codesign"),)
         ),
-        check=True,
-        capture_output=True,
     )
     helper_source = HELPER.read_text()
     assert helper_source.count("/bin/ps") == 2
@@ -140,6 +139,55 @@ def lane(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str, str]]:
     for key in ("HOME", "VIBECRAFTED_HOME", "VIBECRAFTED_RUNTIME_HOME"):
         Path(env[key]).mkdir()
     return parent, env
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
+def test_private_native_copy_runs_real_census_and_fails_loud(tmp_path: Path) -> None:
+    """Falsifiable canary for hosted macOS 15 copied-native failures."""
+    ps = private_native_copy(
+        Path("/bin/ps"), tmp_path / "ps", ("-axo", "pid=,command=")
+    )
+    census = subprocess.run(
+        [str(ps), "-axo", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert census.returncode == 0, census.stderr
+    assert str(os.getpid()) in {line.split()[0] for line in census.stdout.splitlines()}
+    assert not list(tmp_path.glob(".native-copy-*"))
+    # Negative control: a probe no candidate can satisfy reports every attempt
+    # and leaves no destination behind.
+    with pytest.raises(AssertionError, match="no runnable private copy") as refused:
+        private_native_copy(Path("/bin/ps"), tmp_path / "ps-never", ("--no-such-flag",))
+    assert "whole-file: rc=" in str(refused.value)
+    assert not (tmp_path / "ps-never").exists()
+    assert not list(tmp_path.glob(".native-copy-*"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS native copy")
+def test_private_native_copy_never_replaces_existing_destination(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "existing"
+    sentinel.write_bytes(b"keep me")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"foreign")
+    link = tmp_path / "link"
+    link.symlink_to(outside)
+    for target in (sentinel, link):
+        with pytest.raises(AssertionError, match="refusing to replace"):
+            private_native_copy(Path("/bin/ps"), target, ("-axo", "pid=,command="))
+    for refused_target in (Path("/bin/ps"), Path("/Applications/vc-never-created")):
+        with pytest.raises(AssertionError, match="refusing"):
+            private_native_copy(
+                Path("/bin/ps"), refused_target, ("-axo", "pid=,command=")
+            )
+    assert not Path("/Applications/vc-never-created").exists()
+    assert sentinel.read_bytes() == b"keep me"
+    assert link.is_symlink() and outside.read_bytes() == b"foreign"
+    assert not list(tmp_path.glob(".native-copy-*"))
 
 
 def app(path: Path, number: int) -> Path:

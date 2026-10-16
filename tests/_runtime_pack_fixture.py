@@ -8,18 +8,129 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import plistlib
 import re
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def framework_python_delegate() -> Path | None:
+    """The exact Framework app a Homebrew ``python3.x`` trampoline posix_spawns.
+
+    ``bin/python3.14`` admitted alone is not enough under a process-exec fence:
+    it immediately spawns this one executable. Nothing broader is implied.
+    """
+    if not sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        return None
+    delegate = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+    assert delegate.is_file()
+    return delegate.resolve()
+
+
+def private_native_copy(
+    source: Path,
+    destination: Path,
+    probe_args: tuple[str, ...],
+    *,
+    sign_command: Callable[[list[str]], list[str]] = lambda command: command,
+) -> Path:
+    """Copy one named system executable to a private path where it really runs.
+
+    The copy is ad-hoc signed locally, then accepted only after an actual exec
+    with ``probe_args`` returns 0 and prints. Candidates, in order: the whole
+    file; the host-native thin slice when the file carries one; an x86_64 thin
+    slice as an optional real execution probe on whatever translation the host
+    already has. Nothing is installed or enabled, and an absent translation is
+    just a recorded failed attempt, never a skip or a mock. This is fixture
+    acceptance, not portable native product proof. Every candidate is built in
+    a private directory this call creates and removes; ``destination`` is
+    linked in only if it does not already exist (symlinks included), and
+    neither the source itself nor anything under /Applications is a valid
+    destination, so a refusal never touches anything.
+
+    Hosted macOS 15 killed the whole-file copy of /bin/ps and /bin/bash
+    (SIGKILL before main). Working hypothesis, unproven until that runner
+    executes a successor: macOS 15 ships these as x86_64 + arm64e only and
+    refuses a non-Apple arm64e slice. The failure message therefore records
+    host, architectures and each attempt's return code for that falsification.
+    """
+    assert sys.platform == "darwin"
+    if os.path.lexists(destination):
+        raise AssertionError(f"refusing to replace pre-existing {destination}")
+    target = destination.parent.resolve() / destination.name
+    if target == source.resolve() or target.is_relative_to(Path("/Applications")):
+        raise AssertionError(f"refusing destination {destination}")
+    archs = subprocess.run(
+        ["/usr/bin/lipo", "-archs", str(source)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    candidates: list[str | None] = [None]
+    for arch in (platform.machine(), "x86_64"):
+        if arch in archs and arch not in candidates:
+            candidates.append(arch)
+    attempts: list[str] = []
+    work = Path(tempfile.mkdtemp(prefix=".native-copy-", dir=destination.parent))
+    try:
+        for arch in candidates:
+            candidate = work / f"{arch or 'whole'}-{source.name}"
+            if arch is None:
+                shutil.copyfile(source, candidate)
+                assert candidate.read_bytes() == source.read_bytes()
+            else:
+                subprocess.run(
+                    [
+                        "/usr/bin/lipo",
+                        str(source),
+                        "-thin",
+                        arch,
+                        "-output",
+                        str(candidate),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+            candidate.chmod(0o755)
+            subprocess.run(
+                sign_command(
+                    ["/usr/bin/codesign", "--force", "--sign", "-", str(candidate)]
+                ),
+                check=True,
+                capture_output=True,
+            )
+            probe = subprocess.run(
+                [str(candidate), *probe_args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                os.link(candidate, destination)
+                return destination
+            attempts.append(
+                f"{arch or 'whole-file'}: rc={probe.returncode} "
+                f"{probe.stderr.strip()[:120]!r}"
+            )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    raise AssertionError(
+        f"no runnable private copy of {source} (archs={archs}, "
+        f"host={platform.machine()} macOS {platform.mac_ver()[0]}): "
+        + "; ".join(attempts)
+    )
 
 
 def private_child_command(
@@ -88,12 +199,8 @@ def private_child_command(
         for p in (Path(tool), Path(tool).resolve())
     }
     paths.update((Path(sys.executable).resolve(), *(p.resolve() for p in allowed)))
-    if sysconfig.get_config_var("PYTHONFRAMEWORK"):
-        framework_python = (
-            Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
-        )
-        assert framework_python.is_file()
-        paths.add(framework_python.resolve())
+    if framework_python := framework_python_delegate():
+        paths.add(framework_python)
     for python in (
         Path("/Library/Developer/CommandLineTools/usr/bin/python3"),
         Path(
