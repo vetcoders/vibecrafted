@@ -41,6 +41,7 @@ from .env_allowlist import (
     dispatcher_identity,
     filter_headless_worker_env,
     managed_provider_environment,
+    provider_launch_environment_receipt,
     provider_workspace_environment,
     visible_color_environment,
 )
@@ -5902,6 +5903,7 @@ def write_meta(
         "liveness": "pid_pending",
         "model": model,
     }
+    payload.update(provider_launch_environment_receipt(agent, os.environ))
     requested = str(model_requested or model or "").strip()
     if requested:
         payload["model_requested"] = requested

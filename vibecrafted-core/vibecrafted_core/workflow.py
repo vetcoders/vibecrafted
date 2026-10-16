@@ -56,6 +56,7 @@ from .env_allowlist import (
     filter_headless_worker_env,
     managed_provider_environment,
     provider_identity_shell_prelude,
+    provider_launch_environment_receipt,
     visible_color_shell_prelude,
 )
 from .events import append_event
@@ -2296,6 +2297,10 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
             receipt[key] = str(payload.get(key) or "")
     if isinstance(payload.get("execution_controls"), dict):
         receipt["execution_controls"] = dict(payload["execution_controls"])
+    if isinstance(payload.get("provider_launch_environment"), dict):
+        receipt["provider_launch_environment"] = dict(
+            payload["provider_launch_environment"]
+        )
     for key in (
         "model_requested",
         "model_effective",
@@ -3394,6 +3399,9 @@ def launch_workflow(
             spec_digest=idem_spec_digest,
         )
     initial_meta: dict[str, Any] = dict(launch_meta or {})
+    # Launcher requests are measured below from this child's environment;
+    # caller metadata (including a continuation's parent) cannot supply them.
+    initial_meta.pop("provider_launch_environment", None)
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
     initial_meta.update(
@@ -3611,6 +3619,16 @@ def launch_workflow(
         if spec.runtime == "headless"
         else managed_provider_environment(merged_env)
     )
+    # Only headless Popen consumes this map; visible Frame scripts inherit a
+    # different environment. Do not claim those scripts received these pins.
+    if spec.runtime == "headless":
+        provider_environment = provider_launch_environment_receipt(
+            spec.agent, launch_env
+        )
+        if provider_environment:
+            model_receipt.update(provider_environment)
+            initial_meta.update(provider_environment)
+            atomic_write_json(artifacts["meta"], initial_meta)
 
     append_event(
         kind="launch",
