@@ -31,6 +31,7 @@ from vibecrafted_core.spawn import (
     format_interactive_launch_failure,
     interactive_launch_interpreter,
     interactive_policy_command,
+    interactive_resume_support,
     interactive_workspace_command,
     launch_interactive_workspace,
     main,
@@ -1333,12 +1334,7 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     interactive = resolve_provider_policy(
         provider, "local-worktrees", "bypass", "interactive"
     )
-    if provider == "omp":
-        # Headless-only worker: no interactive argv/resume builder exists.
-        assert not interactive.supported
-        assert "headless-only" in interactive.reason
-    else:
-        assert interactive.supported
+    assert interactive.supported
     assert not resolve_provider_policy(
         provider, "local-worktrees", "bypass", "headless"
     ).supported
@@ -1362,18 +1358,241 @@ def test_worktrees_are_interactive_only_while_vm_and_cloud_stay_unavailable(
     )
 
 
+_OMP_INTERACTIVE_FLAGS = {
+    "bypass": ("--approval-mode", "yolo"),
+    "auto": ("--approval-mode", "write"),
+    "accept-edits": ("--approval-mode", "write"),
+    "read-only": ("--tools", "read,grep,glob,find"),
+}
+
+
 @pytest.mark.parametrize("permissions", PERMISSION_POLICIES)
-def test_omp_never_advertises_an_interactive_cell_it_cannot_launch(
+def test_omp_interactive_launch_and_resume_are_supported_on_local_substrates(
     permissions: str,
 ) -> None:
-    """No omp interactive cell is supported, and the refusal is the honest policy
-    reason at the decision point rather than a late "unsupported provider"."""
-    for runtime in RUNTIME_POLICIES:
+    """Founder intent: omp is an interactive TUI client, not headless-only.
+
+    Interactive local-native and local-worktrees resolve the native permission
+    contract; local-vm and cloud stay unavailable; headless stays local-native
+    only; bare-fork remains unsupported.
+    """
+    expected = _OMP_INTERACTIVE_FLAGS[permissions]
+    for runtime in ("local-native", "local-worktrees"):
         cell = resolve_provider_policy("omp", runtime, permissions, "interactive")
-        assert not cell.supported
+        assert cell.supported, cell.reason
+        assert cell.flags == expected
+        argv = interactive_policy_command("omp", "init prompt", runtime, permissions)
+        assert argv[0] == "omp"
+        assert argv[1 : 1 + len(expected)] == list(expected)
+        assert argv[-1] == "init prompt"
+        assert "-p" not in argv
+        assert "--print" not in argv
+    resume_ok, resume_reason = interactive_resume_support("omp", "local-native")
+    assert resume_ok, resume_reason
+    assert not resolve_provider_policy(
+        "omp", "local-vm", permissions, "interactive"
+    ).supported
+    assert not resolve_provider_policy(
+        "omp", "cloud-soon", permissions, "interactive"
+    ).supported
     assert resolve_provider_policy("omp", "local-native", "auto", "headless").supported
-    with pytest.raises(ValueError, match="headless-only worker"):
-        interactive_policy_command("omp", "hi", "local-native", "auto")
+    assert not resolve_provider_policy(
+        "omp", "local-worktrees", "auto", "headless"
+    ).supported
+    with pytest.raises(
+        ValueError,
+        match="omp native fork is unsupported; use fresh or interactive --resume",
+    ):
+        interactive_policy_command(
+            "omp",
+            "hi",
+            "local-native",
+            permissions,
+            continuity_policy=ContinuityPolicy(
+                "bare-fork",
+                "lineage",
+                parent_provider_session_id="parent-session",
+            ),
+        )
+
+
+def _inert_omp_cli(path: Path) -> None:
+    """Inert fake omp CLI: record argv/cwd and exit 0. No network, credentials, or GUI."""
+    path.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  case "$a" in --help|--version) exit 0 ;; esac\n'
+        "done\n"
+        "{\n"
+        "  printf 'cwd %s\\n' \"$PWD\"\n"
+        '  printf \'arg %s\\n\' "$0" "$@"\n'
+        '} > "$SMOKE_CAPTURE"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _read_omp_capture(path: Path) -> dict[str, object]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines and lines[0].startswith("cwd ")
+    return {
+        "cwd": lines[0][4:],
+        "argv": [line[4:] for line in lines[1:] if line.startswith("arg ")],
+    }
+
+
+def _assert_omp_interactive_argv(
+    argv: list[str],
+    *,
+    approval: tuple[str, str],
+    model: str,
+    resume: str = "",
+) -> None:
+    assert Path(argv[0]).name == "omp"
+    assert "-p" not in argv
+    assert "--print" not in argv
+    assert argv[argv.index("--model") + 1] == model
+    assert argv[argv.index(approval[0]) + 1] == approval[1]
+    if resume:
+        assert argv[argv.index("--resume") + 1] == resume
+    assert argv[-1]
+    assert not argv[-1].startswith("-")
+
+
+def test_omp_interactive_init_and_resume_public_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _inert_omp_cli(fake_bin / "omp")
+    capture = tmp_path / "omp-capture.txt"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+
+    prompt = "init the workspace"
+    model = "gpt-4.1"
+    for permissions, approval in (
+        ("auto", ("--approval-mode", "write")),
+        ("bypass", ("--approval-mode", "yolo")),
+    ):
+        command = interactive_workspace_command(
+            "omp",
+            prompt,
+            "local-native",
+            permissions,
+            repo,
+            token_budget="unmetered",
+            model=model,
+        )
+        assert command[3:5] == ["interactive-launch", "omp"]
+        assert "--prompt" not in command
+        assert "-p" not in command
+        admission = json.loads(
+            Path(command[command.index("--admission-file") + 1]).read_text()
+        )
+        assert admission["agent"] == "omp"
+        assert admission["skill"] == "init"
+        assert admission["runtime_policy"] == "local-native"
+        assert admission.get("model_requested") == model
+        assert Path(admission["source_snapshot"]).read_text() == prompt
+        capture.unlink(missing_ok=True)
+        run_id = f"init-{permissions}"
+        rc = launch_interactive_workspace(
+            "omp",
+            prompt,
+            "local-native",
+            permissions,
+            repo,
+            token_budget="unmetered",
+            admission={
+                "run_id": run_id,
+                "skill": "init",
+                "model_requested": model,
+            },
+        )
+        assert rc == 0
+        observed = _read_omp_capture(capture)
+        _assert_omp_interactive_argv(observed["argv"], approval=approval, model=model)
+        assert Path(str(observed["cwd"])) == repo.resolve()
+        snapshot = home / "control_plane/runtime_runs" / run_id / "prompt.md"
+        assert snapshot.read_text(encoding="utf-8") == prompt
+        assert str(snapshot) in str(observed["argv"][-1])
+
+    native_sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    resume_prompt = "continue the session"
+    resume_run = "rsme-omp-1"
+
+    def _select_omp_session(provider, selector, root, selection=None, **_kwargs):
+        return {
+            "agent": provider,
+            "agent_session_id": selector,
+            "selection_root": str(Path(root).resolve()),
+            "session_selector": selector,
+            "identity_source": "explicit_session",
+        }
+
+    monkeypatch.setattr(
+        "vibecrafted_core.workflow.resolve_session_selection", _select_omp_session
+    )
+    resume_command = interactive_workspace_command(
+        "omp",
+        resume_prompt,
+        "local-native",
+        "auto",
+        repo,
+        token_budget="unmetered",
+        model=model,
+        skill="resume",
+        native_session=native_sid,
+    )
+    assert resume_command[3:5] == ["interactive-launch", "omp"]
+    assert "--prompt" not in resume_command
+    assert "-p" not in resume_command
+    resume_admission = json.loads(
+        Path(resume_command[resume_command.index("--admission-file") + 1]).read_text()
+    )
+    assert Path(resume_admission["source_snapshot"]).read_text() == resume_prompt
+    assert resume_admission["skill"] == "resume"
+    assert resume_admission["agent_session_id"] == native_sid
+    assert resume_admission.get("model_requested") == model
+
+    capture.unlink(missing_ok=True)
+    rc = launch_interactive_workspace(
+        "omp",
+        resume_prompt,
+        "local-native",
+        "auto",
+        repo,
+        token_budget="unmetered",
+        admission={
+            "run_id": resume_run,
+            "skill": "resume",
+            "agent_session_id": native_sid,
+            "model_requested": model,
+        },
+    )
+    assert rc == 0
+    observed = _read_omp_capture(capture)
+    argv = observed["argv"]
+    _assert_omp_interactive_argv(
+        argv,
+        approval=("--approval-mode", "write"),
+        model=model,
+        resume=native_sid,
+    )
+    assert Path(str(observed["cwd"])) == repo.resolve()
+    resume_idx = argv.index("--resume")
+    assert argv[resume_idx : resume_idx + 2] == ["--resume", native_sid]
+    resume_snapshot = home / "control_plane/runtime_runs" / resume_run / "prompt.md"
+    assert resume_snapshot.read_text(encoding="utf-8") == resume_prompt
+    assert str(resume_snapshot) in str(argv[-1])
 
 
 def test_accept_edits_is_native_or_unsupported_never_approximated() -> None:
