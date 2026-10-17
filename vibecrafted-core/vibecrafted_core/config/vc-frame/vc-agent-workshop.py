@@ -2176,7 +2176,7 @@ class Workshop:
                     ch_or_key = self.window.get_wch()
                     if isinstance(ch_or_key, str):
                         wch_char = ch_or_key
-                        key = ord(ch_or_key)
+                        key = ord(ch_or_key) if ord(ch_or_key) < 128 else -2
                     else:
                         key = ch_or_key
                 except curses.error:
@@ -3183,6 +3183,8 @@ class Workshop:
                     self.parent_index = -1
                     self._invalidate_stale_results()
                     return
+        else:
+            self._utf8_buf.clear()
 
         if not actively_typing and key == ord("e") and self.error:
             self.error_details = True

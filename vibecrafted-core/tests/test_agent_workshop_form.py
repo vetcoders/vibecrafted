@@ -664,6 +664,7 @@ def test_workshop_narrow_window_clips_mouse_targets_without_phantoms() -> None:
         for t in form.mouse_targets
         if t[4] in ("retry", "dismiss_error", "error_details")
     ]
+    assert len(action_targets) >= 1
     # All registered targets must fit within the window width (0 <= start < end <= 25)
     for row, start, end, _, _kind in action_targets:
         assert 0 <= start < end <= 25
@@ -811,7 +812,7 @@ def test_workshop_interrupted_utf8_lead_byte_resets_buffer_and_preserves_next_ke
 
 
 def test_workshop_get_wch_dispatch_in_run_loop() -> None:
-    """form.run() handles get_wch returning unicode strings directly."""
+    """form.run() handles get_wch returning unicode strings directly without colliding with KEY_RIGHT."""
     workshop = _load()
     typed = "zażółć"
     window = WchWindow(list(typed))
@@ -825,3 +826,16 @@ def test_workshop_get_wch_dispatch_in_run_loop() -> None:
     except InputFinished:
         pass
     assert form.path == typed
+
+    # Ensure 'ą' (ord 261 == curses.KEY_RIGHT) on row 0 (Agent) does not step agent index
+    window_non_typing = WchWindow(["ą"])
+    form_non_typing = workshop.Workshop(window_non_typing, mode="launcher")
+    form_non_typing.row = 0
+    initial_agent = form_non_typing.agent
+    form_non_typing.configure = lambda: None
+    form_non_typing.draw = lambda: None
+    try:
+        form_non_typing.run()
+    except InputFinished:
+        pass
+    assert form_non_typing.agent == initial_agent
