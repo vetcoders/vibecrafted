@@ -839,3 +839,397 @@ def test_workshop_get_wch_dispatch_in_run_loop() -> None:
     except InputFinished:
         pass
     assert form_non_typing.agent == initial_agent
+
+
+def _seed_monaspace_fonts(font_dir: Path) -> None:
+    font_dir.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "MonaspaceNeonNF.ttf",
+        "MonaspaceArgonNF.ttf",
+        "MonaspaceRadonNF.ttf",
+        "MonaspaceKryptonNF.ttf",
+        "MonaspaceXenonNF.ttf",
+    ):
+        (font_dir / name).write_bytes(b"\x00\x01\x00\x00")
+
+
+def test_onboarding_font_apply_malformed_toml_error_and_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed terminal-policy.toml raises ValueError, caught gracefully across key/mouse/run paths, preserving file and recovering cleanly."""
+    workshop = _load()
+    font_dir = tmp_path / "Fonts"
+    _seed_monaspace_fonts(font_dir)
+    vc_home = tmp_path / "vc-home"
+    vc_home.mkdir()
+
+    policy_path = tmp_path / "terminal-policy.toml"
+    malformed_bytes = b'[font.normal\nfamily = "Monaspace Neon"\n'
+    policy_path.write_bytes(malformed_bytes)
+
+    # 1. Launcher key path: handle_launcher_key(10)
+    window = RecordingWindow()
+    form = workshop.Workshop(
+        window,
+        mode="launcher",
+        onboarding=True,
+        onboarding_policy_path=policy_path,
+        onboarding_font_dirs=[font_dir],
+        onboarding_home=vc_home,
+    )
+    assert form.onboarding_active is True
+    # Navigate to Step 2
+    form.handle_launcher_key(ord("s"))
+    assert form.onboarding_step == 2
+
+    # Select Neon variant
+    neon_idx = next(
+        i for i, v in enumerate(form.onboarding_variants) if "Neon" in v.family
+    )
+    form.onboarding_font_idx = neon_idx
+
+    # Press Enter via public handle_launcher_key(10)
+    form.handle_launcher_key(10)
+    assert bool(form.error) is True
+    assert "malformed" in form.error.lower()
+    assert form.onboarding_active is True
+    assert form.onboarding_step == 2
+    assert policy_path.read_bytes() == malformed_bytes
+
+    # 2. Home key path: handle_home_key(10)
+    window_home = RecordingWindow()
+    form_home = workshop.Workshop(
+        window_home,
+        mode="home",
+        onboarding=True,
+        onboarding_policy_path=policy_path,
+        onboarding_font_dirs=[font_dir],
+        onboarding_home=vc_home,
+    )
+    form_home.handle_home_key(ord("s"))
+    assert form_home.onboarding_step == 2
+    form_home.onboarding_font_idx = neon_idx
+    form_home.handle_home_key(10)
+    assert bool(form_home.error) is True
+    assert "malformed" in form_home.error.lower()
+    assert form_home.onboarding_active is True
+    assert form_home.onboarding_step == 2
+    assert policy_path.read_bytes() == malformed_bytes
+
+    # 3. Mouse path: handle_mouse() on onboarding_font and onboarding_apply_font
+    form.draw()
+    # Click on onboarding_font for neon_idx
+    font_target = next(
+        t for t in form.mouse_targets if t[4] == "onboarding_font" and t[3] == neon_idx
+    )
+    f_row, f_start, _, _, _ = font_target
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, f_start, f_row, 0, workshop.curses.BUTTON1_CLICKED),
+        raising=False,
+    )
+    form.handle_mouse()
+    assert bool(form.error) is True
+    assert "malformed" in form.error.lower()
+    assert form.onboarding_active is True
+    assert policy_path.read_bytes() == malformed_bytes
+
+    # Click on onboarding_apply_font
+    apply_target = next(
+        t for t in form.mouse_targets if t[4] == "onboarding_apply_font"
+    )
+    a_row, a_start, _, _, _ = apply_target
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, a_start, a_row, 0, workshop.curses.BUTTON1_CLICKED),
+        raising=False,
+    )
+    form.handle_mouse()
+    assert bool(form.error) is True
+    assert "malformed" in form.error.lower()
+    assert form.onboarding_active is True
+    assert policy_path.read_bytes() == malformed_bytes
+
+    # 4. Run loop dispatch: workshop.run() with Enter key
+    window_run = GetchWindow([10])
+    form_run = workshop.Workshop(
+        window_run,
+        mode="launcher",
+        onboarding=True,
+        onboarding_policy_path=policy_path,
+        onboarding_font_dirs=[font_dir],
+        onboarding_home=vc_home,
+    )
+    form_run.onboarding_step = 2
+    form_run.onboarding_font_idx = neon_idx
+    form_run.configure = lambda: None
+    try:
+        form_run.run()
+    except InputFinished:
+        pass
+    assert bool(form_run.error) is True
+    assert "malformed" in form_run.error.lower()
+    assert form_run.onboarding_active is True
+    assert policy_path.read_bytes() == malformed_bytes
+
+    # 5. Recovery without exiting the app: repair policy_path with valid TOML
+    policy_path.write_text(
+        '[font.normal]\nfamily = "Monaspace Xenon NF"\n', encoding="utf-8"
+    )
+    form.handle_launcher_key(10)
+    assert form.error == ""
+    assert form.onboarding_active is False
+    content = policy_path.read_text(encoding="utf-8")
+    assert "[font.normal]" in content
+    assert "[font.bold]" in content
+    assert "[font.italic]" in content
+    assert '"Monaspace Neon NF"' in content
+
+
+def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-writable policy seam raises OSError, caught gracefully across key/mouse/run paths, preserving file and recovering cleanly."""
+    workshop = _load()
+    font_dir = tmp_path / "Fonts"
+    _seed_monaspace_fonts(font_dir)
+    vc_home = tmp_path / "vc-home"
+    vc_home.mkdir()
+
+    sub_dir = tmp_path / "protected"
+    sub_dir.mkdir()
+    policy_path = sub_dir / "terminal-policy.toml"
+    valid_initial_toml = '[font.normal]\nfamily = "Monaspace Argon NF"\n'
+    policy_path.write_text(valid_initial_toml, encoding="utf-8")
+    initial_bytes = policy_path.read_bytes()
+
+    # Make parent dir non-writable so atomic tempfile creation fails with OSError (PermissionError)
+    sub_dir.chmod(0o555)
+    try:
+        # 1. Trigger via public handle_launcher_key(10)
+        window = RecordingWindow()
+        form = workshop.Workshop(
+            window,
+            mode="launcher",
+            onboarding=True,
+            onboarding_policy_path=policy_path,
+            onboarding_font_dirs=[font_dir],
+            onboarding_home=vc_home,
+        )
+        assert form.onboarding_active is True
+        form.handle_launcher_key(ord("s"))
+        assert form.onboarding_step == 2
+
+        neon_idx = next(
+            i for i, v in enumerate(form.onboarding_variants) if "Neon" in v.family
+        )
+        form.onboarding_font_idx = neon_idx
+
+        form.handle_launcher_key(10)
+        assert bool(form.error) is True
+        assert form.onboarding_active is True
+        assert form.onboarding_step == 2
+        assert policy_path.read_bytes() == initial_bytes
+
+        # 2. Trigger via public handle_home_key(10)
+        window_home = RecordingWindow()
+        form_home = workshop.Workshop(
+            window_home,
+            mode="home",
+            onboarding=True,
+            onboarding_policy_path=policy_path,
+            onboarding_font_dirs=[font_dir],
+            onboarding_home=vc_home,
+        )
+        form_home.handle_home_key(ord("s"))
+        form_home.onboarding_font_idx = neon_idx
+        form_home.handle_home_key(10)
+        assert bool(form_home.error) is True
+        assert form_home.onboarding_active is True
+        assert policy_path.read_bytes() == initial_bytes
+
+        # 3. Trigger via public handle_mouse() on onboarding_apply_font
+        form.draw()
+        apply_target = next(
+            t for t in form.mouse_targets if t[4] == "onboarding_apply_font"
+        )
+        a_row, a_start, _, _, _ = apply_target
+        monkeypatch.setattr(
+            workshop.curses,
+            "getmouse",
+            lambda: (0, a_start, a_row, 0, workshop.curses.BUTTON1_CLICKED),
+            raising=False,
+        )
+        form.handle_mouse()
+        assert bool(form.error) is True
+        assert form.onboarding_active is True
+        assert policy_path.read_bytes() == initial_bytes
+
+        # 4. Trigger via workshop.run() loop
+        window_run = GetchWindow([10])
+        form_run = workshop.Workshop(
+            window_run,
+            mode="launcher",
+            onboarding=True,
+            onboarding_policy_path=policy_path,
+            onboarding_font_dirs=[font_dir],
+            onboarding_home=vc_home,
+        )
+        form_run.onboarding_step = 2
+        form_run.onboarding_font_idx = neon_idx
+        form_run.configure = lambda: None
+        try:
+            form_run.run()
+        except InputFinished:
+            pass
+        assert bool(form_run.error) is True
+        assert form_run.onboarding_active is True
+        assert policy_path.read_bytes() == initial_bytes
+
+        # 5. Recovery: Restore write permissions
+        sub_dir.chmod(0o755)
+
+        # Apply via mouse click on onboarding_apply_font
+        form.draw()
+        apply_target = next(
+            t for t in form.mouse_targets if t[4] == "onboarding_apply_font"
+        )
+        a_row, a_start, _, _, _ = apply_target
+        monkeypatch.setattr(
+            workshop.curses,
+            "getmouse",
+            lambda: (0, a_start, a_row, 0, workshop.curses.BUTTON1_CLICKED),
+            raising=False,
+        )
+        form.handle_mouse()
+        assert form.error == ""
+        assert form.onboarding_active is False
+        content = policy_path.read_text(encoding="utf-8")
+        assert "[font.normal]" in content
+        assert "[font.bold]" in content
+        assert "[font.italic]" in content
+        assert '"Monaspace Neon NF"' in content
+    finally:
+        sub_dir.chmod(0o755)
+
+
+def test_onboarding_close_clears_error_without_leak_to_launcher_or_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Esc or clicking onboarding_close clears prior error so it does not leak to home/launcher."""
+    workshop = _load()
+    font_dir = tmp_path / "Fonts"
+    _seed_monaspace_fonts(font_dir)
+    vc_home = tmp_path / "vc-home"
+    vc_home.mkdir()
+
+    policy_path = tmp_path / "terminal-policy.toml"
+    policy_path.write_bytes(b'[font.normal\nfamily = "Monaspace Neon"\n')
+
+    # Launcher mode
+    window = RecordingWindow()
+    form = workshop.Workshop(
+        window,
+        mode="launcher",
+        onboarding=True,
+        onboarding_policy_path=policy_path,
+        onboarding_font_dirs=[font_dir],
+        onboarding_home=vc_home,
+    )
+    form.handle_launcher_key(ord("s"))  # Step 2
+    form.handle_launcher_key(10)  # Fails with malformed TOML
+    assert bool(form.error) is True
+    assert form.onboarding_active is True
+
+    # Click onboarding_close via handle_mouse
+    form.draw()
+    close_target = next(t for t in form.mouse_targets if t[4] == "onboarding_close")
+    c_row, c_start, _, _, _ = close_target
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, c_start, c_row, 0, workshop.curses.BUTTON1_CLICKED),
+        raising=False,
+    )
+    form.handle_mouse()
+    assert form.onboarding_active is False
+    assert form.error == ""
+
+    # Drawing launcher has NO leaked error
+    window.erase()
+    form.draw()
+    drawn_texts = [text for _, _, text, _ in window.drawn]
+    assert not any("malformed" in t.lower() for t in drawn_texts)
+
+    # Home mode: test Esc closing
+    window_home = RecordingWindow()
+    form_home = workshop.Workshop(
+        window_home,
+        mode="home",
+        onboarding=True,
+        onboarding_policy_path=policy_path,
+        onboarding_font_dirs=[font_dir],
+        onboarding_home=vc_home,
+    )
+    form_home.handle_home_key(ord("s"))  # Step 2
+    form_home.handle_home_key(10)  # Error set
+    assert bool(form_home.error) is True
+
+    # Esc once in Step 2 returns to Step 1 and clears error
+    form_home.handle_home_key(27)
+    assert form_home.onboarding_step == 1
+    assert form_home.error == ""
+    assert form_home.onboarding_active is True
+
+    # Esc again closes onboarding
+    form_home.handle_home_key(27)
+    assert form_home.onboarding_active is False
+    assert form_home.error == ""
+
+
+def test_onboarding_confirm_provider_oserror_and_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workshop._onboarding_confirm_provider catches OSError and ValueError and displays error without crashing."""
+    workshop = _load()
+    vc_home = tmp_path / "vc-home"
+    vc_home.mkdir()
+
+    window = RecordingWindow()
+    form = workshop.Workshop(
+        window,
+        mode="launcher",
+        onboarding=True,
+        onboarding_home=vc_home,
+    )
+    assert form.onboarding_step == 1
+
+    # Mock probe_provider raising ValueError
+    monkeypatch.setattr(
+        cbo,
+        "probe_provider",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("provider config malformed")
+        ),
+    )
+    form.handle_launcher_key(10)
+    assert form.error == "provider config malformed"
+    assert form.notice == ""
+    assert form.onboarding_step == 1
+    assert form.onboarding_active is True
+
+    # Mock probe_provider raising OSError
+    monkeypatch.setattr(
+        cbo,
+        "probe_provider",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("auth path inaccessible")
+        ),
+    )
+    form.handle_launcher_key(10)
+    assert form.error == "auth path inaccessible"
+    assert form.notice == ""
+    assert form.onboarding_step == 1
+    assert form.onboarding_active is True

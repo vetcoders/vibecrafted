@@ -1641,7 +1641,7 @@ class Workshop:
                 policy_path=self.onboarding_policy_path,
                 font_dirs=self.onboarding_font_dirs,
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
             variants = []
         self.onboarding_variants = variants
         active_idx = 0
@@ -1679,6 +1679,7 @@ class Workshop:
                 command_bridge_onboarding.cancel(home=self.onboarding_home)
         except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
             pass
+        self.error = ""
         self.onboarding_active = False
 
     def _onboarding_confirm_provider(self) -> None:
@@ -1700,8 +1701,13 @@ class Workshop:
                 self.onboarding_step = 2
             else:
                 self.error = f"{chosen}: no local auth signal found; configure auth or press Tab/s to skip to Typography"
-        except command_bridge_onboarding.OnboardingError as exc:
+        except (
+            OSError,
+            ValueError,
+            command_bridge_onboarding.OnboardingError,
+        ) as exc:
             self.error = str(exc)
+            self.notice = ""
 
     def _onboarding_apply_font(self, index: int | None = None) -> None:
         if not self.onboarding_variants:
@@ -1718,11 +1724,14 @@ class Workshop:
                 policy_path=self.onboarding_policy_path,
                 font_dirs=self.onboarding_font_dirs,
             )
-        except command_bridge_onboarding.FontNotAvailableError as exc:
+        except (
+            OSError,
+            ValueError,
+            command_bridge_onboarding.FontNotAvailableError,
+            command_bridge_onboarding.OnboardingError,
+        ) as exc:
             self.error = str(exc)
-            return
-        except command_bridge_onboarding.OnboardingError as exc:
-            self.error = str(exc)
+            self.notice = ""
             return
         self._sync_onboarding_typography()
         self.configured_font_family = chosen.family
