@@ -82,10 +82,12 @@ _vc_terminal_bind_owned_python() {
   unalias python python3 2>/dev/null || true
   _vc_terminal_python_bound=1
   path=("$_vc_terminal_python_door" ${path:#$_vc_terminal_python_door})
-  python3() {
+  # `function name` avoids alias expansion while zsh parses this whole body,
+  # before the conditional unalias above can run.
+  function python3 {
     "$_vc_terminal_python_door/python3" "$@"
   }
-  python() {
+  function python {
     "$_vc_terminal_python_door/python" "$@"
   }
 }
