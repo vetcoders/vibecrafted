@@ -668,3 +668,160 @@ def test_workshop_narrow_window_clips_mouse_targets_without_phantoms() -> None:
     for row, start, end, _, _kind in action_targets:
         assert 0 <= start < end <= 25
         assert any(r == row and c == start for r, c, _t, _ in narrow_window.drawn)
+
+
+class GridWindow:
+    """A bounds-checking 2D cell grid fake window.
+
+    Out-of-bounds writes are ignored and later addstr calls overwrite
+    earlier cells at the same (row, col).
+    """
+
+    def __init__(self, height: int = 30, width: int = 100) -> None:
+        self.height = height
+        self.width = width
+        self.grid: list[list[str]] = [
+            [" " for _ in range(width)] for _ in range(height)
+        ]
+        self.drawn: list[tuple[int, int, str, int]] = []
+
+    def getmaxyx(self) -> tuple[int, int]:
+        return (self.height, self.width)
+
+    def erase(self) -> None:
+        self.grid = [[" " for _ in range(self.width)] for _ in range(self.height)]
+        self.drawn.clear()
+
+    def refresh(self) -> None:
+        pass
+
+    def addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
+        self.drawn.append((y, x, text, attr))
+        if 0 <= y < self.height:
+            for i, ch in enumerate(text):
+                col = x + i
+                if 0 <= col < self.width:
+                    self.grid[y][col] = ch
+
+    def get_row(self, y: int) -> str:
+        if 0 <= y < self.height:
+            return "".join(self.grid[y])
+        return ""
+
+
+class WchWindow(RecordingWindow):
+    def __init__(
+        self,
+        items: list[str | int],
+        height: int = 30,
+        width: int = 100,
+    ) -> None:
+        super().__init__(height=height, width=width)
+        self.items = iter(items)
+
+    def get_wch(self) -> str | int:
+        try:
+            return next(self.items)
+        except StopIteration:
+            raise InputFinished
+
+
+def test_workshop_error_recovery_grid_window_no_overwrite_and_exact_cell_targets() -> (
+    None
+):
+    """GridWindow proves Summary and [ Retry (r) ] [ Back (Esc) ] [ Details (e) ] do not overwrite each other."""
+    workshop = _load()
+    window = GridWindow(30, 100)
+    form = workshop.Workshop(window, mode="launcher")
+    form.error = "Oops"
+    form.error_stage = "Validation"
+    form.draw_launcher()
+
+    err_row = 30 - 3  # 27
+    act_row = 30 - 1  # 29
+
+    err_line = window.get_row(err_row)
+    act_line = window.get_row(act_row)
+
+    # Summary row has error and stage, but zero action button text
+    assert "[Validation] Oops" in err_line
+    assert "[ Retry (r) ]" not in err_line
+    assert "[ Back (Esc) ]" not in err_line
+    assert "[ Details (e) ]" not in err_line
+
+    # Action row has all three buttons, and zero error/stage text
+    assert "[ Retry (r) ]" in act_line
+    assert "[ Back (Esc) ]" in act_line
+    assert "[ Details (e) ]" in act_line
+    assert "Oops" not in act_line
+    assert "Validation" not in act_line
+
+    # Mouse targets match the exact final visible cells in the 2D grid
+    action_targets = [
+        t
+        for t in form.mouse_targets
+        if t[4] in ("retry", "dismiss_error", "error_details")
+    ]
+    assert len(action_targets) == 3
+    for row, start, end, _, kind in action_targets:
+        assert row == act_row
+        cell_slice = "".join(window.grid[row][start:end])
+        expected_label = {
+            "retry": "[ Retry (r) ]",
+            "dismiss_error": "[ Back (Esc) ]",
+            "error_details": "[ Details (e) ]",
+        }[kind]
+        assert cell_slice == expected_label
+
+
+def test_workshop_interrupted_utf8_lead_byte_resets_buffer_and_preserves_next_key() -> (
+    None
+):
+    """Interrupted UTF-8 lead byte clears _utf8_buf and does not swallow the next ASCII character or Enter key."""
+    workshop = _load()
+    window = RecordingWindow(30, 100)
+    form = workshop.Workshop(window, mode="launcher")
+    form.path = ""
+    form.row = 1  # editing_path
+
+    # Step 1: Send incomplete lead byte (195). Should be buffered.
+    form.handle_launcher_key(195)
+    assert len(form._utf8_buf) == 1
+    assert form.path == ""
+
+    # Step 2: Send ASCII 'a' (97). Non-continuation byte must clear buffer and insert 'a'.
+    form.handle_launcher_key(ord("a"))
+    assert len(form._utf8_buf) == 0
+    assert form.path == "a"
+
+    # Step 3: Send another interrupted lead byte (195), followed by Enter (10).
+    form.handle_launcher_key(195)
+    assert len(form._utf8_buf) == 1
+
+    launched = False
+
+    def mock_launch() -> None:
+        nonlocal launched
+        launched = True
+
+    form._attempt_launch = mock_launch
+    form.handle_launcher_key(10)
+    assert len(form._utf8_buf) == 0
+    assert launched is True
+
+
+def test_workshop_get_wch_dispatch_in_run_loop() -> None:
+    """form.run() handles get_wch returning unicode strings directly."""
+    workshop = _load()
+    typed = "zażółć"
+    window = WchWindow(list(typed))
+    form = workshop.Workshop(window, mode="launcher")
+    form.path = ""
+    form.row = 1
+    form.configure = lambda: None
+    form.draw = lambda: None
+    try:
+        form.run()
+    except InputFinished:
+        pass
+    assert form.path == typed

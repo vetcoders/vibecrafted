@@ -2170,19 +2170,36 @@ class Workshop:
         self.configure()
         while True:
             self.draw()
-            key = self.window.getch()
+            wch_char: str | None = None
+            if hasattr(self.window, "get_wch"):
+                try:
+                    ch_or_key = self.window.get_wch()
+                    if isinstance(ch_or_key, str):
+                        wch_char = ch_or_key
+                        key = ord(ch_or_key)
+                    else:
+                        key = ch_or_key
+                except curses.error:
+                    key = -1
+            else:
+                key = self.window.getch()
+
             if key == -1:
+                self._utf8_buf.clear()
                 continue
             if key == curses.KEY_MOUSE:
+                self._utf8_buf.clear()
                 self.handle_mouse()
                 continue
             self.presence_schedule.request()
             if key == curses.KEY_RESIZE:
+                self._utf8_buf.clear()
                 continue
             if self.mode == "home":
+                self._utf8_buf.clear()
                 self.handle_home_key(key)
             else:
-                self.handle_launcher_key(key)
+                self.handle_launcher_key(key, wch_char=wch_char)
 
     def draw(self) -> None:
         self.window.erase()
@@ -3093,7 +3110,10 @@ class Workshop:
         self._utf8_buf.clear()
         return None
 
-    def handle_launcher_key(self, key: int) -> None:
+    def handle_launcher_key(self, key: int, wch_char: str | None = None) -> None:
+        if wch_char is not None or not (128 <= key <= 191) and not (194 <= key <= 244):
+            self._utf8_buf.clear()
+
         if self.onboarding_active:
             self.handle_onboarding_key(key)
             return
@@ -3128,35 +3148,41 @@ class Workshop:
         editing_path = self.row == 1
         actively_typing = editing_path or editing_parent or editing_control
 
-        if actively_typing and 128 <= key <= 244:
-            ch = self._decode_key_char(key)
-            if ch is None:
-                return
-            if editing_path:
-                self._insert_path_text(ch)
-                return
-            if editing_control:
-                name = {7: "model", 8: "effort", 10: "session"}[self.row]
-                if (
-                    name == "effort"
-                    and AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES
-                ):
-                    self.error = "Effort is unavailable for this provider"
+        target_char: str | None = None
+        if actively_typing:
+            if wch_char is not None and wch_char.isprintable():
+                target_char = wch_char
+            elif 128 <= key <= 244:
+                target_char = self._decode_key_char(key)
+                if target_char is None:
                     return
-                setattr(self, name, getattr(self, name) + ch)
-                self._invalidate_stale_results()
-                return
-            if editing_parent and self._resume_mode():
-                self.session += ch
-                self.resume_run_id = ""
-                self.resume_index = -1
-                self._invalidate_stale_results()
-                return
-            if editing_parent:
-                self.continuity_parent += ch
-                self.parent_index = -1
-                self._invalidate_stale_results()
-                return
+
+            if target_char is not None:
+                if editing_path:
+                    self._insert_path_text(target_char)
+                    return
+                if editing_control:
+                    name = {7: "model", 8: "effort", 10: "session"}[self.row]
+                    if (
+                        name == "effort"
+                        and AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES
+                    ):
+                        self.error = "Effort is unavailable for this provider"
+                        return
+                    setattr(self, name, getattr(self, name) + target_char)
+                    self._invalidate_stale_results()
+                    return
+                if editing_parent and self._resume_mode():
+                    self.session += target_char
+                    self.resume_run_id = ""
+                    self.resume_index = -1
+                    self._invalidate_stale_results()
+                    return
+                if editing_parent:
+                    self.continuity_parent += target_char
+                    self.parent_index = -1
+                    self._invalidate_stale_results()
+                    return
 
         if not actively_typing and key == ord("e") and self.error:
             self.error_details = True
@@ -3518,6 +3544,7 @@ class Workshop:
             self.continuity = CONTINUITY_MODES.index("fresh")
 
     def handle_mouse(self) -> None:
+        self._utf8_buf.clear()
         try:
             _, x, y, _, state = curses.getmouse()
         except curses.error:

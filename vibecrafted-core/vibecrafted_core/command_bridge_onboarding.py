@@ -457,6 +457,15 @@ def _find_font_file(tokens: Sequence[str], font_dirs: Sequence[Path]) -> Path | 
     return None
 
 
+def _normalize_toml_section(line: str) -> str | None:
+    match = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
+    if not match:
+        return None
+    inner = match.group(1).strip()
+    parts = [p.strip().strip("\"'").strip() for p in re.split(r"\s*\.\s*", inner)]
+    return f"[{'.'.join(parts)}]"
+
+
 def _extract_family_from_toml_text(raw: str) -> str | None:
     try:
         parsed = tomllib.loads(raw)
@@ -478,9 +487,8 @@ def _extract_family_from_toml_text(raw: str) -> str | None:
         pass
     in_font_section = False
     for line in raw.splitlines():
-        header_match = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
-        if header_match:
-            normalized = f"[{header_match.group(1).strip()}]"
+        normalized = _normalize_toml_section(line)
+        if normalized is not None:
             in_font_section = normalized in _FONT_SECTIONS
             continue
         if in_font_section:
@@ -639,38 +647,37 @@ def _rewrite_font_sections(raw: str, family: str) -> str:
     lines = raw.splitlines()
     seen_sections: set[str] = set()
     updated_lines: list[str] = []
+    escaped_family = json.dumps(family)
     idx = 0
     while idx < len(lines):
         line = lines[idx]
-        header_match = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
-        if header_match:
-            normalized_section = f"[{header_match.group(1).strip()}]"
-            if normalized_section in _FONT_SECTIONS:
-                seen_sections.add(normalized_section)
-                updated_lines.append(line)
+        normalized_section = _normalize_toml_section(line)
+        if normalized_section in _FONT_SECTIONS:
+            seen_sections.add(normalized_section)
+            updated_lines.append(line)
+            idx += 1
+            replaced_in_section = False
+            section_body: list[str] = []
+            while idx < len(lines):
+                next_line = lines[idx]
+                if re.match(r"^\s*\[[^\]]+\]\s*(?:#.*)?$", next_line):
+                    break
+                match = re.match(
+                    r'^(\s*)family\s*=\s*(?:"[^"]*"|\x27[^\x27]*\x27|[^#\r\n]*?)(\s*#.*)?$',
+                    next_line,
+                )
+                if not replaced_in_section and match:
+                    indent = match.group(1) or ""
+                    comment = match.group(2) or ""
+                    section_body.append(f"{indent}family = {escaped_family}{comment}")
+                    replaced_in_section = True
+                else:
+                    section_body.append(next_line)
                 idx += 1
-                replaced_in_section = False
-                section_body: list[str] = []
-                while idx < len(lines):
-                    next_line = lines[idx]
-                    if re.match(r"^\s*\[[^\]]+\]\s*(?:#.*)?$", next_line):
-                        break
-                    match = re.match(
-                        r'^(\s*)family\s*=\s*(?:"[^"]*"|\x27[^\x27]*\x27|[^#\r\n]*?)(\s*#.*)?$',
-                        next_line,
-                    )
-                    if not replaced_in_section and match:
-                        indent = match.group(1) or ""
-                        comment = match.group(2) or ""
-                        section_body.append(f'{indent}family = "{family}"{comment}')
-                        replaced_in_section = True
-                    else:
-                        section_body.append(next_line)
-                    idx += 1
-                if not replaced_in_section:
-                    section_body.insert(0, f'family = "{family}"')
-                updated_lines.extend(section_body)
-                continue
+            if not replaced_in_section:
+                section_body.insert(0, f"family = {escaped_family}")
+            updated_lines.extend(section_body)
+            continue
         updated_lines.append(line)
         idx += 1
 
@@ -679,7 +686,7 @@ def _rewrite_font_sections(raw: str, family: str) -> str:
             if updated_lines and updated_lines[-1].strip() != "":
                 updated_lines.append("")
             updated_lines.append(section)
-            updated_lines.append(f'family = "{family}"')
+            updated_lines.append(f"family = {escaped_family}")
             updated_lines.append('style = "Regular"')
 
     return "\n".join(updated_lines) + "\n"
