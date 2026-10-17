@@ -387,25 +387,108 @@ def test_agent_stepper_renders_persistent_chips() -> None:
 # ─── Acceptance Criteria #9 & #10 (Finding 1000013, 22): OMP Gating & Stale Result Invalidation ───
 
 
-def test_omp_agent_interactive_unavailability_and_cycling() -> None:
-    """omp agent is unavailable for interactive launch and skipped by arrow navigation."""
+def _runtime_caps(
+    available: bool, reason: str = "provider is not installed"
+) -> dict[str, dict[str, object]]:
+    return {
+        name: {"available": available, "reason": "" if available else reason}
+        for name in ("local-native", "local-worktrees", "local-vm", "cloud-soon")
+    }
+
+
+def test_omp_agent_interactive_unavailability_and_cycling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """omp is selectable when installed; unavailable providers are skipped and refused."""
     workshop = _load()
-    # Check that omp is in AGENTS
     assert "omp" in workshop.AGENTS
     omp_idx = workshop.AGENTS.index("omp")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
 
-    # In interactive capability check, omp is unavailable
-    assert workshop._provider_available("omp") is False
-    assert "headless" in workshop._provider_unavailable_reason("omp")
+    def installed_caps(agent: str) -> dict[str, dict[str, object]]:
+        return _runtime_caps(True)
 
-    # Left/Right arrow navigation skips unavailable agents
+    monkeypatch.setattr(workshop, "runtime_policy_capabilities", installed_caps)
+    assert workshop._provider_available("omp") is True
+
     form = workshop.Workshop(RecordingWindow(), mode="launcher")
-    form.row = 0  # Agent row
-    # Start at agent before omp (or after omp)
+    form.save_choices = lambda: None
+    form._load_choices = lambda: None
+    form.row = 0
     form.agent = (omp_idx - 1) % len(workshop.AGENTS)
-    # Moving right should skip omp if omp is unavailable
     form._cycle_agent(1)
-    assert form.agent != omp_idx
+    assert form.agent == omp_idx
+
+    form.draw_launcher()
+    target = next(
+        t for t in form.mouse_targets if t[4] == "provider" and t[3] == omp_idx
+    )
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, target[1], target[0], 0, workshop.curses.BUTTON1_CLICKED),
+    )
+    form.handle_mouse()
+    assert form.agent == omp_idx
+
+    init_argv = workshop.launch_argv(
+        "omp",
+        "init",
+        "local-native",
+        "auto",
+        workspace=tmp_path,
+    )
+    assert init_argv[:5] == ["vibecrafted", "init", "omp", "--runtime", "plain"]
+    resume_argv = workshop.launch_argv(
+        "omp",
+        "resume",
+        "local-native",
+        "auto",
+        workspace=tmp_path,
+        session="omp-native-sid-1",
+    )
+    assert resume_argv[:5] == ["vibecrafted", "resume", "omp", "--runtime", "plain"]
+    assert "--session" in resume_argv
+    assert resume_argv[resume_argv.index("--session") + 1] == "omp-native-sid-1"
+
+    unavailable = "copilot"
+
+    def missing_caps(agent: str) -> dict[str, dict[str, object]]:
+        return _runtime_caps(agent != unavailable)
+
+    monkeypatch.setattr(workshop, "runtime_policy_capabilities", missing_caps)
+    assert workshop._provider_available(unavailable) is False
+    missing_idx = workshop.AGENTS.index(unavailable)
+    form.error = ""
+    form.agent = (missing_idx - 1) % len(workshop.AGENTS)
+    form._cycle_agent(1)
+    assert form.agent != missing_idx
+
+    form.draw_launcher()
+    missing_target = next(
+        t for t in form.mouse_targets if t[4] == "provider" and t[3] == missing_idx
+    )
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (
+            0,
+            missing_target[1],
+            missing_target[0],
+            0,
+            workshop.curses.BUTTON1_CLICKED,
+        ),
+    )
+    form.handle_mouse()
+    assert form.agent != missing_idx
+    assert form.error
+
+    form.agent = missing_idx
+    form.path = str(tmp_path)
+    form.error = ""
+    form._launch_one()
+    assert form.error
 
 
 def test_stale_launch_failure_invalidation_on_config_change(tmp_path: Path) -> None:
