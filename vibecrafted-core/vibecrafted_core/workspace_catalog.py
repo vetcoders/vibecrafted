@@ -1041,6 +1041,7 @@ def resolve_project_destination(
     # reinstall left a coherent but incorrect project binding on that seat.
     occupied = set(occupied_names) | live | {"vc-host"}
     owned: dict[str, WorkspaceSessionRecord] = {}
+    incarnation_bound: set[str] = set()
     unowned: set[str] = set()
     for name in sorted(live):
         if name == "vc-host":
@@ -1056,15 +1057,27 @@ def resolve_project_destination(
             == resolved
         ):
             owned[name] = seat[0]
+            if seat[2].session_incarnation is not None:
+                incarnation_bound.add(name)
     preferred = [
         name
         for name, session in owned.items()
-        if name
-        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+        if (
+            name in incarnation_bound
+            or name
+            == (
+                environ.get("VC_FRAME_SESSION_NAME")
+                or environ.get("ZELLIJ_SESSION_NAME")
+            )
+        )
         and session.workspace_id == environ.get(ENV_WORKSPACE_ID)
         and session.session_id == environ.get(ENV_VIBECRAFTED_SESSION_ID)
         and session.workspace_instance_id == environ.get(ENV_WORKSPACE_INSTANCE_ID)
     ]
+    if len(preferred) > 1:
+        raise WorkspaceCatalogError(
+            "multiple live Frame destinations belong to this project"
+        )
     if preferred:
         effective, reason = preferred[0], "owned-current-seat"
     elif len(owned) > 1:

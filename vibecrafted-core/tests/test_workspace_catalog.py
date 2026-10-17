@@ -1770,6 +1770,55 @@ def test_frame_incarnation_probe_rejects_unavailable_metadata_and_pins_engine(
     ]
 
 
+def test_canonical_tuple_prefers_renamed_seat_among_multiple_project_sessions(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    physical = {"old": incarnation, "other": wc.new_uuid7()}
+    monkeypatch.setattr(
+        wc, "_frame_session_incarnation", lambda name, _socket: physical.get(name)
+    )
+    original = _destination_seat(root, "old", "/socket")
+    other = wc.materialize_instance(
+        workspace_id=original.workspace_id,
+        root=root,
+        vibecrafted_session_id=wc.new_uuid7(),
+        build_id=original.build_id,
+    )
+    wc.record_runtime_session_attachment(
+        workspace_id=other.workspace_id,
+        vibecrafted_session_id=other.vibecrafted_session_id,
+        workspace_instance_id=other.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="other",
+        state="live",
+        socket_dir="/socket",
+    )
+    physical["renamed"] = physical.pop("old")
+    environment = {**original.to_env(), "VC_FRAME_SESSION_NAME": "old"}
+    arguments = {
+        "root": root,
+        "requested": "old",
+        "live_names": ["renamed", "other"],
+        "occupied_names": ["renamed", "other"],
+        "socket_dir": "/socket",
+        "env": environment,
+    }
+    route = wc.resolve_project_destination(**arguments)
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "renamed"
+    with pytest.raises(wc.WorkspaceCatalogError, match="multiple live Frame"):
+        wc.resolve_project_destination(**{**arguments, "env": {}})
+    # Even a complete logical tuple cannot choose between two observations of
+    # the same physical incarnation. It must never pick the first sorted name.
+    physical["alias"] = incarnation
+    with pytest.raises(wc.WorkspaceCatalogError, match="multiple live Frame"):
+        wc.resolve_project_destination(
+            **{**arguments, "live_names": ["renamed", "other", "alias"]}
+        )
+
+
 def test_destination_preserves_foreign_basename_and_reuses_verified_custom_seat(
     home, tmp_path
 ):
