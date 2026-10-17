@@ -756,6 +756,7 @@ class RuntimeSessionAttachment:
     attached_at: str
     updated_at: str
     replaces_runtime_session_id: str | None = None
+    session_incarnation: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -767,6 +768,7 @@ class RuntimeSessionAttachment:
             "attached_at": self.attached_at,
             "updated_at": self.updated_at,
             "replaces_runtime_session_id": self.replaces_runtime_session_id,
+            "session_incarnation": self.session_incarnation,
         }
 
     @classmethod
@@ -783,6 +785,7 @@ class RuntimeSessionAttachment:
                 "runtime and runtime_session_id are required for an attachment"
             )
         replacement = str(payload.get("replaces_runtime_session_id") or "").strip()
+        incarnation = payload.get("session_incarnation")
         return cls(
             attachment_id=require_uuid(
                 payload.get("attachment_id"), field_name="attachment_id"
@@ -794,6 +797,11 @@ class RuntimeSessionAttachment:
             attached_at=str(payload.get("attached_at") or ""),
             updated_at=str(payload.get("updated_at") or ""),
             replaces_runtime_session_id=replacement or None,
+            session_incarnation=(
+                require_uuid(incarnation, field_name="session_incarnation")
+                if incarnation is not None
+                else None
+            ),
         )
 
 
@@ -1033,27 +1041,43 @@ def resolve_project_destination(
     # reinstall left a coherent but incorrect project binding on that seat.
     occupied = set(occupied_names) | live | {"vc-host"}
     owned: dict[str, WorkspaceSessionRecord] = {}
+    incarnation_bound: set[str] = set()
+    unowned: set[str] = set()
     for name in sorted(live):
         if name == "vc-host":
             continue
         seat = _runtime_workspace_identity(
             root=None, runtime_session_id=name, socket_dir=socket_dir
         )
+        if seat is None:
+            unowned.add(name)
         if (
             seat
             and Path(show_workspace(seat[0].workspace_id).canonical_root).resolve()
             == resolved
         ):
             owned[name] = seat[0]
+            if seat[2].session_incarnation is not None:
+                incarnation_bound.add(name)
     preferred = [
         name
         for name, session in owned.items()
-        if name
-        == (environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME"))
+        if (
+            name in incarnation_bound
+            or name
+            == (
+                environ.get("VC_FRAME_SESSION_NAME")
+                or environ.get("ZELLIJ_SESSION_NAME")
+            )
+        )
         and session.workspace_id == environ.get(ENV_WORKSPACE_ID)
         and session.session_id == environ.get(ENV_VIBECRAFTED_SESSION_ID)
         and session.workspace_instance_id == environ.get(ENV_WORKSPACE_INSTANCE_ID)
     ]
+    if len(preferred) > 1:
+        raise WorkspaceCatalogError(
+            "multiple live Frame destinations belong to this project"
+        )
     if preferred:
         effective, reason = preferred[0], "owned-current-seat"
     elif len(owned) > 1:
@@ -1080,6 +1104,27 @@ def resolve_project_destination(
         if recent is not None and recent.socket_dir != socket_dir:
             raise WorkspaceCatalogError(
                 "project Frame destination belongs to another socket namespace"
+            )
+        # A complete observation of different immutable incarnations disproves
+        # a rename into those seats. Legacy or unavailable metadata cannot.
+        unowned_incarnations = (
+            [_frame_session_incarnation(name, socket_dir) for name in sorted(unowned)]
+            if recent is not None and recent.session_incarnation is not None
+            else [None] * len(unowned)
+        )
+        if (
+            recent is not None
+            and unowned
+            and (
+                None in unowned_incarnations
+                or recent.session_incarnation in unowned_incarnations
+                or len(set(unowned_incarnations)) != len(unowned_incarnations)
+            )
+        ):
+            raise WorkspaceCatalogError(
+                "Saved Frame binding is unavailable and existing live sessions have no verified binding; "
+                "open the existing session on the Frame rail to continue. "
+                "Automatic project return needs a previously bound session incarnation."
             )
         if recent is not None and recent.runtime_session_id not in occupied:
             return {
@@ -1533,8 +1578,9 @@ def materialize_instance(
 ) -> WorkspaceInstance:
     """Create or refresh a live instance for workspace_id at the current build.
 
-    An existing live instance for a *different* build is detached (never
-    overwritten). A matching build reuses the instance id.
+    An existing live instance for a *different* build becomes source-stale
+    (never overwritten). Its physical attachments are not retired by a source
+    revision. A matching build reuses the instance id.
     """
 
     wid = require_uuid(workspace_id, field_name="workspace_id")
@@ -1689,7 +1735,8 @@ def materialize_instance(
                 # Unknown content is no evidence that another live session
                 # runs a different build. Keep its receipt intact.
                 continue
-            # Different build cannot claim live ownership.
+            # Different source build cannot claim current-build health. This
+            # does not retire a still-live, incarnation-bound physical seat.
             detached = WorkspaceInstance(
                 workspace_instance_id=instance.workspace_instance_id,
                 workspace_id=instance.workspace_id,
@@ -1764,7 +1811,8 @@ def runtime_session_owner_root(
     """Read current live ownership, or conservative history for an exited seat.
 
     The caller supplies the engine's observed state. Historical missing/dead
-    attachments and stale instances cannot own a newly live incarnation.
+    attachments cannot own a newly live incarnation. A source-stale instance
+    requires its already-bound immutable incarnation to remain observable.
     An EXITED cache or unspecified observation has no current incarnation
     proof, so keep its historical foreign-root fence until explicit recovery.
     """
@@ -1809,7 +1857,7 @@ def workspace_return_attachment(
     candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
     for instance in list_instances(workspace_id=record.workspace_id):
         if (
-            instance.status != INSTANCE_STATUS_LIVE
+            instance.status not in (INSTANCE_STATUS_LIVE, INSTANCE_STATUS_STALE)
             or not instance.vibecrafted_session_id
         ):
             continue
@@ -1833,6 +1881,10 @@ def workspace_return_attachment(
             if attachment.runtime == "vc-frame"
             and attachment.state == "live"
             and attachment.runtime_session_id != "vc-host"
+            and (
+                instance.status == INSTANCE_STATUS_LIVE
+                or attachment.session_incarnation is not None
+            )
         )
     preferred = [
         attachment
@@ -1849,6 +1901,57 @@ def workspace_return_attachment(
             "Multiple workspaces are open for this project — choose one on the Frame rail"
         )
     return seats[0] if seats else None
+
+
+def _frame_session_incarnation(runtime_session_id: str, socket_dir: str) -> str | None:
+    """Observe Frame's public, rename-stable identity through the selected engine.
+
+    Never consult cwd, pane text, process argv, or a PATH-selected engine. Older
+    engines/receipts remain readable, but cannot establish rename continuity.
+    """
+    binary = os.environ.get("VIBECRAFTED_VC_FRAME_BIN")
+    if os.environ.get("VIBECRAFTED_RUNTIME_ROOT"):
+        binary = str(Path(os.environ["VIBECRAFTED_RUNTIME_ROOT"]) / "bin/vc-frame")
+    if not binary or not Path(binary).is_absolute():
+        return None
+    environment = dict(os.environ)
+    environment["VC_FRAME_SOCKET_DIR"] = socket_dir
+    environment["ZELLIJ_SOCKET_DIR"] = socket_dir
+    try:
+        observed = subprocess.run(
+            [
+                binary,
+                "--session",
+                runtime_session_id,
+                "action",
+                "list-tabs",
+                "--json",
+                "--all",
+            ],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+        if observed.returncode:
+            return None
+        tabs = json.loads(observed.stdout)
+        if not isinstance(tabs, list) or not tabs:
+            return None
+        incarnations = {
+            require_uuid(
+                tab.get("session_incarnation"), field_name="session_incarnation"
+            )
+            for tab in tabs
+            if isinstance(tab, dict)
+        }
+        if len(incarnations) != 1 or any(not isinstance(tab, dict) for tab in tabs):
+            return None
+        return incarnations.pop()
+    except (OSError, ValueError, WorkspaceCatalogError, subprocess.SubprocessError):
+        return None
 
 
 def record_runtime_session_attachment(
@@ -1883,6 +1986,11 @@ def record_runtime_session_attachment(
             f"invalid runtime session state: {attachment_state!r}"
         )
 
+    incarnation = (
+        _frame_session_incarnation(physical_id, str(socket_dir or ""))
+        if runtime_name == "vc-frame" and attachment_state == "live"
+        else None
+    )
     now = _now_iso()
     with _catalog_lock(exclusive=True):
         catalog = _load_catalog_unlocked()
@@ -1925,8 +2033,14 @@ def record_runtime_session_attachment(
                 index
                 for index, item in enumerate(attachments)
                 if item.runtime == runtime_name
-                and item.runtime_session_id == physical_id
                 and item.socket_dir == str(socket_dir or "")
+                and (
+                    item.runtime_session_id == physical_id
+                    or (
+                        incarnation is not None
+                        and item.session_incarnation == incarnation
+                    )
+                )
             ),
             None,
         )
@@ -1941,10 +2055,31 @@ def record_runtime_session_attachment(
                     attached_at=now,
                     updated_at=now,
                     replaces_runtime_session_id=replacement,
+                    session_incarnation=incarnation,
                 )
             )
         else:
             existing = attachments[match_index]
+            if (
+                existing.session_incarnation
+                and incarnation
+                and existing.session_incarnation != incarnation
+            ):
+                raise WorkspaceCatalogError(
+                    "Frame incarnation changed; refusing to overwrite its binding"
+                )
+            if (
+                existing.session_incarnation == incarnation
+                and incarnation
+                and existing.state == attachment_state
+                and (
+                    replacement is None
+                    or replacement == existing.replaces_runtime_session_id
+                )
+            ):
+                # A rename is a projection of this attachment, not another
+                # attachment or a reason to rewrite its historical display name.
+                return current
             attachments[match_index] = RuntimeSessionAttachment(
                 attachment_id=existing.attachment_id,
                 runtime=existing.runtime,
@@ -1956,6 +2091,11 @@ def record_runtime_session_attachment(
                 replaces_runtime_session_id=(
                     replacement or existing.replaces_runtime_session_id
                 ),
+                # The detached-create lifecycle writes its missing placeholder
+                # before creating the server. Bind that transition, but never
+                # upgrade an already-live legacy name from name equality alone.
+                session_incarnation=existing.session_incarnation
+                or (incarnation if existing.state != "live" else None),
             )
 
         updated = WorkspaceSessionRecord(
@@ -2006,10 +2146,20 @@ class RunWorkspaceIdentity:
 
 
 def _runtime_workspace_identity(
-    *, root: Path | None, runtime_session_id: str, socket_dir: str
+    *,
+    root: Path | None,
+    runtime_session_id: str,
+    socket_dir: str,
+    observe_incarnation: bool = True,
 ) -> tuple[WorkspaceSessionRecord, WorkspaceInstance, RuntimeSessionAttachment] | None:
-    """Read one exact physical seat; historical receipts are never relabelled."""
+    """Project a rename only through a previously bound Frame incarnation.
+
+    The stored display name may be stale. A same-name replacement with another
+    incarnation cannot inherit that seat. Historical receipts stay unchanged.
+    """
     candidates = []
+    incarnation: str | None = None
+    observed = False
     with _catalog_lock(exclusive=False):
         catalog = _load_catalog_unlocked()
         for path in sessions_dir().glob("*.json"):
@@ -2021,14 +2171,32 @@ def _runtime_workspace_identity(
                     "physical Frame session ownership is unreadable"
                 )
             session = WorkspaceSessionRecord.from_payload(payload)
-            attachments = [
-                item
-                for item in session.attachments
-                if item.runtime == "vc-frame"
-                and item.runtime_session_id == runtime_session_id
-                and item.socket_dir == socket_dir
-                and item.state == "live"
-            ]
+            attachments = []
+            for item in session.attachments:
+                if (
+                    item.runtime != "vc-frame"
+                    or item.socket_dir != socket_dir
+                    or item.state != "live"
+                ):
+                    continue
+                if item.session_incarnation is not None and observe_incarnation:
+                    if not observed:
+                        incarnation = _frame_session_incarnation(
+                            runtime_session_id, socket_dir
+                        )
+                        observed = True
+                    matches = item.session_incarnation == incarnation
+                    if item.runtime_session_id != runtime_session_id and "vc-host" in (
+                        item.runtime_session_id,
+                        runtime_session_id,
+                    ):
+                        matches = False
+                else:
+                    matches = item.runtime_session_id == runtime_session_id
+                if matches:
+                    attachments.append(
+                        replace(item, runtime_session_id=runtime_session_id)
+                    )
             if not attachments:
                 continue
             record = catalog.workspaces.get(session.workspace_id)
@@ -2042,12 +2210,21 @@ def _runtime_workspace_identity(
                     "physical Frame session ownership is unavailable"
                 )
             instance = WorkspaceInstance.from_payload(instance_payload)
-            # Match the existing workspace-return liveness criteria, without
-            # promoting historical STALE instances or rewriting their receipts.
-            if instance.status != INSTANCE_STATUS_LIVE:
+            # STALE describes source revision, not physical death. Admit an
+            # older build only through its bound incarnation and LIVE receipt;
+            # keep its original build and status unchanged. Name-only historical
+            # records and explicitly detached instances gain no authority.
+            if instance.status == INSTANCE_STATUS_STALE:
+                attachments = [
+                    item for item in attachments if item.session_incarnation is not None
+                ]
+            elif instance.status != INSTANCE_STATUS_LIVE:
+                continue
+            if not attachments:
                 continue
             if (
                 instance.workspace_id != session.workspace_id
+                or instance.workspace_instance_id != session.workspace_instance_id
                 or instance.vibecrafted_session_id != session.session_id
                 or _canonical_root_key(instance.build_id.root)
                 != _canonical_root_key(record.canonical_root)
@@ -2105,6 +2282,7 @@ def resolve_run_workspace_identity(
             root=resolved_root,
             runtime_session_id=runtime_session_id,
             socket_dir=socket_dir,
+            observe_incarnation=runtime_state == "live",
         )
         if runtime_state
         else None
