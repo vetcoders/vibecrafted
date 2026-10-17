@@ -1234,13 +1234,185 @@ def _paint_row_focus(window: curses.window, row: int, col: int, focused: bool) -
     return col
 
 
+command_bridge_onboarding = __import__(
+    "vibecrafted_core.command_bridge_onboarding", fromlist=["*"]
+)
+
+PATH_PLACEHOLDER = "<select or type project path — Tab to complete>"
+
+
+def _provider_interactive_decision(
+    agent: str,
+    runtime: str | None = None,
+    permissions: str | None = None,
+) -> Any:
+    capabilities = runtime_policy_capabilities(agent)
+    runtimes = (runtime,) if runtime else RUNTIME_POLICIES
+    perms = (permissions,) if permissions else PERMISSION_POLICIES
+    last_decision = None
+    for rt in runtimes:
+        cap = capabilities.get(rt, {})
+        if not cap.get("available"):
+            continue
+        for perm in perms:
+            decision = resolve_provider_policy(agent, rt, perm, "interactive")
+            last_decision = decision
+            if decision.supported:
+                return decision
+    if last_decision is not None:
+        return last_decision
+    return resolve_provider_policy(
+        agent,
+        runtime or RUNTIME_POLICIES[0],
+        permissions or PERMISSION_POLICIES[0],
+        "interactive",
+    )
+
+
 def _provider_available(agent: str) -> bool:
     capabilities = runtime_policy_capabilities(agent)
-    return any(bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES)
+    if not any(
+        bool(capabilities.get(name, {}).get("available")) for name in RUNTIME_POLICIES
+    ):
+        return False
+    return bool(_provider_interactive_decision(agent).supported)
+
+
+def _provider_unavailable_reason(
+    agent: str,
+    runtime: str | None = None,
+    permissions: str | None = None,
+) -> str:
+    capabilities = runtime_policy_capabilities(agent)
+    if not any(
+        bool(capabilities.get(name, {}).get("available")) for name in RUNTIME_POLICIES
+    ):
+        first_reason = next(
+            (
+                str(capabilities.get(name, {}).get("reason") or "")
+                for name in RUNTIME_POLICIES
+                if capabilities.get(name, {}).get("reason")
+            ),
+            "",
+        )
+        return (
+            public_reason(first_reason)
+            or first_reason
+            or "That provider is not available"
+        )
+    decision = _provider_interactive_decision(agent, runtime, permissions)
+    reason = str(getattr(decision, "reason", "") or "").strip()
+    if reason:
+        return f"That provider is not available ({reason})"
+    return "That provider is not available"
+
+
+def _compute_path_suggestions(
+    raw: str,
+    *,
+    cwd: Path | None = None,
+    limit: int = 8,
+) -> list[str]:
+    """Bounded local directory-only path completion with zero subprocesses."""
+    if limit <= 0:
+        return []
+    text = str(raw or "")
+    base_cwd = Path(cwd) if cwd is not None else Path.cwd()
+    tilde_prefix = False
+    home_str = str(Path.home())
+
+    if not text:
+        search_dir = base_cwd
+        prefix = ""
+        display_base = str(base_cwd).rstrip("/") + "/"
+    elif text == "~":
+        search_dir = Path.home()
+        prefix = ""
+        display_base = "~/"
+    elif text.startswith("~/"):
+        tilde_prefix = True
+        expanded = os.path.expanduser(text)
+        if text.endswith("/"):
+            search_dir = Path(expanded)
+            prefix = ""
+            display_base = text
+        else:
+            expanded_path = Path(expanded)
+            search_dir = expanded_path.parent
+            prefix = expanded_path.name
+            parent_rel = text[: len(text) - len(prefix)]
+            display_base = parent_rel if parent_rel.endswith("/") else parent_rel + "/"
+    elif text.startswith("/"):
+        if text.endswith("/"):
+            search_dir = Path(text)
+            prefix = ""
+            display_base = text
+        else:
+            p = Path(text)
+            search_dir = p.parent
+            prefix = p.name
+            parent_str = str(search_dir)
+            display_base = "/" if parent_str == "/" else parent_str.rstrip("/") + "/"
+    else:
+        if text.endswith("/"):
+            search_dir = (base_cwd / text).resolve()
+            prefix = ""
+            display_base = text
+        elif "/" in text:
+            rel_parent, _, prefix = text.rpartition("/")
+            search_dir = (base_cwd / rel_parent).resolve()
+            display_base = rel_parent + "/"
+        else:
+            search_dir = base_cwd
+            prefix = text
+            display_base = ""
+
+    try:
+        entries: list[str] = []
+        with os.scandir(search_dir) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir(follow_symlinks=True):
+                        continue
+                except OSError:
+                    continue
+                name = entry.name
+                if name.startswith(".") and not prefix.startswith("."):
+                    continue
+                entries.append(name)
+    except (PermissionError, OSError):
+        return []
+
+    entries.sort(key=lambda item: (item.lower(), item))
+    exact = [name for name in entries if name.startswith(prefix)]
+    lower_prefix = prefix.lower()
+    ci = [
+        name
+        for name in entries
+        if not name.startswith(prefix) and name.lower().startswith(lower_prefix)
+    ]
+    matched = (exact + ci)[:limit]
+    results: list[str] = []
+    for name in matched:
+        candidate = f"{display_base}{name}/"
+        if tilde_prefix and candidate.startswith(home_str + "/"):
+            candidate = "~" + candidate[len(home_str) :]
+        results.append(candidate)
+    return results
 
 
 class Workshop:
-    def __init__(self, window: curses.window, *, mode: str) -> None:
+    def __init__(
+        self,
+        window: curses.window,
+        *,
+        mode: str = "home",
+        onboarding: bool = False,
+        onboarding_policy_path: Path | None = None,
+        onboarding_font_dirs: tuple[Path, ...] | list[Path] | None = None,
+        onboarding_home: Path | None = None,
+    ) -> None:
+        self._initialized = False
         self.window = window
         self.mode = mode
         self.standalone_launcher = mode == "launcher"
@@ -1266,15 +1438,34 @@ class Workshop:
         self.parent_sessions: list[SessionRecord] = []
         self.parent_index = -1
         self.parent_error = ""
-        self.path = str(
-            Path(os.environ.get("VIBECRAFTED_WORKSPACE_ROOT") or Path.cwd())
-            .expanduser()
-            .resolve()
-        )
+
+        # Truthful workspace initialization: only prefill when VIBECRAFTED_WORKSPACE_ROOT
+        # was explicitly declared in the environment and resolves to an existing dir.
+        declared_root = os.environ.get("VIBECRAFTED_WORKSPACE_ROOT", "").strip()
+        resolved_default = ""
+        if declared_root:
+            try:
+                candidate = Path(declared_root).expanduser().resolve()
+                if candidate.is_dir():
+                    resolved_default = str(candidate)
+            except OSError:
+                resolved_default = ""
+        self._path = resolved_default
+        self.path_explicit = bool(resolved_default)
+        self.path_cursor = len(self._path)
+        self.path_scroll = 0
+        self.path_suggestions: list[str] = []
+        self.path_suggestions_open = False
+        self.path_suggestion_idx = 0
+
         self.error = ""
+        self.error_stage = ""
         self.error_details = False
         self.error_scroll = 0
         self.notice = ""
+        self.launch_stage = ""
+        self.progress_stages: list[str] = []
+        self.confirm_quit = False
         self.mouse_targets: list[tuple[int, int, int, Any, str]] = []
         self.presence_schedule = PresenceSchedule()
         self.faces: list[str] = []
@@ -1292,17 +1483,468 @@ class Workshop:
         self.session = ""
         self.edit_controls = False
         self.active_slot = 0
-        self.choices_root = self.path
+        self.choices_root = self._path
         self.agent_slots: list[dict[str, Any]] = [{}]
         self.launch_results: list[dict[str, str]] = []
+
+        # ZenEntry Onboarding & Monaspace Typography scene state
+        self.onboarding_policy_path = onboarding_policy_path
+        self.onboarding_font_dirs = (
+            tuple(Path(p) for p in onboarding_font_dirs)
+            if onboarding_font_dirs is not None
+            else None
+        )
+        self.onboarding_home = onboarding_home
+        self.onboarding_active = bool(
+            onboarding
+            or os.environ.get("VIBECRAFTED_WORKSHOP_ONBOARDING", "").strip() == "1"
+        )
+        self.onboarding_step = 1
+        self.onboarding_provider_idx = 0
+        self.onboarding_font_idx = 0
+        self.onboarding_variants: list[Any] = []
+        self.configured_font_family = ""
+        self._sync_onboarding_typography()
+        if self.onboarding_active:
+            self.open_onboarding(step=1)
+
         self._load_choices(restore_slots=True)
+        self._initial_path = self._path
+        self._initial_slot_snapshot = self._snapshot()
+        self._initialized = True
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @path.setter
+    def path(self, value: str) -> None:
+        new_val = str(value or "")
+        changed = new_val != self._path
+        self._path = new_val
+        self.path_cursor = len(new_val)
+        self.path_scroll = 0
+        self.path_suggestions_open = False
+        if changed and getattr(self, "_initialized", False):
+            self._invalidate_stale_results()
+
+    @property
+    def workspace(self) -> str:
+        return self._path
+
+    @workspace.setter
+    def workspace(self, value: str) -> None:
+        self.path = value
+
+    @property
+    def agent_count(self) -> int:
+        return len(self.agent_slots)
+
+    @agent_count.setter
+    def agent_count(self, count: int) -> None:
+        target = max(1, min(3, int(count)))
+        while len(self.agent_slots) < target:
+            self.add_agent()
+        while len(self.agent_slots) > target:
+            self.remove_agent()
+
+    @property
+    def _click_zones(self) -> list[tuple[int, int, int, Any, str]]:
+        return self.mouse_targets
+
+    def _is_dirty(self) -> bool:
+        if self._path != getattr(self, "_initial_path", ""):
+            return True
+        if len(self.agent_slots) > 1:
+            return True
+        return self._snapshot() != getattr(self, "_initial_slot_snapshot", {})
+
+    def _slot_request_key(
+        self,
+        slot_values: Mapping[str, Any] | None = None,
+        workspace_str: str | None = None,
+    ) -> str:
+        values = slot_values if slot_values is not None else self._snapshot()
+        ws = str(workspace_str if workspace_str is not None else self._path).strip()
+        try:
+            ws_norm = str(Path(ws).expanduser().resolve()) if ws else ""
+        except OSError:
+            ws_norm = ws
+        agent_idx = int(values.get("agent", self.agent))
+        mode_idx = int(values.get("launch_mode", self.launch_mode))
+        rt_idx = int(values.get("runtime", self.runtime))
+        perm_idx = int(values.get("permissions", self.permissions))
+        cont_idx = int(values.get("continuity", self.continuity))
+        return "|".join(
+            (
+                AGENTS[agent_idx] if 0 <= agent_idx < len(AGENTS) else str(agent_idx),
+                ws_norm,
+                LAUNCH_MODES[mode_idx]
+                if 0 <= mode_idx < len(LAUNCH_MODES)
+                else str(mode_idx),
+                RUNTIME_POLICIES[rt_idx]
+                if 0 <= rt_idx < len(RUNTIME_POLICIES)
+                else str(rt_idx),
+                PERMISSION_POLICIES[perm_idx]
+                if 0 <= perm_idx < len(PERMISSION_POLICIES)
+                else str(perm_idx),
+                CONTINUITY_MODES[cont_idx]
+                if 0 <= cont_idx < len(CONTINUITY_MODES)
+                else str(cont_idx),
+                str(values.get("model", self.model)),
+                str(values.get("effort", self.effort)),
+                str(values.get("session", self.session)),
+            )
+        )
+
+    def _invalidate_stale_results(self) -> None:
+        if not self.launch_results:
+            return
+        if self.active_slot < len(self.agent_slots):
+            self.agent_slots[self.active_slot] = self._snapshot()
+        any_opened = any(r.get("status") == "opened" for r in self.launch_results)
+        if not any_opened:
+            for idx, res in enumerate(self.launch_results):
+                if idx < len(self.agent_slots):
+                    current_key = self._slot_request_key(
+                        self.agent_slots[idx], self._path
+                    )
+                    if res.get("request_key") and res.get("request_key") != current_key:
+                        self.launch_results = []
+                        if not self.error_details:
+                            self.error = ""
+                            self.error_stage = ""
+                        return
+            return
+        for idx, res in enumerate(self.launch_results):
+            if res.get("status") == "opened":
+                continue
+            if idx < len(self.agent_slots):
+                current_key = self._slot_request_key(self.agent_slots[idx], self._path)
+                if res.get("request_key") and res.get("request_key") != current_key:
+                    self.launch_results[idx] = {
+                        "status": "pending",
+                        "reason": "",
+                        "provider": AGENTS[
+                            self.agent_slots[idx].get("agent", self.agent)
+                        ],
+                        "workspace": self._path,
+                        "request_key": current_key,
+                    }
+
+    # ─── ZenEntry Onboarding & Monaspace Typography Methods ──────────────────
+
+    def _sync_onboarding_typography(self) -> None:
+        try:
+            variants = command_bridge_onboarding.inspect_font_variants(
+                policy_path=self.onboarding_policy_path,
+                font_dirs=self.onboarding_font_dirs,
+            )
+        except (OSError, ValueError):
+            variants = []
+        self.onboarding_variants = variants
+        active_idx = 0
+        for idx, item in enumerate(variants):
+            if getattr(item, "active", False):
+                active_idx = idx
+                self.configured_font_family = item.family
+                break
+        if variants and not self.configured_font_family:
+            self.configured_font_family = variants[0].family
+        self.onboarding_font_idx = active_idx
+
+    def open_onboarding(self, *, step: int = 1) -> None:
+        self.onboarding_active = True
+        self.onboarding_step = 1 if step not in (1, 2) else step
+        self.error = ""
+        self.notice = ""
+        self._sync_onboarding_typography()
+        try:
+            st = command_bridge_onboarding.status(self.onboarding_home)
+            if st.state == "pending":
+                command_bridge_onboarding.begin(home=self.onboarding_home)
+            configured = command_bridge_onboarding.configured_providers()
+            if configured and configured[0] in command_bridge_onboarding.PROVIDERS:
+                self.onboarding_provider_idx = (
+                    command_bridge_onboarding.PROVIDERS.index(configured[0])
+                )
+        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
+            pass
+
+    def close_onboarding(self) -> None:
+        try:
+            st = command_bridge_onboarding.status(self.onboarding_home)
+            if st.state == "in_progress":
+                command_bridge_onboarding.cancel(home=self.onboarding_home)
+        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
+            pass
+        self.onboarding_active = False
+
+    def _onboarding_confirm_provider(self) -> None:
+        providers = command_bridge_onboarding.PROVIDERS
+        if not providers:
+            self.onboarding_step = 2
+            return
+        idx = max(0, min(self.onboarding_provider_idx, len(providers) - 1))
+        chosen = providers[idx]
+        try:
+            probe = command_bridge_onboarding.probe_provider(chosen)
+            if probe.configured:
+                command_bridge_onboarding.complete(
+                    chosen,
+                    home=self.onboarding_home,
+                )
+                self.error = ""
+                self.notice = f"Provider {chosen} verified ready."
+                self.onboarding_step = 2
+            else:
+                self.error = f"{chosen}: no local auth signal found; configure auth or press Tab/s to skip to Typography"
+        except command_bridge_onboarding.OnboardingError as exc:
+            self.error = str(exc)
+
+    def _onboarding_apply_font(self, index: int | None = None) -> None:
+        if not self.onboarding_variants:
+            self._sync_onboarding_typography()
+        if not self.onboarding_variants:
+            self.onboarding_active = False
+            return
+        if index is not None and 0 <= index < len(self.onboarding_variants):
+            self.onboarding_font_idx = index
+        chosen = self.onboarding_variants[self.onboarding_font_idx]
+        try:
+            command_bridge_onboarding.select_font_family(
+                chosen.family,
+                policy_path=self.onboarding_policy_path,
+                font_dirs=self.onboarding_font_dirs,
+            )
+        except command_bridge_onboarding.FontNotAvailableError as exc:
+            self.error = str(exc)
+            return
+        except command_bridge_onboarding.OnboardingError as exc:
+            self.error = str(exc)
+            return
+        self._sync_onboarding_typography()
+        self.configured_font_family = chosen.family
+        self.error = ""
+        self.notice = f"Typography set to {chosen.family}"
+        try:
+            st = command_bridge_onboarding.status(self.onboarding_home)
+            if st.state == "in_progress":
+                command_bridge_onboarding.cancel(home=self.onboarding_home)
+        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
+            pass
+        self.onboarding_active = False
+
+    def draw_onboarding(self) -> None:
+        height, width = self.window.getmaxyx()
+        left = max(1, (width - min(width - 2, 84)) // 2)
+        inner = max(20, width - left - 2)
+        top = max(1, (height - 18) // 2)
+
+        header = f"ZenEntry Setup · Step {self.onboarding_step} of 2"
+        _safe_addstr(self.window, top, left, header, curses.A_BOLD | _ACCENT)
+
+        if self.onboarding_step == 1:
+            _safe_addstr(
+                self.window,
+                top + 1,
+                left,
+                "Step 1: Provider Readiness — confirm a configured provider or press s to skip.",
+                curses.A_DIM,
+            )
+            providers = command_bridge_onboarding.PROVIDERS
+            row_y = top + 3
+            for idx, name in enumerate(providers):
+                try:
+                    probe = command_bridge_onboarding.probe_provider(name)
+                    configured = probe.configured
+                    signals = (
+                        ", ".join(probe.evidence)
+                        if probe.evidence
+                        else "no auth signal detected"
+                    )
+                except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
+                    configured = False
+                    signals = "probe unavailable"
+                selected = idx == self.onboarding_provider_idx
+                _paint_row_focus(self.window, row_y, left, selected)
+                badge = "ready" if configured else "unconfigured"
+                line = f"{idx + 1}. {name:10} [{badge}]  {signals}"
+                attr = (
+                    curses.A_BOLD | _ACCENT
+                    if selected and configured
+                    else curses.A_BOLD
+                    if selected
+                    else 0
+                    if configured
+                    else curses.A_DIM
+                )
+                _safe_addstr(self.window, row_y, left, _clip(line, inner), attr)
+                self.mouse_targets.append(
+                    (
+                        row_y,
+                        left,
+                        left + min(len(line), inner),
+                        idx,
+                        "onboarding_provider",
+                    )
+                )
+                row_y += 1
+            btn_row = row_y + 1
+            confirm_txt = "[ Confirm & Next (Enter) ]"
+            skip_txt = "[ Skip to Typography (s) ]"
+            close_txt = "[ Close (Esc) ]"
+            _safe_addstr(self.window, btn_row, left, confirm_txt, curses.A_BOLD)
+            self.mouse_targets.append(
+                (btn_row, left, left + len(confirm_txt), 0, "onboarding_confirm")
+            )
+            col2 = left + len(confirm_txt) + 2
+            _safe_addstr(self.window, btn_row, col2, skip_txt, 0)
+            self.mouse_targets.append(
+                (btn_row, col2, col2 + len(skip_txt), 0, "onboarding_next")
+            )
+            col3 = col2 + len(skip_txt) + 2
+            _safe_addstr(self.window, btn_row, col3, close_txt, curses.A_DIM)
+            self.mouse_targets.append(
+                (btn_row, col3, col3 + len(close_txt), 0, "onboarding_close")
+            )
+        else:
+            if not self.onboarding_variants:
+                self._sync_onboarding_typography()
+            _safe_addstr(
+                self.window,
+                top + 1,
+                left,
+                "Step 2: Terminal Typography — existing policy family is preserved until you choose another.",
+                curses.A_DIM,
+            )
+            preview_row = top + 2
+            preview_line = (
+                f"Glyph sample: {command_bridge_onboarding.FONT_GLYPH_PREVIEW}"
+            )
+            _safe_addstr(
+                self.window,
+                preview_row,
+                left,
+                _clip(preview_line, inner),
+                curses.A_BOLD,
+            )
+            row_y = top + 4
+            for idx, variant in enumerate(self.onboarding_variants):
+                selected = idx == self.onboarding_font_idx
+                _paint_row_focus(self.window, row_y, left, selected)
+                line = f"{idx + 1}. {variant.label:28} · {variant.status_label} · {variant.description}"
+                if not variant.selectable:
+                    attr = curses.A_DIM
+                elif selected:
+                    attr = curses.A_BOLD | _ACCENT
+                elif variant.active:
+                    attr = curses.A_BOLD
+                else:
+                    attr = 0
+                _safe_addstr(self.window, row_y, left, _clip(line, inner), attr)
+                self.mouse_targets.append(
+                    (row_y, left, left + min(len(line), inner), idx, "onboarding_font")
+                )
+                row_y += 1
+            btn_row = row_y + 1
+            apply_txt = "[ Apply Font (Enter) ]"
+            back_txt = "[ Back (b) ]"
+            close_txt = "[ Close (Esc) ]"
+            _safe_addstr(self.window, btn_row, left, apply_txt, curses.A_BOLD)
+            self.mouse_targets.append(
+                (btn_row, left, left + len(apply_txt), 0, "onboarding_apply_font")
+            )
+            col2 = left + len(apply_txt) + 2
+            _safe_addstr(self.window, btn_row, col2, back_txt, 0)
+            self.mouse_targets.append(
+                (btn_row, col2, col2 + len(back_txt), 0, "onboarding_back")
+            )
+            col3 = col2 + len(back_txt) + 2
+            _safe_addstr(self.window, btn_row, col3, close_txt, curses.A_DIM)
+            self.mouse_targets.append(
+                (btn_row, col3, col3 + len(close_txt), 0, "onboarding_close")
+            )
+
+        hint = (
+            "1..9 select · ↑/↓ navigate · Enter confirm · s next · b back · Esc close"
+        )
+        _safe_addstr(self.window, height - 2, left, _clip(hint, inner), curses.A_DIM)
+        if self.error:
+            _safe_addstr(
+                self.window,
+                height - 1,
+                left,
+                _clip(self.error, inner),
+                curses.A_BOLD,
+            )
+        elif self.notice:
+            _safe_addstr(
+                self.window,
+                height - 1,
+                left,
+                _clip(self.notice, inner),
+                curses.A_BOLD,
+            )
+
+    def handle_onboarding_key(self, key: int) -> None:
+        if key == 27:
+            if self.onboarding_step == 2:
+                self.onboarding_step = 1
+                self.error = ""
+                return
+            self.close_onboarding()
+            return
+        if self.onboarding_step == 1:
+            count = len(command_bridge_onboarding.PROVIDERS)
+            if key in (curses.KEY_UP, curses.KEY_LEFT):
+                self.onboarding_provider_idx = (self.onboarding_provider_idx - 1) % max(
+                    1, count
+                )
+            elif key in (curses.KEY_DOWN, curses.KEY_RIGHT):
+                self.onboarding_provider_idx = (self.onboarding_provider_idx + 1) % max(
+                    1, count
+                )
+            elif ord("1") <= key <= ord("9"):
+                idx = key - ord("1")
+                if idx < count:
+                    self.onboarding_provider_idx = idx
+            elif key in (ord("s"), ord("S"), ord("\t")):
+                self.error = ""
+                self.onboarding_step = 2
+            elif key in (10, 13, curses.KEY_ENTER):
+                self._onboarding_confirm_provider()
+        else:
+            if not self.onboarding_variants:
+                self._sync_onboarding_typography()
+            count = len(self.onboarding_variants)
+            if key in (curses.KEY_UP, curses.KEY_LEFT):
+                self.onboarding_font_idx = (self.onboarding_font_idx - 1) % max(
+                    1, count
+                )
+            elif key in (curses.KEY_DOWN, curses.KEY_RIGHT):
+                self.onboarding_font_idx = (self.onboarding_font_idx + 1) % max(
+                    1, count
+                )
+            elif ord("1") <= key <= ord("9"):
+                idx = key - ord("1")
+                if idx < count:
+                    self.onboarding_font_idx = idx
+            elif key in (ord("b"), ord("B")):
+                self.error = ""
+                self.onboarding_step = 1
+            elif key in (10, 13, curses.KEY_ENTER):
+                self._onboarding_apply_font()
 
     def _choice_path(self) -> Path:
         # UI preferences belong to this launcher, not the workspace identity
         # catalog or server configuration. Each canonical root owns one file.
-        digest = hashlib.sha256(
-            str(Path(self.path).expanduser().resolve()).encode()
-        ).hexdigest()
+        raw_target = (
+            str(Path(self._path).expanduser().resolve())
+            if self._path.strip()
+            else "__empty_workspace__"
+        )
+        digest = hashlib.sha256(raw_target.encode()).hexdigest()
         return vibecrafted_home() / "store" / "agent-workshop" / f"{digest}.json"
 
     def _snapshot(self) -> dict[str, Any]:
@@ -1334,6 +1976,8 @@ class Workshop:
         self.resume_index = -1
 
     def _read_choices(self) -> dict[str, Any]:
+        if not self._path.strip():
+            return {"version": 1, "providers": {}}
         try:
             data = json.loads(self._choice_path().read_text())
             if not isinstance(data, dict) or data.get("version") != 1:
@@ -1506,6 +2150,11 @@ class Workshop:
             curses.mouseinterval(0)
         except curses.error:
             pass
+        if not _provider_available(AGENTS[self.agent]):
+            for idx, name in enumerate(AGENTS):
+                if _provider_available(name):
+                    self.agent = idx
+                    break
         self._normalize_runtime_choice()
         self._normalize_permission_choice()
         self._normalize_mode_choice()
@@ -1541,7 +2190,9 @@ class Workshop:
             self._drawn_size = tuple(self.window.getmaxyx())
         except (AttributeError, curses.error):
             self._drawn_size = None
-        if self.mode == "home":
+        if self.onboarding_active:
+            self.draw_onboarding()
+        elif self.mode == "home":
             self.draw_home()
         else:
             self.draw_launcher()
@@ -1584,7 +2235,7 @@ class Workshop:
         top = 0 if compact else max(1, min(4, (height - 16) // 2))
         self._refresh_presence()
         _safe_addstr(self.window, top, left, "Agents", curses.A_BOLD)
-        workspace_name = Path(self.path).name or self.path
+        workspace_name = Path(self._path).name or self._path or "(no project selected)"
         if not compact:
             _safe_addstr(
                 self.window,
@@ -1709,7 +2360,65 @@ class Workshop:
             self.mouse_targets.append((row, x, x + len(token), index, "provider"))
             x += len(token) + 1
 
+    def _draw_project_row(
+        self, path_row: int, left: int, inner: int, width: int
+    ) -> None:
+        focused = self.row == 1
+        path_col = _paint_row_focus(self.window, path_row, left, focused)
+        prefix = "Project  "
+        badge = " [editing]" if focused else ""
+        available_text_cells = max(
+            4, inner - len(prefix) - (len(badge) if focused and inner >= 28 else 0)
+        )
+        if self._path:
+            cur = max(0, min(self.path_cursor, len(self._path)))
+            if cur < self.path_scroll:
+                self.path_scroll = cur
+            elif cur >= self.path_scroll + available_text_cells:
+                self.path_scroll = max(0, cur - available_text_cells + 1)
+            visible_segment = self._path[
+                self.path_scroll : self.path_scroll + available_text_cells
+            ]
+            line = f"{prefix}{visible_segment}"
+            _safe_addstr(self.window, path_row, path_col, _clip(line, inner), 0)
+        else:
+            self.path_scroll = 0
+            line = f"{prefix}{PATH_PLACEHOLDER}"
+            _safe_addstr(self.window, path_row, path_col, _clip(line, inner), 0)
+
+        if focused:
+            cur = max(0, min(self.path_cursor, len(self._path)))
+            rel_cursor = max(0, min(cur - self.path_scroll, available_text_cells - 1))
+            caret_col = path_col + len(prefix) + rel_cursor
+            caret_char = (
+                self._path[cur] if self._path and cur < len(self._path) else " "
+            )
+            if caret_col < width:
+                _safe_addstr(
+                    self.window,
+                    path_row,
+                    caret_col,
+                    caret_char,
+                    curses.A_REVERSE | curses.A_BOLD,
+                )
+            if inner >= 28:
+                badge_col = min(width - len(badge), path_col + inner - len(badge))
+                if badge_col > path_col + len(prefix):
+                    _safe_addstr(
+                        self.window,
+                        path_row,
+                        badge_col,
+                        badge,
+                        curses.A_BOLD | _ACCENT,
+                    )
+        self.mouse_targets.append(
+            (path_row, left, min(width, left + inner), 1, "project")
+        )
+
     def draw_launcher(self) -> None:
+        if self.onboarding_active:
+            self.draw_onboarding()
+            return
         if self.error_details:
             self.draw_launch_error()
             return
@@ -1736,6 +2445,14 @@ class Workshop:
         )
         inner = max(12, width - left - 2)
         _safe_addstr(self.window, top, left, "New agent", curses.A_BOLD)
+        if not compact and inner >= 36:
+            setup_chip = "[ Setup / Font (f) ]"
+            chip_col = left + inner - len(setup_chip)
+            if chip_col > left + 12:
+                _safe_addstr(self.window, top, chip_col, setup_chip, curses.A_DIM)
+                self.mouse_targets.append(
+                    (top, chip_col, chip_col + len(setup_chip), 0, "onboarding_open")
+                )
         _safe_addstr(
             self.window,
             top + 1,
@@ -1762,19 +2479,29 @@ class Workshop:
                 (top + 2, slot_col, slot_col + len(label), index, "slot")
             )
             slot_col += len(label)
-        if len(self.agent_slots) < 3:
-            _safe_addstr(self.window, top + 2, slot_col, "[+ agent]", curses.A_BOLD)
-            self.mouse_targets.append((top + 2, slot_col, slot_col + 9, 0, "add"))
+        remove_label = "[- agent]"
+        remove_attr = curses.A_BOLD if len(self.agent_slots) > 1 else curses.A_DIM
+        if slot_col + len(remove_label) < left + inner:
+            _safe_addstr(self.window, top + 2, slot_col, remove_label, remove_attr)
+            self.mouse_targets.append(
+                (top + 2, slot_col, slot_col + len(remove_label), 0, "remove")
+            )
+            slot_col += len(remove_label) + 1
+        add_label = "[+ agent]"
+        add_attr = curses.A_BOLD if len(self.agent_slots) < 3 else curses.A_DIM
+        if slot_col + len(add_label) <= left + inner:
+            _safe_addstr(self.window, top + 2, slot_col, add_label, add_attr)
+            self.mouse_targets.append(
+                (top + 2, slot_col, slot_col + len(add_label), 0, "add")
+            )
+            slot_col += len(add_label) + 1
+        count_badge = f"Agents: {len(self.agent_slots)}/3"
+        if slot_col + len(count_badge) <= left + inner:
+            _safe_addstr(self.window, top + 2, slot_col, count_badge, curses.A_DIM)
+
         self._draw_providers(top + 3, left, inner)
         path_row = top + 5
-        path_col = _paint_row_focus(self.window, path_row, left, self.row == 1)
-        _safe_addstr(
-            self.window,
-            path_row,
-            path_col,
-            _clip(f"Project  {self.path}", inner),
-            0,
-        )
+        self._draw_project_row(path_row, left, inner, width)
         controls = f"Choices · {self.model or 'provider model'} · {self.effort or 'default effort'} · {PURPOSES[self.purpose]}"
         _safe_addstr(
             self.window, path_row + 1, left, _clip(controls, inner), curses.A_DIM
@@ -1918,14 +2645,31 @@ class Workshop:
         launch_attr = curses.A_BOLD
         _safe_addstr(self.window, cursor, left, launch_label, launch_attr)
         self.mouse_targets.append((cursor, left, left + len(launch_label), 0, "launch"))
+        row_after_launch = cursor + 1
+        if self.path_suggestions_open and self.path_suggestions:
+            for s_idx, suggestion in enumerate(self.path_suggestions[:4]):
+                s_row = row_after_launch + s_idx
+                if s_row >= height - 2:
+                    break
+                s_selected = s_idx == self.path_suggestion_idx
+                s_prefix = "▸ " if s_selected else "  "
+                s_text = _clip(f"{s_prefix}{suggestion}", inner)
+                s_attr = curses.A_BOLD | _ACCENT if s_selected else curses.A_DIM
+                _safe_addstr(self.window, s_row, left, s_text, s_attr)
+                self.mouse_targets.append(
+                    (s_row, left, left + len(s_text), s_idx, "path_suggestion")
+                )
+            row_after_launch += min(4, len(self.path_suggestions))
         for offset, result in enumerate(self.launch_results):
+            if result.get("status") == "pending":
+                continue
             label = f"{offset + 1} {result.get('provider', '')}: {result['status']}"
             if result["reason"]:
                 reason = public_reason(result["reason"]) or result["reason"]
                 label += f" · {reason.splitlines()[0]}"
             _safe_addstr(
                 self.window,
-                cursor + 1 + offset,
+                row_after_launch + offset,
                 left,
                 _clip(label, inner),
                 curses.A_BOLD,
@@ -1933,23 +2677,75 @@ class Workshop:
         hint = (
             "Enter launch  Esc back"
             if compact
-            else "←/→ provider · +/- agent · [/] slot · c choices · a advanced · Enter launch · Esc back"
+            else "←/→ provider · +/- agent · [/] slot · c choices · a advanced · f font · Enter launch · Ctrl+Q quit"
         )
         if self.error:
-            hint = "e error details · " + hint
+            hint = "r retry · e error details · Esc dismiss · " + hint
         _safe_addstr(self.window, height - 2, left, hint, curses.A_DIM)
         if self.error:
-            _safe_addstr(
-                self.window,
-                height - 1,
-                left,
-                (public_reason(self.error) or self.error).splitlines()[0],
+            summary_raw = (public_reason(self.error) or self.error).splitlines()[0]
+            if self.error_stage:
+                summary_raw = f"[{self.error_stage}] {summary_raw}"
+            wrapped_err = textwrap.wrap(summary_raw, max(16, inner)) or [summary_raw]
+            if len(wrapped_err) > 1 and height >= 16 and not compact:
+                _safe_addstr(
+                    self.window,
+                    height - 3,
+                    left,
+                    _clip(wrapped_err[0], inner),
+                    curses.A_BOLD,
+                )
+                _safe_addstr(
+                    self.window,
+                    height - 1,
+                    left,
+                    _clip(
+                        wrapped_err[1]
+                        + "  [ Retry (r) ] [ Back (Esc) ] [ Details (e) ]",
+                        inner,
+                    ),
+                )
+            else:
+                _safe_addstr(
+                    self.window,
+                    height - 1,
+                    left,
+                    summary_raw,
+                )
+            act_row = height - 1
+            retry_lbl = "[ Retry (r) ]"
+            back_lbl = "[ Back (Esc) ]"
+            det_lbl = "[ Details (e) ]"
+            act_col = max(left, min(width - 38, left + inner - 38))
+            self.mouse_targets.append(
+                (act_row, act_col, act_col + len(retry_lbl), 0, "retry")
+            )
+            self.mouse_targets.append(
+                (
+                    act_row,
+                    act_col + len(retry_lbl) + 1,
+                    act_col + len(retry_lbl) + 1 + len(back_lbl),
+                    0,
+                    "dismiss_error",
+                )
+            )
+            self.mouse_targets.append(
+                (
+                    act_row,
+                    act_col + len(retry_lbl) + len(back_lbl) + 2,
+                    act_col + len(retry_lbl) + len(back_lbl) + 2 + len(det_lbl),
+                    0,
+                    "error_details",
+                )
             )
         elif self.notice:
             _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
 
     def draw_launch_error(self) -> None:
         height, width = self.window.getmaxyx()
+        header = (
+            f"Launch error · {self.error_stage}" if self.error_stage else "Launch error"
+        )
         lines = [
             wrapped
             for line in self.error.splitlines()
@@ -1958,6 +2754,9 @@ class Workshop:
         available = max(1, height - 3)
         self.error_scroll = min(self.error_scroll, max(0, len(lines) - available))
         _safe_addstr(self.window, 0, 1, "Launch error", curses.A_BOLD)
+        if self.error_stage and width > 24:
+            _safe_addstr(self.window, 0, 15, f"({self.error_stage})", curses.A_DIM)
+        _ = header
         for row, line in enumerate(
             lines[self.error_scroll : self.error_scroll + available], start=1
         ):
@@ -1966,7 +2765,7 @@ class Workshop:
             self.window,
             height - 1,
             1,
-            "↑/↓ scroll · Esc back to launcher",
+            "↑/↓ scroll · r retry · Esc back to launcher",
             curses.A_DIM,
         )
 
@@ -1981,9 +2780,10 @@ class Workshop:
     def _continuity_caps(
         self, root: str | os.PathLike[str] | None = None
     ) -> dict[str, dict[str, Any]]:
+        effective_root = root or self._path or Path.cwd()
         caps = continuity_policy_capabilities(
             AGENTS[self.agent],
-            root=root or self.path,
+            root=effective_root,
             explicit_parent=self.continuity_parent,
             env=self._launcher_env(),
         )
@@ -2211,7 +3011,86 @@ class Workshop:
             self.continuity = index
             self.continuity_explicit = True
 
+    def _on_path_mutated(self) -> None:
+        self.parent_sessions = []
+        self.parent_index = -1
+        self.path_suggestions_open = False
+        if self._path != self.choices_root:
+            self.choices_root = self._path
+            self.active_slot = 0
+            self.agent_slots = [{"agent": self.agent}]
+            self.launch_results = []
+            self.session = ""
+            self.continuity_parent = ""
+            self._load_choices(restore_slots=True)
+        else:
+            self._invalidate_stale_results()
+
+    def _insert_path_text(self, text: str) -> None:
+        cleaned = "".join(ch for ch in str(text or "") if ch >= " " and ch != "\x7f")
+        if not cleaned:
+            return
+        cur = max(0, min(self.path_cursor, len(self._path)))
+        self._path = self._path[:cur] + cleaned + self._path[cur:]
+        self.path_cursor = cur + len(cleaned)
+        self._on_path_mutated()
+
+    def paste_path_text(self, text: str) -> None:
+        """Insert a burst/pasted path string at the current cursor without firing hotkeys."""
+        self.row = 1
+        self._insert_path_text(text)
+
+    def _backspace_path(self) -> None:
+        cur = max(0, min(self.path_cursor, len(self._path)))
+        if cur <= 0:
+            return
+        self._path = self._path[: cur - 1] + self._path[cur:]
+        self.path_cursor = cur - 1
+        self._on_path_mutated()
+
+    def _delete_path(self) -> None:
+        cur = max(0, min(self.path_cursor, len(self._path)))
+        if cur >= len(self._path):
+            return
+        self._path = self._path[:cur] + self._path[cur + 1 :]
+        self.path_cursor = cur
+        self._on_path_mutated()
+
+    def _trigger_path_autocomplete(self) -> None:
+        suggestions = _compute_path_suggestions(self._path)
+        self.path_suggestions = suggestions
+        if not suggestions:
+            self.path_suggestions_open = False
+            self.path_suggestion_idx = 0
+            return
+        if self.path_suggestions_open:
+            self.path_suggestion_idx = (self.path_suggestion_idx + 1) % len(suggestions)
+        else:
+            self.path_suggestions_open = True
+            self.path_suggestion_idx = 0
+            if len(suggestions) == 1:
+                self._accept_path_suggestion(0)
+
+    def _accept_path_suggestion(self, index: int) -> None:
+        if not self.path_suggestions or not (0 <= index < len(self.path_suggestions)):
+            self.path_suggestions_open = False
+            return
+        chosen = self.path_suggestions[index]
+        self._path = chosen
+        self.path_cursor = len(chosen)
+        self.path_scroll = 0
+        self._on_path_mutated()
+        self.path_suggestions_open = False
+
     def handle_home_key(self, key: int) -> None:
+        if self.onboarding_active:
+            self.handle_onboarding_key(key)
+            return
+        if key == 17:
+            raise SystemExit(0)
+        if key in (ord("f"), ord("F")):
+            self.open_onboarding(step=2)
+            return
         if key in (ord("n"), ord("N")):
             self.open_launcher()
         elif key in (ord("o"), ord("O")):
@@ -2223,28 +3102,121 @@ class Workshop:
                 self.open_launcher()
 
     def handle_launcher_key(self, key: int) -> None:
+        if self.onboarding_active:
+            self.handle_onboarding_key(key)
+            return
+        if self.confirm_quit:
+            if key in (17, ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER):
+                raise SystemExit(0)
+            self.confirm_quit = False
+            self.notice = ""
+            return
+        if key == 17:
+            if self._is_dirty():
+                self.confirm_quit = True
+                self.notice = (
+                    "Unsaved form changes — press Ctrl+Q or y to close, Esc to stay."
+                )
+                return
+            raise SystemExit(0)
         if self.error_details:
             if key in (27, ord("e")):
                 self.error_details = False
+            elif key in (ord("r"), ord("R")):
+                self.error_details = False
+                self._attempt_launch()
             elif key in (curses.KEY_UP, curses.KEY_PPAGE):
                 self.error_scroll = max(0, self.error_scroll - 1)
             elif key in (curses.KEY_DOWN, curses.KEY_NPAGE):
                 self.error_scroll += 1
             return
-        if key == ord("e") and self.error:
-            self.error_details = True
-            self.error_scroll = 0
-            return
-        self.error = ""
-        if key == 27:
-            if self.standalone_launcher:
-                raise SystemExit(0)
-            self.mode = "home"
-            return
+
         editing_control = self.edit_controls and self.row in (7, 8, 10)
         editing_parent = self.advanced and self.row == 6
         editing_path = self.row == 1
-        if not editing_path and not editing_parent and not editing_control:
+        actively_typing = editing_path or editing_parent or editing_control
+
+        if not actively_typing and key == ord("e") and self.error:
+            self.error_details = True
+            self.error_scroll = 0
+            return
+        if not actively_typing and key in (ord("r"), ord("R")) and self.error:
+            self.error = ""
+            self.error_stage = ""
+            self._attempt_launch()
+            return
+
+        if key == 27:
+            if self.path_suggestions_open:
+                self.path_suggestions_open = False
+                return
+            if self.error:
+                self.error = ""
+                self.error_stage = ""
+                return
+            if self.edit_controls:
+                self.edit_controls = False
+                self.row = min(self.row, 1)
+                return
+            if self.advanced:
+                self.advanced = False
+                self.row = min(self.row, 1)
+                return
+            if self.standalone_launcher:
+                self.notice = "Press Ctrl+Q to close Workshop."
+                return
+            self.mode = "home"
+            return
+
+        self.error = ""
+        self.error_stage = ""
+        self.notice = ""
+
+        if editing_path:
+            if key == ord("\t"):
+                self._trigger_path_autocomplete()
+                return
+            if self.path_suggestions_open and self.path_suggestions:
+                if key == curses.KEY_DOWN:
+                    self.path_suggestion_idx = (self.path_suggestion_idx + 1) % len(
+                        self.path_suggestions
+                    )
+                    return
+                if key == curses.KEY_UP:
+                    self.path_suggestion_idx = (self.path_suggestion_idx - 1) % len(
+                        self.path_suggestions
+                    )
+                    return
+                if key in (10, 13, curses.KEY_ENTER):
+                    self._accept_path_suggestion(self.path_suggestion_idx)
+                    return
+            if key == curses.KEY_LEFT:
+                self.path_cursor = max(0, min(self.path_cursor, len(self._path)) - 1)
+                self.path_suggestions_open = False
+                return
+            if key == curses.KEY_RIGHT:
+                self.path_cursor = min(len(self._path), max(0, self.path_cursor) + 1)
+                self.path_suggestions_open = False
+                return
+            if key in (curses.KEY_HOME, 1):
+                self.path_cursor = 0
+                self.path_suggestions_open = False
+                return
+            if key in (curses.KEY_END, 5):
+                self.path_cursor = len(self._path)
+                self.path_suggestions_open = False
+                return
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                self._backspace_path()
+                return
+            if key == curses.KEY_DC:
+                self._delete_path()
+                return
+            if 32 <= key <= 126:
+                self._insert_path_text(chr(key))
+                return
+
+        if not actively_typing:
             if key == ord("+"):
                 self.add_agent()
                 return
@@ -2257,11 +3229,20 @@ class Workshop:
                     % len(self.agent_slots)
                 )
                 return
+            if key in (ord("1"), ord("2"), ord("3")):
+                slot_idx = key - ord("1")
+                if 0 <= slot_idx < len(self.agent_slots):
+                    self.select_slot(slot_idx)
+                    return
             if key in (ord("c"), ord("C")):
                 self.edit_controls = not self.edit_controls
                 self.advanced = False
                 self.row = 7 if self.edit_controls else 0
                 return
+            if key in (ord("f"), ord("F")):
+                self.open_onboarding(step=2)
+                return
+
         if (
             self.active_slot < len(self.launch_results)
             and self.launch_results[self.active_slot]["status"] == "opened"
@@ -2271,12 +3252,7 @@ class Workshop:
                 "This agent tab is already open; add a new agent to launch another"
             )
             return
-        if (
-            key in (ord("a"), ord("A"))
-            and not editing_path
-            and not editing_parent
-            and not editing_control
-        ):
+        if key in (ord("a"), ord("A")) and not actively_typing:
             self.advanced = not self.advanced
             self.edit_controls = False
             if not self.advanced:
@@ -2303,6 +3279,7 @@ class Workshop:
             delta = -1 if key == curses.KEY_LEFT else 1
             if self.row == 9 and self.edit_controls:
                 self.purpose = (self.purpose + delta) % len(PURPOSES)
+                self._invalidate_stale_results()
             elif self.row == 0:
                 self._cycle_agent(delta)
             elif self.advanced and self.row == 2:
@@ -2320,10 +3297,8 @@ class Workshop:
                     self._cycle_parent(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
-            self.launch()
+            self._attempt_launch()
             return
-        editing_parent = self.advanced and self.row == 6
-        editing_path = self.row == 1
         if editing_control:
             name = {7: "model", 8: "effort", 10: "session"}[self.row]
             if name == "effort" and AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES:
@@ -2331,8 +3306,10 @@ class Workshop:
                 return
             if key in (curses.KEY_BACKSPACE, 127, 8):
                 setattr(self, name, getattr(self, name)[:-1])
+                self._invalidate_stale_results()
             elif 32 <= key <= 126:
                 setattr(self, name, getattr(self, name) + chr(key))
+                self._invalidate_stale_results()
             return
         if editing_parent and self._resume_mode():
             # An exact provider session typed by hand; the recorded run (and
@@ -2343,32 +3320,17 @@ class Workshop:
                 self.session += chr(key)
             self.resume_run_id = ""
             self.resume_index = -1
+            self._invalidate_stale_results()
             return
-        if editing_path or editing_parent:
+        if editing_parent:
             if key in (curses.KEY_BACKSPACE, 127, 8):
-                if editing_parent:
-                    self.continuity_parent = self.continuity_parent[:-1]
-                    self.parent_index = -1
-                else:
-                    self.path = self.path[:-1]
-                    self.parent_sessions = []
-                    self.parent_index = -1
+                self.continuity_parent = self.continuity_parent[:-1]
+                self.parent_index = -1
+                self._invalidate_stale_results()
             elif 32 <= key <= 126:
-                if editing_parent:
-                    self.continuity_parent += chr(key)
-                    self.parent_index = -1
-                else:
-                    self.path += chr(key)
-                    self.parent_sessions = []
-                    self.parent_index = -1
-            if editing_path and self.path != self.choices_root:
-                self.choices_root = self.path
-                self.active_slot = 0
-                self.agent_slots = [{"agent": self.agent}]
-                self.launch_results = []
-                self.session = ""
-                self.continuity_parent = ""
-                self._load_choices(restore_slots=True)
+                self.continuity_parent += chr(key)
+                self.parent_index = -1
+                self._invalidate_stale_results()
 
     def _cycle_agent(self, delta: int) -> None:
         index = self.agent
@@ -2405,6 +3367,7 @@ class Workshop:
         self._normalize_continuity_choice()
         self.parent_sessions = []
         self.parent_index = -1
+        self._invalidate_stale_results()
 
     def _cycle_mode(self, delta: int) -> None:
         capabilities = mode_capabilities(
@@ -2417,6 +3380,7 @@ class Workshop:
             if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
                 if self._resume_mode():
                     self._reset_resume()
+                self._invalidate_stale_results()
                 return
         self.error = "No start mode is available for this provider"
 
@@ -2440,6 +3404,7 @@ class Workshop:
         self.continuity_parent = self.parent_sessions[self.parent_index].session_id
         if not self.continuity_explicit:
             self._normalize_continuity_choice()
+        self._invalidate_stale_results()
 
     def _cycle_runtime(self, delta: int) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -2452,6 +3417,7 @@ class Workshop:
                 self._normalize_permission_choice()
                 self._normalize_mode_choice()
                 self._normalize_continuity_choice()
+                self._invalidate_stale_results()
                 return
         self.error = "No runtime is available for this provider"
 
@@ -2464,6 +3430,7 @@ class Workshop:
                 provider, runtime, PERMISSION_POLICIES[self.permissions], "interactive"
             ).supported:
                 self._normalize_mode_choice()
+                self._invalidate_stale_results()
                 return
         self.error = "No permission policy is available for this provider"
 
@@ -2514,6 +3481,7 @@ class Workshop:
             self.continuity = (self.continuity + delta) % len(CONTINUITY_MODES)
             if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
                 self.continuity_explicit = True
+                self._invalidate_stale_results()
                 return
         self.error = "No memory option is available"
 
@@ -2564,6 +3532,33 @@ class Workshop:
         for row, start, end, index, kind in self.mouse_targets:
             if y != row or not (start <= x < end):
                 continue
+            if kind == "onboarding_open":
+                self.open_onboarding(step=2)
+                return
+            if kind == "onboarding_provider":
+                self.onboarding_provider_idx = int(index)
+                return
+            if kind == "onboarding_confirm":
+                self._onboarding_confirm_provider()
+                return
+            if kind == "onboarding_next":
+                self.error = ""
+                self.onboarding_step = 2
+                return
+            if kind == "onboarding_font":
+                self.onboarding_font_idx = int(index)
+                self._onboarding_apply_font(int(index))
+                return
+            if kind == "onboarding_apply_font":
+                self._onboarding_apply_font()
+                return
+            if kind == "onboarding_back":
+                self.error = ""
+                self.onboarding_step = 1
+                return
+            if kind == "onboarding_close":
+                self.close_onboarding()
+                return
             if kind == "home":
                 self.home_choice = index
                 self.open_launcher()
@@ -2576,6 +3571,15 @@ class Workshop:
                 return
             if kind == "add":
                 self.add_agent()
+                return
+            if kind == "remove":
+                self.remove_agent()
+                return
+            if kind == "project":
+                self.row = 1
+                return
+            if kind == "path_suggestion":
+                self._accept_path_suggestion(int(index))
                 return
             if kind == "controls":
                 self.edit_controls = not self.edit_controls
@@ -2590,12 +3594,17 @@ class Workshop:
                 if _provider_available(AGENTS[index]):
                     self._select_agent(index)
                 else:
-                    self.error = "That provider is not available"
+                    self.error = _provider_unavailable_reason(
+                        AGENTS[index],
+                        RUNTIME_POLICIES[self.runtime],
+                        PERMISSION_POLICIES[self.permissions],
+                    )
                 return
             if kind == "choice":
                 self.error = ""
                 offset, value = index
                 self._choose_advanced(offset, value)
+                self._invalidate_stale_results()
                 return
             if kind == "parent":
                 self.error = ""
@@ -2604,9 +3613,24 @@ class Workshop:
                     self._cycle_resume(1)
                 else:
                     self._cycle_parent(1)
+                self._invalidate_stale_results()
                 return
             if kind == "launch":
-                self.launch()
+                self._attempt_launch()
+                return
+            if kind == "retry":
+                self.error = ""
+                self.error_stage = ""
+                self._attempt_launch()
+                return
+            if kind == "dismiss_error":
+                self.error = ""
+                self.error_stage = ""
+                return
+            if kind == "error_details":
+                if self.error:
+                    self.error_details = True
+                    self.error_scroll = 0
                 return
             if kind == "advanced":
                 self.advanced = not self.advanced
@@ -2621,6 +3645,7 @@ class Workshop:
         self.row = 0
         self.advanced = False
         self.error = ""
+        self.error_stage = ""
 
     def _focus_face(self, index: int) -> None:
         if index < 0 or index >= len(self.face_records):
@@ -2666,18 +3691,34 @@ class Workshop:
                 result.stderr or result.stdout or f"cannot open session {name}"
             ).strip()
 
+    def _attempt_launch(self) -> None:
+        """Single launch entrypoint shared by keyboard Enter and mouse [ Launch ]."""
+        self.path_suggestions_open = False
+        self.launch()
+
     def launch(self) -> None:
+        self.progress_stages = ["Validating configuration…"]
+        self.launch_stage = "Validating configuration…"
+        self.error_stage = ""
         try:
+            if not self._path.strip():
+                self.error_stage = "Validating configuration"
+                raise ValueError(
+                    "Project path is required — select or type an existing project directory"
+                )
             workspace = normalized_workspace(self.path)
             if self.launch_results and any(
                 r["status"] == "opened" and r["workspace"] != str(workspace)
                 for r in self.launch_results
             ):
+                self.error_stage = "Validating configuration"
                 raise ValueError(
                     "Tabs are already open in the previous project; reopen the launcher for a new batch"
                 )
             self.save_choices()
         except (ValueError, OSError) as exc:
+            if not self.error_stage:
+                self.error_stage = "Validating configuration"
             self.error = str(exc)
             return
         active = self.active_slot
@@ -2692,6 +3733,7 @@ class Workshop:
             self.notice = ""
         for index, values in enumerate(selections):
             result = self.launch_results[index]
+            current_req_key = self._slot_request_key(values, str(workspace))
             # Opening a tab is the duplicate boundary, even when showing that
             # session afterwards fails. It is not a provider-health receipt.
             if result["status"] == "opened":
@@ -2707,6 +3749,7 @@ class Workshop:
                 "reason": self.error,
                 "provider": AGENTS[self.agent],
                 "workspace": str(workspace),
+                "request_key": current_req_key,
             }
         self._restore(selections[active])
         self.error = next((r["reason"] for r in self.launch_results if r["reason"]), "")
@@ -2749,12 +3792,24 @@ class Workshop:
         )
 
     def _launch_one(self) -> None:
+        provider_name = AGENTS[self.agent]
         try:
             workspace = normalized_workspace(self.path)
             runtime_name = RUNTIME_POLICIES[self.runtime]
-            capability = runtime_policy_capabilities(AGENTS[self.agent])[runtime_name]
+            perm_name = PERMISSION_POLICIES[self.permissions]
+            capability = runtime_policy_capabilities(provider_name)[runtime_name]
             if not capability["available"]:
                 raise ValueError(str(capability["reason"]))
+            interactive_decision = resolve_provider_policy(
+                provider_name, runtime_name, perm_name, "interactive"
+            )
+            if not interactive_decision.supported:
+                raise ValueError(
+                    str(
+                        interactive_decision.reason
+                        or f"{provider_name} does not support interactive Workshop launch"
+                    )
+                )
             continuity_name = CONTINUITY_MODES[self.continuity]
             resuming = bool(self.session) or self._resume_mode()
             run_id = ""
@@ -2768,10 +3823,10 @@ class Workshop:
                 if not continuity_capability["available"]:
                     raise ValueError(str(continuity_capability["reason"]))
             argv = launch_argv(
-                AGENTS[self.agent],
+                provider_name,
                 "resume" if resuming else LAUNCH_MODES[self.launch_mode],
                 runtime_name,
-                PERMISSION_POLICIES[self.permissions],
+                perm_name,
                 continuity=continuity_name,
                 continuity_parent=self.continuity_parent,
                 workspace=workspace,
@@ -2782,10 +3837,12 @@ class Workshop:
                 run_id=run_id,
             )
         except ValueError as exc:
+            self.error_stage = "Validating configuration"
             self.error = public_reason(str(exc)) or str(exc)
             return
         executable = shutil.which(argv[0])
         if executable is None:
+            self.error_stage = "Validating configuration"
             self.error = "vibecrafted launcher is missing from PATH"
             return
         environment = {
@@ -2793,22 +3850,27 @@ class Workshop:
             "local-vm": " · container",
         }.get(runtime_name, "")
         title = (
-            f"{AGENTS[self.agent]} · "
+            f"{provider_name} · "
             f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}{environment}"
         )
         try:
             destination = destination_session_for_workspace(workspace)
         except ValueError as exc:
+            self.error_stage = "Opening project workspace"
             reason = f"Project could not be opened: {exc}"
             self.error = public_reason(reason) or reason
             return
         live, listing_error = list_live_frame_sessions()
         if listing_error:
+            self.error_stage = "Opening project workspace"
             self.error = listing_error
             return
-        if destination not in live or not catalog_owns_destination(
+        opened_new_workspace = destination not in live or not catalog_owns_destination(
             workspace, destination
-        ):
+        )
+        if opened_new_workspace:
+            self.launch_stage = "Opening project workspace…"
+            self.progress_stages.append("Opening project workspace…")
             self.error = ""
             self.notice = "Opening project…"
             self.draw()
@@ -2822,21 +3884,34 @@ class Workshop:
                     Path(admitted.environment["VIBECRAFTED_RUNTIME_BIN"]) / "vc-frame"
                 )
         except ValueError as exc:
+            self.error_stage = "Opening project workspace"
             self.error = str(exc)
             return
         finally:
             self.notice = ""
+        tab_stage = f"Opening {provider_name} tab…"
+        self.launch_stage = tab_stage
+        self.progress_stages.append(tab_stage)
         try:
             result = subprocess.run(
                 pane, check=False, capture_output=True, text=True, **frame_kwargs
             )
         except FileNotFoundError:
+            self.error_stage = f"Opening {provider_name} tab"
             self.error = "vc-frame is not available in this Runtime Pack"
             return
         if result.returncode != 0:
-            self.error = launch_failure_reason(
+            self.error_stage = f"Opening {provider_name} tab"
+            base_reason = launch_failure_reason(
                 result, "cannot open a tab for that Agent"
             )
+            if opened_new_workspace:
+                self.error = (
+                    f"Project workspace opened in {destination}, "
+                    f"but opening {provider_name} tab failed: {base_reason}"
+                )
+            else:
+                self.error = base_reason
             return
         self._opened = True
         current = current_frame_session()
@@ -2862,9 +3937,11 @@ class Workshop:
                     ),
                 )
             except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                self.error_stage = "Showing destination workspace"
                 self.error = f"Agent opened in {destination}, but that session could not be shown: {exc}"
                 return
             if attached.returncode != 0:
+                self.error_stage = "Showing destination workspace"
                 self.error = launch_failure_reason(
                     attached,
                     f"Agent opened in {destination}, but that session could not be shown",
@@ -2879,13 +3956,24 @@ class Workshop:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Vibecrafted Agent Workspaces")
     parser.add_argument("mode", choices=("home", "launcher"), nargs="?", default="home")
+    parser.add_argument(
+        "--onboarding",
+        action="store_true",
+        help="Open ZenEntry setup and terminal typography selector",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        curses.wrapper(lambda window: Workshop(window, mode=args.mode).run())
+        curses.wrapper(
+            lambda window: Workshop(
+                window,
+                mode=args.mode,
+                onboarding=bool(getattr(args, "onboarding", False)),
+            ).run()
+        )
     except KeyboardInterrupt:
         return 130
     return 0
