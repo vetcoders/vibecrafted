@@ -193,6 +193,94 @@ def _opened(fixture) -> list[dict]:
     return [call for call in fixture.scene.calls() if call.get("opened")]
 
 
+def _rename_capable_frame(fixture) -> None:
+    """Extend only the inert engine with Frame's public rename/incarnation contract."""
+    frame = fixture.scene.generation / "bin/vc-frame"
+    body = frame.read_text()
+    marker = '    if verb == "new-tab":'
+    extension = """    if verb == "list-tabs":
+        incarnation = open(os.path.join(table, "incarnations", target)).read().strip()
+        print(json.dumps([{"tab_id": 1, "session_incarnation": incarnation}]))
+        sys.exit(0)
+    if verb == "rename-session":
+        wanted = rest[2]
+        os.rename(os.path.join(table, "live", target), os.path.join(table, "live", wanted))
+        os.rename(os.path.join(table, "incarnations", target), os.path.join(table, "incarnations", wanted))
+        sys.exit(0)
+"""
+    assert marker in body
+    body = body.replace(
+        "    os.close(fd)",
+        "    os.close(fd)\n"
+        "    import uuid\n"
+        "    with open(os.path.join(table, 'incarnations', name), 'w') as handle:\n"
+        "        handle.write(str(uuid.uuid4()))",
+    )
+    for relative in ("bin/vc-frame", "libexec/vc-frame"):
+        _write(
+            fixture.scene.generation / relative,
+            body.replace(marker, extension + marker),
+        )
+    (fixture.scene.table / "incarnations").mkdir()
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_actual_frame_rename_reuses_original_binding(
+    public_destination, monkeypatch, inside
+):
+    f = public_destination
+    _rename_capable_frame(f)
+    name = "seat-a"
+    initial = f.open_agent(name)
+    assert initial.session == name
+    identity = f.wc.resolve_run_workspace_identity(
+        root=f.scene.root,
+        env={},
+        runtime_session_id=name,
+        socket_dir=f.socket_dir,
+        runtime_state="live",
+    )
+    before = f.wc.read_workspace_session(identity.vibecrafted_session_id)
+    if inside:
+        for key, value in identity.to_env().items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("VC_FRAME_SESSION_NAME", name)
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", name)
+    for renamed in ("seat-b", "seat-c"):
+        subprocess.run(
+            [
+                str(f.scene.generation / "bin/vc-frame"),
+                "--session",
+                name,
+                "action",
+                "rename-session",
+                renamed,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        requested = f.workshop.destination_session_for_workspace(f.scene.root)
+        admitted = f.open_agent(requested)
+        assert admitted.session == renamed
+        if inside:
+            assert f.workshop.current_frame_session() == renamed
+            assert f.workshop.owned_current_destination(f.scene.root) == renamed
+        assert [call["created"] for call in _creates(f)] == ["seat-a"]
+        actual = f.wc.resolve_run_workspace_identity(
+            root=f.scene.root,
+            env={},
+            runtime_session_id=renamed,
+            socket_dir=f.socket_dir,
+            runtime_state="live",
+        )
+        assert actual.to_env() == identity.to_env()
+        assert f.wc.read_workspace_session(identity.vibecrafted_session_id) == before
+        name = renamed
+    assert [call["opened"] for call in _opened(f)] == ["seat-a", "seat-b", "seat-c"]
+
+
 def _commit_private_project_revision(fixture, content: str) -> None:
     root = fixture.scene.root
     assert root.is_relative_to(fixture.scene.tmp_path)
@@ -428,7 +516,11 @@ def test_workshop_foreign_live_basename_preserved_and_agent_opens_project_once(
         f.wc.workspace_session_path(owner.vibecrafted_session_id).read_bytes() == before
     )
     assert (f.scene.table / "live/selected").read_bytes() == frame_before
-    actions = [call for call in f.scene.calls() if "action" in call["argv"]]
+    actions = [
+        call
+        for call in f.scene.calls()
+        if "action" in call["argv"] and "list-tabs" not in call["argv"]
+    ]
     assert all(call["argv"][1] != "selected" for call in actions)
 
 

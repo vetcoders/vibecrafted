@@ -167,6 +167,8 @@ from vibecrafted_core.workspace_catalog import (
     read_catalog,
     read_workspace_session,
     resolve_operator_place_session,
+    resolve_project_destination,
+    resolve_run_workspace_identity,
     runtime_session_owner_root,
 )
 
@@ -344,8 +346,9 @@ def launch_argv(
 
 
 def current_frame_session(*, env: Mapping[str, str] | None = None) -> str:
-    """Name of the Frame session hosting this pane, if the runtime exported one."""
+    """Resolve the hosting identity before falling back to its exported name."""
     environ = env if env is not None else os.environ
+    current = ""
     for key in (
         "VC_FRAME_SESSION_NAME",
         "ZELLIJ_SESSION_NAME",
@@ -353,8 +356,51 @@ def current_frame_session(*, env: Mapping[str, str] | None = None) -> str:
     ):
         value = str(environ.get(key) or "").strip()
         if value:
-            return value
-    return ""
+            current = value
+            break
+    if not current or current == "vc-host":
+        return current
+    try:
+        session = read_workspace_session(environ.get("VIBECRAFTED_SESSION_ID", ""))
+        if (
+            session.workspace_id != environ.get("VIBECRAFTED_WORKSPACE_ID")
+            or session.workspace_instance_id
+            != environ.get("VIBECRAFTED_WORKSPACE_INSTANCE_ID")
+            or not any(item.session_incarnation for item in session.attachments)
+        ):
+            return current
+        root = read_catalog().workspaces[session.workspace_id].canonical_root
+        socket_dir = environ.get("VC_FRAME_SOCKET_DIR") or environ.get(
+            "ZELLIJ_SOCKET_DIR", ""
+        )
+        names, error = list_live_frame_sessions(
+            env=selected_runtime_environment(environ)
+        )
+        if error:
+            return current
+        matching = []
+        for name in names:
+            if name == "vc-host":
+                continue
+            try:
+                identity = resolve_run_workspace_identity(
+                    root=root,
+                    env=environ,
+                    runtime_session_id=name,
+                    socket_dir=socket_dir,
+                    runtime_state="live",
+                )
+            except WorkspaceCatalogError:
+                continue
+            if (
+                identity.workspace_id == session.workspace_id
+                and identity.vibecrafted_session_id == session.session_id
+                and identity.workspace_instance_id == session.workspace_instance_id
+            ):
+                matching.append(name)
+        return matching[0] if len(matching) == 1 else ""
+    except (OSError, KeyError, ValueError, WorkspaceCatalogError):
+        return current
 
 
 def destination_session_for_workspace(
@@ -398,7 +444,10 @@ def owned_current_destination(
             == environ.get("VIBECRAFTED_WORKSPACE_INSTANCE_ID")
             and any(
                 item.runtime == "vc-frame"
-                and item.runtime_session_id == current
+                and (
+                    item.runtime_session_id == current
+                    or item.session_incarnation is not None
+                )
                 and item.state == "live"
                 for item in receipt.attachments
             )
@@ -477,6 +526,22 @@ def ensure_live_destination(
     session = str(session or "").strip()
     if not session:
         raise ValueError("could not resolve a Frame session for that project")
+    try:
+        route = resolve_project_destination(
+            root=workspace,
+            requested=session,
+            live_names=live_names,
+            occupied_names=live_names,
+            socket_dir=os.environ.get("VC_FRAME_SOCKET_DIR")
+            or os.environ.get("ZELLIJ_SOCKET_DIR", ""),
+        )
+        if route["VIBECRAFTED_FRAME_DESTINATION_REASON"] in {
+            "owned-current-seat",
+            "owned-live-seat",
+        }:
+            return LiveDestination(route["VIBECRAFTED_OPERATOR_SESSION"], None)
+    except WorkspaceCatalogError as exc:
+        raise ValueError(f"Project could not be opened: {exc}") from exc
     if session in live_names and catalog_owns_destination(workspace, session):
         return LiveDestination(session, None)
     try:

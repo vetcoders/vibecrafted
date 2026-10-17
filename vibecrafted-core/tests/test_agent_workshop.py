@@ -964,6 +964,13 @@ def _prepare_project_creation(
     monkeypatch.setattr(workshop.time, "sleep", lambda _seconds: None)
 
     def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        if command[1:5] in (
+            ["--session", "target", "action", "list-tabs"],
+            ["--session", "target-recovery", "action", "list-tabs"],
+        ):
+            # This fixture models an older Frame without incarnation metadata;
+            # read-only identity probes are separate from launch side effects.
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
         calls.append(command)
         if command == workshop.workspace_shell_argv(
             kwargs["env"], project, "target", prepare=True

@@ -1547,6 +1547,229 @@ def _destination_seat(root: Path, name: str, socket_dir: str):
     return identity
 
 
+def test_frame_incarnation_projects_rename_without_changing_receipt(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    physical = {"seat-a": incarnation}
+    monkeypatch.setattr(
+        wc, "_frame_session_incarnation", lambda name, _socket: physical.get(name)
+    )
+    identity = _destination_seat(root, "seat-a", "/socket")
+    path = wc.workspace_session_path(identity.vibecrafted_session_id)
+    before = path.read_bytes()
+    assert (
+        wc.read_workspace_session(identity.vibecrafted_session_id)
+        .attachments[0]
+        .session_incarnation
+        == incarnation
+    )
+    physical["seat-b"] = physical.pop("seat-a")
+    # A different server may reuse the old display name without owning this seat.
+    physical["seat-a"] = wc.new_uuid7()
+    assert (
+        wc.runtime_session_owner_root("seat-a", "/socket", runtime_state="live") is None
+    )
+    assert wc.runtime_session_owner_root(
+        "seat-b", "/socket", runtime_state="live"
+    ) == str(root)
+    assert (
+        wc.runtime_session_owner_root("seat-b", "/different", runtime_state="live")
+        is None
+    )
+    resolved = wc.resolve_run_workspace_identity(
+        root=root,
+        env={},
+        runtime_session_id="seat-b",
+        socket_dir="/socket",
+        runtime_state="live",
+    )
+    assert resolved.to_env() == identity.to_env()
+    wc.record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="seat-b",
+        state="live",
+        socket_dir="/socket",
+    )
+    assert path.read_bytes() == before
+    physical["seat-b"] = wc.new_uuid7()
+    assert (
+        wc.runtime_session_owner_root("seat-b", "/socket", runtime_state="live") is None
+    )
+    with pytest.raises(wc.WorkspaceCatalogError, match="incarnation changed"):
+        wc.record_runtime_session_attachment(
+            workspace_id=identity.workspace_id,
+            vibecrafted_session_id=identity.vibecrafted_session_id,
+            workspace_instance_id=identity.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="seat-a",
+            state="live",
+            socket_dir="/socket",
+        )
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("proof", [None, "different", "unavailable"])
+def test_missing_frame_name_with_unproven_live_seat_refuses_duplication(
+    home, tmp_path, monkeypatch, proof
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    physical = {"old": incarnation if proof is not None else None}
+    monkeypatch.setattr(
+        wc, "_frame_session_incarnation", lambda name, _socket: physical.get(name)
+    )
+    identity = _destination_seat(root, "old", "/socket")
+    before = wc.workspace_session_path(identity.vibecrafted_session_id).read_bytes()
+    physical.clear()
+    if proof != "unavailable":
+        physical["new"] = wc.new_uuid7()
+    with pytest.raises(wc.WorkspaceCatalogError, match="Frame rail"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="old",
+            live_names=["new"],
+            occupied_names=["new"],
+            socket_dir="/socket",
+            env=identity.to_env(),
+        )
+    assert (
+        wc.workspace_session_path(identity.vibecrafted_session_id).read_bytes()
+        == before
+    )
+
+
+@pytest.mark.parametrize("state", ["missing", "dead"])
+def test_bound_incarnation_still_allows_confirmed_unavailable_recovery(
+    home, tmp_path, monkeypatch, state
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    original = _destination_seat(root, "seat", "/socket")
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: None)
+    recovered = wc.resolve_run_workspace_identity(
+        root=root,
+        env={},
+        runtime_session_id="seat",
+        socket_dir="/socket",
+        runtime_state=state,
+    )
+    assert recovered.vibecrafted_session_id != original.vibecrafted_session_id
+    old = wc.read_workspace_session(original.vibecrafted_session_id)
+    assert old.attachments[0].state == state
+    assert old.attachments[0].session_incarnation == incarnation
+    assert (
+        next(
+            i
+            for i in wc.list_instances()
+            if i.workspace_instance_id == original.workspace_instance_id
+        ).status
+        == wc.INSTANCE_STATUS_STALE
+    )
+
+
+def test_legacy_name_refresh_cannot_mint_incarnation_authority(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: None)
+    identity = _destination_seat(root, "reused", "/socket")
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: wc.new_uuid7())
+    receipt = wc.record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="reused",
+        state="live",
+        socket_dir="/socket",
+    )
+    assert receipt.attachments[0].session_incarnation is None
+
+
+def test_duplicate_frame_incarnation_owners_and_host_are_protected(
+    home, tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    identity = _destination_seat(root, "old", "/socket")
+    assert (
+        wc.runtime_session_owner_root("vc-host", "/socket", runtime_state="live")
+        is None
+    )
+    second = wc.materialize_instance(
+        workspace_id=identity.workspace_id,
+        root=root,
+        vibecrafted_session_id=wc.new_uuid7(),
+        build_id=identity.build_id,
+    )
+    wc.record_runtime_session_attachment(
+        workspace_id=second.workspace_id,
+        vibecrafted_session_id=second.vibecrafted_session_id,
+        workspace_instance_id=second.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="second",
+        state="live",
+        socket_dir="/socket",
+    )
+    with pytest.raises(wc.WorkspaceCatalogError, match="ambiguous live seats"):
+        wc.runtime_session_owner_root("renamed", "/socket", runtime_state="live")
+    with wc._catalog_lock(exclusive=True):
+        wc._write_instance_unlocked(replace(second, status=wc.INSTANCE_STATUS_STALE))
+    assert wc.runtime_session_owner_root(
+        "renamed", "/socket", runtime_state="live"
+    ) == str(root)
+    path = wc.workspace_session_path(identity.vibecrafted_session_id)
+    payload = json.loads(path.read_text())
+    payload["attachments"][0]["session_incarnation"] = "malformed"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(wc.WorkspaceCatalogError, match="session_incarnation"):
+        wc.runtime_session_owner_root("renamed", "/socket", runtime_state="live")
+
+
+@pytest.mark.parametrize("payload", ["{broken", "[]", "{}", "[{}]", "[null]"])
+def test_frame_incarnation_probe_rejects_unavailable_metadata_and_pins_engine(
+    home, tmp_path, monkeypatch, payload
+):
+    generation = tmp_path / "selected"
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(generation))
+    monkeypatch.setenv("VIBECRAFTED_VC_FRAME_BIN", str(tmp_path / "foreign"))
+    calls = []
+
+    def observe(command, **kwargs):
+        calls.append(command)
+        assert kwargs["env"]["VC_FRAME_SOCKET_DIR"] == "/socket"
+        assert kwargs["env"]["ZELLIJ_SOCKET_DIR"] == "/socket"
+        return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(wc.subprocess, "run", observe)
+    assert wc._frame_session_incarnation("renamed", "/socket") is None
+    assert calls == [
+        [
+            str(generation / "bin/vc-frame"),
+            "--session",
+            "renamed",
+            "action",
+            "list-tabs",
+            "--json",
+            "--all",
+        ]
+    ]
+
+
 def test_destination_preserves_foreign_basename_and_reuses_verified_custom_seat(
     home, tmp_path
 ):
