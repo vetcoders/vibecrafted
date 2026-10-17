@@ -1615,15 +1615,15 @@ def test_frame_incarnation_projects_rename_without_changing_receipt(
     assert (
         wc.runtime_session_owner_root("seat-b", "/socket", runtime_state="live") is None
     )
-    with pytest.raises(wc.WorkspaceCatalogError, match="Frame rail"):
-        wc.resolve_project_destination(
-            root=root,
-            requested="seat-a",
-            live_names=["seat-a", "seat-b"],
-            occupied_names=["seat-a", "seat-b"],
-            socket_dir="/socket",
-            env=identity.to_env(),
-        )
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="seat-a",
+        live_names=["seat-a", "seat-b"],
+        occupied_names=["seat-a", "seat-b"],
+        socket_dir="/socket",
+        env=identity.to_env(),
+    )
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "occupied-name-preserved"
     with pytest.raises(wc.WorkspaceCatalogError, match="incarnation changed"):
         wc.record_runtime_session_attachment(
             workspace_id=identity.workspace_id,
@@ -1653,8 +1653,9 @@ def test_missing_frame_name_with_unproven_live_seat_refuses_duplication(
     physical.clear()
     if proof != "unavailable":
         physical["new"] = wc.new_uuid7()
-    with pytest.raises(wc.WorkspaceCatalogError, match="Frame rail"):
-        wc.resolve_project_destination(
+
+    def choose():
+        return wc.resolve_project_destination(
             root=root,
             requested="old",
             live_names=["new"],
@@ -1662,6 +1663,12 @@ def test_missing_frame_name_with_unproven_live_seat_refuses_duplication(
             socket_dir="/socket",
             env=identity.to_env(),
         )
+
+    if proof == "different":
+        assert choose()["VIBECRAFTED_OPERATOR_SESSION"] == "old"
+    else:
+        with pytest.raises(wc.WorkspaceCatalogError, match="Frame rail"):
+            choose()
     assert (
         wc.workspace_session_path(identity.vibecrafted_session_id).read_bytes()
         == before
@@ -1719,6 +1726,80 @@ def test_legacy_name_refresh_cannot_mint_incarnation_authority(
     assert receipt.attachments[0].session_incarnation is None
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "missing",
+        "dead",
+        "replaced",
+        "unavailable",
+        "namespace",
+        "legacy",
+        "detached",
+        "buried",
+    ],
+)
+def test_source_stale_seat_does_not_bypass_physical_proof(
+    home, tmp_path, monkeypatch, boundary
+):
+    from dataclasses import replace
+
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    original = _destination_seat(root, "seat", "/socket")
+    instance = next(
+        i
+        for i in wc.list_instances()
+        if i.workspace_instance_id == original.workspace_instance_id
+    )
+    with wc._catalog_lock(exclusive=True):
+        wc._write_instance_unlocked(replace(instance, status=wc.INSTANCE_STATUS_STALE))
+    if boundary in ("missing", "dead"):
+        wc.record_runtime_session_attachment(
+            workspace_id=original.workspace_id,
+            vibecrafted_session_id=original.vibecrafted_session_id,
+            workspace_instance_id=original.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="seat",
+            state=boundary,
+            socket_dir="/socket",
+        )
+    elif boundary in ("replaced", "unavailable"):
+        monkeypatch.setattr(
+            wc,
+            "_frame_session_incarnation",
+            lambda *_: None if boundary == "unavailable" else wc.new_uuid7(),
+        )
+    elif boundary == "legacy":
+        path = wc.workspace_session_path(original.vibecrafted_session_id)
+        payload = json.loads(path.read_text())
+        payload["attachments"][0].pop("session_incarnation")
+        path.write_text(json.dumps(payload))
+    elif boundary == "detached":
+        with wc._catalog_lock(exclusive=True):
+            wc._write_instance_unlocked(
+                replace(instance, status=wc.INSTANCE_STATUS_DETACHED)
+            )
+    elif boundary == "buried":
+        wc.bury_workspace(original.workspace_id)
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    if boundary == "buried":
+        with pytest.raises(wc.WorkspaceCatalogError, match="unavailable"):
+            wc.runtime_session_owner_root("seat", "/socket", runtime_state="live")
+    else:
+        assert (
+            wc.runtime_session_owner_root(
+                "seat",
+                "/other" if boundary == "namespace" else "/socket",
+                runtime_state="live",
+            )
+            is None
+        )
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
 def test_duplicate_frame_incarnation_owners_and_host_are_protected(
     home, tmp_path, monkeypatch
 ):
@@ -1752,6 +1833,20 @@ def test_duplicate_frame_incarnation_owners_and_host_are_protected(
         wc.runtime_session_owner_root("renamed", "/socket", runtime_state="live")
     with wc._catalog_lock(exclusive=True):
         wc._write_instance_unlocked(replace(second, status=wc.INSTANCE_STATUS_STALE))
+    # Source staleness alone cannot disprove the duplicate physical binding.
+    with pytest.raises(wc.WorkspaceCatalogError, match="ambiguous live seats"):
+        wc.runtime_session_owner_root("renamed", "/socket", runtime_state="live")
+    # Explicit physical retirement does remove its authority, even if an old
+    # observer still reports that incarnation elsewhere.
+    wc.record_runtime_session_attachment(
+        workspace_id=second.workspace_id,
+        vibecrafted_session_id=second.vibecrafted_session_id,
+        workspace_instance_id=second.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="second",
+        state="dead",
+        socket_dir="/socket",
+    )
     assert wc.runtime_session_owner_root(
         "renamed", "/socket", runtime_state="live"
     ) == str(root)

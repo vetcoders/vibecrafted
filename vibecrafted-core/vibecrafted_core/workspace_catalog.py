@@ -1105,7 +1105,22 @@ def resolve_project_destination(
             raise WorkspaceCatalogError(
                 "project Frame destination belongs to another socket namespace"
             )
-        if recent is not None and unowned:
+        # A complete observation of different immutable incarnations disproves
+        # a rename into those seats. Legacy or unavailable metadata cannot.
+        unowned_incarnations = (
+            [_frame_session_incarnation(name, socket_dir) for name in sorted(unowned)]
+            if recent is not None and recent.session_incarnation is not None
+            else [None] * len(unowned)
+        )
+        if (
+            recent is not None
+            and unowned
+            and (
+                None in unowned_incarnations
+                or recent.session_incarnation in unowned_incarnations
+                or len(set(unowned_incarnations)) != len(unowned_incarnations)
+            )
+        ):
             raise WorkspaceCatalogError(
                 "Saved Frame binding is unavailable and existing live sessions have no verified binding; "
                 "open the existing session on the Frame rail to continue. "
@@ -1563,8 +1578,9 @@ def materialize_instance(
 ) -> WorkspaceInstance:
     """Create or refresh a live instance for workspace_id at the current build.
 
-    An existing live instance for a *different* build is detached (never
-    overwritten). A matching build reuses the instance id.
+    An existing live instance for a *different* build becomes source-stale
+    (never overwritten). Its physical attachments are not retired by a source
+    revision. A matching build reuses the instance id.
     """
 
     wid = require_uuid(workspace_id, field_name="workspace_id")
@@ -1719,7 +1735,8 @@ def materialize_instance(
                 # Unknown content is no evidence that another live session
                 # runs a different build. Keep its receipt intact.
                 continue
-            # Different build cannot claim live ownership.
+            # Different source build cannot claim current-build health. This
+            # does not retire a still-live, incarnation-bound physical seat.
             detached = WorkspaceInstance(
                 workspace_instance_id=instance.workspace_instance_id,
                 workspace_id=instance.workspace_id,
@@ -1794,7 +1811,8 @@ def runtime_session_owner_root(
     """Read current live ownership, or conservative history for an exited seat.
 
     The caller supplies the engine's observed state. Historical missing/dead
-    attachments and stale instances cannot own a newly live incarnation.
+    attachments cannot own a newly live incarnation. A source-stale instance
+    requires its already-bound immutable incarnation to remain observable.
     An EXITED cache or unspecified observation has no current incarnation
     proof, so keep its historical foreign-root fence until explicit recovery.
     """
@@ -1839,7 +1857,7 @@ def workspace_return_attachment(
     candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
     for instance in list_instances(workspace_id=record.workspace_id):
         if (
-            instance.status != INSTANCE_STATUS_LIVE
+            instance.status not in (INSTANCE_STATUS_LIVE, INSTANCE_STATUS_STALE)
             or not instance.vibecrafted_session_id
         ):
             continue
@@ -1863,6 +1881,10 @@ def workspace_return_attachment(
             if attachment.runtime == "vc-frame"
             and attachment.state == "live"
             and attachment.runtime_session_id != "vc-host"
+            and (
+                instance.status == INSTANCE_STATUS_LIVE
+                or attachment.session_incarnation is not None
+            )
         )
     preferred = [
         attachment
@@ -2188,12 +2210,21 @@ def _runtime_workspace_identity(
                     "physical Frame session ownership is unavailable"
                 )
             instance = WorkspaceInstance.from_payload(instance_payload)
-            # Match the existing workspace-return liveness criteria, without
-            # promoting historical STALE instances or rewriting their receipts.
-            if instance.status != INSTANCE_STATUS_LIVE:
+            # STALE describes source revision, not physical death. Admit an
+            # older build only through its bound incarnation and LIVE receipt;
+            # keep its original build and status unchanged. Name-only historical
+            # records and explicitly detached instances gain no authority.
+            if instance.status == INSTANCE_STATUS_STALE:
+                attachments = [
+                    item for item in attachments if item.session_incarnation is not None
+                ]
+            elif instance.status != INSTANCE_STATUS_LIVE:
+                continue
+            if not attachments:
                 continue
             if (
                 instance.workspace_id != session.workspace_id
+                or instance.workspace_instance_id != session.workspace_instance_id
                 or instance.vibecrafted_session_id != session.session_id
                 or _canonical_root_key(instance.build_id.root)
                 != _canonical_root_key(record.canonical_root)
