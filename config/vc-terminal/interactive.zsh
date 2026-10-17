@@ -17,7 +17,7 @@ typeset -g _VC_TERMINAL_PROFILE_FILE="${${(%):-%x}:-$HOME/.config/vibecrafted/vc
 _vc_terminal_owned_alias_names=(ll la l .. ... .... gs ga gc gp gl gd)
 _vc_terminal_product_shell="$HOME/.config/vibecrafted/shell"
 
-_vc_terminal_pin_product_env() {
+function _vc_terminal_pin_product_env {
   # Product tool paths must exist before zoxide/atuin/starship `init`.
   # Those commands read STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR at init time.
   export VIBECRAFTED_TERMINAL_ENTRY=1
@@ -34,7 +34,7 @@ _vc_terminal_pin_product_env() {
     "$STARSHIP_CACHE"
 }
 
-_vc_terminal_release_product_tool_env() {
+function _vc_terminal_release_product_tool_env {
   # Intentional personal-shell: stop forcing product Atuin/Starship/zoxide
   # config, history, and keys. Frame config and the typed python door stay
   # product-owned. Do not wrap the source builtin; this is the explicit route.
@@ -46,7 +46,7 @@ _vc_terminal_release_product_tool_env() {
   fi
 }
 
-_vc_terminal_apply_fallback_prompt() {
+function _vc_terminal_apply_fallback_prompt {
   # Two-line offline prompt in the shape of the product starship.toml: bold
   # blue path, then ❯ (green after success, red after failure). Used only when
   # Starship did not install a precmd hook. Do not reset a live Starship prompt.
@@ -57,7 +57,7 @@ _vc_terminal_apply_fallback_prompt() {
   RPROMPT=''
 }
 
-_vc_terminal_bind_owned_python() {
+function _vc_terminal_bind_owned_python {
   # The runtime python pin is inherited, never chosen here: the entry that
   # started this shell (vc-terminal, vc-frame) exported VIBECRAFTED_PYTHON and
   # VIBECRAFTED_RUNTIME_ROOT. Typed python / python3 go through the pinned
@@ -92,7 +92,7 @@ _vc_terminal_bind_owned_python() {
   }
 }
 
-_vc_terminal_load_owned_layer() {
+function _vc_terminal_load_owned_layer {
   local vc_alias_dir vc_alias_file vc_name
   local -a vc_before_aliases vc_before_functions vc_after
   _vc_terminal_pin_product_env
@@ -129,7 +129,7 @@ _vc_terminal_load_owned_layer() {
   _vc_terminal_apply_fallback_prompt
 }
 
-_vc_terminal_catalog_emit() {
+function _vc_terminal_catalog_emit {
   # One catalogue row: $1 group, $2 section, $3 name, $4 value or description.
   # Group and section headers print once, and only above a row that matches.
   emulate -L zsh
@@ -149,7 +149,7 @@ _vc_terminal_catalog_emit() {
   printf '    %s%-8s%s %s\n' "$_vc_terminal_catalog_name" "$3" "$_vc_terminal_catalog_reset" "$4"
 }
 
-aliases() {
+function aliases {
   # Grouped catalogue of what this profile loaded: one group per installed
   # alias file (`## ` lines are its sections), then the profile's own commands.
   # `aliases <text>` keeps rows whose group, section, name or value has <text>.
@@ -202,7 +202,7 @@ aliases() {
   _vc_terminal_catalog_emit "$vc_shell_group" 'Python' python 'same as python3'
 }
 
-reload() {
+function reload {
   # Re-read the installed profile so a changed interactive.zsh becomes the
   # live definition. The load-once guard below skips tool/ZLE/banner work.
   # Then apply the (possibly new) owned layer. cwd and HISTFILE stay put.
@@ -213,7 +213,7 @@ reload() {
   _vc_terminal_load_owned_layer
 }
 
-personal-shell() {
+function personal-shell {
   # Release the product's interactive pins and re-read the personal home
   # profile under personal semantics. Startup already composed ~/.zshrc (the
   # product ZDOTDIR's .zshrc stage); this transition is the explicit release,
@@ -330,7 +330,7 @@ if (( $+functions[compdef] )); then
   compdef _gnu_generic vibecrafted vc-frame vc-workflow vc-dashboard
   # vc-start's human-readable help embeds options in usage/examples rather
   # than a GNU option table, so _gnu_generic cannot discover its flags.
-  _vc_terminal_start_completion() {
+  function _vc_terminal_start_completion {
     _arguments \
       '--repo[Repository directory]:repository:_files -/' \
       '--root[Legacy spelling of --repo]:repository:_files -/' \
@@ -387,7 +387,7 @@ unset vc_tool vc_tool_args vc_tool_init vc_quick_lane
 # within it.  If Atuin is absent (or its init failed), all three keys retain
 # useful built-in history behaviour.
 if (( $+functions[_atuin_search] && $+functions[atuin-search] )); then
-  _vc_terminal_atuin_up_or_history() {
+  function _vc_terminal_atuin_up_or_history {
     emulate -L zsh
     if [[ $BUFFER == *$'\n'* ]]; then
       zle up-line-or-history
