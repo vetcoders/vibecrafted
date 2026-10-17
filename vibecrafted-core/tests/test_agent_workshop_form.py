@@ -580,3 +580,91 @@ def test_launch_stage_progress_and_enter_mouse_parity(
     assert any("[Opening claude tab]" in t for t in drawn_texts)
     assert any("1 codex: opened" in t for t in drawn_texts)
     assert any("2 claude: failed" in t for t in drawn_texts)
+
+
+# ─── Counterexample Unit Tests ───
+
+
+class InputFinished(Exception):
+    pass
+
+
+class GetchWindow(RecordingWindow):
+    def __init__(
+        self,
+        keys: bytes | tuple[int, ...] | list[int] = (),
+        height: int = 30,
+        width: int = 100,
+    ) -> None:
+        super().__init__(height=height, width=width)
+        self.keys = iter(keys)
+
+    def getch(self) -> int:
+        try:
+            return next(self.keys)
+        except StopIteration:
+            raise InputFinished
+
+
+def test_workshop_form_utf8_getch_input_via_run_loop() -> None:
+    """UTF-8 multi-byte characters (e.g. 'zażółć') are decoded and preserved across form.run() getch loop."""
+    workshop = _load()
+    typed = "zażółć"
+    window = GetchWindow(typed.encode("utf-8"))
+    form = workshop.Workshop(window, mode="launcher")
+    form.path = ""
+    form.row = 1
+    form.configure = lambda: None
+    form.draw = lambda: None
+    try:
+        form.run()
+    except InputFinished:
+        pass
+    assert form.path == typed
+
+
+def test_workshop_short_error_recovery_buttons_and_mouse_targets_match_drawn_cells() -> (
+    None
+):
+    """Short errors draw [ Retry (r) ], [ Back (Esc) ], [ Details (e) ] and mouse_targets match drawn cells."""
+    workshop = _load()
+    window = RecordingWindow(30, 100)
+    form = workshop.Workshop(window, mode="launcher")
+    form.error = "Oops"
+    form.error_stage = "Validation"
+    form.draw_launcher()
+
+    all_drawn = "\n".join(text for _, _, text, _ in window.drawn)
+    assert "[ Retry (r) ]" in all_drawn
+    assert "[ Back (Esc) ]" in all_drawn
+    assert "[ Details (e) ]" in all_drawn
+    assert "[Validation] Oops" in all_drawn
+
+    action_targets = [
+        t
+        for t in form.mouse_targets
+        if t[4] in ("retry", "dismiss_error", "error_details")
+    ]
+    assert len(action_targets) == 3
+    for row, start, _end, _, _kind in action_targets:
+        assert any(r == row and c == start for r, c, _t, _ in window.drawn)
+
+
+def test_workshop_narrow_window_clips_mouse_targets_without_phantoms() -> None:
+    """In a narrow window, recovery buttons are clipped by _choice_layout with zero phantom mouse targets."""
+    workshop = _load()
+    narrow_window = RecordingWindow(30, 25)
+    form = workshop.Workshop(narrow_window, mode="launcher")
+    form.error = "Oops"
+    form.error_stage = "Validation"
+    form.draw_launcher()
+
+    action_targets = [
+        t
+        for t in form.mouse_targets
+        if t[4] in ("retry", "dismiss_error", "error_details")
+    ]
+    # All registered targets must fit within the window width (0 <= start < end <= 25)
+    for row, start, end, _, _kind in action_targets:
+        assert 0 <= start < end <= 25
+        assert any(r == row and c == start for r, c, _t, _ in narrow_window.drawn)

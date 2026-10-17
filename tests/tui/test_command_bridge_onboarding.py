@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -367,3 +368,104 @@ primary.background = "#1e1e1e"
     assert 'primary.background = "#1e1e1e"' in result
     assert "live_config_reload" not in result
     assert cbo.read_configured_font_family(policy) == "Monaspace Neon NF"
+
+
+def test_select_font_family_preserves_existing_live_config_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+
+    policy = tmp_path / "terminal-policy.toml"
+    font_dir = tmp_path / "Fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
+    neon_file.write_bytes(b"\x00\x01\x00\x00")
+
+    initial = (
+        "live_config_reload = false\n\n"
+        '[font.normal]\nfamily = "Spot Mono"\nstyle = "Regular"\n\n'
+        '[font.bold]\nfamily = "Spot Mono"\nstyle = "Bold"\n\n'
+        '[font.italic]\nfamily = "Spot Mono"\nstyle = "Italic"\n'
+    )
+    policy.write_text(initial, encoding="utf-8")
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+        font_dirs=[font_dir],
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    parsed = tomllib.loads(result)
+    assert parsed.get("live_config_reload") is False
+    assert parsed["font"]["normal"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["bold"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["italic"]["family"] == "Monaspace Neon NF"
+    assert "live_config_reload = false" in result
+
+
+def test_select_font_family_preserves_commented_table_headers_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+
+    policy = tmp_path / "terminal-policy.toml"
+    font_dir = tmp_path / "Fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
+    neon_file.write_bytes(b"\x00\x01\x00\x00")
+
+    initial = (
+        "[font.normal] # primary font section\n"
+        'family = "Spot Mono"\n'
+        'style = "Regular"\n\n'
+        "[font.bold] # bold style\n"
+        'family = "Spot Mono"\n'
+        'style = "Bold"\n\n'
+        "[font.italic] # italic style\n"
+        'family = "Spot Mono"\n'
+        'style = "Italic"\n'
+    )
+    policy.write_text(initial, encoding="utf-8")
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+        font_dirs=[font_dir],
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    parsed = tomllib.loads(result)
+    assert parsed["font"]["normal"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["bold"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["italic"]["family"] == "Monaspace Neon NF"
+    assert "# primary font section" in result
+    assert "# bold style" in result
+    assert "# italic style" in result
+    assert result.count("[font.normal]") == 1
+    assert result.count("[font.bold]") == 1
+    assert result.count("[font.italic]") == 1
+
+
+def test_select_font_family_refuses_malformed_input_toml_without_modifying_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+
+    policy = tmp_path / "terminal-policy.toml"
+    font_dir = tmp_path / "Fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
+    neon_file.write_bytes(b"\x00\x01\x00\x00")
+
+    malformed = '[font.normal]\nfamily = "Spot Mono\ninvalid toml syntax [[['
+    policy.write_text(malformed, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="terminal-policy.toml is malformed"):
+        cbo.select_font_family(
+            "Monaspace Neon NF",
+            policy_path=policy,
+            font_dirs=[font_dir],
+        )
+
+    assert policy.read_text(encoding="utf-8") == malformed

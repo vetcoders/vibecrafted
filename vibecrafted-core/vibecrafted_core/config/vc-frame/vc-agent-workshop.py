@@ -1457,6 +1457,7 @@ class Workshop:
         self.path_suggestions: list[str] = []
         self.path_suggestions_open = False
         self.path_suggestion_idx = 0
+        self._utf8_buf = bytearray()
 
         self.error = ""
         self.error_stage = ""
@@ -2686,58 +2687,27 @@ class Workshop:
             summary_raw = (public_reason(self.error) or self.error).splitlines()[0]
             if self.error_stage:
                 summary_raw = f"[{self.error_stage}] {summary_raw}"
-            wrapped_err = textwrap.wrap(summary_raw, max(16, inner)) or [summary_raw]
-            if len(wrapped_err) > 1 and height >= 16 and not compact:
-                _safe_addstr(
-                    self.window,
-                    height - 3,
-                    left,
-                    _clip(wrapped_err[0], inner),
-                    curses.A_BOLD,
-                )
-                _safe_addstr(
-                    self.window,
-                    height - 1,
-                    left,
-                    _clip(
-                        wrapped_err[1]
-                        + "  [ Retry (r) ] [ Back (Esc) ] [ Details (e) ]",
-                        inner,
-                    ),
-                )
-            else:
-                _safe_addstr(
-                    self.window,
-                    height - 1,
-                    left,
-                    summary_raw,
-                )
+            err_row = max(0, height - 3) if height >= 6 else max(0, height - 2)
+            _safe_addstr(
+                self.window,
+                err_row,
+                left,
+                _clip(summary_raw, inner),
+                curses.A_BOLD,
+            )
             act_row = height - 1
-            retry_lbl = "[ Retry (r) ]"
-            back_lbl = "[ Back (Esc) ]"
-            det_lbl = "[ Details (e) ]"
-            act_col = max(left, min(width - 38, left + inner - 38))
-            self.mouse_targets.append(
-                (act_row, act_col, act_col + len(retry_lbl), 0, "retry")
+            layout = _choice_layout(
+                ("[ Retry (r) ]", "[ Back (Esc) ]", "[ Details (e) ]"),
+                left,
+                min(width, left + inner),
             )
-            self.mouse_targets.append(
-                (
-                    act_row,
-                    act_col + len(retry_lbl) + 1,
-                    act_col + len(retry_lbl) + 1 + len(back_lbl),
-                    0,
-                    "dismiss_error",
-                )
-            )
-            self.mouse_targets.append(
-                (
-                    act_row,
-                    act_col + len(retry_lbl) + len(back_lbl) + 2,
-                    act_col + len(retry_lbl) + len(back_lbl) + 2 + len(det_lbl),
-                    0,
-                    "error_details",
-                )
-            )
+            action_kinds = ("retry", "dismiss_error", "error_details")
+            for idx, start, end, fragment in layout:
+                if fragment:
+                    _safe_addstr(self.window, act_row, start, fragment)
+                    self.mouse_targets.append(
+                        (act_row, start, end, 0, action_kinds[idx])
+                    )
         elif self.notice:
             _safe_addstr(self.window, height - 1, left, self.notice, curses.A_BOLD)
 
@@ -3101,6 +3071,28 @@ class Workshop:
             else:
                 self.open_launcher()
 
+    def _decode_key_char(self, key: int) -> str | None:
+        if 32 <= key <= 126:
+            self._utf8_buf.clear()
+            return chr(key)
+        if 194 <= key <= 244:
+            self._utf8_buf = bytearray([key])
+            return None
+        if 128 <= key <= 191:
+            if not self._utf8_buf:
+                return None
+            self._utf8_buf.append(key)
+            try:
+                ch = self._utf8_buf.decode("utf-8")
+                self._utf8_buf.clear()
+                return ch
+            except UnicodeDecodeError:
+                if len(self._utf8_buf) >= 4:
+                    self._utf8_buf.clear()
+                return None
+        self._utf8_buf.clear()
+        return None
+
     def handle_launcher_key(self, key: int) -> None:
         if self.onboarding_active:
             self.handle_onboarding_key(key)
@@ -3135,6 +3127,36 @@ class Workshop:
         editing_parent = self.advanced and self.row == 6
         editing_path = self.row == 1
         actively_typing = editing_path or editing_parent or editing_control
+
+        if actively_typing and 128 <= key <= 244:
+            ch = self._decode_key_char(key)
+            if ch is None:
+                return
+            if editing_path:
+                self._insert_path_text(ch)
+                return
+            if editing_control:
+                name = {7: "model", 8: "effort", 10: "session"}[self.row]
+                if (
+                    name == "effort"
+                    and AGENTS[self.agent] not in EFFORT_OVERRIDE_STYLES
+                ):
+                    self.error = "Effort is unavailable for this provider"
+                    return
+                setattr(self, name, getattr(self, name) + ch)
+                self._invalidate_stale_results()
+                return
+            if editing_parent and self._resume_mode():
+                self.session += ch
+                self.resume_run_id = ""
+                self.resume_index = -1
+                self._invalidate_stale_results()
+                return
+            if editing_parent:
+                self.continuity_parent += ch
+                self.parent_index = -1
+                self._invalidate_stale_results()
+                return
 
         if not actively_typing and key == ord("e") and self.error:
             self.error_details = True

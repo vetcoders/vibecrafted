@@ -460,29 +460,38 @@ def _find_font_file(tokens: Sequence[str], font_dirs: Sequence[Path]) -> Path | 
 def _extract_family_from_toml_text(raw: str) -> str | None:
     try:
         parsed = tomllib.loads(raw)
-    except (tomllib.TOMLDecodeError, ValueError):
-        parsed = None
-    if isinstance(parsed, dict):
-        font_table = parsed.get("font")
-        if isinstance(font_table, dict):
-            for subkey in ("normal", "bold", "italic"):
-                sub = font_table.get(subkey)
-                if isinstance(sub, dict):
-                    family = sub.get("family")
+        if isinstance(parsed, dict):
+            font_table = parsed.get("font")
+            if isinstance(font_table, dict):
+                normal = font_table.get("normal")
+                if isinstance(normal, dict):
+                    family = normal.get("family")
                     if isinstance(family, str) and family.strip():
                         return family.strip()
+                for subkey in ("bold", "italic"):
+                    sub = font_table.get(subkey)
+                    if isinstance(sub, dict):
+                        family = sub.get("family")
+                        if isinstance(family, str) and family.strip():
+                            return family.strip()
+    except (tomllib.TOMLDecodeError, ValueError):
+        pass
     in_font_section = False
     for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_font_section = stripped in _FONT_SECTIONS
+        header_match = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
+        if header_match:
+            normalized = f"[{header_match.group(1).strip()}]"
+            in_font_section = normalized in _FONT_SECTIONS
             continue
-        if in_font_section and stripped.startswith("family"):
-            match = re.match(r'^family\s*=\s*"([^"]*)"', stripped)
-            if not match:
-                match = re.match(r"^family\s*=\s*'([^']*)'", stripped)
-            if match and match.group(1).strip():
-                return match.group(1).strip()
+        if in_font_section:
+            match = re.match(
+                r'^\s*family\s*=\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^#\r\n]+))',
+                line,
+            )
+            if match:
+                val = match.group(1) or match.group(2) or match.group(3) or ""
+                if val.strip():
+                    return val.strip()
     return None
 
 
@@ -627,40 +636,41 @@ def proposed_font_family(
 
 
 def _rewrite_font_sections(raw: str, family: str) -> str:
-    lines = [
-        line
-        for line in raw.splitlines()
-        if not re.match(r"^\s*live_config_reload\s*=", line)
-    ]
+    lines = raw.splitlines()
     seen_sections: set[str] = set()
     updated_lines: list[str] = []
     idx = 0
     while idx < len(lines):
         line = lines[idx]
-        stripped = line.strip()
-        if stripped in _FONT_SECTIONS:
-            section = stripped
-            seen_sections.add(section)
-            updated_lines.append(line)
-            idx += 1
-            replaced_in_section = False
-            section_body: list[str] = []
-            while idx < len(lines):
-                next_line = lines[idx]
-                next_stripped = next_line.strip()
-                if next_stripped.startswith("[") and next_stripped.endswith("]"):
-                    break
-                if not replaced_in_section and re.match(r"^\s*family\s*=", next_line):
-                    indent = re.match(r"^(\s*)", next_line).group(1)  # type: ignore[union-attr]
-                    section_body.append(f'{indent}family = "{family}"')
-                    replaced_in_section = True
-                else:
-                    section_body.append(next_line)
+        header_match = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
+        if header_match:
+            normalized_section = f"[{header_match.group(1).strip()}]"
+            if normalized_section in _FONT_SECTIONS:
+                seen_sections.add(normalized_section)
+                updated_lines.append(line)
                 idx += 1
-            if not replaced_in_section:
-                section_body.insert(0, f'family = "{family}"')
-            updated_lines.extend(section_body)
-            continue
+                replaced_in_section = False
+                section_body: list[str] = []
+                while idx < len(lines):
+                    next_line = lines[idx]
+                    if re.match(r"^\s*\[[^\]]+\]\s*(?:#.*)?$", next_line):
+                        break
+                    match = re.match(
+                        r'^(\s*)family\s*=\s*(?:"[^"]*"|\x27[^\x27]*\x27|[^#\r\n]*?)(\s*#.*)?$',
+                        next_line,
+                    )
+                    if not replaced_in_section and match:
+                        indent = match.group(1) or ""
+                        comment = match.group(2) or ""
+                        section_body.append(f'{indent}family = "{family}"{comment}')
+                        replaced_in_section = True
+                    else:
+                        section_body.append(next_line)
+                    idx += 1
+                if not replaced_in_section:
+                    section_body.insert(0, f'family = "{family}"')
+                updated_lines.extend(section_body)
+                continue
         updated_lines.append(line)
         idx += 1
 
@@ -733,7 +743,17 @@ def select_font_family(
         if target.is_file()
         else _DEFAULT_FONT_POLICY_SEED
     )
+    if target.is_file() and existing_raw.strip():
+        try:
+            tomllib.loads(existing_raw)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError("terminal-policy.toml is malformed") from exc
+
     updated_raw = _rewrite_font_sections(existing_raw, clean)
+    try:
+        tomllib.loads(updated_raw)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError("rewritten terminal-policy.toml is invalid") from exc
 
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
