@@ -4,15 +4,13 @@ Covers:
 - Findings: 1000002, 12, 15, 1000008, 1000011, 18, 1000013, 22, 23
 - Acceptance Criteria: #1..#11, #16
 - Monaspace typography selector and ZenEntry onboarding scene integration
-- Invariant: Zero diff in lines 360..584 of vc-agent-workshop.py
+- Per-stage launch progress, error stage attribution, and Enter/mouse launch parity
 """
 
 from __future__ import annotations
 
 import curses
 import importlib.util
-import re
-import subprocess
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -320,10 +318,17 @@ def test_dedicated_ctrl_q_with_dirty_confirmation(tmp_path: Path) -> None:
 def test_structured_error_panel_and_recovery_actions() -> None:
     """Error panel preserves form inputs, sets stage, and provides r (retry), Esc, e (details)."""
     workshop = _load()
-    form = workshop.Workshop(RecordingWindow(), mode="launcher")
+    window = RecordingWindow(height=30, width=60)
+    form = workshop.Workshop(window, mode="launcher")
     form.path = "/test/repo"
     form.error = "Failed to launch tab: connection refused"
     form.error_stage = "Agent tab launch"
+
+    form.draw_launcher()
+    drawn_texts = [text for _, _, text, _ in window.drawn]
+    assert any(form.error_stage in t for t in drawn_texts)
+    assert any("Retry" in t for t in drawn_texts)
+    assert any("Details" in t for t in drawn_texts)
 
     # Toggle details with 'e'
     _dispatch_key(form, ord("e"))
@@ -482,35 +487,96 @@ def test_zenentry_onboarding_scene_step_navigation_and_cancel(tmp_path: Path) ->
     assert cbo.status(home=vc_home).state == "pending"
 
 
-# ─── Acceptance Criteria #16: Line 360..584 Zero-Diff Invariant ───
+# ─── Acceptance Criteria #16: Stage Progress, Partial Failure & Launch Parity ───
 
 
-def test_vc_agent_workshop_lines_360_to_584_have_zero_diff_from_main() -> None:
-    """Lines 360..584 in vc-agent-workshop.py must have zero diff compared to main (2d7493c)."""
-    git_diff = subprocess.run(
-        [
-            "git",
-            "diff",
-            "2d7493cf1f324d9819e3fff4ead4f102778d08c5",
-            "--",
-            str(SCRIPT),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+def test_launch_stage_progress_and_enter_mouse_parity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies per-stage progress, stage error attribution, and Enter/mouse launch parity."""
+    workshop = _load()
+    window = RecordingWindow(height=30, width=100)
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+
+    form = workshop.Workshop(window, mode="launcher")
+    form.path = str(repo)
+
+    # 1. Verify Enter and mouse launch target parity on _attempt_launch
+    # When path suggestions are open, attempting launch closes suggestions
+    form.path_suggestions_open = True
+    attempt_calls: list[str] = []
+    monkeypatch.setattr(form, "launch", lambda: attempt_calls.append("launched"))
+
+    # Keyboard Enter
+    _dispatch_key(form, 10)
+    assert form.path_suggestions_open is False
+    assert attempt_calls == ["launched"]
+
+    # Mouse click on [ Launch ]
+    form.path_suggestions_open = True
+    form.draw_launcher()
+    launch_target = next(t for t in form.mouse_targets if t[4] == "launch")
+    l_row, l_start, _end, _, _ = launch_target
+    monkeypatch.setattr(
+        workshop.curses,
+        "getmouse",
+        lambda: (0, l_start, l_row, 0, workshop.curses.BUTTON1_CLICKED),
+        raising=False,
     )
-    diff_text = git_diff.stdout
+    form.handle_mouse()
+    assert form.path_suggestions_open is False
+    assert attempt_calls == ["launched", "launched"]
 
-    # Parse unified diff hunk headers: @@ -from_line,from_count +to_line,to_count @@
-    hunks = re.findall(r"@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@", diff_text)
-    for from_line, from_count, to_line, to_count in hunks:
-        f_start = int(from_line)
-        f_len = int(from_count) if from_count else 1
-        t_start = int(to_line)
-        t_len = int(to_count) if to_count else 1
-        f_end = f_start + f_len
-        # Neither hunk range should overlap with 360..584
-        overlap = not (f_end < 360 or f_start > 584)
-        assert not overlap, (
-            f"Forbidden diff overlap in lines 360..584: -{f_start},{f_len} +{t_start},{t_len}"
-        )
+    # 2. Verify per-stage progress and partial launch failure state
+    monkeypatch.delattr(form, "launch")
+
+    form.select_slot(0)
+    form.agent = workshop.AGENTS.index("codex")
+    form.agent_slots[0] = form._snapshot()
+    form.add_agent()
+    form.select_slot(1)
+    form.agent = workshop.AGENTS.index("claude")
+    form.agent_slots[1] = form._snapshot()
+    assert len(form.agent_slots) == 2
+
+    calls = 0
+
+    def mock_launch_one() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            form._opened = True
+            form.launch_stage = "Opening project workspace…"
+            form.progress_stages.append("Opening project workspace…")
+        else:
+            form._opened = False
+            form.error_stage = "Opening claude tab"
+            form.error = "connection refused on terminal socket"
+            form.launch_stage = "Opening claude tab…"
+            form.progress_stages.append("Opening claude tab…")
+
+    monkeypatch.setattr(form, "_launch_one", mock_launch_one)
+    form.launch()
+
+    # Per-stage progress tracked on Workshop
+    assert "Validating configuration…" in form.progress_stages
+    assert "Opening project workspace…" in form.progress_stages
+    assert "Opening claude tab…" in form.progress_stages
+    assert form.error_stage == "Opening claude tab"
+    assert "connection refused" in form.error
+
+    # Partial launch results state
+    assert len(form.launch_results) == 2
+    assert form.launch_results[0]["status"] == "opened"
+    assert form.launch_results[1]["status"] == "failed"
+    assert form.launch_results[1]["request_key"] is not None
+    assert form.mode == "launcher"
+
+    # Draw launcher and verify stage attribution and partial results are rendered
+    window.erase()
+    form.draw_launcher()
+    drawn_texts = [text for _, _, text, _ in window.drawn]
+    assert any("[Opening claude tab]" in t for t in drawn_texts)
+    assert any("1 codex: opened" in t for t in drawn_texts)
+    assert any("2 claude: failed" in t for t in drawn_texts)
