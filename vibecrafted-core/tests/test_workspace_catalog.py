@@ -2097,3 +2097,80 @@ def test_concurrent_first_project_resolution_has_one_catalog_owner(
     assert results[0].workspace_id == results[1].workspace_id
     assert results[0].workspace_instance_id == results[1].workspace_instance_id
     assert len(wc.read_catalog().workspaces) == 1
+
+
+def test_operator_session_name_ignores_fleet_worktree_label_collision(
+    home: Path, tmp_path: Path
+) -> None:
+    primary_root = tmp_path / "codescribe"
+    primary_root.mkdir()
+    wt_root = home / "worktrees" / "c02d" / "codescribe"
+    wt_root.mkdir(parents=True)
+    primary = wc.create_workspace(
+        root=primary_root, display_label="codescribe", select=True
+    )
+    worktree = wc.create_workspace(
+        root=wt_root, display_label="codescribe", select=False
+    )
+    assert wc.operator_session_name(primary.workspace_id) == "codescribe"
+    assert wc.operator_session_name(worktree.workspace_id).startswith("codescribe-")
+
+
+def test_workspace_return_attachment_ignores_superseded_stale_instance_without_incarnation(
+    home: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "codescribe"
+    root.mkdir()
+    ws = wc.create_workspace(root=root, display_label="codescribe", select=True)
+    shared_sid = wc.new_uuid7()
+    first_iid = wc.new_uuid7()
+    superseded_iid = wc.new_uuid7()
+    now = "2026-10-17T00:00:00+00:00"
+    bid = wc.BuildId("a" * 40, False, "", "1", str(root.resolve()))
+    wc._atomic_write_json(
+        wc.instance_path(first_iid),
+        wc.WorkspaceInstance(
+            workspace_instance_id=first_iid,
+            workspace_id=ws.workspace_id,
+            build_id=bid,
+            vibecrafted_session_id=shared_sid,
+            status=wc.INSTANCE_STATUS_STALE,
+            created_at=now,
+            updated_at=now,
+        ).to_payload(),
+    )
+    wc._atomic_write_json(
+        wc.instance_path(superseded_iid),
+        wc.WorkspaceInstance(
+            workspace_instance_id=superseded_iid,
+            workspace_id=ws.workspace_id,
+            build_id=bid,
+            vibecrafted_session_id=shared_sid,
+            status=wc.INSTANCE_STATUS_STALE,
+            created_at=now,
+            updated_at=now,
+        ).to_payload(),
+    )
+    wc._atomic_write_json(
+        wc.workspace_session_path(shared_sid),
+        wc.WorkspaceSessionRecord(
+            session_id=shared_sid,
+            workspace_id=ws.workspace_id,
+            workspace_instance_id=first_iid,
+            created_at=now,
+            updated_at=now,
+            attachments=(
+                wc.RuntimeSessionAttachment(
+                    attachment_id=wc.new_uuid7(),
+                    runtime="vc-frame",
+                    runtime_session_id="codescribe",
+                    state="live",
+                    socket_dir="/tmp/vc-frame-501",
+                    attached_at=now,
+                    updated_at=now,
+                    session_incarnation=None,
+                ),
+            ),
+        ).to_payload(),
+    )
+    assert wc.workspace_return_attachment(ws.workspace_id) is None

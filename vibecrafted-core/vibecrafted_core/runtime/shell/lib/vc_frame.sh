@@ -909,7 +909,8 @@ _vetcoders_import_legacy_vc_frame_sessions() {
   [[ "$legacy_socket_dir" != "$current_socket_dir" ]] || return 0
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 0
   listing="$(
-    VC_FRAME_SOCKET_DIR="$legacy_socket_dir" \
+    env -u VC_FRAME_SESSION_NAME -u ZELLIJ_SESSION_NAME \
+      VC_FRAME_SOCKET_DIR="$legacy_socket_dir" \
       ZELLIJ_SOCKET_DIR="$legacy_socket_dir" \
       "$vc_frame_bin" ls 2>/dev/null | _vetcoders_strip_ansi || true
   )"

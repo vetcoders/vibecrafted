@@ -966,6 +966,21 @@ def _place_label_for_workspace(
     return _sanitize_worker_host_label(raw, max_len=max_len)
 
 
+def _is_fleet_worktree_root(root: str | Path) -> bool:
+    raw = str(root or "").strip()
+    if not raw:
+        return False
+    normalized = raw.replace("\\", "/")
+    if "/.vibecrafted/worktrees/" in normalized:
+        return True
+    try:
+        resolved = Path(raw).expanduser().resolve()
+        wt_root = (control_plane_home().parent / "worktrees").expanduser().resolve()
+        return resolved.is_relative_to(wt_root)
+    except OSError:
+        return False
+
+
 def operator_session_name(
     workspace_id: str,
     *,
@@ -994,12 +1009,31 @@ def operator_session_name(
         display_label=display_label or (record.display_label if record else ""),
         canonical_root=record.canonical_root if record else "",
     )
+    catalog_home = control_plane_home().expanduser().resolve()
+    catalog_is_isolated = (
+        _is_pytest_temp_path(catalog_home)
+        or "isolated-vibecrafted-home" in catalog_home.parts
+    )
+    record_is_wt = bool(record and _is_fleet_worktree_root(record.canonical_root))
+    record_is_leaked_ephemeral = bool(
+        record
+        and not catalog_is_isolated
+        and _ephemeral_test_root_reason(record.canonical_root) is not None
+    )
     collide = False
     if loaded is not None:
         for other in loaded.workspaces.values():
             if other.workspace_id == wid:
                 continue
             if other.status != WORKSPACE_STATUS_ACTIVE:
+                continue
+            if not record_is_wt and _is_fleet_worktree_root(other.canonical_root):
+                continue
+            if (
+                not catalog_is_isolated
+                and not record_is_leaked_ephemeral
+                and _ephemeral_test_root_reason(other.canonical_root) is not None
+            ):
                 continue
             other_label = _place_label_for_workspace(
                 display_label=other.display_label,
@@ -1869,14 +1903,8 @@ def workspace_return_attachment(
         if not workspace_session_path(instance.vibecrafted_session_id).is_file():
             continue
         session = read_workspace_session(instance.vibecrafted_session_id)
-        if (
-            session.workspace_id != record.workspace_id
-            or session.workspace_instance_id != instance.workspace_instance_id
-            or session.session_id != instance.vibecrafted_session_id
-        ):
-            raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
-        candidates.extend(
-            (instance, attachment)
+        attachments = [
+            attachment
             for attachment in session.attachments
             if attachment.runtime == "vc-frame"
             and attachment.state == "live"
@@ -1885,7 +1913,16 @@ def workspace_return_attachment(
                 instance.status == INSTANCE_STATUS_LIVE
                 or attachment.session_incarnation is not None
             )
-        )
+        ]
+        if not attachments and instance.status == INSTANCE_STATUS_STALE:
+            continue
+        if (
+            session.workspace_id != record.workspace_id
+            or session.workspace_instance_id != instance.workspace_instance_id
+            or session.session_id != instance.vibecrafted_session_id
+        ):
+            raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
+        candidates.extend((instance, attachment) for attachment in attachments)
     preferred = [
         attachment
         for instance, attachment in candidates
