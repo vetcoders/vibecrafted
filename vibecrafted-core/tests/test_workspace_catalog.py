@@ -1597,10 +1597,33 @@ def test_frame_incarnation_projects_rename_without_changing_receipt(
         socket_dir="/socket",
     )
     assert path.read_bytes() == before
+    replacement = wc.record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="seat-b",
+        state="live",
+        socket_dir="/socket",
+        replaces_runtime_session_id="preserved-dead-seat",
+    )
+    assert (
+        replacement.attachments[0].replaces_runtime_session_id == "preserved-dead-seat"
+    )
+    before = path.read_bytes()
     physical["seat-b"] = wc.new_uuid7()
     assert (
         wc.runtime_session_owner_root("seat-b", "/socket", runtime_state="live") is None
     )
+    with pytest.raises(wc.WorkspaceCatalogError, match="Frame rail"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="seat-a",
+            live_names=["seat-a", "seat-b"],
+            occupied_names=["seat-a", "seat-b"],
+            socket_dir="/socket",
+            env=identity.to_env(),
+        )
     with pytest.raises(wc.WorkspaceCatalogError, match="incarnation changed"):
         wc.record_runtime_session_attachment(
             workspace_id=identity.workspace_id,

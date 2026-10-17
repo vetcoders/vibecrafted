@@ -1105,13 +1105,13 @@ def resolve_project_destination(
             raise WorkspaceCatalogError(
                 "project Frame destination belongs to another socket namespace"
             )
+        if recent is not None and unowned:
+            raise WorkspaceCatalogError(
+                "Saved Frame binding is unavailable and existing live sessions have no verified binding; "
+                "open the existing session on the Frame rail to continue. "
+                "Automatic project return needs a previously bound session incarnation."
+            )
         if recent is not None and recent.runtime_session_id not in occupied:
-            if unowned:
-                raise WorkspaceCatalogError(
-                    "Saved Frame name is unavailable and existing live sessions have no verified binding; "
-                    "open the existing session on the Frame rail to continue. "
-                    "Automatic project return needs a previously bound session incarnation."
-                )
             return {
                 "VIBECRAFTED_REQUESTED_FRAME_SESSION": requested,
                 "VIBECRAFTED_OPERATOR_SESSION": recent.runtime_session_id,
@@ -2050,6 +2050,10 @@ def record_runtime_session_attachment(
                 existing.session_incarnation == incarnation
                 and incarnation
                 and existing.state == attachment_state
+                and (
+                    replacement is None
+                    or replacement == existing.replaces_runtime_session_id
+                )
             ):
                 # A rename is a projection of this attachment, not another
                 # attachment or a reason to rewrite its historical display name.
