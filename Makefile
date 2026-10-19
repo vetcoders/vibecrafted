@@ -296,9 +296,29 @@ voc-core-contract-gate:
 	@env -u PYTHONPATH -u PYTHONHOME uv run --project vibecrafted-core --with pytest \
 		python -m pytest tests/tui/test_voc_core_contract.py -q
 
+# The unified gate proves source, not the caller's shell. Installer lanes and
+# installed runtimes export UV_PROJECT_ENVIRONMENT, PYTHON*, VIBECRAFTED_* roots
+# and sometimes a shared sticky TMPDIR; inherited, they redirect the core legs to
+# a foreign environment or a live workspace. Only these gate-scoped variables
+# select the core environment and the parent of the private gate root.
+UNIFIED_GATE_CORE_ENVIRONMENT ?= $(CURDIR)/vibecrafted-core/.venv
+UNIFIED_GATE_TMP_PARENT ?=
+
+define UNIFIED_GATE_HERMETIC_ENV
+gate_parent="$(UNIFIED_GATE_TMP_PARENT)"; gate_parent="$${gate_parent:-$${TMPDIR:-/tmp}}"; \
+gate_root="$$(mktemp -d "$${gate_parent%/}/vibecrafted-unified-gate.XXXXXX")"; \
+trap 'rm -rf "$$gate_root"' EXIT; \
+for name in $$(env | sed -n 's/^\(VIBECRAFTED_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$$name"; done; \
+unset UV_PROJECT_ENVIRONMENT VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME; \
+mkdir -m 700 "$$gate_root/tmp" "$$gate_root/vibecrafted-home"; \
+export TMPDIR="$$gate_root/tmp" VIBECRAFTED_HOME="$$gate_root/vibecrafted-home"
+endef
+
 unified-product-contract-gate:
-	@$(MAKE) --no-print-directory release-version-gate
 	@set -eu; \
+	$(UNIFIED_GATE_HERMETIC_ENV); \
+	$(MAKE) --no-print-directory release-version-gate; \
+	UV_PROJECT_ENVIRONMENT="$(UNIFIED_GATE_CORE_ENVIRONMENT)" \
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		tests/tui/test_unified_app_contract.py \
 		tests/tui/test_makefile_installer_contract.py \
@@ -309,6 +329,7 @@ unified-product-contract-gate:
 		tests/tui/test_installer_uninstall.py \
 		tests/tui/test_staged_tools_sync.py \
 		tests/tui/test_uv_bootstrap.py -q; \
+	UV_PROJECT_ENVIRONMENT="$(UNIFIED_GATE_CORE_ENVIRONMENT)" \
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		vibecrafted-core/tests/test_walkaround_distribution.py \
 		vibecrafted-core/tests/test_package_layout.py \
@@ -318,8 +339,7 @@ unified-product-contract-gate:
 	$(PYTHON) -m json.tool vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json >/dev/null; \
 	$(PYTHON) -m json.tool vibecrafted-core/vibecrafted_core/trust/release-policy.v1.json >/dev/null; \
 	bash -n scripts/verify-vibecrafted-product.sh; \
-	tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/vibecrafted-contract-wheel.XXXXXX")"; \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	tmp="$$(mktemp -d "$$TMPDIR/vibecrafted-contract-wheel.XXXXXX")"; \
 	uv build --wheel --project vibecrafted-core --out-dir "$$tmp/dist" >/dev/null; \
 	uv venv "$$tmp/venv" >/dev/null; \
 	uv pip install --python "$$tmp/venv/bin/python" "$$tmp"/dist/vibecrafted-*.whl >/dev/null; \

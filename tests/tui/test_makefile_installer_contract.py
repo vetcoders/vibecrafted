@@ -2164,3 +2164,136 @@ def test_release_prereqs_is_a_noop_on_linux(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Linux assembler provisions its own" in result.stdout
     assert not (toolchain / "calls").exists()
+
+
+def _run_unified_gate_with_fake_uv(
+    tmp_path: Path, ambient: dict[str, str], *make_args: str
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, str]]]:
+    """Drive the real gate recipe until both core legs called `uv run`.
+
+    The fake uv records the environment each leg would hand to pytest, then
+    stops the gate on the second core leg, so nothing past the legs runs and
+    nothing outside ``tmp_path`` is written.
+    """
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "uv-calls"
+    calls.mkdir()
+    uv = fake_bin / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'kind=other; case "$*" in "run --project vibecrafted-core "*) kind=core ;; esac\n'
+        'n="$(ls "$UV_FAKE_LOG" | wc -l | tr -d " ")"; n=$((n + 1))\n'
+        'mode="$(stat -c %a "$TMPDIR" 2>/dev/null || stat -f %Lp "$TMPDIR")"\n'
+        'root_mode="$(stat -c %a "$TMPDIR/.." 2>/dev/null || stat -f %Lp "$TMPDIR/..")"\n'
+        '{ printf "UV_FAKE_ARGV=%s\\n" "$*"; printf "UV_FAKE_TMPDIR_MODE=%s\\n" "$mode";'
+        ' printf "UV_FAKE_ROOT_MODE=%s\\n" "$root_mode"; env; }'
+        ' > "$UV_FAKE_LOG/call-$n-$kind.env"\n'
+        '[ "$kind" = other ] || [ "$(ls "$UV_FAKE_LOG" | grep -c core)" -lt 2 ] || exit 86\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    result = subprocess.run(
+        ["make", "--no-print-directory", "unified-product-contract-gate", *make_args],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            **ambient,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "UV_FAKE_LOG": str(calls),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    records = []
+    for call in sorted(calls.glob("call-*-core.env")):
+        record: dict[str, str] = {}
+        for line in call.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.replace("_", "").isalnum():
+                record.setdefault(key, value)
+        records.append(record)
+    return result, records
+
+
+def _poisoned_caller_environment(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    shared_tmp = tmp_path / "shared-sticky-tmp"
+    shared_tmp.mkdir()
+    shared_tmp.chmod(0o1777)
+    live_home = tmp_path / "live-vibecrafted-home"
+    (live_home / "control_plane").mkdir(parents=True)
+    ambient = {
+        "UV_PROJECT_ENVIRONMENT": str(tmp_path / "installer-cache-venv"),
+        "VIRTUAL_ENV": str(tmp_path / "foreign-venv"),
+        "UV_PYTHON": str(tmp_path / "foreign-python"),
+        "PYTHONPATH": str(tmp_path / "foreign-pythonpath"),
+        "PYTHONHOME": str(tmp_path / "foreign-pythonhome"),
+        "VIBECRAFTED_HOME": str(live_home),
+        "VIBECRAFTED_ROOT": str(tmp_path / "live-root"),
+        "VIBECRAFTED_RUNTIME_HOME": str(tmp_path / "live-runtime"),
+        "VIBECRAFTED_WORKSPACE_ID": "live-workspace",
+        "VIBECRAFTED_SESSION_ID": "live-session",
+        "VIBECRAFTED_RUN_ID": "live-run",
+        "TMPDIR": str(shared_tmp),
+    }
+    return ambient, shared_tmp, live_home
+
+
+def test_unified_gate_core_legs_ignore_ambient_caller_environment(
+    tmp_path: Path,
+) -> None:
+    ambient, shared_tmp, live_home = _poisoned_caller_environment(tmp_path)
+
+    result, records = _run_unified_gate_with_fake_uv(tmp_path, ambient)
+
+    assert result.returncode != 0, "fake uv stops the gate after the core legs"
+    assert len(records) == 2, result.stderr
+    core_env = REPO_ROOT / "vibecrafted-core" / ".venv"
+    for record in records:
+        assert record["UV_FAKE_ARGV"].startswith("run --project vibecrafted-core ")
+        assert record["UV_PROJECT_ENVIRONMENT"] == str(core_env)
+        for name in ("VIRTUAL_ENV", "UV_PYTHON", "PYTHONPATH", "PYTHONHOME"):
+            assert name not in record, f"{name} leaked into a core gate leg"
+        leaked = {
+            key
+            for key in record
+            if key.startswith("VIBECRAFTED_") and key != "VIBECRAFTED_HOME"
+        }
+        assert not leaked, f"caller identity leaked into a core gate leg: {leaked}"
+        private_tmp = Path(record["TMPDIR"])
+        gate_root = private_tmp.parent
+        assert gate_root.parent == shared_tmp
+        assert record["UV_FAKE_TMPDIR_MODE"] == "700"
+        assert record["UV_FAKE_ROOT_MODE"] == "700"
+        home = Path(record["VIBECRAFTED_HOME"])
+        assert home.parent == gate_root and home != live_home
+    assert list(live_home.rglob("*")) == [live_home / "control_plane"]
+    assert not list(shared_tmp.iterdir()), "private gate root must be removed"
+    for other in (tmp_path / "uv-calls").glob("call-*-other.env"):
+        text = other.read_text(encoding="utf-8")
+        assert f"UV_PROJECT_ENVIRONMENT={ambient['UV_PROJECT_ENVIRONMENT']}" not in text
+        assert f"PYTHONHOME={ambient['PYTHONHOME']}" not in text
+
+
+def test_unified_gate_honours_deliberate_gate_overrides(tmp_path: Path) -> None:
+    ambient, shared_tmp, _ = _poisoned_caller_environment(tmp_path)
+    chosen_env = tmp_path / "chosen-core-env"
+    chosen_parent = tmp_path / "chosen-tmp-parent"
+    chosen_parent.mkdir(mode=0o700)
+
+    result, records = _run_unified_gate_with_fake_uv(
+        tmp_path,
+        ambient,
+        f"UNIFIED_GATE_CORE_ENVIRONMENT={chosen_env}",
+        f"UNIFIED_GATE_TMP_PARENT={chosen_parent}",
+    )
+
+    assert len(records) == 2, result.stderr
+    for record in records:
+        assert record["UV_PROJECT_ENVIRONMENT"] == str(chosen_env)
+        assert Path(record["TMPDIR"]).parent.parent == chosen_parent
+    assert not list(chosen_parent.iterdir())
+    assert not list(shared_tmp.iterdir())
