@@ -2281,13 +2281,14 @@ def test_unified_gate_core_legs_ignore_ambient_caller_environment(
         assert not leaked, f"caller identity leaked into a core gate leg: {leaked}"
         private_tmp = Path(record["TMPDIR"])
         gate_root = private_tmp.parent
-        assert gate_root.parent == shared_tmp
+        assert gate_root.parent == Path("/tmp")
+        assert not gate_root.exists(), "private gate root must be removed"
         assert record["UV_FAKE_TMPDIR_MODE"] == "700"
         assert record["UV_FAKE_ROOT_MODE"] == "700"
         home = Path(record["VIBECRAFTED_HOME"])
         assert home.parent == gate_root and home != live_home
     assert list(live_home.rglob("*")) == [live_home / "control_plane"]
-    assert not list(shared_tmp.iterdir()), "private gate root must be removed"
+    assert not list(shared_tmp.iterdir()), "inherited TMPDIR must stay untouched"
     for other in (tmp_path / "uv-calls").glob("call-*-other.env"):
         text = other.read_text(encoding="utf-8")
         assert f"UV_PROJECT_ENVIRONMENT={ambient['UV_PROJECT_ENVIRONMENT']}" not in text
@@ -2357,3 +2358,37 @@ def test_unified_gate_pytest_child_does_not_inherit_core_environment_selection(
     )
     assert not list(chosen_parent.iterdir())
     assert not list(shared_tmp.iterdir())
+
+
+def test_unified_gate_private_tmpdir_is_short_despite_long_inherited_tmpdir(
+    tmp_path: Path,
+) -> None:
+    """A long inherited macOS-style TMPDIR must not set the private TMPDIR length.
+
+    Alacritty-<pid>.sock lives under the gate's TMPDIR and must fit sockaddr_un
+    (103 usable bytes); the terminal host fails closed beyond that, so the gate
+    owns choosing a short private parent instead of inheriting TMPDIR.
+    """
+
+    ambient, _, _ = _poisoned_caller_environment(tmp_path)
+    long_tmp = (
+        tmp_path / "var-folders-b7" / ("0x9fs8m97c54kl597tv2y_440000gn" * 2) / "T"
+    )
+    long_tmp.mkdir(parents=True)
+    long_tmp.chmod(0o1777)
+    ambient["TMPDIR"] = str(long_tmp)
+    socket_tail = "/Alacritty-4294967295.sock"
+    assert (
+        len(str(long_tmp / "vibecrafted-unified-gate.XXXXXX/tmp") + socket_tail) > 103
+    )
+
+    result, records = _run_unified_gate_with_fake_uv(tmp_path, ambient)
+
+    assert len(records) == 2, result.stderr
+    for record in records:
+        private_tmp = record["TMPDIR"]
+        assert len(private_tmp + socket_tail) <= 103, private_tmp
+        assert not private_tmp.startswith(str(long_tmp))
+        assert record["UV_FAKE_TMPDIR_MODE"] == "700"
+        assert record["UV_FAKE_ROOT_MODE"] == "700"
+    assert not list(long_tmp.iterdir()), "inherited TMPDIR must stay untouched"

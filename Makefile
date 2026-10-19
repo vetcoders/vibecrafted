@@ -301,13 +301,15 @@ voc-core-contract-gate:
 # and sometimes a shared sticky TMPDIR; inherited, they redirect the core legs to
 # a foreign environment or a live workspace. Only these gate-scoped variables
 # select the core environment and the parent of the private gate root. The
+# default parent is /tmp, never the inherited TMPDIR: macOS TMPDIR is ~49 bytes
+# deep and pushes host Unix socket paths (Alacritty-<pid>.sock) past sockaddr_un. The
 # selection is launcher-only: uv consumes it, then `env -u` releases it so pytest
 # and the installer Makes it spawns fall back to their host-scoped defaults.
 UNIFIED_GATE_CORE_ENVIRONMENT ?= $(CURDIR)/vibecrafted-core/.venv
 UNIFIED_GATE_TMP_PARENT ?=
 
 define UNIFIED_GATE_HERMETIC_ENV
-gate_parent="$(UNIFIED_GATE_TMP_PARENT)"; gate_parent="$${gate_parent:-$${TMPDIR:-/tmp}}"; \
+gate_parent="$(UNIFIED_GATE_TMP_PARENT)"; gate_parent="$${gate_parent:-/tmp}"; \
 gate_root="$$(mktemp -d "$${gate_parent%/}/vibecrafted-unified-gate.XXXXXX")"; \
 trap 'rm -rf "$$gate_root"' EXIT; \
 for name in $$(env | sed -n 's/^\(VIBECRAFTED_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$$name"; done; \
