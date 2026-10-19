@@ -5129,8 +5129,17 @@ def _verified_native_resume_command(
     agent_session_id: str,
     *,
     parent_meta: dict[str, Any] | None = None,
+    permissions: str = "",
+    sandbox: bool | None = None,
 ) -> tuple[list[str], str, str, ExecutionControls]:
-    """Return one live-probed provider resume argv with no shell boundary."""
+    """Return one live-probed provider resume argv with no shell boundary.
+
+    ``permissions``/``sandbox`` carry a *current* explicit manual selection
+    (``<skill> --session ... --permissions X``). An explicit axis wins over the
+    owning run's admitted decision; an omitted axis inherits it verbatim. With
+    neither supplied (automatic/tracked continuation) the admitted receipt is
+    reused unchanged. Unsupported combinations refuse; nothing is dropped.
+    """
 
     normalized_agent = str(agent or "").strip().lower()
     try:
@@ -5174,13 +5183,43 @@ def _verified_native_resume_command(
         from .execution_controls import controls_from_receipt
         from .server_config import durable_permission_selection
 
-        controls = controls_from_receipt(
+        admitted = controls_from_receipt(
             (owning_run or {}).get("execution_controls") or {}
         )
-        if controls is None:
+        if admitted is not None and admitted.provider != normalized_agent:
+            raise ValueError("admitted controls do not match resume provider")
+        requested_permissions = parse_permissions_word(permissions)
+        requested_sandbox = parse_sandbox_word(sandbox)
+        explicit = bool(requested_permissions) or requested_sandbox is not None
+        if admitted is not None and not explicit:
+            controls = admitted
+        elif admitted is not None:
+            controls = resolve_execution_controls(
+                normalized_agent,
+                permissions=requested_permissions,
+                sandbox=(
+                    requested_sandbox
+                    if requested_sandbox is not None
+                    else admitted.sandbox_requested
+                ),
+                configured_permissions=admitted.permissions_effective,
+                permissions_source=admitted.permissions_source,
+            )
+            if not requested_permissions:
+                # Only the sandbox axis changed: keep the admitted permission
+                # attribution instead of claiming a fresh request.
+                controls = replace(
+                    controls,
+                    permissions_requested=admitted.permissions_requested,
+                    permissions_source=admitted.permissions_source,
+                    permissions_reason=admitted.permissions_reason,
+                )
+        else:
             configured, source = durable_permission_selection(normalized_agent)
             controls = resolve_execution_controls(
                 normalized_agent,
+                permissions=requested_permissions,
+                sandbox=requested_sandbox,
                 configured_permissions=configured,
                 permissions_source=source,
             )
@@ -5249,6 +5288,8 @@ def manual_resume_session(
     skill: str = "workflow",
     launch_meta: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    permissions: str = "",
+    sandbox: bool | str | None = None,
 ) -> dict[str, Any]:
     """Launch an explicit provider-session continuation as its own tracked run.
 
@@ -5257,11 +5298,26 @@ def manual_resume_session(
     manufacture trust preconditions. It only proves that the requested
     provider has a verified noninteractive resume contract, then delegates the
     detached lifetime and prompt-stdin transport to the normal core launcher.
+
+    ``permissions``/``sandbox`` are the operator's *current* explicit choice;
+    they are resolved before admission freezes the controls, so a read-only
+    review session can be continued as a bypass implement (and vice versa).
+    Omitted, the owning run's admitted decision is inherited unchanged.
     """
 
     normalized_agent = str(agent or "").strip().lower()
     native_id = _explicit_native_identity(agent_session_id)
     prompt_body = str(prompt or "")
+    try:
+        permissions_word = parse_permissions_word(permissions)
+        sandbox_requested = parse_sandbox_word(sandbox)
+    except ExecutionControlsError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
+        )
     if not normalized_agent:
         return _manual_explicit_resume_rejection(
             agent="",
@@ -5296,6 +5352,8 @@ def manual_resume_session(
             _verified_native_resume_command(
                 normalized_agent,
                 native_id,
+                permissions=permissions_word,
+                sandbox=sandbox_requested,
             )
         )
     except _NativeResumeCommandRejected as exc:
@@ -5339,6 +5397,8 @@ def manual_resume_session(
                 "repo_selector": True,
                 "runtime": "headless",
                 "model": model_requested,
+                "permissions": permissions_word,
+                "sandbox": sandbox_requested,
             },
             resolved_source_dir,
             admission_controls=controls,
