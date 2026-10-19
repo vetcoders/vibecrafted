@@ -300,7 +300,9 @@ voc-core-contract-gate:
 # installed runtimes export UV_PROJECT_ENVIRONMENT, PYTHON*, VIBECRAFTED_* roots
 # and sometimes a shared sticky TMPDIR; inherited, they redirect the core legs to
 # a foreign environment or a live workspace. Only these gate-scoped variables
-# select the core environment and the parent of the private gate root.
+# select the core environment and the parent of the private gate root. The
+# selection is launcher-only: uv consumes it, then `env -u` releases it so pytest
+# and the installer Makes it spawns fall back to their host-scoped defaults.
 UNIFIED_GATE_CORE_ENVIRONMENT ?= $(CURDIR)/vibecrafted-core/.venv
 UNIFIED_GATE_TMP_PARENT ?=
 
@@ -319,7 +321,7 @@ unified-product-contract-gate:
 	$(UNIFIED_GATE_HERMETIC_ENV); \
 	$(MAKE) --no-print-directory release-version-gate; \
 	UV_PROJECT_ENVIRONMENT="$(UNIFIED_GATE_CORE_ENVIRONMENT)" \
-	uv run --project vibecrafted-core --with pytest python -m pytest \
+	uv run --project vibecrafted-core --with pytest env -u UV_PROJECT_ENVIRONMENT python -m pytest \
 		tests/tui/test_unified_app_contract.py \
 		tests/tui/test_makefile_installer_contract.py \
 		tests/tui/test_installer_kit.py \
@@ -330,7 +332,7 @@ unified-product-contract-gate:
 		tests/tui/test_staged_tools_sync.py \
 		tests/tui/test_uv_bootstrap.py -q; \
 	UV_PROJECT_ENVIRONMENT="$(UNIFIED_GATE_CORE_ENVIRONMENT)" \
-	uv run --project vibecrafted-core --with pytest python -m pytest \
+	uv run --project vibecrafted-core --with pytest env -u UV_PROJECT_ENVIRONMENT python -m pytest \
 		vibecrafted-core/tests/test_walkaround_distribution.py \
 		vibecrafted-core/tests/test_package_layout.py \
 		vibecrafted-core/tests/test_doctor.py \

@@ -2167,7 +2167,10 @@ def test_release_prereqs_is_a_noop_on_linux(tmp_path: Path) -> None:
 
 
 def _run_unified_gate_with_fake_uv(
-    tmp_path: Path, ambient: dict[str, str], *make_args: str
+    tmp_path: Path,
+    ambient: dict[str, str],
+    *make_args: str,
+    exec_child: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, str]]]:
     """Drive the real gate recipe until both core legs called `uv run`.
 
@@ -2191,10 +2194,22 @@ def _run_unified_gate_with_fake_uv(
         '{ printf "UV_FAKE_ARGV=%s\\n" "$*"; printf "UV_FAKE_TMPDIR_MODE=%s\\n" "$mode";'
         ' printf "UV_FAKE_ROOT_MODE=%s\\n" "$root_mode"; env; }'
         ' > "$UV_FAKE_LOG/call-$n-$kind.env"\n'
-        '[ "$kind" = other ] || [ "$(ls "$UV_FAKE_LOG" | grep -c core)" -lt 2 ] || exit 86\n',
+        '[ "$kind" = other ] || [ "$(ls "$UV_FAKE_LOG" | grep -c core)" -lt 2 ] || exit 86\n'
+        # Like real uv, hand the command after `--with pytest` its inherited env.
+        '[ "$kind" = core ] && [ -n "${UV_FAKE_EXEC_CHILD:-}" ] || exit 0\n'
+        "shift 5\n"
+        'exec "$@"\n',
         encoding="utf-8",
     )
     uv.chmod(0o755)
+    child = fake_bin / "python"
+    child.write_text(
+        "#!/bin/sh\n"
+        'env > "$UV_FAKE_LOG/child-$$.env"\n'
+        'printf "UV_FAKE_ARGV=%s\\n" "$*" >> "$UV_FAKE_LOG/child-$$.env"\n',
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
     result = subprocess.run(
         ["make", "--no-print-directory", "unified-product-contract-gate", *make_args],
         cwd=REPO_ROOT,
@@ -2203,6 +2218,7 @@ def _run_unified_gate_with_fake_uv(
             **ambient,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "UV_FAKE_LOG": str(calls),
+            **({"UV_FAKE_EXEC_CHILD": "1"} if exec_child else {}),
         },
         capture_output=True,
         text=True,
@@ -2295,5 +2311,49 @@ def test_unified_gate_honours_deliberate_gate_overrides(tmp_path: Path) -> None:
     for record in records:
         assert record["UV_PROJECT_ENVIRONMENT"] == str(chosen_env)
         assert Path(record["TMPDIR"]).parent.parent == chosen_parent
+    assert not list(chosen_parent.iterdir())
+    assert not list(shared_tmp.iterdir())
+
+
+def test_unified_gate_pytest_child_does_not_inherit_core_environment_selection(
+    tmp_path: Path,
+) -> None:
+    """uv alone selects the core venv; pytest and its installer children must not.
+
+    A nested installer Make that inherits UV_PROJECT_ENVIRONMENT defeats the
+    host-scoped installer defaults the contract tests assert.
+    """
+
+    ambient, shared_tmp, _ = _poisoned_caller_environment(tmp_path)
+    chosen_env = tmp_path / "chosen-core-env"
+    chosen_parent = tmp_path / "chosen-tmp-parent"
+    chosen_parent.mkdir(mode=0o700)
+
+    result, records = _run_unified_gate_with_fake_uv(
+        tmp_path,
+        ambient,
+        f"UNIFIED_GATE_CORE_ENVIRONMENT={chosen_env}",
+        f"UNIFIED_GATE_TMP_PARENT={chosen_parent}",
+        exec_child=True,
+    )
+
+    assert len(records) == 2, result.stderr
+    for record in records:
+        assert record["UV_PROJECT_ENVIRONMENT"] == str(chosen_env)
+    children = sorted((tmp_path / "uv-calls").glob("child-*.env"))
+    assert len(children) == 1, "first core leg must reach the pytest child"
+    child_env: dict[str, str] = {}
+    for line in children[0].read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.replace("_", "").isalnum():
+            child_env.setdefault(key, value)
+    assert child_env["UV_FAKE_ARGV"].startswith("-m pytest ")
+    assert "UV_PROJECT_ENVIRONMENT" not in child_env
+    for name in ("VIRTUAL_ENV", "UV_PYTHON", "PYTHONPATH", "PYTHONHOME"):
+        assert name not in child_env
+    assert Path(child_env["TMPDIR"]).parent.parent == chosen_parent
+    assert (
+        Path(child_env["VIBECRAFTED_HOME"]).parent == Path(child_env["TMPDIR"]).parent
+    )
     assert not list(chosen_parent.iterdir())
     assert not list(shared_tmp.iterdir())
