@@ -3771,6 +3771,12 @@ def _scenario_bundled_console(
 _WORKSHOP_ROUTE_TIMEOUT = 20.0
 _WORKSHOP_EXIT_TIMEOUT = 5.0
 _WORKSHOP_ROWS, _WORKSHOP_COLS = 45, 160
+# A real Workshop session repaints a few hundred KiB at most; anything beyond
+# these budgets is malformed output and must fail closed, not stall the route.
+_WORKSHOP_TRANSCRIPT_BUDGET = 4 * 1024 * 1024
+_WORKSHOP_RENDER_WORK_BUDGET = 4_000_000
+_WORKSHOP_CSI_PARAM_LIMIT = 64
+_WORKSHOP_CSI_NUMBER_DIGITS = 6
 
 
 def _render_screen(
@@ -3780,9 +3786,14 @@ def _render_screen(
 
     ncurses repaints only cells that changed, so a needle can be split across
     cursor moves in the byte stream; the replayed grid is the rendered truth.
+
+    Every count and region is clamped to the actual grid, and a transcript or
+    replay-work budget overrun raises instead of rendering truncated output.
     """
     import unicodedata
 
+    if len(raw) > _WORKSHOP_TRANSCRIPT_BUDGET:
+        raise RuntimeError("installed Workshop output exceeded the transcript budget")
     text = raw.decode("utf-8", errors="replace")
     grid = [[" "] * cols for _ in range(rows)]
     row = col = 0
@@ -3790,15 +3801,28 @@ def _render_screen(
     saved = (0, 0)
     last = " "
 
+    work = 0
+
+    def charge(units: int) -> None:
+        nonlocal work
+        work += units
+        if work > _WORKSHOP_RENDER_WORK_BUDGET:
+            raise RuntimeError("installed Workshop output exceeded the render budget")
+
     def scroll(start: int, end: int, count: int) -> None:
-        for _ in range(max(0, count)):
-            del grid[start]
-            grid.insert(end, [" "] * cols)
+        shift = min(max(0, count), end - start + 1)
+        if shift:
+            charge(shift)
+            del grid[start : start + shift]
+            at = end - shift + 1
+            grid[at:at] = [[" "] * cols for _ in range(shift)]
 
     def unscroll(start: int, end: int, count: int) -> None:
-        for _ in range(max(0, count)):
-            del grid[end]
-            grid.insert(start, [" "] * cols)
+        shift = min(max(0, count), end - start + 1)
+        if shift:
+            charge(shift)
+            del grid[end - shift + 1 : end + 1]
+            grid[start:start] = [[" "] * cols for _ in range(shift)]
 
     def linefeed() -> None:
         nonlocal row
@@ -3820,12 +3844,20 @@ def _render_screen(
                     break
                 params, final = text[index + 2 : end], text[end]
                 index = end + 1
+                charge(1)
                 if params[:1] in {"?", ">", "=", "<"}:
                     continue
+                if len(params) > _WORKSHOP_CSI_PARAM_LIMIT:
+                    continue
                 nums = [
-                    int(part) if part.isdigit() else 0 for part in params.split(";")
+                    (
+                        int(part[:_WORKSHOP_CSI_NUMBER_DIGITS])
+                        if part.isascii() and part.isdigit()
+                        else 0
+                    )
+                    for part in params.split(";")
                 ]
-                count = nums[0] if nums and nums[0] else 1
+                count = min(nums[0] if nums and nums[0] else 1, max(rows, cols))
                 if final in "Hf":
                     row = (nums[0] if nums and nums[0] else 1) - 1
                     col = (nums[1] if len(nums) > 1 and nums[1] else 1) - 1
@@ -3866,12 +3898,11 @@ def _render_screen(
                     for cell in range(col, min(cols, col + count)):
                         grid[row][cell] = " "
                 elif final == "b":
-                    for _ in range(count):
-                        if col < cols:
-                            grid[row][col] = last
-                            col += 1
+                    for _ in range(min(count, max(0, cols - col))):
+                        grid[row][col] = last
+                        col += 1
                 elif final == "@":
-                    grid[row][col:col] = [" "] * count
+                    grid[row][col:col] = [" "] * min(count, max(0, cols - col))
                     del grid[row][cols:]
                 elif final == "P":
                     del grid[row][col : col + count]
@@ -3885,9 +3916,13 @@ def _render_screen(
                 elif final == "T":
                     unscroll(top, bottom, count)
                 elif final == "r":
-                    top = (nums[0] if nums and nums[0] else 1) - 1
-                    bottom = (nums[1] if len(nums) > 1 and nums[1] else rows) - 1
-                    row = col = 0
+                    new_top = (nums[0] if nums and nums[0] else 1) - 1
+                    new_bottom = (
+                        min(rows, nums[1] if len(nums) > 1 and nums[1] else rows) - 1
+                    )
+                    if 0 <= new_top < new_bottom:
+                        top, bottom = new_top, new_bottom
+                        row = col = 0
                 row = max(0, min(rows - 1, row))
                 col = max(0, min(cols - 1, col))
                 continue
@@ -3989,6 +4024,10 @@ class _WorkshopPty:
             except OSError:
                 chunk = b""
             self.output.extend(chunk)
+            if len(self.output) > _WORKSHOP_TRANSCRIPT_BUDGET:
+                raise RuntimeError(
+                    "installed Workshop output exceeded the transcript budget"
+                )
             if not chunk:
                 time.sleep(min(0.05, max(0.0, timeout)))
 

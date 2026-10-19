@@ -251,6 +251,97 @@ def test_render_screen_keeps_cells_skipped_by_curses_diffing() -> None:
     assert screen.splitlines()[1] == "  Step 2: Terminal"
 
 
+_RENDER_CHILD = (
+    "import sys; sys.path.insert(0, sys.argv[1]);"
+    "from vibecrafted_core import product_contract as c;"
+    "raw = sys.stdin.buffer.read();"
+    "\ntry:\n print('screen', repr(c._render_screen(raw, rows=4, cols=40)))"
+    "\nexcept RuntimeError as error:\n print('budget', error)"
+)
+
+
+def _render_in_child(raw: bytes, *, timeout: float = 8.0) -> tuple[str, float]:
+    """Render in a private child so a regression cannot hang the test run."""
+    core = str(REPO_ROOT / "vibecrafted-core")
+    started = time.monotonic()
+    child = subprocess.Popen(
+        [sys.executable, "-c", _RENDER_CHILD, core],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, err = child.communicate(raw, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, 9)
+        child.communicate()
+        pytest.fail(f"renderer exceeded {timeout}s on {len(raw)} bytes of input")
+    assert child.returncode == 0, err.decode(errors="replace")
+    return out.decode(), time.monotonic() - started
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\x1b[999999999S",
+        b"\x1b[999999999T",
+        b"\x1b[2;3H\x1b[999999999L",
+        b"\x1b[2;3H\x1b[999999999M",
+        b"\x1b[999999999@",
+        b"\x1b[999999999P",
+        b"A\x1b[999999999b",
+        b"\x1b[999999999X",
+        b"\x1b[0;999r\x1b[999999999S",
+        b"\x1b[3;2r\x1b[999999999T",
+        b"\x1b[99;999r\x1b[999999999M",
+        b"\x1b[" + b"9" * 6000 + b"S",
+        "\x1b[\u00b2S\x1b[\u00b2;\u00b2r\x1b[\u00b2L".encode(),
+    ],
+    ids=[
+        "scroll-up",
+        "scroll-down",
+        "insert-lines",
+        "delete-lines",
+        "insert-chars",
+        "delete-chars",
+        "repeat",
+        "erase-chars",
+        "region-zero-top",
+        "region-inverted",
+        "region-offscreen",
+        "thousands-of-digits",
+        "unicode-digits",
+    ],
+)
+def test_render_screen_is_bounded_on_huge_csi_counts(payload: bytes) -> None:
+    out, elapsed = _render_in_child(payload)
+    assert out.startswith("screen "), out
+    assert elapsed < 5
+
+
+def test_render_screen_clamps_scroll_to_the_grid() -> None:
+    text = b"\x1b[H\x1b[2Jtop\x1b[999999999S\x1b[2;1Hlow"
+    out, _ = _render_in_child(text)
+    assert out.strip() == "screen '\\nlow\\n\\n'"
+
+
+def test_render_screen_ignores_invalid_scroll_region() -> None:
+    out, _ = _render_in_child(b"\x1b[Hone\x1b[9;2r\x1b[2;1Htwo\x1b[1S")
+    # The invalid region is ignored; the full-screen scroll lifts row two to one.
+    assert out.strip() == "screen 'two\\n\\n\\n'"
+
+
+def test_render_screen_fails_closed_on_budget_exhaustion() -> None:
+    oversized = b"x" * (contract._WORKSHOP_TRANSCRIPT_BUDGET + 1)
+    with pytest.raises(RuntimeError, match="transcript budget"):
+        contract._render_screen(oversized, rows=4, cols=40)
+    churn = b"\x1b[4S" * (contract._WORKSHOP_RENDER_WORK_BUDGET // 4 + 1)
+    out, elapsed = _render_in_child(churn)
+    assert out.startswith("budget "), out[:80]
+    assert elapsed < 6
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
