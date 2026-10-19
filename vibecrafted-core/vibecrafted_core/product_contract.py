@@ -3768,6 +3768,347 @@ def _scenario_bundled_console(
     return {"bundled_console_reachable": result.stdout.strip()}
 
 
+_WORKSHOP_ROUTE_TIMEOUT = 20.0
+_WORKSHOP_EXIT_TIMEOUT = 5.0
+_WORKSHOP_ROWS, _WORKSHOP_COLS = 45, 160
+
+
+def _render_screen(
+    raw: bytes, rows: int = _WORKSHOP_ROWS, cols: int = _WORKSHOP_COLS
+) -> str:
+    """Replay curses output onto a cell grid and return what the screen shows.
+
+    ncurses repaints only cells that changed, so a needle can be split across
+    cursor moves in the byte stream; the replayed grid is the rendered truth.
+    """
+    import unicodedata
+
+    text = raw.decode("utf-8", errors="replace")
+    grid = [[" "] * cols for _ in range(rows)]
+    row = col = 0
+    top, bottom = 0, rows - 1
+    saved = (0, 0)
+    last = " "
+
+    def scroll(start: int, end: int, count: int) -> None:
+        for _ in range(max(0, count)):
+            del grid[start]
+            grid.insert(end, [" "] * cols)
+
+    def unscroll(start: int, end: int, count: int) -> None:
+        for _ in range(max(0, count)):
+            del grid[end]
+            grid.insert(start, [" "] * cols)
+
+    def linefeed() -> None:
+        nonlocal row
+        if row == bottom:
+            scroll(top, bottom, 1)
+        else:
+            row = min(rows - 1, row + 1)
+
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if char == "\x1b" and index + 1 < length:
+            kind = text[index + 1]
+            if kind == "[":
+                end = index + 2
+                while end < length and not "@" <= text[end] <= "~":
+                    end += 1
+                if end >= length:
+                    break
+                params, final = text[index + 2 : end], text[end]
+                index = end + 1
+                if params[:1] in {"?", ">", "=", "<"}:
+                    continue
+                nums = [
+                    int(part) if part.isdigit() else 0 for part in params.split(";")
+                ]
+                count = nums[0] if nums and nums[0] else 1
+                if final in "Hf":
+                    row = (nums[0] if nums and nums[0] else 1) - 1
+                    col = (nums[1] if len(nums) > 1 and nums[1] else 1) - 1
+                elif final == "A":
+                    row -= count
+                elif final in "Be":
+                    row += count
+                elif final in "Ca":
+                    col += count
+                elif final == "D":
+                    col -= count
+                elif final in "G`":
+                    col = count - 1
+                elif final == "d":
+                    row = count - 1
+                elif final == "J":
+                    mode = nums[0] if nums else 0
+                    if mode == 0:
+                        grid[row][col:] = [" "] * (cols - col)
+                        for line in grid[row + 1 :]:
+                            line[:] = [" "] * cols
+                    elif mode == 1:
+                        grid[row][: col + 1] = [" "] * (col + 1)
+                        for line in grid[:row]:
+                            line[:] = [" "] * cols
+                    else:
+                        for line in grid:
+                            line[:] = [" "] * cols
+                elif final == "K":
+                    mode = nums[0] if nums else 0
+                    if mode == 0:
+                        grid[row][col:] = [" "] * (cols - col)
+                    elif mode == 1:
+                        grid[row][: col + 1] = [" "] * (col + 1)
+                    else:
+                        grid[row][:] = [" "] * cols
+                elif final == "X":
+                    for cell in range(col, min(cols, col + count)):
+                        grid[row][cell] = " "
+                elif final == "b":
+                    for _ in range(count):
+                        if col < cols:
+                            grid[row][col] = last
+                            col += 1
+                elif final == "@":
+                    grid[row][col:col] = [" "] * count
+                    del grid[row][cols:]
+                elif final == "P":
+                    del grid[row][col : col + count]
+                    grid[row].extend([" "] * (cols - len(grid[row])))
+                elif final == "L" and top <= row <= bottom:
+                    unscroll(row, bottom, count)
+                elif final == "M" and top <= row <= bottom:
+                    scroll(row, bottom, count)
+                elif final == "S":
+                    scroll(top, bottom, count)
+                elif final == "T":
+                    unscroll(top, bottom, count)
+                elif final == "r":
+                    top = (nums[0] if nums and nums[0] else 1) - 1
+                    bottom = (nums[1] if len(nums) > 1 and nums[1] else rows) - 1
+                    row = col = 0
+                row = max(0, min(rows - 1, row))
+                col = max(0, min(cols - 1, col))
+                continue
+            if kind == "]":
+                end = index + 2
+                while (
+                    end < length
+                    and text[end] != "\x07"
+                    and text[end : end + 2] != "\x1b\\"
+                ):
+                    end += 1
+                index = end + (2 if text[end : end + 2] == "\x1b\\" else 1)
+                continue
+            if kind in "()#":
+                index += 3
+                continue
+            if kind == "7":
+                saved = (row, col)
+            elif kind == "8":
+                row, col = saved
+            elif kind == "M":
+                if row == top:
+                    unscroll(top, bottom, 1)
+                else:
+                    row = max(0, row - 1)
+            elif kind in "DE":
+                linefeed()
+                if kind == "E":
+                    col = 0
+            index += 2
+            continue
+        index += 1
+        if char == "\r":
+            col = 0
+        elif char in "\n\x0b\x0c":
+            linefeed()
+        elif char == "\b":
+            col = max(0, min(cols - 1, col) - 1)
+        elif char == "\t":
+            col = min(cols - 1, (col // 8 + 1) * 8)
+        elif ord(char) >= 32 and char != "\x7f":
+            if unicodedata.combining(char):
+                continue
+            if col >= cols:
+                col = 0
+                linefeed()
+            grid[row][col] = char
+            last = char
+            col += 1
+            if unicodedata.east_asian_width(char) in {"W", "F"} and col < cols:
+                grid[row][col] = ""
+                col += 1
+    return "\n".join("".join(line).rstrip() for line in grid)
+
+
+class _WorkshopPty:
+    """Installed Agents-tab Workshop driven through a private PTY."""
+
+    def __init__(
+        self, argv: Sequence[str | Path], *, cwd: Path, env: Mapping[str, str]
+    ):
+        import pty
+        import termios
+
+        self.master, slave = pty.openpty()
+        # 0x11 (Ctrl+Q, the Workshop quit key) is XON under software flow
+        # control; the line discipline would swallow it before curses saw it.
+        attrs = termios.tcgetattr(slave)
+        attrs[0] &= ~(termios.IXON | termios.IXOFF)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        import fcntl
+
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
+        self.output = bytearray()
+        try:
+            self.process = subprocess.Popen(
+                [str(item) for item in argv],
+                cwd=cwd,
+                env={**env, "TERM": "xterm-256color", "LINES": "45", "COLUMNS": "160"},
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except BaseException:
+            os.close(self.master)
+            raise
+        finally:
+            os.close(slave)
+
+    def drain(self, timeout: float) -> None:
+        import select
+
+        ready, _, _ = select.select([self.master], [], [], max(0.0, timeout))
+        if ready:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:
+                chunk = b""
+            self.output.extend(chunk)
+            if not chunk:
+                time.sleep(min(0.05, max(0.0, timeout)))
+
+    def screen(self) -> str:
+        return _render_screen(bytes(self.output))
+
+    def await_screen(
+        self, needle: str, *, deadline: float, absent: str | None = None
+    ) -> str:
+        while True:
+            screen = self.screen()
+            if needle in screen and (absent is None or absent not in screen):
+                return screen
+            if self.process.poll() is not None or time.monotonic() >= deadline:
+                break
+            self.drain(min(0.1, deadline - time.monotonic()))
+        raise RuntimeError(
+            f"installed Workshop did not render {needle!r} on the Agents route"
+        )
+
+    def send(self, data: bytes) -> None:
+        os.write(self.master, data)
+
+    def close(self) -> int | None:
+        try:
+            if self.process.poll() is None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                return self.process.wait(timeout=_WORKSHOP_EXIT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return None
+        finally:
+            os.close(self.master)
+
+
+def _scenario_workshop_typography(
+    scenario: _WalkaroundScenario, layout_payload: bytes
+) -> bytes:
+    """Walk Agents -> New agent -> Setup / Font in the installed Workshop.
+
+    The Agents tab of the installed operator layout runs the generation-pinned
+    ``pane-python`` over ``vc-agent-workshop.py launcher``; this probe runs the
+    same installed pair in a private PTY, presses the visible chip key, proves
+    Step 2 typography rendered, then backs out without choosing a font.
+    """
+    if b'tab name="Agents"' not in layout_payload or (
+        b"vc-agent-workshop.py" not in layout_payload
+    ):
+        raise RuntimeError("installed operator layout has no Agents Workshop tab")
+    frame_config = scenario.product_config / "vc-frame"
+    runner = frame_config / "pane-python"
+    workshop = frame_config / "vc-agent-workshop.py"
+    if not (runner.is_file() and os.access(runner, os.X_OK)):
+        raise RuntimeError("installed Agents tab has no generation-pinned pane-python")
+    if not workshop.is_file():
+        raise RuntimeError("installed Agents tab has no Workshop launcher")
+    policies = [
+        scenario.product_config / name
+        for name in ("config.toml", "terminal-policy.toml")
+    ]
+    before = [path.read_bytes() if path.is_file() else None for path in policies]
+    deadline = time.monotonic() + _WORKSHOP_ROUTE_TIMEOUT
+    session = _WorkshopPty(
+        [runner, workshop, "launcher"], cwd=scenario.root, env=scenario.environment
+    )
+    exit_code: int | None = None
+    try:
+        new_agent = session.await_screen("[ Setup / Font (f) ]", deadline=deadline)
+        if "New agent" not in new_agent:
+            raise RuntimeError("installed Workshop did not render the New agent card")
+        session.send(b"f")
+        typography = session.await_screen(
+            "Step 2: Terminal Typography", deadline=deadline
+        )
+        if "Glyph sample:" not in typography:
+            raise RuntimeError("installed Workshop typography has no glyph preview")
+        # Esc: Step 2 -> Step 1, Esc: close setup, Ctrl+Q: leave the launcher,
+        # discarding the probe's private in-memory draft without applying it.
+        session.send(b"\x1b")
+        session.await_screen(
+            "[ Close (Esc) ]", deadline=deadline, absent="Terminal Typography"
+        )
+        session.send(b"\x1b")
+        session.await_screen(
+            "[ Setup / Font (f) ]", deadline=deadline, absent="[ Close (Esc) ]"
+        )
+        session.send(b"\x11")
+        exit_deadline = min(deadline, time.monotonic() + _WORKSHOP_EXIT_TIMEOUT)
+        confirmed = False
+        while session.process.poll() is None and time.monotonic() < exit_deadline:
+            session.drain(0.1)
+            if not confirmed and "Unsaved form changes" in session.screen():
+                session.send(b"y")
+                confirmed = True
+        exit_code = session.process.poll()
+        if exit_code is None:
+            raise RuntimeError("installed Workshop did not exit after Ctrl+Q")
+        session.drain(0)
+        transcript = bytes(session.output)
+    finally:
+        session.close()
+    if exit_code != 0:
+        raise RuntimeError(f"installed Workshop exited {exit_code} on the Agents route")
+    after = [path.read_bytes() if path.is_file() else None for path in policies]
+    if after != before:
+        raise RuntimeError(
+            "Workshop typography probe changed the installed user policy"
+        )
+    return (
+        hashlib.sha256(runner.read_bytes()).digest()
+        + hashlib.sha256(workshop.read_bytes()).digest()
+        + new_agent.encode()
+        + typography.encode()
+        + hashlib.sha256(transcript).digest()
+    )
+
+
 def _scenario_start_here(
     scenario: _WalkaroundScenario,
 ) -> Mapping[str, bytes | str]:
@@ -3782,7 +4123,12 @@ def _scenario_start_here(
     # retired "Start the operator vc-frame session").
     if b"Create a vc-frame workspace for a repository" not in help_output:
         raise RuntimeError("installed vc-start onboarding help is unavailable")
-    return {"onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()}
+    rendered = _scenario_workshop_typography(scenario, payload)
+    return {
+        "onboarding_reachable": hashlib.sha256(
+            payload + help_output + rendered
+        ).hexdigest()
+    }
 
 
 def _scenario_update(
