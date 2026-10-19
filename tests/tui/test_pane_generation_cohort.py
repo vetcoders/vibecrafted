@@ -101,6 +101,15 @@ def test_matching_shared_helper_still_runs_generation_copy(cohort) -> None:
     assert json.loads(result.stdout)["file"] == str(old)
 
 
+def test_launchpad_uses_the_same_generation_boundary(cohort) -> None:
+    _, old, shared, env = cohort
+    launchpad = _write(old.with_name("vc-start-here.py"), old.read_text())
+    shared_launchpad = _write(shared.with_name(launchpad.name), shared.read_text())
+    result = _run(shared_launchpad, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["file"] == str(launchpad)
+
+
 def test_runtime_root_fallback_selects_matching_helper(cohort) -> None:
     generation, old, shared, env = cohort
     env.pop("VIBECRAFTED_PYTHON")
@@ -119,6 +128,21 @@ def test_private_helper_with_product_name_is_not_remapped(cohort, tmp_path) -> N
     result = _run(private, env)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["file"] == str(private)
+
+
+def test_unknown_helper_inside_shared_config_remains_founder_owned(cohort) -> None:
+    _, _, shared, env = cohort
+    custom = _write(
+        shared.parent / "custom.py",
+        "import json, sys\n"
+        "print(json.dumps({'file': __file__, 'args': sys.argv[1:]}))\n",
+    )
+    result = _run(custom, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "file": str(custom),
+        "args": ["launcher", "space argument"],
+    }
 
 
 def test_shared_directory_symlink_does_not_reclassify_checkout_path(cohort, tmp_path):

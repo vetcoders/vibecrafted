@@ -36,9 +36,15 @@ for py in "${candidates[@]}"; do
   for config_home in "$HOME/.config" "${XDG_CONFIG_HOME:-$HOME/.config}"; do
     shared="$config_home/vibecrafted/vc-frame"
     [[ -d "$shared" ]] || continue
-    if [[ "$launcher_dir" == "$(cd -L "$shared" && pwd -L)" && "$launcher" == *.py ]]; then
-      managed=true
-      break
+    if [[ "$launcher_dir" == "$(cd -L "$shared" && pwd -L)" ]]; then
+      # Only shipped Python pane entries are ours. Other files in this
+      # directory remain Founder-owned, as in the installer's managed leaves.
+      case "${launcher##*/}" in
+        vc-agent-workshop.py|vc-start-here.py)
+          managed=true
+          break
+          ;;
+      esac
     fi
   done
   if [[ "$managed" == true ]]; then
