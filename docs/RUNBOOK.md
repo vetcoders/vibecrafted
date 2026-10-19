@@ -230,6 +230,44 @@ Do not delete sessions or replay a brief just because a window vanished.
      _effective_operator_session; scripts/vibecrafted cmd_start_help /
      cmd_dashboard_help. -->
 
+### 5a. Terminal Typography (Setup / Font)
+
+Choose the terminal font from the installed UI; no source checkout, Python
+command or config editing is required.
+
+1. Open **Agents** (the project's agent home inside the Frame session).
+2. Select **New agent** (button, or press `n` / `Enter`).
+3. In the New agent form, select **Setup / Font** (`[ Setup / Font (f) ]`, top
+   right) or press `f` while no text field is being edited. The chip is hidden
+   in narrow panes. On the Agents home, `f` opens the same screen directly.
+4. **ZenEntry Setup** opens on **Terminal Typography** (step 2 of 2). Each row
+   shows a font, its description and a status such as `font file present` or
+   `font file missing`. Rows marked missing cannot be applied.
+5. Pick a row (click, `↑`/`↓`, or `1`–`9`), then **Apply Font** (`Enter`).
+   `b` or `Esc` goes back to step 1 (provider check); `Esc` there closes the
+   screen. Closing without Apply leaves the font unchanged.
+
+What it lists: the five Monaspace Nerd Font families (Xenon, Argon, Neon, Radon,
+Krypton NF) and, when one is already configured, your current family, which is
+preserved until you choose another. A family is selectable only when its font
+file is installed in `~/Library/Fonts` or `/Library/Fonts`; the screen does not
+install fonts for you.
+
+What Apply does: it writes the family into the `[font.normal]`, `[font.bold]`
+and `[font.italic]` sections of
+`${XDG_CONFIG_HOME:-~/.config}/vibecrafted/terminal-policy.toml` on **this
+machine** and confirms with `Typography set to <family>`. Other keys in the file
+are left alone. Nothing is synced to other machines, and merely opening the
+screen changes nothing. When an already-open terminal picks up the new policy
+is not specified here.
+
+<!-- Sources: vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py
+     (draw_home, draw_launcher "[ Setup / Font (f) ]", draw_onboarding step 2,
+     _onboarding_apply_font); vibecrafted_core/command_bridge_onboarding.py
+     (MONASPACE_FONT_VARIANTS, default_font_dirs, terminal_policy_path,
+     select_font_family). Installed receipt: eb94709e Agents -> New agent ->
+     Setup / Font -> Terminal Typography rendered, no policy applied. -->
+
 ## 6. Event bus and the Slack bridge
 
 Inter-agent and operator-away communication runs on a thin bus, not on humans

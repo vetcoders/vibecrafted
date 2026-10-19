@@ -370,6 +370,11 @@ WRITE stage. They are not aliases (ADR-0001).
 
 Type `vibecrafted help` for the command deck, or `vc-` and hit tab once the shell helpers are installed.
 
+**Set your terminal font from the app.** In the installed Vibecrafted UI, open
+**Agents → New agent → Setup / Font** (press `f`) to reach **Terminal
+Typography** and pick a font. No source checkout or Python command is needed.
+Steps and save behavior: [Runbook §5a](docs/RUNBOOK.md#5a-terminal-typography-setup--font).
+
 When you want to walk the release surface explicitly, run:
 
 ```bash
