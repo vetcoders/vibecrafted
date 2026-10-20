@@ -1706,13 +1706,14 @@ class Workshop:
     # ─── ZenEntry Onboarding & Monaspace Typography Methods ──────────────────
 
     def _sync_onboarding_typography(self) -> None:
-        self.configured_font_family = (
-            command_bridge_onboarding.read_configured_font_family(
-                self.onboarding_policy_path
-            )
-            or ""
-        )
+        self.configured_font_family = ""
         try:
+            self.configured_font_family = (
+                command_bridge_onboarding.read_configured_font_family(
+                    self.onboarding_policy_path
+                )
+                or ""
+            )
             variants = command_bridge_onboarding.inspect_font_variants(
                 policy_path=self.onboarding_policy_path,
                 font_dirs=self.onboarding_font_dirs,
@@ -1721,7 +1722,7 @@ class Workshop:
                 "Installed fixed-width fonts · Monaspace NF first"
                 if variants
                 and variants[0].catalogue_source == "CoreText fixed-pitch traits"
-                else "Native catalogue unavailable; curated font files only"
+                else "Native catalogue unavailable; font files cannot verify fixed width"
                 if variants
                 else "No fixed-width families available"
             )

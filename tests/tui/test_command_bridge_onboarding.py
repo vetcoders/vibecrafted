@@ -220,7 +220,7 @@ def test_unknown_provider_and_surface_are_refused(homes: dict[str, Path]) -> Non
     assert not cbo.record_path().exists()
 
 
-def test_curated_file_route_proposes_without_applying(tmp_path: Path) -> None:
+def test_curated_file_route_is_diagnostic_only(tmp_path: Path) -> None:
     policy = tmp_path / "terminal-policy.toml"
     fonts = tmp_path / "Fonts"
     fonts.mkdir()
@@ -232,7 +232,16 @@ def test_curated_file_route_proposes_without_applying(tmp_path: Path) -> None:
     (fonts / "MonaspaceXenonNF-Regular.otf").write_bytes(b"fixture")
     variants = cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts])
     assert [v.family for v in variants] == ["Monaspace Xenon NF"]
-    assert variants[0].selectable and not variants[0].active
+    assert not variants[0].selectable and not variants[0].active
+    assert variants[0].face_styles == ("", "", "")
+    assert (
+        cbo.proposed_font_family(policy_path=policy, font_dirs=[fonts])
+        == cbo.FALLBACK_FONT_FAMILY
+    )
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            variants[0].family, policy_path=policy, font_dirs=[fonts]
+        )
     assert not policy.exists()
 
 
@@ -349,7 +358,7 @@ def test_non_macos_catalogue_is_deterministic_and_does_not_probe_native(
         home=tmp_path, policy_path=tmp_path / "policy"
     )
     assert [v.family for v in first] == ["Monaspace Xenon NF"]
-    assert not first[0].active
+    assert not first[0].active and not first[0].selectable
 
 
 def test_select_font_family_refuses_missing_file_without_modifying_policy(
@@ -379,12 +388,17 @@ def test_select_font_family_updates_only_font_families_without_live_config_reloa
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
     policy = tmp_path / "terminal-policy.toml"
-    font_dir = tmp_path / "Fonts"
-    font_dir.mkdir(parents=True, exist_ok=True)
-    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
-    neon_file.write_bytes(b"\x00\x01\x00\x00")
 
     policy.write_text(
         """# Custom terminal policy comments
@@ -415,7 +429,6 @@ primary.background = "#1e1e1e"
     cbo.select_font_family(
         "Monaspace Neon NF",
         policy_path=policy,
-        font_dirs=[font_dir],
     )
 
     result = policy.read_text(encoding="utf-8")
@@ -432,12 +445,17 @@ def test_select_font_family_preserves_existing_live_config_reload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
     policy = tmp_path / "terminal-policy.toml"
-    font_dir = tmp_path / "Fonts"
-    font_dir.mkdir(parents=True, exist_ok=True)
-    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
-    neon_file.write_bytes(b"\x00\x01\x00\x00")
 
     initial = (
         "live_config_reload = false\n\n"
@@ -450,7 +468,6 @@ def test_select_font_family_preserves_existing_live_config_reload(
     cbo.select_font_family(
         "Monaspace Neon NF",
         policy_path=policy,
-        font_dirs=[font_dir],
     )
 
     result = policy.read_text(encoding="utf-8")
@@ -466,12 +483,17 @@ def test_select_font_family_preserves_commented_table_headers_without_duplicates
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
     policy = tmp_path / "terminal-policy.toml"
-    font_dir = tmp_path / "Fonts"
-    font_dir.mkdir(parents=True, exist_ok=True)
-    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
-    neon_file.write_bytes(b"\x00\x01\x00\x00")
 
     initial = (
         "[font.normal] # primary font section\n"
@@ -489,7 +511,6 @@ def test_select_font_family_preserves_commented_table_headers_without_duplicates
     cbo.select_font_family(
         "Monaspace Neon NF",
         policy_path=policy,
-        font_dirs=[font_dir],
     )
 
     result = policy.read_text(encoding="utf-8")
@@ -509,12 +530,17 @@ def test_select_font_family_refuses_malformed_input_toml_without_modifying_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
     policy = tmp_path / "terminal-policy.toml"
-    font_dir = tmp_path / "Fonts"
-    font_dir.mkdir(parents=True, exist_ok=True)
-    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
-    neon_file.write_bytes(b"\x00\x01\x00\x00")
 
     malformed = '[font.normal]\nfamily = "Spot Mono\ninvalid toml syntax [[['
     policy.write_text(malformed, encoding="utf-8")
@@ -523,7 +549,6 @@ def test_select_font_family_refuses_malformed_input_toml_without_modifying_file(
         cbo.select_font_family(
             "Monaspace Neon NF",
             policy_path=policy,
-            font_dirs=[font_dir],
         )
 
     assert policy.read_text(encoding="utf-8") == malformed
@@ -533,12 +558,17 @@ def test_select_font_family_preserves_quoted_table_headers_and_escapes_family(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
     policy = tmp_path / "terminal-policy.toml"
-    font_dir = tmp_path / "Fonts"
-    font_dir.mkdir(parents=True, exist_ok=True)
-    neon_file = font_dir / "MonaspaceNeonNF-Regular.otf"
-    neon_file.write_bytes(b"\x00\x01\x00\x00")
 
     initial = (
         '[ "font" . "normal" ] # quoted normal header\n'
@@ -556,7 +586,6 @@ def test_select_font_family_preserves_quoted_table_headers_and_escapes_family(
     cbo.select_font_family(
         "Monaspace Neon NF",
         policy_path=policy,
-        font_dirs=[font_dir],
     )
 
     result = policy.read_text(encoding="utf-8")
@@ -613,3 +642,70 @@ def test_explicit_current_eligible_family_harmonizes_other_faces(
         result["font"][key] == {"family": "Menlo", "style": "Regular"}
         for key in ("normal", "bold", "italic")
     )
+
+
+@pytest.mark.parametrize("family", ["Monaspace Xenon NF", "Custom Fixed"])
+def test_unverified_files_never_authorize_selection_or_clobber_current_styles(
+    family: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "linux")
+    monkeypatch.setattr(cbo, "_native_font_faces", lambda: pytest.fail("native probe"))
+    fonts = tmp_path / "Fonts"
+    fonts.mkdir()
+    for name in ("MonaspaceXenonNF-Regular.otf", "CustomFixed-Bold.ttf"):
+        (fonts / name).write_bytes(b"not verified font metadata")
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        "[font]\nsize = 17.5\n[font.offset]\nx = -2\ny = -6\n"
+        + "".join(
+            f'[font.{key}]\nfamily = "{family}"\nstyle = "{style}"\n'
+            for key, style in (
+                ("normal", "Book"),
+                ("bold", "Bold"),
+                ("italic", "Italic"),
+            )
+        )
+    )
+    original = policy.read_bytes()
+    variants = cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts])
+    assert not any(v.selectable for v in variants)
+    assert next(v for v in variants if v.active).family == family
+    cbo.select_font_family(family, policy_path=policy, font_dirs=[fonts])
+    assert policy.read_bytes() == original
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            "Monaspace Neon NF", policy_path=policy, font_dirs=[fonts]
+        )
+    assert policy.read_bytes() == original
+    policy.unlink()
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            "Monaspace Xenon NF", policy_path=policy, font_dirs=[fonts]
+        )
+    assert not policy.exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_casefolded_family_merges_split_genuine_styles(
+    reverse: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    faces = [
+        cbo._FontFace("Example", "Book", 1 << 10),
+        cbo._FontFace("example", "Bold", (1 << 10) | 2),
+        cbo._FontFace("EXAMPLE", "Oblique", (1 << 10) | 1),
+        cbo._FontFace("Example", "Proportional Bold", 2),
+    ]
+    monkeypatch.setattr(
+        cbo, "_native_font_faces", lambda: faces[::-1] if reverse else faces
+    )
+    policy = tmp_path / "policy.toml"
+    variants = cbo.inspect_font_variants(policy_path=policy)
+    assert len(variants) == 1
+    assert variants[0].face_styles == ("Book", "Bold", "Oblique")
+    cbo.select_font_family(variants[0].family, policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
+        {"family": variants[0].family, "style": style}
+        for style in ("Book", "Bold", "Oblique")
+    ]

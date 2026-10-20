@@ -924,16 +924,17 @@ def test_workshop_get_wch_dispatch_in_run_loop() -> None:
     assert form_non_typing.agent == initial_agent
 
 
-def _seed_monaspace_fonts(font_dir: Path) -> None:
-    font_dir.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "MonaspaceNeonNF.ttf",
-        "MonaspaceArgonNF.ttf",
-        "MonaspaceRadonNF.ttf",
-        "MonaspaceKryptonNF.ttf",
-        "MonaspaceXenonNF.ttf",
-    ):
-        (font_dir / name).write_bytes(b"\x00\x01\x00\x00")
+def _mock_monaspace_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace(family, style, (1 << 10) | traits)
+            for family in cbo.MONASPACE_FAMILIES
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
 
 
 def test_onboarding_font_apply_malformed_toml_error_and_recovery(
@@ -941,8 +942,7 @@ def test_onboarding_font_apply_malformed_toml_error_and_recovery(
 ) -> None:
     """Malformed terminal-policy.toml raises ValueError, caught gracefully across key/mouse/run paths, preserving file and recovering cleanly."""
     workshop = _load()
-    font_dir = tmp_path / "Fonts"
-    _seed_monaspace_fonts(font_dir)
+    _mock_monaspace_metadata(monkeypatch)
     vc_home = tmp_path / "vc-home"
     vc_home.mkdir()
 
@@ -957,7 +957,6 @@ def test_onboarding_font_apply_malformed_toml_error_and_recovery(
         mode="launcher",
         onboarding=True,
         onboarding_policy_path=policy_path,
-        onboarding_font_dirs=[font_dir],
         onboarding_home=vc_home,
     )
     assert form.onboarding_active is True
@@ -986,7 +985,6 @@ def test_onboarding_font_apply_malformed_toml_error_and_recovery(
         mode="home",
         onboarding=True,
         onboarding_policy_path=policy_path,
-        onboarding_font_dirs=[font_dir],
         onboarding_home=vc_home,
     )
     form_home.handle_home_key(ord("s"))
@@ -1042,7 +1040,6 @@ def test_onboarding_font_apply_malformed_toml_error_and_recovery(
         mode="launcher",
         onboarding=True,
         onboarding_policy_path=policy_path,
-        onboarding_font_dirs=[font_dir],
         onboarding_home=vc_home,
     )
     form_run.onboarding_step = 2
@@ -1076,8 +1073,7 @@ def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
 ) -> None:
     """Non-writable policy seam raises OSError, caught gracefully across key/mouse/run paths, preserving file and recovering cleanly."""
     workshop = _load()
-    font_dir = tmp_path / "Fonts"
-    _seed_monaspace_fonts(font_dir)
+    _mock_monaspace_metadata(monkeypatch)
     vc_home = tmp_path / "vc-home"
     vc_home.mkdir()
 
@@ -1098,7 +1094,6 @@ def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
             mode="launcher",
             onboarding=True,
             onboarding_policy_path=policy_path,
-            onboarding_font_dirs=[font_dir],
             onboarding_home=vc_home,
         )
         assert form.onboarding_active is True
@@ -1123,7 +1118,6 @@ def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
             mode="home",
             onboarding=True,
             onboarding_policy_path=policy_path,
-            onboarding_font_dirs=[font_dir],
             onboarding_home=vc_home,
         )
         form_home.handle_home_key(ord("s"))
@@ -1157,7 +1151,6 @@ def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
             mode="launcher",
             onboarding=True,
             onboarding_policy_path=policy_path,
-            onboarding_font_dirs=[font_dir],
             onboarding_home=vc_home,
         )
         form_run.onboarding_step = 2
@@ -1203,8 +1196,7 @@ def test_onboarding_close_clears_error_without_leak_to_launcher_or_home(
 ) -> None:
     """Esc or clicking onboarding_close clears prior error so it does not leak to home/launcher."""
     workshop = _load()
-    font_dir = tmp_path / "Fonts"
-    _seed_monaspace_fonts(font_dir)
+    _mock_monaspace_metadata(monkeypatch)
     vc_home = tmp_path / "vc-home"
     vc_home.mkdir()
 
@@ -1218,7 +1210,6 @@ def test_onboarding_close_clears_error_without_leak_to_launcher_or_home(
         mode="launcher",
         onboarding=True,
         onboarding_policy_path=policy_path,
-        onboarding_font_dirs=[font_dir],
         onboarding_home=vc_home,
     )
     form.handle_launcher_key(ord("s"))  # Step 2
@@ -1253,7 +1244,6 @@ def test_onboarding_close_clears_error_without_leak_to_launcher_or_home(
         mode="home",
         onboarding=True,
         onboarding_policy_path=policy_path,
-        onboarding_font_dirs=[font_dir],
         onboarding_home=vc_home,
     )
     form_home.handle_home_key(ord("s"))  # Step 2
@@ -1479,6 +1469,7 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
     )
 
     def run(keys: bytes, name: str) -> None:
+        before = policy.read_bytes()
         master, slave = pty.openpty()
         attributes = termios.tcgetattr(slave)
         attributes[0] &= ~(termios.IXON | termios.IXOFF)
@@ -1509,7 +1500,7 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
                         break
                     output.extend(chunk)
                 if not sent and b"Enter apply" in output:
-                    assert policy.read_text() == original
+                    assert policy.read_bytes() == before
                     os.write(master, keys)
                     sent = True
                 if child.poll() is not None:
@@ -1533,6 +1524,10 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
     assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
         {"family": chosen.family, "style": style} for style in chosen.face_styles
     ]
+    invalid = b'[font.normal]\nfamily = "Broken\xff"\n'
+    policy.write_bytes(invalid)
+    run(b"\x1b", "invalid-utf8-cancel")
+    assert policy.read_bytes() == invalid
     assert not list((tmp_path / "vc-home").rglob("command_bridge_onboarding*"))
     receipt = {
         "eligible_families": len(variants),
@@ -1543,7 +1538,43 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
         "selected_family": chosen.family,
         "selected_styles": chosen.face_styles,
         "cancel_preserved_bytes": True,
+        "invalid_utf8_cancel_preserved_bytes": True,
         "policy": str(policy),
     }
     (tmp_path / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt))
+
+
+@pytest.mark.parametrize("font_only", [False, True])
+def test_invalid_utf8_policy_is_recoverable_and_cancellable(
+    font_only: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    policy = tmp_path / "terminal-policy.toml"
+    original = b'[font.normal]\nfamily = "Broken\xff"\n'
+    policy.write_bytes(original)
+    monkeypatch.setattr(
+        cbo, "configured_providers", lambda: pytest.fail("provider probe")
+    )
+    form = workshop.Workshop(
+        RecordingWindow(), mode="launcher", onboarding_policy_path=policy
+    )
+    form.configured_font_family = "stale previous selection"
+    form.font_only = font_only
+    form.open_onboarding(step=2)
+    assert form.onboarding_active and form.onboarding_step == 2
+    assert form.configured_font_family == ""
+    assert not form.onboarding_variants and form.font_catalogue_note
+    form.draw()
+    assert any(form.font_catalogue_note in text for _, _, text, _ in form.window.drawn)
+    form.handle_onboarding_key(10)
+    assert form.error and policy.read_bytes() == original
+    if font_only:
+        with pytest.raises(SystemExit) as closed:
+            form.handle_onboarding_key(27)
+        assert closed.value.code == 0
+    else:
+        form.handle_onboarding_key(27)
+        form.handle_onboarding_key(27)
+        assert not form.onboarding_active
+    assert policy.read_bytes() == original

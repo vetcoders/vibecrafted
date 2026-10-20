@@ -160,8 +160,9 @@ font size, offsets and unrelated preferences.
 Frame's direct entry uses the canonical Workshop script with `launcher --font`;
 it opens the same typography scene without provider authentication. Esc closes
 that direct chooser. `--onboarding` still opens the two-step setup flow.
-Non-macOS hosts retain the curated Monaspace file route and explicitly report
-that the native catalogue is unavailable. Catalogue availability describes
+Non-macOS hosts show curated Monaspace file matches as unavailable diagnostics.
+A filename cannot verify fixed width or face styles, so it cannot authorize a
+new selection. Existing policy and styles are preserved. Catalogue availability describes
 CoreText discovery, not verification of a running terminal renderer.
 
 ## Terminal startup recovery

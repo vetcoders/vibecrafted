@@ -26,6 +26,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   then installed fixed-width families identified by macOS CoreText traits.
   Paging and wheel navigation keep the list usable; `launcher --font` opens it
   directly without provider setup. Font policy changes only on explicit Apply.
+  Invalid UTF-8 policy stays recoverable without rewriting its bytes; filename
+  matches cannot authorize selection, and case variants retain all genuine faces.
 
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.

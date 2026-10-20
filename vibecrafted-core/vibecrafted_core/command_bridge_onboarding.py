@@ -675,8 +675,8 @@ def inspect_font_variants(
 ) -> list[FontVariantStatus]:
     """Curated families first, then OS fixed-width families, without writes.
 
-    Explicit font_dirs and non-macOS retain the curated file-based route only;
-    arbitrary family names cannot prove fixed width through filename matching.
+    Explicit font_dirs and non-macOS retain curated file diagnostics only;
+    filenames cannot prove fixed width or provide genuine face styles.
     A configured ineligible family remains visible as current, never eligible.
     """
     configured = read_configured_font_family(policy_path, env=env, home=home)
@@ -684,7 +684,7 @@ def inspect_font_variants(
     source = (
         "CoreText fixed-pitch traits"
         if native
-        else "curated files; native catalogue unavailable"
+        else "font files; fixed-width metadata unavailable"
     )
     families: dict[str, list[_FontFace]] = {}
     paths: dict[str, str] = {}
@@ -701,16 +701,20 @@ def inspect_font_variants(
         for family, _description, tokens in MONASPACE_FONT_VARIANTS:
             found = _find_font_file(tokens, dirs)
             if found is not None:
-                families[family] = [_FontFace(family, "Regular", _FONT_MONOSPACE)]
                 paths[family] = str(found)
 
     descriptions = {
         family: description for family, description, _ in MONASPACE_FONT_VARIANTS
     }
-    # Case-insensitive dedupe with deterministic genuine upstream spelling.
+    # Merge eligible faces before choosing styles; alternate spellings may
+    # carry different faces of the same family.
     canonical: dict[str, str] = {}
-    for family in sorted(families, key=lambda name: (name.casefold(), name)):
-        canonical.setdefault(family.casefold(), family)
+    for family in sorted(
+        families.keys() | paths.keys(), key=lambda name: (name.casefold(), name)
+    ):
+        name = canonical.setdefault(family.casefold(), family)
+        if name != family:
+            families[name].extend(families[family])
     ordered = [
         canonical[name.casefold()]
         for name in MONASPACE_FAMILIES
@@ -720,17 +724,31 @@ def inspect_font_variants(
     results = []
     for family in ordered:
         active = configured is not None and family.casefold() == configured.casefold()
+        verified = family in families
         results.append(
             FontVariantStatus(
                 family=family,
                 label=family,
-                description=descriptions.get(family, "Installed fixed-width family"),
+                description=(
+                    descriptions.get(family, "Installed fixed-width family")
+                    if verified
+                    else "Font file found; fixed-width metadata unavailable"
+                ),
                 font_file_present=True,
                 font_file_path=paths.get(family, ""),
                 active=active,
-                selectable=True,
-                status_label="current" if active else "available",
-                face_styles=_font_face_styles(families[family]),
+                preserved_custom=active and not verified,
+                selectable=verified,
+                status_label=("current" if active else "available")
+                if verified
+                else (
+                    "current · unavailable for selection"
+                    if active
+                    else "unavailable for selection"
+                ),
+                face_styles=_font_face_styles(families[family])
+                if verified
+                else ("", "", ""),
                 catalogue_source=source,
             )
         )
@@ -745,6 +763,7 @@ def inspect_font_variants(
                 preserved_custom=True,
                 selectable=False,
                 status_label="current · unavailable for selection",
+                face_styles=("", "", ""),
                 catalogue_source=source,
             )
         )
@@ -768,7 +787,10 @@ def proposed_font_family(
     for variant in variants:
         if variant.active:
             return variant.family
-    return variants[0].family if variants else FALLBACK_FONT_FAMILY
+    return next(
+        (variant.family for variant in variants if variant.selectable),
+        FALLBACK_FONT_FAMILY,
+    )
 
 
 def _rewrite_font_sections(raw: str, family: str, styles: tuple[str, str, str]) -> str:
