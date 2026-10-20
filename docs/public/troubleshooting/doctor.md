@@ -142,6 +142,28 @@ vibecrafted doctor --fix-server-service     # reconcile the LaunchAgent with the
 
 Each fix flag re-verifies after repairing, so a clean exit means the repair actually held.
 
+## Terminal fonts
+
+Open **Agents → New agent → Setup / Font (f)**. The existing chooser shows the
+current policy and lists available Monaspace NF families first, followed by other
+installed fixed-width families. On macOS, CoreText fixed-pitch traits determine
+eligibility; a family name containing “Mono” is not evidence. Upstream family
+names are retained.
+
+Use arrows, Page Up/Down, Home/End, or the mouse wheel to browse. Clicking a row
+selects it; **Apply Font** or Enter applies it. Opening, browsing and cancelling
+leave the policy unchanged. An unavailable or proportional configured family
+remains visible as current, but cannot be chosen as an installed fixed-width
+font. Applying another family updates normal/bold/italic face styles and keeps
+font size, offsets and unrelated preferences.
+
+Frame's direct entry uses the canonical Workshop script with `launcher --font`;
+it opens the same typography scene without provider authentication. Esc closes
+that direct chooser. `--onboarding` still opens the two-step setup flow.
+Non-macOS hosts retain the curated Monaspace file route and explicitly report
+that the native catalogue is unavailable. Catalogue availability describes
+CoreText discovery, not verification of a running terminal renderer.
+
 ## Terminal startup recovery
 
 The `vc-terminal` launcher validates the installed shell specification before

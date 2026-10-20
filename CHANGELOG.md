@@ -22,6 +22,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The existing terminal font chooser lists curated Monaspace NF families first,
+  then installed fixed-width families identified by macOS CoreText traits.
+  Paging and wheel navigation keep the list usable; `launcher --font` opens it
+  directly without provider setup. Font policy changes only on explicit Apply.
+
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.
 - OMP telemetry follows native profiles and agent-directory overrides, retains
