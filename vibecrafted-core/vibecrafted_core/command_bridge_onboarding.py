@@ -18,9 +18,11 @@ fsync + rename) instead of growing a second durability path.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
+import sys
 import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -375,7 +377,7 @@ style = "Regular"
 
 
 class FontNotAvailableError(OnboardingError):
-    """Raised when selecting a font family whose font file is not present."""
+    """Raised when a new selection is not an available fixed-width family."""
 
 
 @dataclass(frozen=True)
@@ -389,6 +391,8 @@ class FontVariantStatus:
     preserved_custom: bool = False
     selectable: bool = True
     status_label: str = ""
+    face_styles: tuple[str, str, str] = ("Regular", "Bold", "Italic")
+    catalogue_source: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -401,6 +405,8 @@ class FontVariantStatus:
             "preserved_custom": self.preserved_custom,
             "selectable": self.selectable,
             "status_label": self.status_label,
+            "face_styles": self.face_styles,
+            "catalogue_source": self.catalogue_source,
         }
 
 
@@ -524,6 +530,142 @@ def read_configured_font_family(
     return _extract_family_from_toml_text(raw)
 
 
+# CoreText symbolic traits (CTFontTraits.h). Names never determine eligibility.
+_FONT_ITALIC = 1 << 0
+_FONT_BOLD = 1 << 1
+_FONT_MONOSPACE = 1 << 10
+
+
+@dataclass(frozen=True)
+class _FontFace:
+    family: str
+    style: str
+    traits: int
+
+
+def _native_font_faces() -> list[_FontFace]:
+    """Read the process-visible CoreText catalogue, without GUI or registration.
+
+    ctypes uses the OS C API directly; no PyObjC, compiler, subprocess, or font
+    installation is required. Every Copy/Create reference is released here.
+    """
+    try:
+        cf = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        ct = ctypes.CDLL("/System/Library/Frameworks/CoreText.framework/CoreText")
+        ptr = ctypes.c_void_p
+
+        def bind(lib: Any, name: str, result: Any, args: list[Any]) -> Any:
+            function = getattr(lib, name)
+            function.restype = result
+            function.argtypes = args
+            return function
+
+        release = bind(cf, "CFRelease", None, [ptr])
+        count = bind(cf, "CFArrayGetCount", ctypes.c_long, [ptr])
+        at = bind(cf, "CFArrayGetValueAtIndex", ptr, [ptr, ctypes.c_long])
+        length = bind(cf, "CFStringGetLength", ctypes.c_long, [ptr])
+        string = bind(
+            cf,
+            "CFStringGetCString",
+            ctypes.c_bool,
+            [ptr, ptr, ctypes.c_long, ctypes.c_uint32],
+        )
+        collection = bind(ct, "CTFontCollectionCreateFromAvailableFonts", ptr, [ptr])
+        descriptors = bind(
+            ct, "CTFontCollectionCreateMatchingFontDescriptors", ptr, [ptr]
+        )
+        create = bind(
+            ct, "CTFontCreateWithFontDescriptor", ptr, [ptr, ctypes.c_double, ptr]
+        )
+        traits = bind(ct, "CTFontGetSymbolicTraits", ctypes.c_uint32, [ptr])
+        family = bind(ct, "CTFontCopyFamilyName", ptr, [ptr])
+        copy_name = bind(ct, "CTFontCopyName", ptr, [ptr, ptr])
+        style_key = ptr.in_dll(ct, "kCTFontStyleNameKey")
+
+        def style(font: Any) -> Any:
+            return copy_name(font, style_key)
+
+        def text(copy: Any, font: Any) -> str:
+            value = copy(font)
+            if not value:
+                raise OnboardingError("CoreText returned an unnamed font face")
+            try:
+                buffer = ctypes.create_string_buffer(length(value) * 4 + 1)
+                if not string(value, buffer, len(buffer), 0x08000100):  # UTF-8
+                    raise OnboardingError("CoreText font name could not be decoded")
+                return buffer.value.decode("utf-8")
+            finally:
+                release(value)
+
+        owned_collection = collection(None)
+        if not owned_collection:
+            raise OnboardingError("CoreText font catalogue is unavailable")
+        try:
+            owned_descriptors = descriptors(owned_collection)
+            if not owned_descriptors:
+                raise OnboardingError("CoreText font catalogue has no descriptors")
+            try:
+                faces = []
+                for index in range(count(owned_descriptors)):
+                    font = create(at(owned_descriptors, index), 12.0, None)
+                    if not font:
+                        raise OnboardingError("CoreText could not inspect a font face")
+                    try:
+                        faces.append(
+                            _FontFace(
+                                text(family, font), text(style, font), traits(font)
+                            )
+                        )
+                    finally:
+                        release(font)
+                return faces
+            finally:
+                release(owned_descriptors)
+        finally:
+            release(owned_collection)
+    except (OSError, AttributeError, UnicodeError) as exc:
+        raise OnboardingError(f"CoreText font catalogue unavailable: {exc}") from exc
+
+
+def _font_face_styles(faces: Sequence[_FontFace]) -> tuple[str, str, str]:
+    """Choose genuine face styles; missing bold/italic reuse the normal face."""
+    ordered = sorted(
+        faces,
+        key=lambda f: (
+            f.style.casefold() not in ("regular", "normal", "book"),
+            f.style.casefold(),
+            f.style,
+        ),
+    )
+    normal = next(
+        (f for f in ordered if not f.traits & (_FONT_BOLD | _FONT_ITALIC)), ordered[0]
+    )
+    bold = next(
+        (
+            f
+            for f in sorted(ordered, key=lambda f: f.style.casefold() != "bold")
+            if f.traits & _FONT_BOLD and not f.traits & _FONT_ITALIC
+        ),
+        normal,
+    )
+    italic = next(
+        (
+            f
+            for f in sorted(
+                ordered,
+                key=lambda f: (
+                    f.style.casefold() not in ("italic", "regular italic", "oblique")
+                ),
+            )
+            if f.traits & _FONT_ITALIC and not f.traits & _FONT_BOLD
+        ),
+        normal,
+    )
+    return normal.style, bold.style, italic.style
+
+
 def inspect_font_variants(
     *,
     policy_path: Path | None = None,
@@ -531,93 +673,98 @@ def inspect_font_variants(
     env: Mapping[str, str] | None = None,
     home: Path | None = None,
 ) -> list[FontVariantStatus]:
-    """Inspect Monaspace font variants and preserve any existing configured family.
+    """Curated families first, then OS fixed-width families, without writes.
 
-    Distinguishes font-file presence in ``font_dirs`` from the active configured
-    family in ``terminal-policy.toml``. Never executes subprocesses or CoreText.
+    Explicit font_dirs and non-macOS retain curated file diagnostics only;
+    filenames cannot prove fixed width or provide genuine face styles.
+    A configured ineligible family remains visible as current, never eligible.
     """
-    dirs = (
-        tuple(Path(d) for d in font_dirs)
-        if font_dirs is not None
-        else default_font_dirs(home=home)
-    )
     configured = read_configured_font_family(policy_path, env=env, home=home)
-
-    monaspace_found: dict[str, Path | None] = {}
-    for family, _desc, tokens in MONASPACE_FONT_VARIANTS:
-        monaspace_found[family] = _find_font_file(tokens, dirs)
-
-    if configured:
-        active_family = configured
-    elif monaspace_found.get(DEFAULT_PROPOSED_FONT_FAMILY) is not None:
-        active_family = DEFAULT_PROPOSED_FONT_FAMILY
+    native = sys.platform == "darwin" and font_dirs is None
+    source = (
+        "CoreText fixed-pitch traits"
+        if native
+        else "font files; fixed-width metadata unavailable"
+    )
+    families: dict[str, list[_FontFace]] = {}
+    paths: dict[str, str] = {}
+    if native:
+        for face in _native_font_faces():
+            if face.traits & _FONT_MONOSPACE:
+                families.setdefault(face.family, []).append(face)
     else:
-        first_present = next(
-            (
-                fam
-                for fam, _desc, _tok in MONASPACE_FONT_VARIANTS
-                if monaspace_found.get(fam) is not None
-            ),
-            None,
+        dirs = (
+            tuple(Path(d) for d in font_dirs)
+            if font_dirs is not None
+            else default_font_dirs(home=home)
         )
-        active_family = first_present or FALLBACK_FONT_FAMILY
+        for family, _description, tokens in MONASPACE_FONT_VARIANTS:
+            found = _find_font_file(tokens, dirs)
+            if found is not None:
+                paths[family] = str(found)
 
-    results: list[FontVariantStatus] = []
-    if active_family not in MONASPACE_FAMILIES:
-        custom_path = _find_font_file((active_family,), dirs)
-        custom_present = custom_path is not None
-        if custom_present:
-            status_label = (
-                "active · font file present (unverified renderer registration)"
-            )
-        elif configured:
-            status_label = "active · current policy family (font file missing)"
-        else:
-            status_label = "active · shipped fallback family (font file missing)"
-        results.append(
-            FontVariantStatus(
-                family=active_family,
-                label=f"{active_family} (current)",
-                description=(
-                    "Preserved existing terminal-policy.toml font family"
-                    if configured
-                    else "Bundled fallback font family (no Monaspace font file found)"
-                ),
-                font_file_present=custom_present,
-                font_file_path=str(custom_path) if custom_path is not None else "",
-                active=True,
-                preserved_custom=True,
-                selectable=True,
-                status_label=status_label,
-            )
-        )
-
-    for family, description, _tokens in MONASPACE_FONT_VARIANTS:
-        found = monaspace_found.get(family)
-        present = found is not None
-        is_active = family == active_family
-        selectable = present or is_active
-        if is_active and present:
-            status_label = (
-                "active · font file present (unverified renderer registration)"
-            )
-        elif is_active:
-            status_label = "active · font file missing"
-        elif present:
-            status_label = "font file present (unverified renderer registration)"
-        else:
-            status_label = "font file missing"
+    descriptions = {
+        family: description for family, description, _ in MONASPACE_FONT_VARIANTS
+    }
+    # Merge eligible faces before choosing styles; alternate spellings may
+    # carry different faces of the same family.
+    canonical: dict[str, str] = {}
+    for family in sorted(
+        families.keys() | paths.keys(), key=lambda name: (name.casefold(), name)
+    ):
+        name = canonical.setdefault(family.casefold(), family)
+        if name != family:
+            families[name].extend(families[family])
+    ordered = [
+        canonical[name.casefold()]
+        for name in MONASPACE_FAMILIES
+        if name.casefold() in canonical
+    ]
+    ordered += [name for name in canonical.values() if name not in ordered]
+    results = []
+    for family in ordered:
+        active = configured is not None and family.casefold() == configured.casefold()
+        verified = family in families
         results.append(
             FontVariantStatus(
                 family=family,
                 label=family,
-                description=description,
-                font_file_present=present,
-                font_file_path=str(found) if found is not None else "",
-                active=is_active,
-                preserved_custom=False,
-                selectable=selectable,
-                status_label=status_label,
+                description=(
+                    descriptions.get(family, "Installed fixed-width family")
+                    if verified
+                    else "Font file found; fixed-width metadata unavailable"
+                ),
+                font_file_present=True,
+                font_file_path=paths.get(family, ""),
+                active=active,
+                preserved_custom=active and not verified,
+                selectable=verified,
+                status_label=("current" if active else "available")
+                if verified
+                else (
+                    "current · unavailable for selection"
+                    if active
+                    else "unavailable for selection"
+                ),
+                face_styles=_font_face_styles(families[family])
+                if verified
+                else ("", "", ""),
+                catalogue_source=source,
+            )
+        )
+    if configured and configured.casefold() not in canonical:
+        results.append(
+            FontVariantStatus(
+                family=configured,
+                label=configured,
+                description="Current policy preserved; unavailable or not fixed-width",
+                font_file_present=False,
+                active=True,
+                preserved_custom=True,
+                selectable=False,
+                status_label="current · unavailable for selection",
+                face_styles=("", "", ""),
+                catalogue_source=source,
             )
         )
     return results
@@ -640,14 +787,18 @@ def proposed_font_family(
     for variant in variants:
         if variant.active:
             return variant.family
-    return FALLBACK_FONT_FAMILY
+    return next(
+        (variant.family for variant in variants if variant.selectable),
+        FALLBACK_FONT_FAMILY,
+    )
 
 
-def _rewrite_font_sections(raw: str, family: str) -> str:
+def _rewrite_font_sections(raw: str, family: str, styles: tuple[str, str, str]) -> str:
     lines = raw.splitlines()
     seen_sections: set[str] = set()
     updated_lines: list[str] = []
     escaped_family = json.dumps(family)
+    section_styles = dict(zip(_FONT_SECTIONS, styles, strict=True))
     idx = 0
     while idx < len(lines):
         line = lines[idx]
@@ -657,6 +808,7 @@ def _rewrite_font_sections(raw: str, family: str) -> str:
             updated_lines.append(line)
             idx += 1
             replaced_in_section = False
+            replaced_style = False
             section_body: list[str] = []
             while idx < len(lines):
                 next_line = lines[idx]
@@ -671,11 +823,31 @@ def _rewrite_font_sections(raw: str, family: str) -> str:
                     comment = match.group(2) or ""
                     section_body.append(f"{indent}family = {escaped_family}{comment}")
                     replaced_in_section = True
+                elif re.match(r"^\s*style\s*=", next_line):
+                    # Match the quoted TOML value before looking for its comment.
+                    style_match = re.match(
+                        r"""^(\s*)style\s*=\s*(?:"(?:\\.|[^"\\])*"|'[^']*')(\s*#.*)?\s*$""",
+                        next_line,
+                    )
+                    if style_match is None:
+                        raise ValueError(
+                            "terminal font style must be a single-line string"
+                        )
+                    indent, suffix = style_match.groups()
+                    suffix = suffix or ""
+                    section_body.append(
+                        f"{indent}style = {json.dumps(section_styles[normalized_section])}{suffix}"
+                    )
+                    replaced_style = True
                 else:
                     section_body.append(next_line)
                 idx += 1
             if not replaced_in_section:
                 section_body.insert(0, f"family = {escaped_family}")
+            if not replaced_style:
+                section_body.insert(
+                    1, f"style = {json.dumps(section_styles[normalized_section])}"
+                )
             updated_lines.extend(section_body)
             continue
         updated_lines.append(line)
@@ -687,7 +859,7 @@ def _rewrite_font_sections(raw: str, family: str) -> str:
                 updated_lines.append("")
             updated_lines.append(section)
             updated_lines.append(f"family = {escaped_family}")
-            updated_lines.append('style = "Regular"')
+            updated_lines.append(f"style = {json.dumps(section_styles[section])}")
 
     return "\n".join(updated_lines) + "\n"
 
@@ -700,16 +872,14 @@ def select_font_family(
     env: Mapping[str, str] | None = None,
     home: Path | None = None,
 ) -> Path:
-    """Persist ``family`` into ``terminal-policy.toml`` if selectable.
+    """Apply an eligible family and genuine styles through the existing owner.
 
-    Refuses with ``FontNotAvailableError`` when a requested Monaspace or new
-    custom family has no font file in ``font_dirs`` (unless it matches the
-    already-configured family in ``terminal-policy.toml``).
-    Updates only ``[font.normal]``, ``[font.bold]``, and ``[font.italic]``
-    ``family`` keys via atomic sibling tempfile + ``os.replace``.
+    Re-selecting an unavailable or proportional configured family is a no-op.
+    Eligible selections harmonize all three faces, including the current family.
+    Unrelated preferences, font size and offsets survive the atomic write.
     """
     clean = str(family or "").strip()
-    if not clean or any(ch in clean for ch in ('"', "'", "\n", "\r", "\x00")):
+    if not clean or any(ord(ch) < 32 or ord(ch) == 127 for ch in clean):
         raise OnboardingError(f"invalid font family {family!r}")
 
     target = (
@@ -724,26 +894,18 @@ def select_font_family(
         env=env,
         home=home,
     )
-    by_family = {variant.family: variant for variant in variants}
-
-    if configured is not None and clean == configured:
-        allowed = True
-    elif clean in by_family:
-        allowed = by_family[clean].selectable and (
-            by_family[clean].font_file_present or by_family[clean].preserved_custom
-        )
-    else:
-        dirs = (
-            tuple(Path(d) for d in font_dirs)
-            if font_dirs is not None
-            else default_font_dirs(home=home)
-        )
-        allowed = _find_font_file((clean,), dirs) is not None
-
-    if not allowed:
-        raise FontNotAvailableError(
-            f"{clean!r} cannot be selected: font file not found in ~/Library/Fonts or /Library/Fonts"
-        )
+    chosen = next(
+        (
+            variant
+            for variant in variants
+            if variant.family == clean and variant.selectable
+        ),
+        None,
+    )
+    if chosen is None:
+        if configured is not None and clean == configured:
+            return target
+        raise FontNotAvailableError(f"{clean!r} is not an available fixed-width family")
 
     existing_raw = (
         target.read_text(encoding="utf-8")
@@ -756,7 +918,7 @@ def select_font_family(
         except tomllib.TOMLDecodeError as exc:
             raise ValueError("terminal-policy.toml is malformed") from exc
 
-    updated_raw = _rewrite_font_sections(existing_raw, clean)
+    updated_raw = _rewrite_font_sections(existing_raw, clean, chosen.face_styles)
     try:
         tomllib.loads(updated_raw)
     except tomllib.TOMLDecodeError as exc:

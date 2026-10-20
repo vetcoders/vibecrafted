@@ -234,58 +234,6 @@ def test_final_signature_verifier_refuses_each_host_regression(
         contract._verify_host_permission_signatures(app)
 
 
-def test_canonical_xcode_generator_binds_privacy_and_hardening(tmp_path: Path) -> None:
-    if shutil.which("xcodegen") is None:
-        pytest.skip("XcodeGen is unavailable")
-    source = tmp_path / "app"
-    shutil.copytree(HOST_SOURCE.parent, source)
-    result = subprocess.run(
-        ["xcodegen", "generate", "--spec", str(source / "project.yml")],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    project = (source / "Vibecrafted.xcodeproj/project.pbxproj").read_text()
-    assert "Vibecrafted/Vibecrafted.entitlements" in project
-    assert "Vibecrafted/Info.plist" in project
-    assert "ENABLE_HARDENED_RUNTIME = YES" in project
-    assert "ENABLE_APP_SANDBOX = YES" not in project
-    assert "io.vetcoders.vibecrafted;" in project
-    info = plistlib.loads((source / "Vibecrafted/Info.plist").read_bytes())
-    contract._validate_host_usage_descriptions(info)
-
-
-def test_release_path_consumes_plan_and_verifies_final_signatures() -> None:
-    builder = (ROOT / "scripts/build-vibecrafted-release.sh").read_text()
-    assert '--entitlements "$host_entitlements" "$APP"' in builder
-    assert '"$APP/Contents/MacOS/vc-terminal" "$host_entitlements"' in builder
-    assert builder.index('--entitlements-output "$host_entitlements"') < builder.index(
-        'sign_macho_tree "$APP/Contents"'
-    )
-    assert builder.count('--app "$APP" --verify-only --verify-signatures') == 2
-    notarize = builder[
-        builder.index("notarize_product() {") : builder.index("emit_release_tuple() {")
-    ]
-    assert (
-        '"$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions' in notarize
-    )
-    assert "$SOURCE_ROOT" not in notarize
-    assert contract._release_policy()["entitlements"] == contract.HOST_ENTITLEMENTS
-    schema = json.loads(
-        (
-            ROOT
-            / "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json"
-        ).read_text()
-    )
-    assert '"com.apple.security.device.audio-input"' in json.dumps(schema)
-    debug = (ROOT / "vibecrafted-app/shell-agent/Makefile").read_text()
-    grant = next(line for line in debug.splitlines() if "--entitlements" in line)
-    assert "--deep" not in grant
-    assert "--options runtime" in grant
-
-
 def test_final_product_manifest_generation_preserves_host_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

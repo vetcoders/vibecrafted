@@ -26,6 +26,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the main host plus embedded terminal with the audio-input hardened-runtime
   entitlement. Release assembly checks both final signatures; normal macOS
   consent remains required after a notarized install.
+- The existing terminal font chooser lists curated Monaspace NF families first,
+  then installed fixed-width families identified by macOS CoreText traits.
+  Paging and wheel navigation keep the list usable; `launcher --font` opens it
+  directly without provider setup. Font policy changes only on explicit Apply.
+  Invalid UTF-8 policy stays recoverable without rewriting its bytes; filename
+  matches cannot authorize selection, and case variants retain all genuine faces.
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.
 - OMP telemetry follows native profiles and agent-directory overrides, retains

@@ -1473,6 +1473,7 @@ class Workshop:
         *,
         mode: str = "home",
         onboarding: bool = False,
+        font: bool = False,
         onboarding_policy_path: Path | None = None,
         onboarding_font_dirs: tuple[Path, ...] | list[Path] | None = None,
         onboarding_home: Path | None = None,
@@ -1565,13 +1566,17 @@ class Workshop:
             onboarding
             or os.environ.get("VIBECRAFTED_WORKSHOP_ONBOARDING", "").strip() == "1"
         )
+        self.font_only = font
+        self.font_catalogue_note = ""
+        self.onboarding_font_scroll = 0
         self.onboarding_step = 1
         self.onboarding_provider_idx = 0
         self.onboarding_font_idx = 0
         self.onboarding_variants: list[Any] = []
         self.configured_font_family = ""
-        self._sync_onboarding_typography()
-        if self.onboarding_active:
+        if font:
+            self.open_onboarding(step=2)
+        elif self.onboarding_active:
             self.open_onboarding(step=1)
 
         self._load_choices(restore_slots=True)
@@ -1701,23 +1706,55 @@ class Workshop:
     # ─── ZenEntry Onboarding & Monaspace Typography Methods ──────────────────
 
     def _sync_onboarding_typography(self) -> None:
+        self.configured_font_family = ""
         try:
+            self.configured_font_family = (
+                command_bridge_onboarding.read_configured_font_family(
+                    self.onboarding_policy_path
+                )
+                or ""
+            )
             variants = command_bridge_onboarding.inspect_font_variants(
                 policy_path=self.onboarding_policy_path,
                 font_dirs=self.onboarding_font_dirs,
             )
-        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
+            self.font_catalogue_note = (
+                "Installed fixed-width fonts · Monaspace NF first"
+                if variants
+                and variants[0].catalogue_source == "CoreText fixed-pitch traits"
+                else "Native catalogue unavailable; font files cannot verify fixed width"
+                if variants
+                else "No fixed-width families available"
+            )
+        except (OSError, ValueError, command_bridge_onboarding.OnboardingError) as exc:
             variants = []
+            self.font_catalogue_note = str(exc)
         self.onboarding_variants = variants
-        active_idx = 0
-        for idx, item in enumerate(variants):
-            if getattr(item, "active", False):
-                active_idx = idx
-                self.configured_font_family = item.family
-                break
-        if variants and not self.configured_font_family:
-            self.configured_font_family = variants[0].family
-        self.onboarding_font_idx = active_idx
+        self.onboarding_font_idx = next(
+            (
+                idx
+                for idx, item in enumerate(variants)
+                if item.active and item.selectable
+            ),
+            0,
+        )
+        self.onboarding_font_scroll = 0
+
+    def _onboarding_font_viewport(self) -> tuple[int, int, int]:
+        height, _ = self.window.getmaxyx()
+        top = 1
+        start = top + 5
+        capacity = max(0, height - start - 5)
+        count = len(self.onboarding_variants)
+        self.onboarding_font_idx = max(
+            0, min(self.onboarding_font_idx, max(0, count - 1))
+        )
+        scroll = min(self.onboarding_font_scroll, max(0, count - capacity))
+        if capacity:
+            scroll = min(scroll, self.onboarding_font_idx)
+            scroll = max(scroll, self.onboarding_font_idx - capacity + 1)
+        self.onboarding_font_scroll = max(0, scroll)
+        return start, capacity, self.onboarding_font_scroll
 
     def open_onboarding(self, *, step: int = 1) -> None:
         self.onboarding_active = True
@@ -1725,6 +1762,8 @@ class Workshop:
         self.error = ""
         self.notice = ""
         self._sync_onboarding_typography()
+        if self.onboarding_step == 2:
+            return
         try:
             st = command_bridge_onboarding.status(self.onboarding_home)
             if st.state == "pending":
@@ -1738,6 +1777,8 @@ class Workshop:
             pass
 
     def close_onboarding(self) -> None:
+        if self.font_only:
+            raise SystemExit(0)
         try:
             st = command_bridge_onboarding.status(self.onboarding_home)
             if st.state == "in_progress":
@@ -1776,13 +1817,16 @@ class Workshop:
 
     def _onboarding_apply_font(self, index: int | None = None) -> None:
         if not self.onboarding_variants:
-            self._sync_onboarding_typography()
-        if not self.onboarding_variants:
-            self.onboarding_active = False
+            self.error = self.font_catalogue_note or "No fixed-width families available"
             return
         if index is not None and 0 <= index < len(self.onboarding_variants):
             self.onboarding_font_idx = index
         chosen = self.onboarding_variants[self.onboarding_font_idx]
+        if not chosen.selectable:
+            self.error = (
+                "Current policy is preserved. Choose an available fixed-width family."
+            )
+            return
         try:
             command_bridge_onboarding.select_font_family(
                 chosen.family,
@@ -1801,7 +1845,9 @@ class Workshop:
         self._sync_onboarding_typography()
         self.configured_font_family = chosen.family
         self.error = ""
-        self.notice = f"Typography set to {chosen.family}"
+        self.notice = f"Terminal font set to {chosen.family}"
+        if self.font_only:
+            raise SystemExit(0)
         try:
             st = command_bridge_onboarding.status(self.onboarding_home)
             if st.state == "in_progress":
@@ -1814,9 +1860,13 @@ class Workshop:
         height, width = self.window.getmaxyx()
         left = max(1, (width - min(width - 2, 84)) // 2)
         inner = max(20, width - left - 2)
-        top = max(1, (height - 18) // 2)
+        top = 1 if self.onboarding_step == 2 else max(1, (height - 18) // 2)
 
-        header = f"ZenEntry Setup · Step {self.onboarding_step} of 2"
+        header = (
+            "Terminal font"
+            if self.onboarding_step == 2
+            else "ZenEntry Setup · Step 1 of 2"
+        )
         _safe_addstr(self.window, top, left, header, curses.A_BOLD | _ACCENT)
 
         if self.onboarding_step == 1:
@@ -1884,13 +1934,14 @@ class Workshop:
                 (btn_row, col3, col3 + len(close_txt), 0, "onboarding_close")
             )
         else:
-            if not self.onboarding_variants:
-                self._sync_onboarding_typography()
             _safe_addstr(
                 self.window,
                 top + 1,
                 left,
-                "Step 2: Terminal Typography — existing policy family is preserved until you choose another.",
+                _clip(
+                    f"Current: {self.configured_font_family or 'terminal default'}",
+                    inner,
+                ),
                 curses.A_DIM,
             )
             preview_row = top + 2
@@ -1904,8 +1955,16 @@ class Workshop:
                 _clip(preview_line, inner),
                 curses.A_BOLD,
             )
-            row_y = top + 4
-            for idx, variant in enumerate(self.onboarding_variants):
+            _safe_addstr(
+                self.window,
+                top + 3,
+                left,
+                _clip(self.font_catalogue_note, inner),
+                curses.A_DIM,
+            )
+            row_y, capacity, scroll = self._onboarding_font_viewport()
+            visible = self.onboarding_variants[scroll : scroll + capacity]
+            for idx, variant in enumerate(visible, start=scroll):
                 selected = idx == self.onboarding_font_idx
                 _paint_row_focus(self.window, row_y, left, selected)
                 line = f"{idx + 1}. {variant.label:28} · {variant.status_label} · {variant.description}"
@@ -1922,9 +1981,17 @@ class Workshop:
                     (row_y, left, left + min(len(line), inner), idx, "onboarding_font")
                 )
                 row_y += 1
-            btn_row = row_y + 1
+            end = min(scroll + capacity, len(self.onboarding_variants))
+            _safe_addstr(
+                self.window,
+                height - 5,
+                left,
+                f"{scroll + 1 if end else 0}-{end} / {len(self.onboarding_variants)}",
+                curses.A_DIM,
+            )
+            btn_row = height - 4
             apply_txt = "[ Apply Font (Enter) ]"
-            back_txt = "[ Back (b) ]"
+            back_txt = "" if self.font_only else "[ Back (b) ]"
             close_txt = "[ Close (Esc) ]"
             _safe_addstr(self.window, btn_row, left, apply_txt, curses.A_BOLD)
             self.mouse_targets.append(
@@ -1942,7 +2009,9 @@ class Workshop:
             )
 
         hint = (
-            "1..9 select · ↑/↓ navigate · Enter confirm · s next · b back · Esc close"
+            "↑/↓ · PgUp/PgDn · Home/End · wheel · Enter apply · Esc close"
+            if self.onboarding_step == 2
+            else "1..9 select · ↑/↓ navigate · Enter confirm · s next · Esc close"
         )
         _safe_addstr(self.window, height - 2, left, _clip(hint, inner), curses.A_DIM)
         if self.error:
@@ -1964,6 +2033,9 @@ class Workshop:
 
     def handle_onboarding_key(self, key: int) -> None:
         if key == 27:
+            if self.font_only:
+                self.close_onboarding()
+                return
             if self.onboarding_step == 2:
                 self.onboarding_step = 1
                 self.error = ""
@@ -1990,8 +2062,6 @@ class Workshop:
             elif key in (10, 13, curses.KEY_ENTER):
                 self._onboarding_confirm_provider()
         else:
-            if not self.onboarding_variants:
-                self._sync_onboarding_typography()
             count = len(self.onboarding_variants)
             if key in (curses.KEY_UP, curses.KEY_LEFT):
                 self.onboarding_font_idx = (self.onboarding_font_idx - 1) % max(
@@ -2001,11 +2071,21 @@ class Workshop:
                 self.onboarding_font_idx = (self.onboarding_font_idx + 1) % max(
                     1, count
                 )
+            elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+                _, capacity, _ = self._onboarding_font_viewport()
+                delta = max(1, capacity) * (-1 if key == curses.KEY_PPAGE else 1)
+                self.onboarding_font_idx = max(
+                    0, min(count - 1, self.onboarding_font_idx + delta)
+                )
+            elif key in (curses.KEY_HOME, curses.KEY_END):
+                self.onboarding_font_idx = (
+                    0 if key == curses.KEY_HOME else max(0, count - 1)
+                )
             elif ord("1") <= key <= ord("9"):
-                idx = key - ord("1")
+                idx = self.onboarding_font_scroll + key - ord("1")
                 if idx < count:
                     self.onboarding_font_idx = idx
-            elif key in (ord("b"), ord("B")):
+            elif key in (ord("b"), ord("B")) and not self.font_only:
                 self.error = ""
                 self.onboarding_step = 1
             elif key in (10, 13, curses.KEY_ENTER):
@@ -3625,6 +3705,13 @@ class Workshop:
             _, x, y, _, state = curses.getmouse()
         except curses.error:
             return
+        if self.onboarding_active and self.onboarding_step == 2:
+            if state & getattr(curses, "BUTTON4_PRESSED", 0):
+                self.handle_onboarding_key(curses.KEY_UP)
+                return
+            if state & getattr(curses, "BUTTON5_PRESSED", 0):
+                self.handle_onboarding_key(curses.KEY_DOWN)
+                return
         # Hover/drag, release and secondary buttons are never an activation.
         # One physical click is one press; a CLICKED that ncurses still
         # synthesizes for the same press is that click, not a second one.
@@ -3672,12 +3759,11 @@ class Workshop:
                 return
             if kind == "onboarding_font":
                 self.onboarding_font_idx = int(index)
-                self._onboarding_apply_font(int(index))
                 return
             if kind == "onboarding_apply_font":
                 self._onboarding_apply_font()
                 return
-            if kind == "onboarding_back":
+            if kind == "onboarding_back" and not self.font_only:
                 self.error = ""
                 self.onboarding_step = 1
                 return
@@ -4086,7 +4172,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Open ZenEntry setup and terminal typography selector",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--font", action="store_true", help="Open the terminal font chooser directly"
+    )
+    args = parser.parse_args(argv)
+    if args.font and (args.mode != "launcher" or args.onboarding):
+        parser.error(
+            "--font requires launcher and cannot be combined with --onboarding"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4097,6 +4191,7 @@ def main(argv: list[str] | None = None) -> int:
                 window,
                 mode=args.mode,
                 onboarding=bool(getattr(args, "onboarding", False)),
+                font=args.font,
             ).run()
         )
     except KeyboardInterrupt:
