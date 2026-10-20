@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- macOS host packaging declares microphone and speech-recognition use and signs
+  the main host plus embedded terminal with the audio-input hardened-runtime
+  entitlement. Release assembly checks both final signatures; normal macOS
+  consent remains required after a notarized install.
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.
 - OMP telemetry follows native profiles and agent-directory overrides, retains

@@ -69,6 +69,11 @@ OUTER_BUNDLE_CODE_IDENTITY = "outer-bundle-codesign-v1"
 MACHO_CODE_IDENTITY = "macho-code-v1"
 TRUSTED_RUNNER_PUBLIC_KEY_NAME = "vibecrafted-signing-v1.pub"
 RELEASE_POLICY_NAME = "release-policy.v1.json"
+HOST_ENTITLEMENTS = {"com.apple.security.device.audio-input": True}
+HOST_USAGE_DESCRIPTION_KEYS = (
+    "NSMicrophoneUsageDescription",
+    "NSSpeechRecognitionUsageDescription",
+)
 RELEASE_DMG_PATTERN = (
     r"^Vibecrafted_[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-"
     r"[0-9]{8}-[0-9a-f]{8}\.dmg$"
@@ -790,7 +795,7 @@ def _release_policy() -> Mapping[str, Any]:
             'certificate leaf[subject.OU] = "MW223P3NPX"'
         ),
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": HOST_ENTITLEMENTS,
     }
     if policy != expected:
         _fail(E_PROOF, "packaged release policy does not match the v1 trust contract")
@@ -2286,6 +2291,7 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, f"Info.plist executable must be {PRODUCT_EXECUTABLE}")
     if plist.get("CFBundleIconFile") != PRODUCT_ICON_FILE:
         _fail(E_BUNDLE, f"Info.plist icon must be {PRODUCT_ICON_FILE}")
+    _validate_host_usage_descriptions(plist)
     icon_path = app / "Contents/Resources" / PRODUCT_ICON_FILE
     if not icon_path.is_file() or icon_path.is_symlink():
         _fail(E_BUNDLE, f"application icon is missing: {PRODUCT_ICON_FILE}")
@@ -2409,8 +2415,8 @@ def _codesign_release_evidence(app: Path) -> dict[str, Any]:
             _fail(E_PROOF, f"final app entitlements are malformed: {exc}")
     else:
         # codesign exits successfully with an empty stdout when the signature
-        # carries no entitlement blob. That is the required release policy,
-        # distinct from an unreadable query (non-zero exit above).
+        # carries no entitlement blob. Observation must stay distinct from an
+        # unreadable query; release policy comparison rejects this empty set.
         entitlements = {}
     if not isinstance(entitlements, dict):
         _fail(E_PROOF, "final app entitlements are not a dictionary")
@@ -2436,6 +2442,48 @@ def _release_relative_path(root: Path, value: Any, *, field: str) -> Path:
     return candidate
 
 
+def _validate_host_usage_descriptions(plist: Mapping[str, Any]) -> None:
+    for key in HOST_USAGE_DESCRIPTION_KEYS:
+        value = plist.get(key)
+        if not isinstance(value, str) or not value.strip() or "$(" in value:
+            _fail(E_BUNDLE, f"host requires a non-empty {key}")
+
+
+def _verify_host_permission_signatures(app: Path) -> None:
+    """Read the final signatures; a signing plan is not entitlement evidence."""
+    for target in (app, app / "Contents/MacOS/vc-terminal"):
+        result = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(target)],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            _fail(E_PROOF, f"host entitlements are unreadable: {target.name}")
+        try:
+            observed = plistlib.loads(result.stdout)
+        except (plistlib.InvalidFileException, ExpatError, ValueError) as exc:
+            _fail(E_PROOF, f"host entitlements are missing or malformed: {exc}")
+        # Strict bool identity also refuses integer 1 in place of plist true.
+        if (
+            not isinstance(observed, dict)
+            or observed.keys() != HOST_ENTITLEMENTS.keys()
+            or observed.get("com.apple.security.device.audio-input") is not True
+        ):
+            _fail(E_PROOF, f"host entitlement policy mismatch: {target.name}")
+        metadata = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--verbose=4", str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if metadata.returncode != 0 or not re.search(
+            r"^CodeDirectory .*flags=.*\([^)]*\bruntime\b[^)]*\)",
+            metadata.stdout + metadata.stderr,
+            re.MULTILINE,
+        ):
+            _fail(E_PROOF, f"host requires hardened runtime: {target.name}")
+
+
 def _verify_release_signer_policy(
     app: Path, outer: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2451,6 +2499,7 @@ def _verify_release_signer_policy(
         _fail(E_PROOF, "release output signer policy violates packaged policy")
     if observed_signer != {"cdhash": outer["cdhash"], **expected_signer}:
         _fail(E_PROOF, "final app signer evidence does not match release output")
+    _verify_host_permission_signatures(app)
     return observed_signer, expected_signer
 
 
@@ -4169,6 +4218,8 @@ def _self_test() -> int:
                     "CFBundleShortVersionString": "1.0.0",
                     "CFBundleVersion": "1",
                     "ATSApplicationFontsPath": "fonts",
+                    "NSMicrophoneUsageDescription": "Voice input when requested.",
+                    "NSSpeechRecognitionUsageDescription": "Transcribe speech when requested.",
                 },
                 handle,
             )

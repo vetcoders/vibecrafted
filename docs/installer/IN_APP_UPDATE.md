@@ -318,3 +318,99 @@ Check for Updates → Install Update path remain separate delivery steps.
   atomic exchange.
 - Security hooks skipped by this W1 checkpoint must be restored by the
   integrator.
+
+## Microphone and speech recognition in the macOS host
+
+`vibecrafted-app/shell-agent/app/Vibecrafted/Info.plist` owns the two purpose
+strings: `NSMicrophoneUsageDescription` and
+`NSSpeechRecognitionUsageDescription`. The adjacent `Vibecrafted.entitlements`
+owns exactly `com.apple.security.device.audio-input = true`. This is the
+hardened-runtime audio-input entitlement; the host does not enable App Sandbox.
+Speech recognition uses its own purpose string and authorization request. A
+sandbox speech-recognition entitlement is not needed for this unsandboxed host.
+Neither declaration grants consent or resets a previous denial.
+
+XcodeGen binds that plist and entitlement file in `project.yml`, including the
+development target. The release build disables Xcode signing, so its actual
+assembly boundary independently runs `unified_product_manifest.py
+host-permissions`, copies the canonical purpose strings into the generated
+bundle and writes `build/.../host-entitlements.plist`. The builder applies this
+file to the outer `Vibecrafted.app` signature and to
+`Contents/MacOS/vc-terminal`. Other nested tools and dylibs keep their existing
+signing policy. The Runtime Pack's flat internal terminal is not a second GUI
+host; its macOS public entry still requires the fixed Applications host.
+
+The release builder emits `host-permissions-plan.json` before signing and
+`host-permissions-receipt.json` after reading both actual entitlement blobs and
+hardened-runtime flags. The notarize-only path repeats this read-only check.
+The product verifier requires both purpose strings; release signer policy and
+its schema pin the exact audio-input entitlement and reject extra exemptions.
+
+A safe assembly probe uses an **unsigned temporary** `.app` containing an
+`Info.plist` with the canonical identity. It needs no compiler, signing key,
+installed App, recording device or privacy prompt:
+
+```bash
+# APP is the temporary bundle; PLAN_DIR is outside it.
+PYTHONPATH="$PWD/vibecrafted-core" scripts/project-python \
+  scripts/unified_product_manifest.py host-permissions \
+  --app "$APP" --entitlements-output "$PLAN_DIR/host-entitlements.plist"
+/usr/bin/plutil -p "$APP/Contents/Info.plist"
+/usr/bin/plutil -p "$PLAN_DIR/host-entitlements.plist"
+```
+
+### Founder-authorized build and installed smoke
+
+After admission into a clean source checkout, the integrator runs
+`make unified-product-contract-gate` once. An older installed verifier pins an
+empty entitlement set and can reject this candidate through in-app Update.
+Use the source-owned installation path below for that transition; do not relax
+its trust policy or edit the installed bundle.
+
+1. Record the source SHA, existing Frame session/pane identities, current App
+   version/build, and a checksum of `~/.config/vibecrafted/config.toml` (record
+   absence when it does not exist). Keep a terminal attached to each active
+   Frame workspace. Build from the canonical root with the established donor
+   roots available; an isolated checkout can explicitly export
+   `VIBECRAFTED_TERMINAL_REPO` and `VIBECRAFTED_FRAME_REPO` first.
+2. Build, sign, notarize and staple through the canonical target:
+
+   ```bash
+   zsh -ic 'NOTARY_PROFILE=vibecrafted-notary make release RELEASE_FLAGS=--snapshot-donors KEYS="$HOME/.keys"'
+   xcrun stapler validate dist/Vibecrafted.app
+   spctl --assess --type execute --verbose=2 dist/Vibecrafted.app
+   PYTHONPATH="$PWD/vibecrafted-core" scripts/project-python \
+     scripts/unified_product_manifest.py host-permissions \
+     --app dist/Vibecrafted.app --verify-only --verify-signatures
+   ```
+
+   Use the configured Founder notary profile if its name differs. Inspect the
+   exact source/version/build receipts and the final DMG's stapled ticket.
+   Never hand a `--no-notarize` artifact to a person.
+
+3. At a Founder-selected idle point, run `bash scripts/install-app.sh` on that
+   already notarized `dist/Vibecrafted.app`. Do not use `make install-app` here:
+   its `app` prerequisite builds a fresh signed, unstapled candidate. The
+   journaled helper may quit/relaunch the **Main UI**; it must preserve terminal
+   helpers, detached Frame servers, PTYs, agents and server configuration.
+   Stop if its admission/identity guard refuses; do not kill sessions to pass.
+4. Repeat the host-permissions verification above with
+   `--app /Applications/Vibecrafted.app`; verify its signature, stapled ticket,
+   source/version/build and launched Main executable path. Compare the server
+   config checksum and original Frame sessions/panes. Only after successful
+   install and launch verification, play the prescribed success ping.
+5. From the installed App, deliberately start a supported tool's microphone
+   request and handle the normal macOS dialog. Separately request Speech
+   framework authorization/transcription using a fresh Founder-selected test
+   payload. Speech recognition of a file and microphone capture are distinct
+   acceptance surfaces; successful TTS proves neither. Record each outcome,
+   responsible App identity and selected child tool. A persisted denial may
+   need the Founder's change in **System Settings → Privacy & Security →
+   Microphone / Speech Recognition**. Do not reset TCC or inspect private audio
+   to manufacture acceptance.
+
+Packaging proves the declarations and signature policy, not the user's consent
+or every external CLI's own signing and request behavior. Existing running
+terminal processes keep their prior loaded generation until a normal,
+Founder-controlled session turnover; preserve them and record which generation
+was used for live acceptance.

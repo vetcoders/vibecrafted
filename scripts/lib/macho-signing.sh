@@ -255,14 +255,23 @@ verify_macho_app_bundles() {
 
 sign_macho_tree() {
   local root="$1" excluded="${2:-}" candidate
+  local permission_executable="${3:-}" permission_entitlements="${4:-}"
+  local -a entitlement_args
   [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
   [[ -n "${SIGNING_IDENTITY:-}" ]] \
     || macho_signing_die "SIGNING_IDENTITY is empty" || return 1
   while IFS= read -r -d '' candidate; do
     [[ -z "$excluded" || "$candidate" != "$excluded" ]] || continue
     if is_macho_file "$candidate"; then
+      entitlement_args=()
+      if [[ -n "$permission_executable" && "$candidate" == "$permission_executable" ]]; then
+        [[ -s "$permission_entitlements" ]] \
+          || macho_signing_die "missing host entitlements: $permission_entitlements" || return 1
+        entitlement_args=(--entitlements "$permission_entitlements")
+      fi
       codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" "$candidate" \
+        ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
+        ${entitlement_args[@]+"${entitlement_args[@]}"} "$candidate" \
         || macho_signing_die "could not sign ${candidate#"$root"/}" || return 1
     fi
   done < <(find "$root" -type f -print0)

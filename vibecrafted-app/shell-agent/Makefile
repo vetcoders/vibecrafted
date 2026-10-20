@@ -45,7 +45,8 @@ app: bindings xcode
 	@../../scripts/build-vibecrafted-icon.sh ../../docs/presence/logo-master.png build/VibecraftedDev.app/Contents/Resources/Vibecrafted.icns
 	@! find build/VibecraftedDev.app/Contents/Resources -maxdepth 1 -type f -name '*.icns' ! -name 'Vibecrafted.icns' -print -quit | grep -q .
 	@./scripts/fix-dylib-install-names.sh build/VibecraftedDev.app
-	@codesign --force --deep --sign - build/VibecraftedDev.app
+	@codesign --force --deep --options runtime --sign - build/VibecraftedDev.app
+	@codesign --force --options runtime --entitlements app/Vibecrafted/Vibecrafted.entitlements --sign - build/VibecraftedDev.app
 	@echo "App built: build/VibecraftedDev.app (io.vetcoders.vibecrafted.dev)"
 
 dmg:
