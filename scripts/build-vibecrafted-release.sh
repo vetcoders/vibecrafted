@@ -1283,7 +1283,15 @@ build_product() {
   assert_payload_is_anonymous "$APP" "Vibecrafted.app"
 
   log "Signing nested code and binding exact source receipts"
-  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted"
+  # The actual assembly boundary owns privacy metadata and signing inputs.
+  # Xcode signing is disabled above; CODE_SIGN_ENTITLEMENTS alone is insufficient.
+  local host_entitlements="$BUILD_DIR/host-entitlements.plist"
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --entitlements-output "$host_entitlements" \
+    > "$BUILD_DIR/host-permissions-plan.json"
+  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted" \
+    "$APP/Contents/MacOS/vc-terminal" "$host_entitlements"
   sign_nested_app_bundles
   sign_helper_scripts
   embed_runtime_pack
@@ -1299,7 +1307,7 @@ build_product() {
     --terminal-sha "$(git_sha "$TERMINAL_REPO")" \
     --frame-sha "$(git_sha "$FRAME_REPO")"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$APP"
+    "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"
   log "Probing the signed bundled Python without mutating the app seal"
   "$runtime/bin/python3" -c 'import jsonschema, yaml, vibecrafted_core.product_contract'
   if find "$APP/Contents" \( -type d -name __pycache__ -o -type f -name '*.py[co]' \) \
@@ -1307,6 +1315,10 @@ build_product() {
     die "bundled Python mutated the signed application payload"
   fi
   codesign --verify --deep --strict --verbose=2 "$APP"
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --verify-only --verify-signatures \
+    > "$BUILD_DIR/host-permissions-receipt.json"
   verify_update_channel
   run_bundled_verifier app "$APP" --require-clean
 }
@@ -1325,6 +1337,14 @@ create_dmg() {
 
 notarize_product() {
   local app_zip="$BUILD_DIR/Vibecrafted.app.zip"
+  # Also covers --notarize-only: do not spend a ticket on an older assembly
+  # that lacks host declarations or loses terminal entitlements on re-sign.
+  # The source snapshot is reaped after a build; notarize-only reads the
+  # current checkout's verifier just like verify_update_channel above.
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --verify-only --verify-signatures \
+    > "$BUILD_DIR/host-permissions-receipt.json"
   verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
     || die "refusing notarization: embedded Runtime Pack Mach-O preflight failed"
   rm -f "$app_zip"

@@ -21,6 +21,7 @@ targets:
           - "Bridge/vibecrafted_shell_ffiFFI.h"
           - "Bridge/vibecrafted_shell_ffiFFI.modulemap"
           - "Info.plist"
+          - "Vibecrafted.entitlements"
           - "Vibecrafted.icns"
     preBuildScripts:
       - name: "Build Rust FFI"
@@ -39,6 +40,8 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: Vibecrafted/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Vibecrafted/Vibecrafted.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         SWIFT_OBJC_BRIDGING_HEADER: "Vibecrafted/Bridge/vibecrafted_shell_ffiFFI.h"
         CODE_SIGN_IDENTITY: "-"

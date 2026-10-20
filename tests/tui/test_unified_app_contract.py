@@ -207,8 +207,21 @@ def _macho_dependencies(path: Path) -> list[str]:
 
 
 def _codesign_macho(path: Path) -> None:
+    permission_args = (
+        [
+            "--options",
+            "runtime",
+            "--entitlements",
+            str(
+                REPO_ROOT
+                / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.entitlements"
+            ),
+        ]
+        if path.name == "vc-terminal"
+        else []
+    )
     result = subprocess.run(
-        ["codesign", "--force", "--sign", "-", str(path)],
+        ["codesign", "--force", "--sign", "-", *permission_args, str(path)],
         check=False,
         capture_output=True,
         text=True,
@@ -218,7 +231,20 @@ def _codesign_macho(path: Path) -> None:
 
 def _codesign_app(app: Path) -> None:
     result = subprocess.run(
-        ["codesign", "--force", "--sign", "-", str(app)],
+        [
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--entitlements",
+            str(
+                REPO_ROOT
+                / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.entitlements"
+            ),
+            str(app),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -572,6 +598,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1",
                 "ATSApplicationFontsPath": "fonts",
+                "NSMicrophoneUsageDescription": "Voice input when requested.",
+                "NSSpeechRecognitionUsageDescription": "Transcribe speech when requested.",
             },
             handle,
         )
@@ -866,7 +894,7 @@ def _release_output_fixture(
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
     }
     policy = contract._release_policy()
     executable = app / product["outer_bundle_code"]["path"]
@@ -1012,7 +1040,7 @@ def _developer_id_release_app(root: Path, macho_executable: Path) -> Path:
     ]
     nested_before = {path: _sha256(path) for path in nested}
     empty_entitlements = root / "empty-entitlements.plist"
-    empty_entitlements.write_bytes(plistlib.dumps({}))
+    empty_entitlements.write_bytes(plistlib.dumps(contract.HOST_ENTITLEMENTS))
     signed = subprocess.run(
         [
             "/usr/bin/codesign",
@@ -3406,7 +3434,7 @@ def test_packaged_release_policy_pins_the_existing_public_key() -> None:
     assert policy["public_key_spki_sha256"] == contract.RELEASE_KEY_SPKI_SHA256
     assert policy["team_id"] == "MW223P3NPX"
     assert policy["hardened_runtime"] is True
-    assert policy["entitlements"] == {}
+    assert policy["entitlements"] == {"com.apple.security.device.audio-input": True}
 
 
 def test_signed_release_output_binds_live_artifacts_and_signer_policy(
@@ -4135,7 +4163,7 @@ def test_real_developer_id_requirement_passes_and_entitlement_drift_fails(
     app = tmp_path / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     empty_entitlements = tmp_path / "empty-entitlements.plist"
-    empty_entitlements.write_bytes(plistlib.dumps({}))
+    empty_entitlements.write_bytes(plistlib.dumps(contract.HOST_ENTITLEMENTS))
     signed = subprocess.run(
         [
             "codesign",
@@ -4407,7 +4435,7 @@ def test_release_output_rejects_foreign_signer_or_entitlement_drift_even_with_sa
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
         **signer_drift,
     }
     receipt, signature, _, _ = _release_output_fixture(
@@ -4858,7 +4886,7 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
     }
     monkeypatch.setattr(
         unified_product_manifest.contract,

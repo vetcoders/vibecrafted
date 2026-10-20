@@ -124,6 +124,73 @@ def configure_update_channel(args: argparse.Namespace) -> None:
     print(json.dumps(receipt, sort_keys=True))
 
 
+def configure_host_permissions(args: argparse.Namespace) -> None:
+    """Assemble privacy metadata before signing, or inspect the sealed result.
+
+    Used by the release builder and the safe temporary-bundle packaging probe.
+    It never signs code, launches the host, or calls a privacy API.
+    """
+    app = args.app
+    plist_path = app / "Contents/Info.plist"
+    if plist_path.is_symlink() or not plist_path.is_file():
+        raise SystemExit("host permissions require a regular Info.plist")
+    plist = plistlib.loads(plist_path.read_bytes())
+    if (
+        not isinstance(plist, dict)
+        or plist.get("CFBundleIdentifier") != contract.PRODUCT_BUNDLE_ID
+    ):
+        raise SystemExit("host permissions require the canonical app identity")
+    if args.verify_only:
+        contract._validate_host_usage_descriptions(plist)
+        if args.verify_signatures:
+            contract._verify_host_permission_signatures(app)
+    else:
+        if args.verify_signatures:
+            raise SystemExit("--verify-signatures requires --verify-only")
+        if (app / "Contents/_CodeSignature").exists():
+            raise SystemExit("refusing host permission mutation of a signed App")
+        if args.entitlements_output is None:
+            raise SystemExit("host assembly requires --entitlements-output")
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "vibecrafted-app/shell-agent/app/Vibecrafted"
+        )
+        canonical = plistlib.loads((source / "Info.plist").read_bytes())
+        contract._validate_host_usage_descriptions(canonical)
+        entitlements = plistlib.loads(
+            (source / "Vibecrafted.entitlements").read_bytes()
+        )
+        if (
+            entitlements != contract.HOST_ENTITLEMENTS
+            or entitlements.get("com.apple.security.device.audio-input") is not True
+        ):
+            raise SystemExit(
+                "host signing input differs from the release entitlement policy"
+            )
+        for key in contract.HOST_USAGE_DESCRIPTION_KEYS:
+            plist[key] = canonical[key]
+        args.entitlements_output.parent.mkdir(parents=True, exist_ok=True)
+        args.entitlements_output.write_bytes(plistlib.dumps(entitlements))
+        plist_path.write_bytes(plistlib.dumps(plist))
+    print(
+        json.dumps(
+            {
+                "usage_descriptions": {
+                    key: plist[key] for key in contract.HOST_USAGE_DESCRIPTION_KEYS
+                },
+                "entitlements": contract.HOST_ENTITLEMENTS,
+                "hardened_runtime": True,
+                "signing_targets": ["Vibecrafted.app", "Contents/MacOS/vc-terminal"],
+                "signatures_verified": bool(
+                    args.verify_only and args.verify_signatures
+                ),
+                "live_consent_verified": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, Any]:
     path = root / relative
     if kind is None:
@@ -474,11 +541,18 @@ def main() -> int:
     choice.add_argument("--unprovisioned", action="store_true")
     channel.add_argument("--app", type=Path)
     channel.add_argument("--verify-only", action="store_true")
+    permissions = commands.add_parser("host-permissions")
+    permissions.add_argument("--app", type=Path, required=True)
+    permissions.add_argument("--entitlements-output", type=Path)
+    permissions.add_argument("--verify-only", action="store_true")
+    permissions.add_argument("--verify-signatures", action="store_true")
     args = parser.parse_args()
     if args.command == "app":
         produce_app(args)
     elif args.command == "release":
         produce_release(args)
+    elif args.command == "host-permissions":
+        configure_host_permissions(args)
     else:
         configure_update_channel(args)
     return 0
