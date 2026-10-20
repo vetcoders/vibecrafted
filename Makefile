@@ -318,6 +318,9 @@ mkdir -m 700 "$$gate_root/tmp" "$$gate_root/vibecrafted-home"; \
 export TMPDIR="$$gate_root/tmp" VIBECRAFTED_HOME="$$gate_root/vibecrafted-home"
 endef
 
+# The verifier self-test needs jsonschema, which only the selected core
+# environment carries; it takes that interpreter through project-python's explicit
+# PYTHON contract, never the ambient PYTHON/PATH or an unrelated checkout .venv.
 unified-product-contract-gate:
 	@set -eu; \
 	$(UNIFIED_GATE_HERMETIC_ENV); \
@@ -339,7 +342,9 @@ unified-product-contract-gate:
 		vibecrafted-core/tests/test_package_layout.py \
 		vibecrafted-core/tests/test_doctor.py \
 		vibecrafted-core/tests/test_runtime_receipt.py -q; \
-	bash scripts/verify-vibecrafted-product.sh --self-test; \
+	core_env='$(subst ','\'',$(UNIFIED_GATE_CORE_ENVIRONMENT))'; \
+	case "$$core_env" in /*) ;; *) core_env='$(subst ','\'',$(CURDIR))'"/$$core_env" ;; esac; \
+	PYTHON="$$core_env/bin/python" bash scripts/verify-vibecrafted-product.sh --self-test; \
 	$(PYTHON) -m json.tool vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json >/dev/null; \
 	$(PYTHON) -m json.tool vibecrafted-core/vibecrafted_core/trust/release-policy.v1.json >/dev/null; \
 	bash -n scripts/verify-vibecrafted-product.sh; \

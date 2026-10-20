@@ -2171,6 +2171,7 @@ def _run_unified_gate_with_fake_uv(
     ambient: dict[str, str],
     *make_args: str,
     exec_child: bool = False,
+    run_past_core: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, str]]]:
     """Drive the real gate recipe until both core legs called `uv run`.
 
@@ -2194,7 +2195,8 @@ def _run_unified_gate_with_fake_uv(
         '{ printf "UV_FAKE_ARGV=%s\\n" "$*"; printf "UV_FAKE_TMPDIR_MODE=%s\\n" "$mode";'
         ' printf "UV_FAKE_ROOT_MODE=%s\\n" "$root_mode"; env; }'
         ' > "$UV_FAKE_LOG/call-$n-$kind.env"\n'
-        '[ "$kind" = other ] || [ "$(ls "$UV_FAKE_LOG" | grep -c core)" -lt 2 ] || exit 86\n'
+        '[ "$kind" = other ] || [ -n "${UV_FAKE_RUN_PAST_CORE:-}" ] ||'
+        ' [ "$(ls "$UV_FAKE_LOG" | grep -c core)" -lt 2 ] || exit 86\n'
         # Like real uv, hand the command after `--with pytest` its inherited env.
         '[ "$kind" = core ] && [ -n "${UV_FAKE_EXEC_CHILD:-}" ] || exit 0\n'
         "shift 5\n"
@@ -2219,6 +2221,7 @@ def _run_unified_gate_with_fake_uv(
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "UV_FAKE_LOG": str(calls),
             **({"UV_FAKE_EXEC_CHILD": "1"} if exec_child else {}),
+            **({"UV_FAKE_RUN_PAST_CORE": "1"} if run_past_core else {}),
         },
         capture_output=True,
         text=True,
@@ -2392,3 +2395,58 @@ def test_unified_gate_private_tmpdir_is_short_despite_long_inherited_tmpdir(
         assert record["UV_FAKE_TMPDIR_MODE"] == "700"
         assert record["UV_FAKE_ROOT_MODE"] == "700"
     assert not list(long_tmp.iterdir()), "inherited TMPDIR must stay untouched"
+
+
+def _inert_interpreter(path: Path, log: Path, label: str) -> Path:
+    """An interpreter that satisfies project-python's probe and records its use."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = -c ] && exit 0\n'
+        'case "$*" in\n'
+        f'  *product_contract*) {{ echo "{label} $*"; echo "PWD=$PWD"; }} >> "{log}"\n'
+        f'    [ "{label}" = core ] || exit 1 ;;\n'
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.parametrize("selection", ["absolute", "relative-with-space"])
+def test_unified_gate_self_test_runs_on_the_selected_core_interpreter(
+    tmp_path: Path, selection: str
+) -> None:
+    """The verifier self-test needs jsonschema, which only the core env carries.
+
+    project-python prefers an explicit PYTHON, then a checkout .venv, then host
+    python. The gate must hand it the deliberately selected core interpreter so
+    an ambient PYTHON (or PATH python / unrelated venv) cannot win.
+    """
+
+    log = tmp_path / "selftest.log"
+    core_env = tmp_path / "chosen core env"
+    _inert_interpreter(core_env / "bin" / "python", log, "core")
+    ambient_python = _inert_interpreter(tmp_path / "ambient" / "python", log, "ambient")
+    ambient, _, _ = _poisoned_caller_environment(tmp_path)
+    ambient["PYTHON"] = str(ambient_python)
+    env_arg = (
+        str(core_env)
+        if selection == "absolute"
+        else os.path.relpath(core_env, REPO_ROOT)
+    )
+
+    result, _ = _run_unified_gate_with_fake_uv(
+        tmp_path,
+        ambient,
+        f"UNIFIED_GATE_CORE_ENVIRONMENT={env_arg}",
+        run_past_core=True,
+    )
+
+    runs = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    verifier = [line for line in runs if "product_contract" in line]
+    assert verifier, result.stderr
+    assert all(line.startswith("core ") for line in verifier), verifier
+    assert any("--self-test" in line for line in verifier)
