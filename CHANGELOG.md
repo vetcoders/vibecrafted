@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Automatic project names remove leading dashes after path-character sanitizing,
+  so folders with spaces and backslashes can open their exact project path.
+  Explicit Frame names retain the existing validation and length limits.
 - Registered projects with an unbound same-name live Frame session refuse automatic
   preparation instead of silently creating a duplicate hashed seat. Proven
   foreign collisions and first-time projects keep their existing routing.

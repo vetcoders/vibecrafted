@@ -889,7 +889,9 @@ def _sanitize_worker_host_label(
 ) -> str:
     label = (display_label or "workspace").strip() or "workspace"
     label = re.sub(r"\s+", "-", label)
-    label = re.sub(r"[^A-Za-z0-9._-]+", "", label) or "workspace"
+    # Automatic names must survive the shell's unchanged option-name guard.
+    # Remove invalid characters first: a separator can otherwise hide a dash.
+    label = re.sub(r"[^A-Za-z0-9._-]+", "", label).lstrip("-") or "workspace"
     if max_len is not None and len(label) > max_len:
         label = label[:max_len].rstrip("-._") or "workspace"
     return label

@@ -193,6 +193,44 @@ def _opened(fixture) -> list[dict]:
     return [call for call in fixture.scene.calls() if call.get("opened")]
 
 
+@pytest.mark.parametrize(
+    "basename, expected",
+    [
+        ("-project", "project"),
+        (r"-space and back\slash", "space-and-backslash"),
+        (r"\-project", "project"),
+        ("---", "workspace"),
+        ("space and words", "space-and-words"),
+        ("long-project-folder-over-24-characters", "long-project-folder-over"),
+    ],
+)
+def test_automatic_project_name_admits_exact_path_and_reuses_its_seat(
+    public_destination, basename: str, expected: str
+) -> None:
+    f = public_destination
+    f.scene.root = f.scene.tmp_path / basename
+    f.scene.root.mkdir()
+
+    admitted = f.open_agent(f.workshop.destination_session_for_workspace(f.scene.root))
+    assert admitted.session == expected
+    assert f.scene.live() == sorted(["vc-host", expected])
+    identity = f.wc.resolve_run_workspace_identity(
+        root=f.scene.root,
+        env=admitted.environment,
+        runtime_session_id=admitted.session,
+        socket_dir=f.socket_dir,
+        runtime_state="live",
+    )
+    record = f.wc.read_catalog().workspaces[identity.workspace_id]
+    assert record.canonical_root == str(f.scene.root.resolve())
+    assert admitted.environment["VIBECRAFTED_WORKSPACE_ROOT"] == record.canonical_root
+
+    returned = f.open_agent(f.workshop.destination_session_for_workspace(f.scene.root))
+    assert returned.session == expected
+    assert len(_creates(f)) == 1
+    assert len(_opened(f)) == 2
+
+
 def _rename_capable_frame(fixture) -> None:
     """Extend only the inert engine with Frame's public rename/incarnation contract."""
     frame = fixture.scene.generation / "bin/vc-frame"
