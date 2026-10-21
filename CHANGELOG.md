@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Frame preserves VT query replies and resize ordering, and Aa opens the existing
+  typography chooser scene with one reusable panel.
+- Source builds export pinned donors independently of uncommitted Git attributes
+  and validate the exported package manifest before compilation.
 - macOS host packaging declares microphone and speech-recognition use and signs
   the main host plus embedded terminal with the audio-input hardened-runtime
   entitlement. Release assembly checks both final signatures; normal macOS

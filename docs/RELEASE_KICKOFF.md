@@ -21,11 +21,15 @@ commit SHAs in `config/source-components.json`. Local source overrides
 `VIBECRAFTED_FRAME_REPO` and `VIBECRAFTED_TERMINAL_REPO` must contain those
 commits; their branches, index and working files stay intact. Missing donors
 are fetched by exact commit into temporary repositories. The selected package
-identity and version are checked before compilation; invalid selections refuse
+identity and version are checked in both the pinned Git object and the exported
+manifest consumed by the build; invalid selections refuse
 without falling back to an older donor.
 
 These builders compile isolated `git archive` exports and record the actual
-archive SHA-256 and selected revision in their inventories. To materialize and
+archive SHA-256 and selected revision in their inventories. Export uses only
+committed Git attributes: donor-local, global and system attributes cannot change
+the selected source. The archive digest identifies the exported bytes; it is not
+independent proof of the commit. To materialize and
 inspect the same source path before native compilation:
 
 ```bash

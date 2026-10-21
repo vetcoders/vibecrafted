@@ -381,3 +381,161 @@ def test_selected_commit_is_independent_of_donor_head_and_replace_refs(
         ).strip()
         == later
     )
+
+
+@pytest.mark.parametrize("builder", ["helper", "linux", "windows"])
+@pytest.mark.parametrize(
+    "attribute_source",
+    ["info", "local-config", "global", "system", "environment", "xdg"],
+)
+def test_source_export_uses_only_committed_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: str, attribute_source: str
+) -> None:
+    from _source_component_fixture import prepare, source_fixture, write_pins
+
+    checkout, pins, repos = source_fixture(tmp_path)
+    # GNU tar accepts caller exclusions; the build must consume all selected files.
+    monkeypatch.setenv("TAR_OPTIONS", "--exclude=payload.rs")
+    poison = tmp_path / "uncommitted-attributes"
+    poison.write_text(
+        "Cargo.toml export-ignore\nalacritty/Cargo.toml export-ignore\n"
+        "payload.rs export-ignore\nstamp.txt -export-subst\n"
+        "committed-hidden.txt -export-ignore\n"
+    )
+    before = {}
+    for name, repo in repos.items():
+        (repo / ".gitattributes").write_text(
+            "committed-hidden.txt export-ignore\nstamp.txt export-subst\n"
+        )
+        (repo / "payload.rs").write_text("committed source\n")
+        (repo / "stamp.txt").write_text("$Format:%H$\n")
+        (repo / "committed-hidden.txt").write_text("committed omission\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "."],
+            env=repository_environment(),
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "committed attributes",
+            ],
+            env=repository_environment(),
+            check=True,
+        )
+        pins["components"][name]["revision"] = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            env=repository_environment(),
+            text=True,
+        ).strip()
+        if attribute_source == "info":
+            (repo / ".git/info/attributes").write_bytes(poison.read_bytes())
+        elif attribute_source == "local-config":
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "core.attributesFile", str(poison)],
+                env=repository_environment(),
+                check=True,
+            )
+        (repo / ".gitattributes").write_bytes(poison.read_bytes())
+        (repo / "payload.rs").write_text("staged Founder work\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "payload.rs"],
+            env=repository_environment(),
+            check=True,
+        )
+        (repo / "payload.rs").write_text("unstaged Founder work\n")
+        (repo / "untracked.txt").write_text("untracked Founder work\n")
+        before[name] = {
+            str(path.relative_to(repo)): path.read_bytes()
+            for path in repo.rglob("*")
+            if path.is_file()
+        }
+    config = tmp_path / "attributes.gitconfig"
+    config.write_text(f'[core]\n    attributesFile = "{poison.as_posix()}"\n')
+    if attribute_source in {"global", "system"}:
+        monkeypatch.setenv(f"GIT_CONFIG_{attribute_source.upper()}", str(config))
+    elif attribute_source == "environment":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.attributesFile")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(poison))
+    elif attribute_source == "xdg":
+        xdg = tmp_path / "xdg/git"
+        xdg.mkdir(parents=True)
+        (xdg / "attributes").write_bytes(poison.read_bytes())
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg.parent))
+    write_pins(checkout, pins)
+    destination = tmp_path / "selected"
+    result = prepare(checkout, destination, builder, repos)
+    assert result.returncode == 0, result.stderr
+    for name, repo in repos.items():
+        source = destination / name
+        manifest = "Cargo.toml" if name == "vc-frame" else "alacritty/Cargo.toml"
+        assert (source / manifest).is_file(), (
+            "unpinned attributes removed the selected manifest"
+        )
+        assert (source / "payload.rs").read_text() == "committed source\n"
+        assert (source / "stamp.txt").read_text().strip() == pins["components"][name][
+            "revision"
+        ]
+        assert not (source / "committed-hidden.txt").exists()
+        assert not (source / "untracked.txt").exists()
+        assert {
+            str(path.relative_to(repo)): path.read_bytes()
+            for path in repo.rglob("*")
+            if path.is_file()
+        } == before[name]
+
+
+@pytest.mark.parametrize("builder", ["helper", "linux", "windows"])
+@pytest.mark.parametrize("export_change", ["omit", "substitute-version"])
+def test_source_export_checks_the_manifest_actually_consumed(
+    tmp_path: Path, builder: str, export_change: str
+) -> None:
+    from _source_component_fixture import prepare, source_fixture, write_pins
+
+    checkout, pins, repos = source_fixture(tmp_path)
+    repo = repos["vc-frame"]
+    cargo = repo / "Cargo.toml"
+    if export_change == "omit":
+        (repo / ".gitattributes").write_text("Cargo.toml export-ignore\n")
+    else:
+        cargo.write_text(cargo.read_text().replace("4.3.1", "$Format:%H$"))
+        pins["components"]["vc-frame"]["version"] = "$Format:%H$"
+        (repo / ".gitattributes").write_text("Cargo.toml export-subst\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "."], env=repository_environment(), check=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "export changes manifest",
+        ],
+        env=repository_environment(),
+        check=True,
+    )
+    pins["components"]["vc-frame"]["revision"] = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        env=repository_environment(),
+        text=True,
+    ).strip()
+    write_pins(checkout, pins)
+    destination = tmp_path / "rejected"
+    result = prepare(checkout, destination, builder, repos)
+    assert result.returncode != 0, result.stdout
+    assert not (destination / "selection.json").exists()

@@ -141,18 +141,24 @@ def select_repository(
     return destination
 
 
-def verify_version(name: str, pin: dict[str, str], repo: Path) -> None:
+def verify_version(
+    name: str, pin: dict[str, str], repo: Path, *, exported: bool = False
+) -> None:
     _, _, manifest_path, table = COMPONENTS[name]
-    blob = subprocess.check_output(
-        [
-            "git",
-            "--no-replace-objects",
-            "-C",
-            str(repo),
-            "show",
-            f"{pin['revision']}:{manifest_path}",
-        ],
-        env=repository_environment(),
+    blob = (
+        (repo / manifest_path).read_bytes()
+        if exported
+        else subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(repo),
+                "show",
+                f"{pin['revision']}:{manifest_path}",
+            ],
+            env=repository_environment(),
+        )
     )
     manifest = tomllib.loads(blob.decode("utf-8"))
     expected_name = "vc-frame" if name == "vc-frame" else "alacritty"
@@ -186,23 +192,61 @@ def materialize_sources(
         archive = destination / f"{name}.tar"
         source = destination / name
         source.mkdir()
-        subprocess.run(
-            [
-                "git",
-                "--no-replace-objects",
-                "-C",
-                str(repo),
-                "archive",
-                "--format=tar",
-                f"--output={archive}",
-                pin["revision"],
-            ],
-            env=repository_environment(),
-            check=True,
+        # Read canonical objects through an empty bare repository: archive in
+        # the donor would also consume its uncommitted info/attributes. Neither
+        # donor config/templates nor caller/global/system attributes may shape
+        # a receipt that names this immutable commit. Committed attributes still
+        # apply, including export-ignore and export-subst.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+            and key not in {"TAR_OPTIONS", "TAR_READER_OPTIONS"}
+        }
+        environment.update(
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_ATTR_NOSYSTEM="1",
+            GIT_NO_REPLACE_OBJECTS="1",
         )
+        objects = Path(git("rev-parse", "--git-path", "objects", cwd=repo))
+        if not objects.is_absolute():
+            objects = repo / objects
+        with tempfile.TemporaryDirectory(prefix="vibecrafted-export-") as temp:
+            isolated = Path(temp)
+            subprocess.run(
+                ["git", "init", "--bare", "--template=", "--quiet", str(isolated)],
+                env=environment,
+                check=True,
+            )
+            (isolated / "objects/info/alternates").write_text(
+                objects.resolve().as_posix() + "\n", encoding="utf-8"
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(isolated),
+                    "-c",
+                    f"core.attributesFile={os.devnull}",
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive}",
+                    pin["revision"],
+                ],
+                env=environment,
+                check=True,
+            )
         # Git produces paths rooted at the repository, so no strip-components
         # or Windows-only nested-archive fallback is needed.
-        subprocess.run(["tar", "-xf", str(archive), "-C", str(source)], check=True)
+        subprocess.run(
+            ["tar", "-xf", str(archive), "-C", str(source)],
+            env=environment,
+            check=True,
+        )
+        verify_version(name, pin, source, exported=True)
         with archive.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         records[name] = {**pin, "source_archive_sha256": digest}
