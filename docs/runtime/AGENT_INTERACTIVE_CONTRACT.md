@@ -88,6 +88,11 @@ the requested name. Operational refusal exits 4 with stderr and no success
 JSON; invalid command arguments exit 2. The consumer switches only after this
 packet succeeds and uses its exact native name/incarnation/socket namespace.
 
+Native PTY fixtures observe IPC readiness and the intended layout before acting;
+background-create acknowledgement alone is not readiness. Cleanup waits for the
+fixture-owned native server processes to exit before removing their private
+socket/cache trees. Logical session removal alone is not process termination.
+
 `_vetcoders_effective_project_root` resolves the project **once**, at the public
 entry: explicit `--root` (normalized to an absolute physical path _before_ any
 cwd change) → ambient project root → the caller's repository. Terminal cwd,

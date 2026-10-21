@@ -148,6 +148,19 @@ class IsolatedFrame:
             name,
         )
         self.sessions.add(name)
+        # Background creation acknowledges dispatch, not native IPC readiness.
+        deadline = time.monotonic() + 10
+        while True:
+            ready = self.cli(
+                "--session", name, "action", "list-tabs", "--json", "--all", check=False
+            )
+            if ready.returncode == 0 and any(
+                tab["name"] == "Existing workload" and tab["session_incarnation"]
+                for tab in json.loads(ready.stdout)
+            ):
+                return
+            assert time.monotonic() < deadline, ready.stdout + ready.stderr
+            time.sleep(0.05)
 
     def workload(self, project: Path, session: str, label: str):
         receipt = self.directory / f"{label}.json"
@@ -179,8 +192,31 @@ class IsolatedFrame:
         return data
 
     def close(self):
+        # A kill request can precede the daemon's final cache/socket writes.
+        # Only observe this fixture's exact engine and private socket subtree.
+        prefix = f"{self.engine} --server "
+        servers = set()
+        processes = subprocess.check_output(
+            ["ps", "-ax", "-o", "pid=", "-o", "command="], text=True
+        )
+        for line in processes.splitlines():
+            pid, command = line.strip().split(None, 1)
+            if command.startswith(prefix) and Path(
+                command.removeprefix(prefix)
+            ).resolve().is_relative_to(self.directory):
+                servers.add(int(pid))
         for session in sorted(self.sessions):
             self.cli("kill-session", session, check=False)
+        deadline = time.monotonic() + 10
+        while servers:
+            for pid in tuple(servers):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    servers.remove(pid)
+            assert not servers or time.monotonic() < deadline, servers
+            if servers:
+                time.sleep(0.05)
 
 
 @pytest.fixture
