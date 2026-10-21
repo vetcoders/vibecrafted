@@ -33,8 +33,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   public Frame wrapper keeps its installed-layout guard; Runtime Packs and
   existing seats remain unchanged.
 - Bind release sources and hosted defaults to Frame 4.5.0 at
-  `810415ae14f6f29ba77e51d118d1a4db8f30abf6`, including guarded native
-  incarnation admission and cold rail/Agents startup fixes.
+  `4f689254bd5cad05adee5ab2a8555e9d3b775dfb`, including installed wrapper/native
+  engine admission, retained layouts, guarded browser reconnects and cold Agents startup.
 - App and Runtime Pack terminal copies use the same canonical audio-input
   entitlement and code identifier through final signing and bundle sealing.
   Strict installer CDHash and signing-owner admission remains unchanged.
