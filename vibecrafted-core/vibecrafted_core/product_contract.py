@@ -2449,9 +2449,13 @@ def _validate_host_usage_descriptions(plist: Mapping[str, Any]) -> None:
             _fail(E_BUNDLE, f"host requires a non-empty {key}")
 
 
-def _verify_host_permission_signatures(app: Path) -> None:
+def _verify_host_permission_signatures(
+    app: Path, *, targets: tuple[Path, ...] | None = None
+) -> None:
     """Read the final signatures; a signing plan is not entitlement evidence."""
-    for target in (app, app / "Contents/MacOS/vc-terminal"):
+    for target in (
+        targets if targets is not None else (app, app / "Contents/MacOS/vc-terminal")
+    ):
         result = subprocess.run(
             ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(target)],
             check=False,

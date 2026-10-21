@@ -22,6 +22,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- App and Runtime Pack terminal copies use the same canonical audio-input
+  entitlement and code identifier through final signing and bundle sealing.
+  Strict installer CDHash and signing-owner admission remains unchanged.
+- Release donor snapshots build native and WASM outputs in each physical donor's
+  leased central target and consume binaries from that same target.
 - Agents recovers missing pane context from an existing verified Frame binding
   and offers the current Git repository as a path hint. Launching from an
   unbound current project refuses duplicate-seat allocation and points back to

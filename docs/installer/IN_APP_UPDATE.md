@@ -336,9 +336,24 @@ assembly boundary independently runs `unified_product_manifest.py
 host-permissions`, copies the canonical purpose strings into the generated
 bundle and writes `build/.../host-entitlements.plist`. The builder applies this
 file to the outer `Vibecrafted.app` signature and to
-`Contents/MacOS/vc-terminal`. Other nested tools and dylibs keep their existing
-signing policy. The Runtime Pack's flat internal terminal is not a second GUI
-host; its macOS public entry still requires the fixed Applications host.
+`Contents/MacOS/vc-terminal`, and to its copied
+`Contents/Resources/runtime/libexec/vc-terminal`. The standalone packager uses
+that same command with `--runtime-root` to generate the same canonical
+entitlements for `libexec/vc-terminal`; it verifies the final entitlement blob
+and hardened-runtime flag after signing and bundle sealing. All selected flat
+terminal copies use the explicit code identifier `vc-terminal`. Nested bundle
+sealing preserves the entitlements assigned by the controlled Mach-O walk and
+keeps canonical bundle identifiers; unrelated helpers and dylibs receive no host permissions.
+
+The Runtime Pack's flat internal terminal is not a second GUI host; its macOS
+public entry still requires the fixed Applications host. Installer admission
+continues to require equal verified terminal CDHash and signing owner, and the
+same owner on the outer App. Permission or code drift must refuse publication;
+hash equality alone is not permission-policy verification. Release acceptance
+must compare the final Developer ID App terminal with the extracted standalone
+pack terminal and confirm the embedded carrier contains those exact pack bytes.
+Disposable ad-hoc test fixtures prove the signing mechanics, never production
+owner admission or notarized delivery.
 
 The release builder emits `host-permissions-plan.json` before signing and
 `host-permissions-receipt.json` after reading both actual entitlement blobs and
@@ -373,6 +388,12 @@ its trust policy or edit the installed bundle.
    Frame workspace. Build from the canonical root with the established donor
    roots available; an isolated checkout can explicitly export
    `VIBECRAFTED_TERMINAL_REPO` and `VIBECRAFTED_FRAME_REPO` first.
+   Source snapshots stay disposable. Terminal native outputs use the selected
+   physical Terminal donor's `target`; Frame native and regenerated WASM outputs
+   use the selected physical Frame donor's `target`. The builder reads binaries
+   from those same targets. Existing shared build leases protect them from
+   cleanup, not competing builds: serialize the real release against other
+   donor-target writers through payload consumption.
 2. Build, sign, notarize and staple through the canonical target:
 
    ```bash

@@ -744,11 +744,7 @@ strip_debug_stabs() {
 }
 
 sign_nested_app_bundles() {
-  local nested_app
-  while IFS= read -r -d '' nested_app; do
-    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$nested_app"
-  done < <(find "$APP/Contents" -mindepth 2 -type d -iname '*.app' -print0)
+  sign_macho_app_bundles "$APP/Contents"
 }
 
 # Helpers/vc-app-update is a shebang script, not Mach-O, so sign_macho_tree
@@ -815,8 +811,9 @@ materialize_donor_snapshots() {
     log "vc-terminal snapshot at $terminal_head"
     log "vc-frame snapshot at $frame_head"
   fi
-  # Every snapshot build starts from a cold donor target directory. Main
-  # cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
+  # Source snapshots are disposable; donor Cargo/WASM outputs remain under the
+  # physical donors' leased target roots, never below the snapshots we reap.
+  # Main cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
   [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
@@ -1111,9 +1108,11 @@ build_product() {
   require_clean_repo "$FRAME_REPO" vc-frame
 
   log "Building vc-terminal through its release binary target"
-  make -C "$TERMINAL_REPO" \
+  CARGO_TARGET_DIR="$TERMINAL_DONOR/target" \
+    CARGO_BUILD_BUILD_DIR="$TERMINAL_DONOR/target" \
+    make -C "$TERMINAL_REPO" \
     DEPLOYMENT_TARGET='MACOSX_DEPLOYMENT_TARGET=14.0' release-bins
-  local terminal_source="$TERMINAL_REPO/target/release/alacritty"
+  local terminal_source="$TERMINAL_DONOR/target/release/alacritty"
   [[ -x "$terminal_source" ]] || die "vc-terminal release binary is missing"
   chmod 0755 "$terminal_source"
 
@@ -1133,7 +1132,9 @@ build_product() {
   # script created and will reap, so it is ours to dirty.
   if (( SNAPSHOT_DONORS )); then
     log "Rebuilding vc-frame's bundled WASM plugins under the release remaps"
-    CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets
+    CARGO_TARGET_DIR="$FRAME_DONOR/target" \
+      CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
+      CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets
   else
     log "NOTE: --snapshot-donors is off, so the tracked WASM plugin blobs ship"
     log "      as they are. If they name this host the payload gate refuses"
@@ -1154,12 +1155,14 @@ build_product() {
   # asks zellij-utils/build.rs to inspect the derived-output mutation.
   local frame_release_sha
   frame_release_sha="$(git_sha "$FRAME_REPO")"
-  CARGO_PROFILE_RELEASE_STRIP=false \
+  CARGO_TARGET_DIR="$FRAME_DONOR/target" \
+    CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
+    CARGO_PROFILE_RELEASE_STRIP=false \
     VC_FRAME_GIT_SHA="$frame_release_sha" \
     VC_FRAME_GIT_DIRTY=0 \
     VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
     make -C "$FRAME_REPO" release-binary
-  local frame_source="$FRAME_REPO/target/release/vc-frame"
+  local frame_source="$FRAME_DONOR/target/release/vc-frame"
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
   chmod 0755 "$frame_source"
 
@@ -1291,7 +1294,8 @@ build_product() {
     --app "$APP" --entitlements-output "$host_entitlements" \
     > "$BUILD_DIR/host-permissions-plan.json"
   sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted" \
-    "$APP/Contents/MacOS/vc-terminal" "$host_entitlements"
+    "$APP/Contents/MacOS/vc-terminal" "$host_entitlements" \
+    "$runtime/libexec/vc-terminal"
   sign_nested_app_bundles
   sign_helper_scripts
   embed_runtime_pack
