@@ -66,7 +66,7 @@ The selected generation exposes that preparation through its existing Workshop
 entry point, without curses or a terminal:
 
 ```text
-<runtime>/bin/python3 <runtime>/config/vc-frame/vc-agent-workshop.py prepare --root <declared-project> [--session <requested-name>] [--layout <absolute-physical-layout>]
+<runtime>/bin/python3 <runtime>/vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py prepare --root <declared-project> [--session <requested-name>] [--layout <absolute-physical-layout>]
 ```
 
 The caller supplies an absolute physical `VIBECRAFTED_RUNTIME_ROOT` and its
@@ -78,6 +78,25 @@ panes and workloads. The existing resolver, selected-runtime admission,
 workspace materialization, locked background creation and live WES admission
 remain the only owners. This internal entry does not reconcile the host server
 or LaunchAgent. There is no direct-create fallback.
+
+In installed product mode, the missing-seat create owner retains an explicit
+selected layout and its `.swap.kdl` companion as exact content-addressed files
+inside the existing writable product `vc-frame/layouts` directory. Publication
+runs under the create lock after rechecking that the seat is missing. It never
+refreshes product configuration or writes the selected Runtime Pack; absent or
+symlinked product configuration, conflicting retained bytes and symlinked input
+or output refuse creation. The public `bin/vc-frame` wrapper keeps its normal
+installed-layout guard and invokes the generation's distinct native `libexec`
+engine. Reuse does not publish or apply a newly selected layout.
+
+A registered project without a verifiable original Frame binding refuses
+automatic preparation when its requested native name is occupied by an unbound
+live session, including when the caller is in the lobby or has no current
+session marker. It does not adopt that session or silently allocate a hashed
+replacement. A new project or a verified foreign owner still uses the existing
+name-collision route; unrelated unbound names do not block a free destination.
+Root/name similarity cannot prove an arbitrarily renamed unbound session's
+identity.
 
 Success writes one JSON object to stdout with `native_session_name`,
 `session_incarnation`, `socket_dir`, `VIBECRAFTED_OPERATOR_SESSION`,

@@ -1449,10 +1449,6 @@ _vetcoders_start_create_workspace_session() {
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 4
   fi
-  if [[ "$kind" != chrome ]]; then
-    create_argv+=(--new-session-with-layout "$layout_file")
-  fi
-  create_argv+=(attach --create-background "$session_name")
   _vetcoders_start_acquire_create_lock "$session_name" || return $?
   _vetcoders_start_read_inventory_state "$session_name"
   state="$_vetcoders_start_inventory_state"
@@ -1465,6 +1461,33 @@ _vetcoders_start_create_workspace_session() {
     _vetcoders_start_release_create_lock
     return 3
   fi
+  if [[ "$kind" != chrome ]]; then
+    if ! _vetcoders_vc_frame_developer_mode; then
+      local core_dir="" python_bin=""
+      core_dir="$(_vetcoders_owned_core_dir)" || rc=$?
+      if ((rc == 0)); then
+        python_bin="$(_vetcoders_owned_python_bin)" || rc=$?
+      fi
+      if ((rc == 0)); then
+        layout_file="$(PYTHONPATH="$core_dir" "$python_bin" -c '
+import sys
+from pathlib import Path
+from vibecrafted_core.vc_frame_delivery import publish_selected_project_layout
+try:
+    print(publish_selected_project_layout(Path(sys.argv[1])))
+except OSError as exc:
+    print(f"vc-start: selected project layout refused: {exc}", file=sys.stderr)
+    sys.exit(4)
+' "$layout_file")" || rc=$?
+      fi
+      if ((rc != 0)); then
+        _vetcoders_start_release_create_lock
+        return "$rc"
+      fi
+    fi
+    create_argv+=(--new-session-with-layout "$layout_file")
+  fi
+  create_argv+=(attach --create-background "$session_name")
   # The embedded Operator is independent of any project workspace record.
   if [[ "$kind" != chrome ]]; then
     _vetcoders_record_vc_frame_attachment missing "$session_name" || {

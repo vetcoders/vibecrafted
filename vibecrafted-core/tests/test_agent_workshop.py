@@ -1171,9 +1171,28 @@ def test_live_inventory_probes_pinned_frame_with_same_environment(
 def test_fresh_project_basename_collision_uses_preparation_before_agent_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    real_run = subprocess.run
     workshop, launched, calls, generation = _prepare_project_creation(
         tmp_path, monkeypatch, recovery=True
     )
+    # The helper already registered the selected project. An occupied name
+    # therefore needs proven foreign ownership to permit collision routing;
+    # an unbound same-name seat now correctly refuses a duplicate replacement.
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    with monkeypatch.context() as physical:
+        physical.setattr(subprocess, "run", real_run)
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=foreign.workspace_id,
+            vibecrafted_session_id=foreign.vibecrafted_session_id,
+            workspace_instance_id=foreign.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="target",
+            state="live",
+        )
     monkeypatch.setattr(workshop, "catalog_owns_destination", lambda *_args: False)
     inventory = iter(
         [(["target", "source-host"], ""), (["target-recovery", "source-host"], "")]

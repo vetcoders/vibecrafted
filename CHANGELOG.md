@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Registered projects with an unbound same-name live Frame session refuse automatic
+  preparation instead of silently creating a duplicate hashed seat. Proven
+  foreign collisions and first-time projects keep their existing routing.
+- Installed project creation retains explicit selected layouts and swap files
+  through the canonical create owner in writable product configuration. The
+  public Frame wrapper keeps its installed-layout guard; Runtime Packs and
+  existing seats remain unchanged.
 - Bind release sources and hosted defaults to Frame 4.5.0 at
   `810415ae14f6f29ba77e51d118d1a4db8f30abf6`, including guarded native
   incarnation admission and cold rail/Agents startup fixes.

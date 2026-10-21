@@ -627,6 +627,7 @@ class Scene:
             PRIMARY_SHELL.read_text(encoding="utf-8"),
         )
         self.config_dir = self.home / ".config" / "vibecrafted" / "vc-frame"
+        _write(self.config_dir / "config.kdl", "// installed product fixture\n")
         _write(self.config_dir / "layouts" / "operator.kdl", "layout {\n}\n")
         for alias in ("dashboard", "marbles", "research", "workflow"):
             _write(self.config_dir / "layouts" / f"{alias}.kdl", "layout {\n}\n")
@@ -3431,6 +3432,26 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
             time.sleep(0.25)
 
     try:
+        # Register the project through the canonical owner without assigning a
+        # Frame seat. An unregistered folder must still be allowed to route
+        # around a foreign basename collision; this case protects an already
+        # known project's original unbound native session instead.
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; from pathlib import Path; "
+                    "from vibecrafted_core.workspace_catalog import create_workspace; "
+                    "create_workspace(root=Path(sys.argv[1]), select=True)"
+                ),
+                str(repo),
+            ],
+            env={**env, "PYTHONPATH": str(SOURCE_CORE_DIR)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         assert state() == "missing"
 
         create = "\n".join(
@@ -3470,10 +3491,13 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         entry = shell(
             f'vc-start --repo {shlex.quote(str(repo))}\nprintf "RC=[%s]\\n" "$?"'
         )
-        assert "RC=[2]" in entry.stdout, entry.stdout + entry.stderr
-        assert "no consistent live WES identity" in entry.stderr
+        assert "RC=[4]" in entry.stdout, entry.stdout + entry.stderr
+        assert "no verified Frame binding" in entry.stderr
         assert "no installed vc-start front door" not in entry.stderr
         assert state() == "live"
+        names = frame("list-sessions", "--short", "--no-formatting").stdout.splitlines()
+        assert names.count(session) == 1
+        assert not any(name.startswith(session + "-") for name in names)
 
         # Do not race the serializer: the EXITED record asserted below is a
         # real file this engine wrote for THIS session, proven present before

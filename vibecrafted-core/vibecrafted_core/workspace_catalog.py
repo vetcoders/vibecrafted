@@ -1156,6 +1156,17 @@ def resolve_project_destination(
             if records
             else None
         )
+        if records and recent is None and requested in unowned:
+            # An occupied requested name may be this registered project's
+            # original unbound seat. A hash suffix would silently duplicate
+            # that place; name/root similarity cannot authorize adoption.
+            # Unrelated unbound names do not block a free destination.
+            raise WorkspaceCatalogError(
+                "This project has no verified Frame binding and the requested "
+                "live session has no verified project binding. Open the original "
+                "session on the Sessions rail; automatic project preparation "
+                "cannot adopt it or create a replacement."
+            )
         if recent is not None and recent.socket_dir != socket_dir:
             raise WorkspaceCatalogError(
                 "project Frame destination belongs to another socket namespace"

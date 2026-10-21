@@ -2038,6 +2038,66 @@ def test_unbound_current_project_cannot_allocate_a_collision_replacement(
     assert wc.read_catalog().workspaces == {}
 
 
+@pytest.mark.parametrize("current", ["", "vc-host", "elsewhere"])
+def test_registered_root_without_original_binding_cannot_allocate_a_replacement(
+    home, tmp_path, current
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    wc.create_workspace(root=root, display_label="project", select=True)
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    with pytest.raises(wc.WorkspaceCatalogError, match="verified.*binding"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="",
+            live_names=["project", "vc-host"],
+            occupied_names=["project", "vc-host"],
+            socket_dir="/private/frame",
+            env={"VC_FRAME_SESSION_NAME": current} if current else {},
+        )
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+def test_registered_root_can_create_free_destination_among_unrelated_unbound_seats(
+    home, tmp_path
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    wc.create_workspace(root=root, display_label="project", select=True)
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="",
+        live_names=["unrelated-source", "vc-host"],
+        occupied_names=["unrelated-source", "vc-host"],
+        socket_dir="/private/frame",
+        env={"VC_FRAME_SESSION_NAME": "unrelated-source"},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "project"
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "restore-or-create"
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+def test_registered_root_can_preserve_a_verified_foreign_name_collision(home, tmp_path):
+    root, foreign = tmp_path / "project", tmp_path / "elsewhere"
+    root.mkdir()
+    foreign.mkdir()
+    wc.create_workspace(root=root, display_label="project", select=True)
+    _destination_seat(foreign, "project", "/private/frame")
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="project",
+        live_names=["project"],
+        occupied_names=["project"],
+        socket_dir="/private/frame",
+        env={},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] != "project"
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "occupied-name-preserved"
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
 def test_destination_stale_recent_is_reconciled_by_existing_missing_lifecycle(
     home, tmp_path
 ):
