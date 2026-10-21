@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Agents recovers missing pane context from an existing verified Frame binding
+  and offers the current Git repository as a path hint. Launching from an
+  unbound current project refuses duplicate-seat allocation and points back to
+  the existing session; a path hint never establishes workspace ownership.
 - Frame preserves VT query replies and resize ordering, and Aa opens the existing
   typography chooser scene with one reusable panel.
 - Source builds export pinned donors independently of uncommitted Git attributes

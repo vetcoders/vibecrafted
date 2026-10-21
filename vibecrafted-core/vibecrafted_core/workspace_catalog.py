@@ -1093,6 +1093,27 @@ def resolve_project_destination(
             owned[name] = seat[0]
             if seat[2].session_incarnation is not None:
                 incarnation_bound.add(name)
+    current = str(
+        environ.get("VC_FRAME_SESSION_NAME") or environ.get("ZELLIJ_SESSION_NAME") or ""
+    ).strip()
+    if current in unowned and requested == current:
+        raise WorkspaceCatalogError(
+            "The current Frame session has no verified project binding. "
+            "Use the existing session on the Sessions rail or attach to it with "
+            f"vc-frame attach {current}; automatic project preparation cannot "
+            "adopt it or create a replacement."
+        )
+    if current in owned:
+        receipt = owned[current]
+        for key, value in (
+            (ENV_WORKSPACE_ID, receipt.workspace_id),
+            (ENV_VIBECRAFTED_SESSION_ID, receipt.session_id),
+            (ENV_WORKSPACE_INSTANCE_ID, receipt.workspace_instance_id),
+        ):
+            if environ.get(key) and environ[key] != value:
+                raise WorkspaceCatalogError(
+                    "current Frame context conflicts with its verified project binding"
+                )
     preferred = [
         name
         for name, session in owned.items()
@@ -1837,6 +1858,53 @@ def read_workspace_session(vibecrafted_session_id: str) -> WorkspaceSessionRecor
                 f"workspace session record not found: {vibecrafted_session_id}"
             )
         return WorkspaceSessionRecord.from_payload(payload)
+
+
+def current_workspace_context(
+    *,
+    runtime_session_id: str,
+    socket_dir: str,
+    live_names: Sequence[str],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Recover a pane's lost exports from its already-bound physical seat.
+
+    This never materializes or adopts a workspace. Inventory and the existing
+    incarnation-aware WES reader supply authority; cwd and labels supply none.
+    Partial exports can be completed, but conflicting exports are not replaced.
+    """
+    if runtime_session_id == "vc-host" or runtime_session_id not in live_names:
+        return {}
+    seat = _runtime_workspace_identity(
+        root=None, runtime_session_id=runtime_session_id, socket_dir=socket_dir
+    )
+    if seat is None:
+        return {}
+    session, instance, _ = seat
+    record = show_workspace(session.workspace_id)
+    context = {
+        ENV_WORKSPACE_ID: session.workspace_id,
+        ENV_VIBECRAFTED_SESSION_ID: session.session_id,
+        ENV_WORKSPACE_INSTANCE_ID: session.workspace_instance_id,
+        ENV_BUILD_ID: instance.build_id.rendered,
+        "VIBECRAFTED_WORKSPACE_ROOT": record.canonical_root,
+        "VIBECRAFTED_OPERATOR_SESSION": runtime_session_id,
+    }
+    environ = os.environ if env is None else env
+    for key in (
+        ENV_WORKSPACE_ID,
+        ENV_VIBECRAFTED_SESSION_ID,
+        ENV_WORKSPACE_INSTANCE_ID,
+        "VIBECRAFTED_WORKSPACE_ROOT",
+    ):
+        inherited = str(environ.get(key) or "").strip()
+        if key == "VIBECRAFTED_WORKSPACE_ROOT" and inherited:
+            inherited = str(Path(inherited).expanduser().resolve())
+        if inherited and inherited != context[key]:
+            raise WorkspaceCatalogError(
+                "current Frame context conflicts with its verified project binding"
+            )
+    return context
 
 
 def runtime_session_owner_root(
@@ -3288,6 +3356,7 @@ __all__ = [
     "claim_live_instance",
     "compute_build_id",
     "create_workspace",
+    "current_workspace_context",
     "is_legacy_operator_session_name",
     "legacy_operator_session_name",
     "legacy_worker_host_session_name",

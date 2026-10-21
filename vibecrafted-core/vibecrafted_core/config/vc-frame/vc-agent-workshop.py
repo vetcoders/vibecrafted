@@ -141,7 +141,11 @@ from vibecrafted_core.aicx_session_chain import (
 )
 from vibecrafted_core.effort_overrides import EFFORT_OVERRIDE_STYLES
 from vibecrafted_core.model_overrides import MODEL_OVERRIDE_FLAGS
-from vibecrafted_core.repo_selection import RepoSelectionError, validate_workspace_root
+from vibecrafted_core.repo_selection import (
+    RepoSelectionError,
+    git_toplevel,
+    validate_workspace_root,
+)
 from vibecrafted_core.runtime_paths import (
     selected_runtime_environment,
     vibecrafted_home,
@@ -164,6 +168,7 @@ from vibecrafted_core.spawn import (
 from vibecrafted_core.workspace_catalog import (
     WORKSPACE_STATUS_ACTIVE,
     WorkspaceCatalogError,
+    current_workspace_context,
     read_catalog,
     read_workspace_session,
     resolve_operator_place_session,
@@ -511,7 +516,11 @@ def launch_failure_reason(result: Any, fallback: str) -> str:
 
 
 def ensure_live_destination(
-    workspace: Path, session: str, live_names: list[str]
+    workspace: Path,
+    session: str,
+    live_names: list[str],
+    *,
+    current_project_hint: str = "",
 ) -> LiveDestination:
     """Prepare a missing project in the selected runtime, then admit its WES seat.
 
@@ -527,6 +536,27 @@ def ensure_live_destination(
     if not session:
         raise ValueError("could not resolve a Frame session for that project")
     try:
+        # A Git cwd is a useful path hint, never permission to adopt its Frame.
+        # Fence the hinted current project before collision routing can choose
+        # a second name, including when the current seat has a custom label.
+        current = current_frame_session()
+        socket_dir = os.environ.get("VC_FRAME_SOCKET_DIR") or os.environ.get(
+            "ZELLIJ_SOCKET_DIR", ""
+        )
+        if (
+            current
+            and current != "vc-host"
+            and current in live_names
+            and str(workspace) == current_project_hint
+            and runtime_session_owner_root(current, socket_dir, runtime_state="live")
+            is None
+        ):
+            raise WorkspaceCatalogError(
+                "The current Frame session has no verified project binding. "
+                "Continue in the existing session on the Sessions rail; "
+                f"vc-frame attach {current} opens that same session from a terminal. "
+                "Automatic project preparation cannot adopt it or create a replacement."
+            )
         route = resolve_project_destination(
             root=workspace,
             requested=session,
@@ -1505,28 +1535,55 @@ class Workshop:
         self.parent_index = -1
         self.parent_error = ""
 
-        # Truthful workspace initialization: only prefill when VIBECRAFTED_WORKSPACE_ROOT
-        # was explicitly declared in the environment and resolves to an existing dir.
+        # Recover the physical seat's complete context before loading project
+        # choices. A pane can lose its exports while its WES binding survives.
+        # Neither its cwd nor its session label is ownership evidence.
+        context_error = ""
+        current = current_frame_session()
+        if current and current != "vc-host":
+            try:
+                live, listing_error = list_live_frame_sessions()
+                if not listing_error:
+                    context = current_workspace_context(
+                        runtime_session_id=current,
+                        socket_dir=os.environ.get("VC_FRAME_SOCKET_DIR")
+                        or os.environ.get("ZELLIJ_SOCKET_DIR", ""),
+                        live_names=live,
+                    )
+                    os.environ.update(context)
+            except (OSError, WorkspaceCatalogError) as exc:
+                context_error = str(exc)
         declared_root = os.environ.get("VIBECRAFTED_WORKSPACE_ROOT", "").strip()
         resolved_default = ""
-        if declared_root:
+        if declared_root and current != "vc-host" and not context_error:
             try:
-                candidate = Path(declared_root).expanduser().resolve()
+                candidate = validate_workspace_root(declared_root)
                 if candidate.is_dir():
                     resolved_default = str(candidate)
-            except OSError:
+            except (OSError, RepoSelectionError):
                 resolved_default = ""
-        self._path = resolved_default
+        # A real repository is a usable default even in an unbound legacy
+        # pane. Launch admission remains separate and fails closed there.
+        project_hint = (
+            git_toplevel(Path.cwd())
+            if mode == "launcher"
+            and current != "vc-host"
+            and not context_error
+            and not resolved_default
+            else ""
+        )
+        self.current_project_hint = resolved_default or project_hint
+        self._path = resolved_default or project_hint
         self.path_explicit = bool(resolved_default)
         self.path_cursor = len(self._path)
         self.path_scroll = 0
-        self.path_suggestions: list[str] = []
+        self.path_suggestions: list[str] = [self._path + "/"] if self._path else []
         self.path_suggestions_open = False
         self.path_suggestion_idx = 0
         self._utf8_buf = bytearray()
 
-        self.error = ""
-        self.error_stage = ""
+        self.error = context_error
+        self.error_stage = "Restoring project context" if context_error else ""
         self.error_details = False
         self.error_scroll = 0
         self.notice = ""
@@ -4086,7 +4143,12 @@ class Workshop:
             self.notice = "Opening project…"
             self.draw()
         try:
-            admitted = ensure_live_destination(workspace, destination, live)
+            admitted = ensure_live_destination(
+                workspace,
+                destination,
+                live,
+                current_project_hint=self.current_project_hint,
+            )
             destination = admitted.session
             pane = launch_pane_argv(title, workspace, argv, session=destination)
             frame_kwargs = {"env": admitted.environment} if admitted.environment else {}

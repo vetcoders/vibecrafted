@@ -47,6 +47,21 @@ dispatch its provider tab there (P0, Founder 2026-09-06: a resume launched in
 
 ### Project identity (one owner)
 
+Agents restores missing pane exports from the current physical seat's existing
+WES binding before loading project choices. The observed live inventory, socket
+namespace and recorded Frame incarnation determine that context. Conflicting
+exports refuse recovery; a verified bound root wins over an inherited cwd.
+Without a binding, a Git cwd supplies a project path hint only. Starting that
+current project cannot allocate a collision-suffixed replacement: the launcher
+keeps the existing seat and offers the Sessions rail / `vc-frame attach` route.
+An explicit different project still uses the canonical shell preparation owner.
+
+Frame's native rail **Open project** currently creates directly from a folder
+selection, outside that shell owner. Its cwd/name transport cannot establish
+WES ownership retrospectively. That creation path must enter the canonical
+missing → materialize → create → live-attachment lifecycle before switching to
+the returned physical seat. Agents recovery does not certify that origin path.
+
 `_vetcoders_effective_project_root` resolves the project **once**, at the public
 entry: explicit `--root` (normalized to an absolute physical path _before_ any
 cwd change) → ambient project root → the caller's repository. Terminal cwd,

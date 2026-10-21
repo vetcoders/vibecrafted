@@ -66,25 +66,6 @@ def _dispatch_key(form: Any, key: int) -> None:
 # ─── Acceptance Criteria #1 & #3 (Finding 23, 1000011): Truthful Project Path Initialization ───
 
 
-def test_truthful_project_path_initialization_when_env_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When VIBECRAFTED_WORKSPACE_ROOT is unset, path defaults to empty string and shows placeholder."""
-    monkeypatch.delenv("VIBECRAFTED_WORKSPACE_ROOT", raising=False)
-    workshop = _load()
-    window = RecordingWindow()
-    form = workshop.Workshop(window, mode="launcher")
-
-    assert form.path == ""
-    assert form.workspace == ""
-    assert form.path_explicit is False
-
-    # Check that drawing renders the placeholder
-    form.draw_launcher()
-    drawn_texts = [text for _, _, text, _ in window.drawn]
-    assert any(workshop.PATH_PLACEHOLDER in t for t in drawn_texts)
-
-
 def test_truthful_project_path_initialization_when_env_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -100,18 +81,6 @@ def test_truthful_project_path_initialization_when_env_set(
     assert form.path == str(valid_dir.resolve())
     assert form.workspace == str(valid_dir.resolve())
     assert form.path_explicit is True
-
-
-def test_truthful_project_path_initialization_ignores_nonexistent_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When VIBECRAFTED_WORKSPACE_ROOT points to a non-existent dir, path defaults to empty."""
-    monkeypatch.setenv("VIBECRAFTED_WORKSPACE_ROOT", str(tmp_path / "does_not_exist"))
-    workshop = _load()
-    form = workshop.Workshop(RecordingWindow(), mode="launcher")
-
-    assert form.path == ""
-    assert form.path_explicit is False
 
 
 # ─── Acceptance Criteria #1 & #2 (Finding 1000002): Path Editor Navigation, Editing & Isolation ───
@@ -164,6 +133,7 @@ def test_path_editor_literal_character_insertion_and_shortcut_isolation() -> Non
     workshop = _load()
     form = workshop.Workshop(RecordingWindow(), mode="launcher")
     form.row = 1  # Focused on path
+    form.path = ""  # Exercise literal insertion independently of project discovery.
     initial_agent = form.agent
     initial_advanced = form.advanced
     initial_count = form.agent_count

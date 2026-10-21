@@ -1964,6 +1964,80 @@ def test_destination_preserves_foreign_basename_and_reuses_verified_custom_seat(
     assert {p: p.read_bytes() for p in before} == before
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_current_context_recovers_missing_exports_without_materialization(
+    home, tmp_path, monkeypatch, legacy
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = None if legacy else wc.new_uuid7()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    identity = _destination_seat(root, "custom-seat", "/private/frame")
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    context = wc.current_workspace_context(
+        runtime_session_id="custom-seat",
+        socket_dir="/private/frame",
+        live_names=["custom-seat"],
+        env={wc.ENV_WORKSPACE_ID: identity.workspace_id},
+    )
+    assert context == {
+        **identity.to_env(),
+        "VIBECRAFTED_WORKSPACE_ROOT": str(root),
+        "VIBECRAFTED_OPERATOR_SESSION": "custom-seat",
+    }
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize(
+    "boundary", ["host", "missing", "namespace", "replaced", "tuple", "root"]
+)
+def test_current_context_cannot_rebind_a_foreign_or_stale_seat(
+    home, tmp_path, monkeypatch, boundary
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    incarnation = wc.new_uuid7()
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    _destination_seat(root, "custom-seat", "/private/frame")
+    if boundary == "replaced":
+        monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: wc.new_uuid7())
+    env = {}
+    if boundary == "tuple":
+        env[wc.ENV_VIBECRAFTED_SESSION_ID] = wc.new_uuid7()
+    if boundary == "root":
+        env["VIBECRAFTED_WORKSPACE_ROOT"] = str(tmp_path / "foreign")
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    arguments = {
+        "runtime_session_id": "vc-host" if boundary == "host" else "custom-seat",
+        "socket_dir": "/other" if boundary == "namespace" else "/private/frame",
+        "live_names": [] if boundary == "missing" else ["custom-seat", "vc-host"],
+        "env": env,
+    }
+    if boundary in ("tuple", "root"):
+        with pytest.raises(wc.WorkspaceCatalogError, match="conflicts"):
+            wc.current_workspace_context(**arguments)
+    else:
+        assert wc.current_workspace_context(**arguments) == {}
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+def test_unbound_current_project_cannot_allocate_a_collision_replacement(
+    home, tmp_path
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    with pytest.raises(wc.WorkspaceCatalogError, match="existing session"):
+        wc.resolve_project_destination(
+            root=root,
+            requested="project",
+            live_names=["project"],
+            occupied_names=["project"],
+            socket_dir="/private/frame",
+            env={"VC_FRAME_SESSION_NAME": "project"},
+        )
+    assert wc.read_catalog().workspaces == {}
+
+
 def test_destination_stale_recent_is_reconciled_by_existing_missing_lifecycle(
     home, tmp_path
 ):
