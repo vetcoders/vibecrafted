@@ -3,7 +3,7 @@
 All notable changes to 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## [4.5.0-beta-1] - 2026-10-21
 
 ### Changed
 
