@@ -22,47 +22,6 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-@pytest.mark.parametrize(
-    ("donor", "revision", "archive_sha256"),
-    [
-        (
-            "terminal",
-            "38ef2f918383ca4dde797d22869b619097c81d05",
-            "a395232e497151c1fe1885cafe80d0db0531050dee2b833116a6021284168a52",
-        ),
-        (
-            "frame",
-            "0b91c4f0806356b5c92e46c82bf0fdf0310c0222",
-            "490f07a02a6588f2676b85b2bfca85af447aa4dfe6ad6e67d81654f7229821b2",
-        ),
-    ],
-)
-def test_platform_builders_share_exact_donor_inputs(
-    donor: str, revision: str, archive_sha256: str
-) -> None:
-    """Pin parity includes the archive digest, not only the commit label."""
-    for filename, names in (
-        (
-            "build-linux-arm64-runtime-pack.sh",
-            (f"{donor}_revision", f"{donor}_archive_sha256"),
-        ),
-        (
-            "build-windows-x64-runtime-pack.ps1",
-            (f"{donor}Revision", f"{donor}ArchiveSha256"),
-        ),
-    ):
-        source = (REPO_ROOT / "scripts" / filename).read_text(encoding="utf-8")
-        actual = []
-        for name in names:
-            prefix = r"\$" if filename.endswith(".ps1") else ""
-            match = re.search(
-                rf'^{prefix}{name}\s*=\s*"([0-9a-f]+)"$', source, re.MULTILINE
-            )
-            assert match is not None, (filename, name)
-            actual.append(match.group(1))
-        assert actual == [revision, archive_sha256], filename
-
-
 @pytest.mark.parametrize("builder", ["linux", "windows"])
 @pytest.mark.parametrize("changed_pin", [False, True])
 def test_runtime_inventory_uses_verified_donor_archive_digests(
@@ -78,23 +37,10 @@ def test_runtime_inventory_uses_verified_donor_archive_digests(
             else "build-windows-x64-runtime-pack.ps1"
         )
     ).read_text(encoding="utf-8")
-    variables = {}
-    for donor in ("terminal", "frame"):
-        for field, suffix in (
-            ("revision", "Revision"),
-            ("archive_sha256", "ArchiveSha256"),
-        ):
-            name = f"{donor}_{field}" if builder == "linux" else f"{donor}{suffix}"
-            prefix = "" if builder == "linux" else r"\$"
-            match = re.search(rf'^{prefix}{name}="([0-9a-f]+)"$', source, re.MULTILINE)
-            if builder == "windows":
-                match = re.search(rf'^\${name} = "([0-9a-f]+)"$', source, re.MULTILINE)
-            assert match is not None, name
-            value = match.group(1)
-            if changed_pin:
-                digest = hashlib.sha256(f"next {donor} {field}".encode()).hexdigest()
-                value = digest[:40] if field == "revision" else digest
-            variables[name] = value
+    from _source_component_fixture import materialize_fixture
+
+    selection = materialize_fixture(tmp_path / "donors", changed_pin=changed_pin)
+    donors = json.loads(selection.read_text())["components"]
 
     payload = tmp_path / "payload"
     (payload / "bin").mkdir(parents=True)
@@ -125,10 +71,8 @@ def test_runtime_inventory_uses_verified_donor_archive_digests(
             + writer.split("\nPY\n", 1)[0]
             + "\nPY\n"
         )
-        setup = "\n".join(
-            f"{name}={shlex.quote(value)}" for name, value in variables.items()
-        )
-        setup += f"\npayload={shlex.quote(str(payload))}\nsource_revision={'a' * 40}\n"
+        setup = f"selection={shlex.quote(str(selection))}\n"
+        setup += f"payload={shlex.quote(str(payload))}\nsource_revision={'a' * 40}\n"
         setup += (
             "platform=linux-x64\narchitecture=x64\ntarget=x86_64-unknown-linux-gnu\n"
         )
@@ -138,7 +82,11 @@ def test_runtime_inventory_uses_verified_donor_archive_digests(
             '$inventoryScript = Join-Path $work "write_inventory.py"', 1
         )[1]
         writer, bindings = section.split("@'\n", 1)[1].split("\n'@ | Set-Content", 1)
-        values = {**variables, "payload": str(payload), "SourceRevision": "a" * 40}
+        values = {
+            "selectionPath": str(selection),
+            "payload": str(payload),
+            "SourceRevision": "a" * 40,
+        }
         for name, variable in re.findall(
             r"^\$env:([A-Z_0-9]+) = \$(\w+)$", bindings, re.MULTILINE
         ):
@@ -152,14 +100,13 @@ def test_runtime_inventory_uses_verified_donor_archive_digests(
     inventory = json.loads((payload / "runtime-inventory.json").read_text())
     records = {row["name"]: row for row in inventory["executables"]}
     for donor in ("terminal", "frame"):
-        sha_name = (
-            f"{donor}_archive_sha256" if builder == "linux" else f"{donor}ArchiveSha256"
+        pin = donors[f"vc-{donor}"]
+        assert (
+            records[f"vc-{donor}"]["source_archive_sha256"]
+            == pin["source_archive_sha256"]
         )
-        revision_name = (
-            f"{donor}_revision" if builder == "linux" else f"{donor}Revision"
-        )
-        assert records[f"vc-{donor}"]["source_archive_sha256"] == variables[sha_name]
-        assert records[f"vc-{donor}"]["source_revision"] == variables[revision_name]
+        assert records[f"vc-{donor}"]["source_revision"] == pin["revision"]
+        assert records[f"vc-{donor}"]["source_url"] == pin["repository"]
     for name, row in records.items():
         if name not in {"vc-terminal", "vc-frame"}:
             assert (
@@ -287,9 +234,6 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
         "WORKDIR /src/vibecrafted"
     )
     assert "69616218470b2ad053617efb9e7027b1518ea38918d933c2791e113d99cec507" in builder
-    assert "38ef2f918383ca4dde797d22869b619097c81d05" in assembler
-    assert "0b91c4f0806356b5c92e46c82bf0fdf0310c0222" in assembler
-    assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
     assert 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"' in assembler
@@ -319,13 +263,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert '"vc-admin": ["--version"]' in assembler
     assert '"vc-procs": ["--version"]' in assembler
     assert '"$repo_root/vibecrafted-app/target' not in assembler
-    assert 'rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"' in assembler
-    assert (
-        'RUSTFLAGS="--remap-path-prefix=$work/vc-frame=/usr/src/vc-frame"' in assembler
-    )
     assert "cargo xtask build --release --no-plugins" not in assembler
     assert "cargo xtask build --release" in assembler
-    assert 'rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"' in assembler
     assert 'rm -rf "$voc_target"' in assembler
     assert 'rm -rf "$server_build"' in assembler
     assert (

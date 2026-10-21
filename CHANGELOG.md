@@ -50,11 +50,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   checkouts supply Git objects without changing their branches or working files.
   Missing sources are fetched into temporary repositories. An explicit
   `RUNTIME_PACK` continues to select an existing pack.
-  The source channel pins Frame 4.4.0 at `0b91c4f0806356b5c92e46c82bf0fdf0310c0222`,
-  which carries strider, the Launchpad landing page and the live Sessions rail
-  plus the Panels cohort; Terminal remains 0.18.0-dev at
-  `38ef2f918383ca4dde797d22869b619097c81d05`. The DMG, Linux and Windows
-  builders use the same pair.
+  Linux and Windows builders resolve the same canonical component selection,
+  including unpublished local Git commits, and compile isolated committed-source
+  exports. Inventory records each selected revision and the SHA-256 of the
+  Git-generated source archive, with no independent platform donor pins.
 - Project Agents opens the interactive launcher. Launch preferences include
   model and reasoning effort, with provider-specific effort transport verified
   through interactive PTY fixtures.
