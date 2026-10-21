@@ -168,6 +168,7 @@ from vibecrafted_core.spawn import (
 from vibecrafted_core.workspace_catalog import (
     WORKSPACE_STATUS_ACTIVE,
     WorkspaceCatalogError,
+    _runtime_workspace_identity,
     current_workspace_context,
     read_catalog,
     read_workspace_session,
@@ -521,6 +522,8 @@ def ensure_live_destination(
     live_names: list[str],
     *,
     current_project_hint: str = "",
+    layout: Path | None = None,
+    workspace_only: bool = False,
 ) -> LiveDestination:
     """Prepare a missing project in the selected runtime, then admit its WES seat.
 
@@ -588,7 +591,14 @@ def ensure_live_destination(
         # The selected generation owns both the internal facade and its engine.
         env["PATH"] = os.pathsep.join((str(runtime_bin), env.get("PATH", "")))
         result = subprocess.run(
-            workspace_shell_argv(env, workspace, session, prepare=True),
+            workspace_shell_argv(
+                env,
+                workspace,
+                session,
+                prepare=True,
+                layout=layout,
+                workspace_only=workspace_only,
+            ),
             cwd=str(workspace),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -677,7 +687,13 @@ def ensure_live_destination(
 
 
 def workspace_shell_argv(
-    environment: Mapping[str, str], workspace: Path, session: str, *, prepare: bool
+    environment: Mapping[str, str],
+    workspace: Path,
+    session: str,
+    *,
+    prepare: bool,
+    layout: Path | None = None,
+    workspace_only: bool = False,
 ) -> list[str]:
     """Address existing workspace owners with data argv, never a public GUI entry."""
     root = Path(environment["VIBECRAFTED_RUNTIME_ROOT"])
@@ -690,6 +706,17 @@ def workspace_shell_argv(
         )
     script = 'source "$1" || exit $?; '
     if prepare:
+        if workspace_only:
+            script += (
+                "if ! _vetcoders_vc_frame_developer_mode; then "
+                '_vetcoders_product_runtime_admit "$VIBECRAFTED_RUNTIME_ROOT" || exit $?; fi; '
+                "_vetcoders_pin_vc_frame_config_dir || exit $?; "
+            )
+        owner = (
+            "_vetcoders_product_workspace_prepare"
+            if workspace_only
+            else "_vetcoders_product_entry_prepare"
+        )
         script += (
             '_vetcoders_start_validate_workspace_name "$3" || exit $?; '
             '_vetcoders_prepare_project_destination "$2" "$3" || exit $?; '
@@ -699,14 +726,14 @@ def workspace_shell_argv(
             'if [[ "$state" == error ]]; then _vetcoders_start_refuse_inventory "$target"; exit $?; fi; '
             'if [[ "$state" == live || "$state" == dead ]]; then '
             '_vetcoders_start_check_existing_owner "$target" "$state" "$2" || exit $?; fi; '
-            '_vetcoders_product_entry_prepare "$2" "$target" "$state" || exit $?; '
-            '_vetcoders_start_launch_workspace "$target" "$2" background >&2 || exit $?; '
+            f'{owner} "$2" "$target" "$state" || exit $?; '
+            '_vetcoders_start_launch_workspace "$target" "$2" background "${5:-}" >&2 || exit $?; '
             '_vetcoders_product_core_cli workspace resolve --root "$2" --json '
             '--runtime-session-id "$target" --socket-dir "$(_vetcoders_vc_frame_socket_dir)" --runtime-state live'
         )
     else:
         script += '_vetcoders_start_enter_workspace_session "$4" "$3"'
-    return [
+    command = [
         "/bin/bash",
         "--noprofile",
         "--norc",
@@ -718,6 +745,91 @@ def workspace_shell_argv(
         session,
         str(Path(environment["VIBECRAFTED_RUNTIME_BIN"]) / "vc-frame"),
     ]
+    if layout is not None:
+        command.append(str(layout))
+    return command
+
+
+def prepare_project_destination(
+    root: Path, *, session: str = "", layout: Path | None = None
+) -> dict[str, str]:
+    """Noninteractive selected-runtime entry to the existing workspace owner.
+
+    The layout is creation input only. Reusing a live seat does not replace its
+    panes or workloads. The final packet comes from the incarnation-aware WES
+    reader, never from the requested name or the launcher's progress output.
+    """
+    workspace = validate_workspace_root(root)
+    session = session.strip()
+    if session == "vc-host":
+        raise ValueError("vc-host is the Operator host, not a project destination")
+    if layout is not None and (
+        not layout.is_absolute()
+        or not layout.is_file()
+        or any(path.is_symlink() for path in (layout, *layout.parents))
+    ):
+        raise ValueError("layout must be an existing absolute physical file")
+    selected_root = str(os.environ.get("VIBECRAFTED_RUNTIME_ROOT") or "")
+    if selected_root:
+        runtime = Path(selected_root)
+        if (
+            selected_root != selected_root.strip()
+            or not runtime.is_absolute()
+            or any(path.is_symlink() for path in (runtime, *runtime.parents))
+            or runtime != runtime.resolve()
+        ):
+            raise ValueError(
+                "selected Runtime Pack root must be an absolute physical path"
+            )
+    env = selected_runtime_environment()
+    if not env.get("VIBECRAFTED_RUNTIME_ROOT"):
+        raise ValueError("a selected Runtime Pack is required to prepare a project")
+    socket_dir = env.get("VC_FRAME_SOCKET_DIR") or env.get("ZELLIJ_SOCKET_DIR", "")
+    if not socket_dir:
+        raise ValueError("Frame must declare its socket namespace for preparation")
+    namespace = Path(socket_dir)
+    if not namespace.is_absolute():
+        raise ValueError("Frame socket namespace must be an absolute path")
+    names, error = list_live_frame_sessions(env=env)
+    if error:
+        raise ValueError(error)
+    requested = session or destination_session_for_workspace(workspace, env=env)
+    current_project_hint = ""
+    inherited_root = str(env.get("VIBECRAFTED_WORKSPACE_ROOT") or "").strip()
+    if inherited_root:
+        try:
+            current_project_hint = str(validate_workspace_root(inherited_root))
+        except (OSError, RepoSelectionError):
+            pass
+    admitted = ensure_live_destination(
+        workspace,
+        requested,
+        names,
+        current_project_hint=current_project_hint,
+        layout=layout,
+        workspace_only=True,
+    )
+    env = admitted.environment or env
+    names, error = list_live_frame_sessions(env=env)
+    if error or admitted.session == "vc-host" or admitted.session not in names:
+        raise ValueError(error or "prepared destination is not a live project seat")
+    seat = _runtime_workspace_identity(
+        root=workspace, runtime_session_id=admitted.session, socket_dir=socket_dir
+    )
+    if seat is None or not seat[2].session_incarnation:
+        raise ValueError("prepared destination has no verified live Frame incarnation")
+    receipt, instance, attachment = seat
+    return {
+        "native_session_name": admitted.session,
+        "session_incarnation": attachment.session_incarnation,
+        "socket_dir": attachment.socket_dir,
+        "VIBECRAFTED_OPERATOR_SESSION": admitted.session,
+        "VIBECRAFTED_WORKSPACE_ROOT": str(workspace),
+        "VIBECRAFTED_WORKSPACE_ID": receipt.workspace_id,
+        "VIBECRAFTED_SESSION_ID": receipt.session_id,
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID": receipt.workspace_instance_id,
+        "VIBECRAFTED_BUILD_ID": instance.build_id.rendered,
+    }
 
 
 def launch_pane_argv(
@@ -1109,6 +1221,11 @@ def list_live_frame_sessions(
     except subprocess.TimeoutExpired:
         return [], "Frame sessions are unavailable"
     if result.returncode != 0:
+        if result.returncode == 1 and (result.stderr or result.stdout).strip() in {
+            "No active vc-frame sessions found.",
+            "No active zellij sessions found.",
+        }:
+            return [], ""
         return [], (
             result.stderr or result.stdout or "Frame sessions are unavailable"
         ).strip()
@@ -4228,7 +4345,14 @@ class Workshop:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Vibecrafted Agent Workspaces")
-    parser.add_argument("mode", choices=("home", "launcher"), nargs="?", default="home")
+    parser.add_argument(
+        "mode", choices=("home", "launcher", "prepare"), nargs="?", default="home"
+    )
+    parser.add_argument("--root", type=Path, help="Declared project root for prepare")
+    parser.add_argument("--session", default="", help="Requested native project seat")
+    parser.add_argument(
+        "--layout", type=Path, help="Physical selected layout for creation"
+    )
     parser.add_argument(
         "--onboarding",
         action="store_true",
@@ -4238,6 +4362,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--font", action="store_true", help="Open the terminal font chooser directly"
     )
     args = parser.parse_args(argv)
+    if args.mode == "prepare":
+        if args.root is None or args.font or args.onboarding:
+            parser.error("prepare requires --root and cannot open onboarding or fonts")
+    elif args.root is not None or args.session or args.layout is not None:
+        parser.error("--root, --session and --layout require prepare")
     if args.font and (args.mode != "launcher" or args.onboarding):
         parser.error(
             "--font requires launcher and cannot be combined with --onboarding"
@@ -4247,6 +4376,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.mode == "prepare":
+        try:
+            payload = prepare_project_destination(
+                args.root, session=args.session, layout=args.layout
+            )
+        except (OSError, ValueError, RepoSelectionError, WorkspaceCatalogError) as exc:
+            print(f"vc-agent-workshop: {exc}", file=sys.stderr)
+            return 4
+        print(json.dumps(payload))
+        return 0
     try:
         curses.wrapper(
             lambda window: Workshop(

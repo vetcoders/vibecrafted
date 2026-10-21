@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -252,6 +253,183 @@ def _project(runtime: IsolatedFrame, name: str) -> Path:
     project.mkdir()
     subprocess.run(["git", "init", "--quiet", str(project)], check=True)
     return project
+
+
+def test_noninteractive_prepare_preserves_selected_layout_and_live_wes(
+    real_frame, monkeypatch
+):
+    r = real_frame
+    project = _project(r, "rail project")
+    # Absolute namespace aliases are valid (macOS /tmp and /var are aliases).
+    # Keep the same explicit spelling across the caller and workspace child.
+    socket_root = Path(os.environ["VC_FRAME_SOCKET_DIR"])
+    socket_root.mkdir(exist_ok=True)
+    socket_alias = r.directory / "socket-alias"
+    socket_alias.symlink_to(socket_root, target_is_directory=True)
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(socket_alias))
+    monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(socket_alias))
+    generation = r.directory / "selected-generation"
+    binary = generation / "bin"
+    binary.mkdir(parents=True)
+    (generation / "VERSION").write_text("4.5.0+g00000000\n")
+    (binary / "python3").symlink_to(sys.executable)
+    (binary / "vc-frame").symlink_to(r.engine)
+    facade = generation / FACADE.relative_to(REPO)
+    facade.parent.mkdir(parents=True)
+    service_called = r.directory / "forbidden-host-service-call"
+    facade.write_text(
+        f"source {shlex.quote(str(FACADE))} || return $?\n"
+        f"export VIBECRAFTED_CORE_DIR={shlex.quote(str(REPO / 'vibecrafted-core'))}\n"
+        "_vetcoders_owned_core_dir() { printf '%s\\n' "
+        + shlex.quote(str(REPO / "vibecrafted-core"))
+        + "; }\n"
+        "_vetcoders_owned_python_bin() { printf '%s\\n' "
+        + shlex.quote(sys.executable)
+        + "; }\n"
+        "_vetcoders_control_plane_eye_prepare() { touch "
+        + shlex.quote(str(service_called))
+        + "; printf 'unexpected host service reconciliation\\n' >&2; return 97; }\n"
+    )
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(generation))
+    initial = r.directory / "selected-pane.json"
+    workload = r.directory / "selected-pane.py"
+    workload.write_text(
+        "import json,os,pathlib,time\n"
+        f"pathlib.Path({str(initial)!r}).write_text(json.dumps(dict("
+        "pid=os.getpid(),cwd=os.getcwd(),isatty=os.isatty(0),"
+        "environment=dict(os.environ))))\n"
+        "while True: time.sleep(0.1)\n"
+    )
+    layout = r.directory / "selected layout.kdl"
+    layout.write_text(
+        'layout {\n tab name="Selected canvas" {\n pane command='
+        + json.dumps(sys.executable)
+        + " {\n args "
+        + json.dumps(str(workload))
+        + "\n }\n }\n }\n"
+    )
+
+    def invoke(*args, extra_env=None, expected=0):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CONFIG / "vc-agent-workshop.py"),
+                "prepare",
+                "--root",
+                str(project),
+                *args,
+            ],
+            cwd=r.directory,
+            env={**os.environ, **(extra_env or {})},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        r.actions.append(
+            {
+                "owner": "noninteractive prepare API",
+                "status": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
+        r.sessions.update(r.live())
+        assert result.returncode == expected, result.stdout + result.stderr
+        if expected:
+            assert not result.stdout
+            return result.stderr
+        return json.loads(result.stdout)
+
+    # Preconditions fail before the catalog or the physical inventory changes.
+    before = r.live()
+    snapshot = {
+        p: p.read_bytes() for p in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    }
+    assert "socket namespace" in invoke(
+        extra_env={"VC_FRAME_SOCKET_DIR": "", "ZELLIJ_SOCKET_DIR": ""}, expected=4
+    )
+    assert "Operator host" in invoke("--session", "vc-host", expected=4)
+    assert "socket namespace" in invoke(
+        extra_env={"VC_FRAME_SOCKET_DIR": "relative-sockets"}, expected=4
+    )
+    assert "absolute physical" in invoke(
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": "~/../selected-generation"}, expected=4
+    )
+    runtime_alias = r.directory / "runtime-alias"
+    runtime_alias.symlink_to(generation)
+    assert "absolute physical" in invoke(
+        extra_env={"VIBECRAFTED_RUNTIME_ROOT": str(runtime_alias)}, expected=4
+    )
+    assert "absolute physical" in invoke("--layout", "relative.kdl", expected=4)
+    assert r.live() == before
+    assert {
+        p: p.read_bytes() for p in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == snapshot
+
+    r.naked(project, "unknown-custom-seat")
+    unknown_before = r.live()
+    assert "no verified project binding" in invoke(
+        extra_env={
+            "VC_FRAME_SESSION_NAME": "unknown-custom-seat",
+            "VIBECRAFTED_WORKSPACE_ROOT": str(project),
+        },
+        expected=4,
+    )
+    assert r.live() == unknown_before
+    assert {
+        p: p.read_bytes() for p in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == snapshot
+    r.cli("kill-session", "unknown-custom-seat")
+
+    prepared = invoke("--session", "rail-seat", "--layout", str(layout))
+    assert prepared["native_session_name"] == "rail-seat"
+    assert prepared["VIBECRAFTED_OPERATOR_SESSION"] == "rail-seat"
+    assert prepared["socket_dir"] == os.environ["VC_FRAME_SOCKET_DIR"]
+    assert prepared["VIBECRAFTED_WORKSPACE_ROOT"] == str(project)
+    assert (
+        prepared["session_incarnation"] == r.tabs("rail-seat")[0]["session_incarnation"]
+    )
+    deadline = time.monotonic() + 10
+    while not initial.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert initial.exists(), r.panes("rail-seat")
+    started = json.loads(initial.read_text())
+    assert started["isatty"] and started["cwd"] == str(project)
+    for key in WES_KEYS:
+        assert started["environment"][key] == prepared[key]
+    before_tabs, before_panes = r.tabs("rail-seat"), r.panes("rail-seat")
+    other_layout = r.directory / "other.kdl"
+    other_layout.write_text(
+        'layout {\n tab name="Must not replace" {\n pane;\n }\n }\n'
+    )
+    # Omitted native name resolves the actual admitted seat. A newly selected
+    # layout is input for creation, never a command to reset existing work.
+    reused = invoke("--layout", str(other_layout))
+    assert reused == prepared
+    foreign = _project(r, "foreign")
+    foreign_identity = catalog.resolve_run_workspace_identity(root=foreign, env={})
+    assert invoke(extra_env=foreign_identity.to_env()) == prepared
+    assert "conflicts" in invoke(
+        extra_env={
+            **foreign_identity.to_env(),
+            "VC_FRAME_SESSION_NAME": "rail-seat",
+        },
+        expected=4,
+    )
+    assert r.tabs("rail-seat") == before_tabs
+    assert r.panes("rail-seat") == before_panes
+    os.kill(started["pid"], 0)
+    assert not service_called.exists(), (
+        "internal preparation called the host service owner"
+    )
+    r.actions.append(
+        {
+            "host_service_fence": "fail loudly on any eye/reconcile call",
+            "service_called": service_called.exists(),
+        }
+    )
 
 
 def test_bound_seat_recovers_lost_pane_context_and_preserves_real_workload(

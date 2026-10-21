@@ -1771,7 +1771,7 @@ _vetcoders_start_create_before_terminal() {
 # the root). Re-read the inventory (cheap; the create below is exclusive
 # anyway), create unless this very start already did, then enter.
 _vetcoders_start_launch_workspace() {
-  local session_name="${1:-}" root="${2:-}" entry_mode="${3:-enter}" vc_frame_bin="" state="" rc=0
+  local session_name="${1:-}" root="${2:-}" entry_mode="${3:-enter}" layout_file="${4:-}" vc_frame_bin="" state="" rc=0
   # Internal Workshop preparation reuses this owner without the public terminal
   # front door. Keep the parser's name guard before a create-lock path is used.
   _vetcoders_start_validate_workspace_name "$session_name" || return $?
@@ -1812,7 +1812,7 @@ _vetcoders_start_launch_workspace() {
       _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
       ;;
     missing)
-      _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" || rc=$?
+      _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" "$layout_file" || rc=$?
       if ((rc == 3)); then
         _vetcoders_start_read_inventory_state "$session_name"
         state="$_vetcoders_start_inventory_state"

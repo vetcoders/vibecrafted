@@ -3,7 +3,7 @@
 All notable changes to 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [4.5.0-beta-1] - 2026-10-21
+## [4.5.0] - 2026-10-21
 
 ### Changed
 
@@ -26,6 +26,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   and offers the current Git repository as a path hint. Launching from an
   unbound current project refuses duplicate-seat allocation and points back to
   the existing session; a path hint never establishes workspace ownership.
+- Frame can request project preparation through the selected runtime's existing
+  workspace owner and receive its verified native session, incarnation and WES
+  context. Selected layouts apply only when creating a new seat; preparation
+  reuses existing seats without replacing their layout or running work.
 - Frame preserves VT query replies and resize ordering, and Aa opens the existing
   typography chooser scene with one reusable panel.
 - Source builds export pinned donors independently of uncommitted Git attributes
