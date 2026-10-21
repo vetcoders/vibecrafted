@@ -1,10 +1,13 @@
 import json
+import tomllib
 import zipfile
 from pathlib import Path
 
+import yaml
 from vibecrafted_core.cli import LAUNCHERS
 
 from scripts import build_marketplace_bundle as bundle
+from scripts import vetcoders_install as installer
 
 
 def test_parse_listing_metadata_reads_current_registry_fields() -> None:
@@ -56,17 +59,69 @@ def test_top_level_skill_dirs_are_live_skills_or_foundations() -> None:
         if not path.is_dir() or path.name in allowed_non_skill_dirs:
             continue
 
-        missing = [
-            marker
-            for marker in ("SKILL.md", "FLOW.md")
-            if not (path / marker).is_file()
-        ]
+        # vc-grill is an interactive, single-document skill with no launch flow.
+        markers = ("SKILL.md",) if path.name == "vc-grill" else ("SKILL.md", "FLOW.md")
+        missing = [marker for marker in markers if not (path / marker).is_file()]
         if missing:
             offenders.append(
                 f"{path.relative_to(bundle.REPO_ROOT)} missing {', '.join(missing)}"
             )
 
     assert not offenders, "\n".join(offenders)
+
+
+def test_grill_distributes_as_an_interactive_skill_without_a_launcher(
+    tmp_path: Path,
+) -> None:
+    skills = installer.source_skills_root(bundle.REPO_ROOT)
+    canonical = skills / "vc-grill"
+    assert canonical in installer.discover_skills(bundle.REPO_ROOT)
+    assert canonical in bundle.discover_bundle_skills(bundle.REPO_ROOT)
+
+    documents = [
+        (root / "vc-grill" / "SKILL.md").read_text(encoding="utf-8")
+        for root in (skills, skills / "pl")
+    ]
+    frontmatters = [text.split("---", 2)[1] for text in documents]
+    assert frontmatters[0] == frontmatters[1], "PL must preserve triggering metadata"
+    metadata = yaml.safe_load(frontmatters[0])
+    assert metadata["name"] == "vc-grill"
+    assert metadata["version"] == "1.0.0"
+    assert metadata["description"].strip()
+    for text in documents:
+        assert "`/vc-grill`" in text
+        assert "Design Contract" in text
+        assert "Loctree" in text and "AICX" in text
+        assert "vibecrafted grill" not in text
+        assert "launcher `grill`" not in text
+
+    # Exercise the existing distribution seams only against private artifacts.
+    store = tmp_path / "store" / "vc-grill"
+    installer.rsync_skill(canonical, store)
+    assert (store / "SKILL.md").read_bytes() == (canonical / "SKILL.md").read_bytes()
+    output = tmp_path / bundle.OUTPUT_FILENAME
+    bundle.write_bundle(bundle.REPO_ROOT, output)
+    with zipfile.ZipFile(output) as archive:
+        assert (
+            archive.read("skills/vc-grill/SKILL.md")
+            == (canonical / "SKILL.md").read_bytes()
+        )
+        assert not any(
+            "grill" in name and "/bin/" in name for name in archive.namelist()
+        )
+
+    assert "grill" not in LAUNCHERS
+    project = tomllib.loads(
+        (bundle.REPO_ROOT / "vibecrafted-core/pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "vc-grill" not in project["project"]["scripts"]
+    assert (
+        "vibecrafted_core/skills/**" in project["tool"]["hatch"]["build"]["artifacts"]
+    )
+    for root in (bundle.REPO_ROOT / "bin", bundle.REPO_ROOT / "scripts"):
+        assert not (root / "vc-grill").exists()
 
 
 def test_forensics_documentation_routes_match_the_command_deck() -> None:

@@ -2414,14 +2414,26 @@ def _prepare_restored_workspace(
 ) -> tuple[ResurrectContext, dict[str, Any]]:
     """Reserve a distinct WES seat through the same lifecycle as public start.
 
-    Only an explicit existing project cwd can own the rebuilt Frame session.
-    Lobby and unavailable cwd remain physical-only; no guessed agent cwd can
-    lend ownership to the whole session.
+    A corroborated exact seat owner outranks an inherited layout cwd. Unbound
+    project seats can use an explicit existing cwd; the operator host, lobby
+    and unavailable cwd remain physical-only. No agent cwd lends ownership.
     """
     from . import workspace_catalog as wc
     from .repo_selection import is_workspace_lobby
 
-    raw = str(session.get("cwd") or "")
+    name = session["name"]
+    if name == "vc-host":
+        return ctx, {"result": "not-applicable", "reason": "operator host"}
+    # The dumped layout may inherit the server's cwd instead of the project's.
+    # Read the same strict exact-seat authority used by public project entry;
+    # unreadable or ambiguous ownership must not fall back to a different root.
+    seat = wc._runtime_workspace_identity(
+        root=None,
+        runtime_session_id=name,
+        socket_dir=str(ctx.socket_dir),
+    )
+    owner = wc.show_workspace(seat[0].workspace_id) if seat is not None else None
+    raw = owner.canonical_root if owner is not None else str(session.get("cwd") or "")
     root = Path(raw).expanduser() if raw else None
     if root is None or not root.is_absolute() or not root.is_dir():
         return ctx, {
@@ -2430,12 +2442,11 @@ def _prepare_restored_workspace(
         }
     if is_workspace_lobby(root, env=ctx.env):
         return ctx, {"result": "not-applicable", "reason": "workspace lobby"}
-    name = session["name"]
     # Resurrection has independently proved this name absent. Resolve records
     # that observation through the catalog owner; never relabel old identity.
     identity = wc.resolve_run_workspace_identity(
         root=root,
-        env={},
+        env={wc.ENV_WORKSPACE_ID: owner.workspace_id} if owner is not None else {},
         runtime_session_id=name,
         socket_dir=str(ctx.socket_dir),
         runtime_state="missing",
@@ -2452,6 +2463,7 @@ def _prepare_restored_workspace(
     return replace(ctx, env={**ctx.env, **identity.to_env()}), {
         "result": "reserved",
         "root": str(root.resolve()),
+        "root_source": "catalog-owner" if owner is not None else "layout-cwd",
         **identity.to_meta_fields(),
     }
 

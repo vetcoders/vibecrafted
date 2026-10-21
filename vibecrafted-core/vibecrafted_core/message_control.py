@@ -22,7 +22,7 @@ from .control_plane import (
     control_plane_home,
     resolve_run,
 )
-from .run_mutation import run_mutation_locks
+from .run_mutation import RunMetaMutationError, read_run_meta, run_mutation_locks
 from .runtime_paths import selected_runtime_environment
 from .spawn import _resolve_agent_command
 
@@ -111,7 +111,10 @@ def _run_identity(run_id: str) -> tuple[str, str, str]:
         raise MessageControlError(f"run_not_resolved:{run_id}") from exc
     if resolved.meta is None:
         raise MessageControlError("run_meta_missing")
-    meta = _read_json(resolved.meta)
+    try:
+        meta = read_run_meta(resolved.meta, expected_run_id=run_id)
+    except (OSError, RunMetaMutationError) as exc:
+        raise MessageControlError("run_identity_mismatch") from exc
     agent = str(meta.get("agent") or "").strip().lower()
     session = str(meta.get("agent_session_id") or "").strip()
     runtime_session = str(
@@ -165,7 +168,10 @@ def resolve_message_run(*, run_id: str = "", session: str = "") -> str:
         for path in root.glob("*/meta.json"):
             if not _SAFE_ID.fullmatch(path.parent.name):
                 continue
-            meta = _read_json(path)
+            try:
+                meta = read_run_meta(path, expected_run_id=path.parent.name)
+            except (OSError, RunMetaMutationError):
+                continue
             identities = {
                 str(meta.get(key) or "").strip()
                 for key in (

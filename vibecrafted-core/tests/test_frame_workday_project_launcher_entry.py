@@ -20,11 +20,9 @@ import tempfile
 import termios
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config
-from vibecrafted_core.workspace_catalog import create_workspace, operator_session_name
 
 CONFIG = Path(__file__).resolve().parents[1] / "vibecrafted_core/config/vc-frame"
 
@@ -197,39 +195,6 @@ def test_agents_entry_opens_interactive_launcher(
         assert terminal.finish() == 0
     finally:
         terminal.close()
-
-
-def test_project_route_never_falls_back_to_global_runs(tmp_path: Path, monkeypatch):
-    workshop = _load("vc-agent-workshop")
-    roots = [tmp_path / owner / "same-name" for owner in ("first", "second")]
-    records = []
-    for root in roots:
-        root.mkdir(parents=True)
-        records.append(create_workspace(root=root, display_label=root.name))
-    seats = [
-        operator_session_name(r.workspace_id, display_label=r.display_label)
-        for r in records
-    ]
-    assert seats[0] != seats[1]
-    monkeypatch.chdir(roots[0])
-    monkeypatch.setenv("VIBECRAFTED_WORKSPACE_ROOT", str(roots[1]))
-    monkeypatch.setenv("VC_FRAME_SESSION_NAME", seats[1])
-    launcher = workshop.Workshop(SimpleNamespace(), mode="launcher")
-    assert launcher.path == str(roots[1])
-    assert workshop.destination_session_for_workspace(launcher.path) == seats[1]
-    assert workshop.catalog_owns_destination(roots[1], seats[1])
-    assert not workshop.catalog_owns_destination(roots[1], seats[0])
-    with pytest.raises(ValueError, match="does not bind"):
-        workshop.ensure_live_destination(roots[1], seats[0], seats)
-    command = workshop.launch_pane_argv(
-        "codex",
-        launcher.path,
-        workshop.launch_argv("codex", "init", workspace=launcher.path),
-        session=seats[1],
-    )
-    assert command[command.index("--session") + 1] == seats[1]
-    assert command[command.index("--root") + 1] == str(roots[1])
-    assert "runs" not in command and "tui" not in command
 
 
 @pytest.mark.parametrize("script", ["vc-agent-workshop.py", "vc-start-here.py"])

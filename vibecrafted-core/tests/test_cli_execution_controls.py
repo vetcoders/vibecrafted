@@ -318,7 +318,7 @@ def test_invalid_values_are_refused_before_any_control_plane_write(
     ("provider", "args", "fragment"),
     [
         ("junie", ["--sandbox", "true"], "junie 26.8.31 exposes no sandbox control"),
-        ("junie", ["--permissions", "bypass"], "supported: auto"),
+        ("junie", ["--permissions", "read-only"], "supported: auto"),
         (
             "codex",
             ["--permissions", "auto", "--sandbox", "false"],
@@ -594,3 +594,141 @@ def test_native_resume_keeps_admitted_policy_in_provider_argv_and_receipt(
         (_runtime_runs(world.env) / result["run_id"] / "meta.json").read_text()
     )["execution_controls"]
     assert receipt == admitted.receipt()
+
+
+@pytest.mark.parametrize(
+    ("body", "override", "effective", "source"),
+    [
+        ('[runtime.picking]\npermissions = "bypass"\n', "", "bypass", "config:global"),
+        (
+            'permissions = "read-only"\n[runtime.picking]\npermissions = "bypass"\n',
+            "",
+            "bypass",
+            "config:global",
+        ),
+        (
+            'permissions = "bypass"\n[runtime.picking]\npermissions = "auto"\n',
+            "",
+            "auto",
+            "config:global",
+        ),
+        (
+            'permissions = "bypass"\n[runtime.picking]\npermissions = ""\n',
+            "",
+            "auto",
+            "default",
+        ),
+        ('permissions = "bypass"\n', "", "bypass", "config:global"),
+        (
+            (
+                '[runtime.picking]\npermissions = "bypass"\n'
+                '[agents.claude]\npermissions = "read-only"\n'
+            ),
+            "",
+            "read-only",
+            "config:agents.claude",
+        ),
+        (
+            (
+                '[runtime.picking]\npermissions = "bypass"\n'
+                '[agents.claude]\npermissions = "read-only"\n'
+            ),
+            "auto",
+            "auto",
+            "dispatch",
+        ),
+    ],
+)
+def test_ui_permission_precedence_reaches_public_launch_and_metadata(
+    world: _World, tmp_path: Path, body: str, override: str, effective: str, source: str
+) -> None:
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(body, encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    args = ["--permissions", override] if override else []
+    result = world.launch(
+        "workflow", "claude", *args, "--repo", str(world.repo), "-p", "configured run"
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["accepted"] is True
+    controls = receipt["execution_controls"]
+    assert controls["permissions_effective"] == effective
+    assert controls["permissions_source"] == source
+    assert controls["permissions_requested"] == (
+        "" if source == "default" else effective
+    )
+    argv = _await_argv(world.argv_file)
+    assert argv == receipt["worker_command"][1:]
+    expected_flag = {"bypass": "bypassPermissions", "auto": "auto", "read-only": "plan"}
+    assert argv[argv.index("--permission-mode") + 1] == expected_flag[effective]
+    meta = json.loads(
+        (_runtime_runs(world.env) / receipt["run_id"] / "meta.json").read_text()
+    )
+    assert meta["execution_controls"] == controls
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'permissions = "bypass"\n[runtime.picking]\npermissions = "yolo"\n',
+        "[runtime.picking]\npermissions = false\n",
+        '[runtime.picking]\npermissions = ["bypass"]\n',
+        'runtime = "bypass"\n',
+        '[runtime]\npicking = "bypass"\n',
+    ],
+)
+def test_malformed_ui_permission_refuses_before_launch(
+    world: _World, tmp_path: Path, body: str
+) -> None:
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(body, encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    result = world.launch("workflow", "claude", "--repo", str(world.repo), "-p", "x")
+    assert result.returncode == 2, result.stdout
+    assert "runtime" in result.stderr
+    assert not world.argv_file.exists()
+    runs = _runtime_runs(world.env)
+    assert not runs.exists() or not any(runs.iterdir())
+
+
+@pytest.mark.parametrize("selection", ["dispatch", "global", "agent"])
+def test_junie_bypass_launch_records_honest_auto_adaptation(
+    tmp_path: Path, selection: str
+) -> None:
+    world = _World(tmp_path, provider="junie")
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    table = "agents.junie" if selection == "agent" else "runtime.picking"
+    config.write_text(f'[{table}]\npermissions = "bypass"\n', encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    args = ["--permissions", "bypass"] if selection == "dispatch" else []
+    result = world.launch(
+        "workflow", "junie", *args, "--repo", str(world.repo), "-p", "x"
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["accepted"] is True
+    controls = receipt["execution_controls"]
+    assert controls["permissions_requested"] == "bypass"
+    assert controls["permissions_effective"] == "auto"
+    assert (
+        controls["permissions_source"]
+        == {
+            "dispatch": "dispatch",
+            "global": "config:global",
+            "agent": "config:agents.junie",
+        }[selection]
+    )
+    assert controls["permissions_reason"] == "junie-headless-no-bypass"
+    assert controls["provider_flags"] == []
+    argv = _await_argv(world.argv_file)
+    assert "--brave" not in argv
+    assert "--plan" not in argv
+    assert argv == receipt["worker_command"][1:]
+    meta = json.loads(
+        (_runtime_runs(world.env) / receipt["run_id"] / "meta.json").read_text()
+    )
+    assert meta["execution_controls"] == controls

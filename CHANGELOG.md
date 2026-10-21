@@ -3,7 +3,7 @@
 All notable changes to 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## [4.5.0] - 2026-10-21
 
 ### Changed
 
@@ -22,6 +22,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Automatic project names remove leading dashes after path-character sanitizing,
+  so folders with spaces and backslashes can open their exact project path.
+  Explicit Frame names retain the existing validation and length limits.
+- Registered projects with an unbound same-name live Frame session refuse automatic
+  preparation instead of silently creating a duplicate hashed seat. Proven
+  foreign collisions and first-time projects keep their existing routing.
+- Installed project creation retains explicit selected layouts and swap files
+  through the canonical create owner in writable product configuration. The
+  public Frame wrapper keeps its installed-layout guard; Runtime Packs and
+  existing seats remain unchanged.
+- Bind release sources and hosted defaults to Frame 4.5.0 at
+  `4f689254bd5cad05adee5ab2a8555e9d3b775dfb`, including installed wrapper/native
+  engine admission, retained layouts, guarded browser reconnects and cold Agents startup.
+- App and Runtime Pack terminal copies use the same canonical audio-input
+  entitlement and code identifier through final signing and bundle sealing.
+  Strict installer CDHash and signing-owner admission remains unchanged.
+- Release donor snapshots build native and WASM outputs in each physical donor's
+  leased central target and consume binaries from that same target.
+- Agents recovers missing pane context from an existing verified Frame binding
+  and offers the current Git repository as a path hint. Launching from an
+  unbound current project refuses duplicate-seat allocation and points back to
+  the existing session; a path hint never establishes workspace ownership.
+- Frame can request project preparation through the selected runtime's existing
+  workspace owner and receive its verified native session, incarnation and WES
+  context. Selected layouts apply only when creating a new seat; preparation
+  reuses existing seats without replacing their layout or running work.
+- Frame preserves VT query replies and resize ordering, and Aa opens the existing
+  typography chooser scene with one reusable panel.
+- Source builds export pinned donors independently of uncommitted Git attributes
+  and validate the exported package manifest before compilation.
+- macOS host packaging declares microphone and speech-recognition use and signs
+  the main host plus embedded terminal with the audio-input hardened-runtime
+  entitlement. Release assembly checks both final signatures; normal macOS
+  consent remains required after a notarized install.
+- The existing terminal font chooser lists curated Monaspace NF families first,
+  then installed fixed-width families identified by macOS CoreText traits.
+  Paging and wheel navigation keep the list usable; `launcher --font` opens it
+  directly without provider setup. Font policy changes only on explicit Apply.
+  Invalid UTF-8 policy stays recoverable without rewriting its bytes; filename
+  matches cannot authorize selection, and case variants retain all genuine faces.
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.
 - OMP telemetry follows native profiles and agent-directory overrides, retains
@@ -40,11 +80,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   checkouts supply Git objects without changing their branches or working files.
   Missing sources are fetched into temporary repositories. An explicit
   `RUNTIME_PACK` continues to select an existing pack.
-  The source channel pins Frame 4.4.0 at `0b91c4f0806356b5c92e46c82bf0fdf0310c0222`,
-  which carries strider, the Launchpad landing page and the live Sessions rail
-  plus the Panels cohort; Terminal remains 0.18.0-dev at
-  `38ef2f918383ca4dde797d22869b619097c81d05`. The DMG, Linux and Windows
-  builders use the same pair.
+  Linux and Windows builders resolve the same canonical component selection,
+  including unpublished local Git commits, and compile isolated committed-source
+  exports. Inventory records each selected revision and the SHA-256 of the
+  Git-generated source archive, with no independent platform donor pins.
 - Project Agents opens the interactive launcher. Launch preferences include
   model and reasoning effort, with provider-specific effort transport verified
   through interactive PTY fixtures.

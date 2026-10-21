@@ -744,11 +744,7 @@ strip_debug_stabs() {
 }
 
 sign_nested_app_bundles() {
-  local nested_app
-  while IFS= read -r -d '' nested_app; do
-    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$nested_app"
-  done < <(find "$APP/Contents" -mindepth 2 -type d -iname '*.app' -print0)
+  sign_macho_app_bundles "$APP/Contents"
 }
 
 # Helpers/vc-app-update is a shebang script, not Mach-O, so sign_macho_tree
@@ -815,8 +811,9 @@ materialize_donor_snapshots() {
     log "vc-terminal snapshot at $terminal_head"
     log "vc-frame snapshot at $frame_head"
   fi
-  # Every snapshot build starts from a cold donor target directory. Main
-  # cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
+  # Source snapshots are disposable; donor Cargo/WASM outputs remain under the
+  # physical donors' leased target roots, never below the snapshots we reap.
+  # Main cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
   [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
@@ -1111,9 +1108,11 @@ build_product() {
   require_clean_repo "$FRAME_REPO" vc-frame
 
   log "Building vc-terminal through its release binary target"
-  make -C "$TERMINAL_REPO" \
+  CARGO_TARGET_DIR="$TERMINAL_DONOR/target" \
+    CARGO_BUILD_BUILD_DIR="$TERMINAL_DONOR/target" \
+    make -C "$TERMINAL_REPO" \
     DEPLOYMENT_TARGET='MACOSX_DEPLOYMENT_TARGET=14.0' release-bins
-  local terminal_source="$TERMINAL_REPO/target/release/alacritty"
+  local terminal_source="$TERMINAL_DONOR/target/release/alacritty"
   [[ -x "$terminal_source" ]] || die "vc-terminal release binary is missing"
   chmod 0755 "$terminal_source"
 
@@ -1133,7 +1132,9 @@ build_product() {
   # script created and will reap, so it is ours to dirty.
   if (( SNAPSHOT_DONORS )); then
     log "Rebuilding vc-frame's bundled WASM plugins under the release remaps"
-    CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets
+    CARGO_TARGET_DIR="$FRAME_DONOR/target" \
+      CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
+      CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets
   else
     log "NOTE: --snapshot-donors is off, so the tracked WASM plugin blobs ship"
     log "      as they are. If they name this host the payload gate refuses"
@@ -1154,12 +1155,14 @@ build_product() {
   # asks zellij-utils/build.rs to inspect the derived-output mutation.
   local frame_release_sha
   frame_release_sha="$(git_sha "$FRAME_REPO")"
-  CARGO_PROFILE_RELEASE_STRIP=false \
+  CARGO_TARGET_DIR="$FRAME_DONOR/target" \
+    CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
+    CARGO_PROFILE_RELEASE_STRIP=false \
     VC_FRAME_GIT_SHA="$frame_release_sha" \
     VC_FRAME_GIT_DIRTY=0 \
     VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
     make -C "$FRAME_REPO" release-binary
-  local frame_source="$FRAME_REPO/target/release/vc-frame"
+  local frame_source="$FRAME_DONOR/target/release/vc-frame"
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
   chmod 0755 "$frame_source"
 
@@ -1283,7 +1286,16 @@ build_product() {
   assert_payload_is_anonymous "$APP" "Vibecrafted.app"
 
   log "Signing nested code and binding exact source receipts"
-  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted"
+  # The actual assembly boundary owns privacy metadata and signing inputs.
+  # Xcode signing is disabled above; CODE_SIGN_ENTITLEMENTS alone is insufficient.
+  local host_entitlements="$BUILD_DIR/host-entitlements.plist"
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --entitlements-output "$host_entitlements" \
+    > "$BUILD_DIR/host-permissions-plan.json"
+  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted" \
+    "$APP/Contents/MacOS/vc-terminal" "$host_entitlements" \
+    "$runtime/libexec/vc-terminal"
   sign_nested_app_bundles
   sign_helper_scripts
   embed_runtime_pack
@@ -1299,7 +1311,7 @@ build_product() {
     --terminal-sha "$(git_sha "$TERMINAL_REPO")" \
     --frame-sha "$(git_sha "$FRAME_REPO")"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$APP"
+    "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"
   log "Probing the signed bundled Python without mutating the app seal"
   "$runtime/bin/python3" -c 'import jsonschema, yaml, vibecrafted_core.product_contract'
   if find "$APP/Contents" \( -type d -name __pycache__ -o -type f -name '*.py[co]' \) \
@@ -1307,6 +1319,10 @@ build_product() {
     die "bundled Python mutated the signed application payload"
   fi
   codesign --verify --deep --strict --verbose=2 "$APP"
+  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+    "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --verify-only --verify-signatures \
+    > "$BUILD_DIR/host-permissions-receipt.json"
   verify_update_channel
   run_bundled_verifier app "$APP" --require-clean
 }
@@ -1325,6 +1341,14 @@ create_dmg() {
 
 notarize_product() {
   local app_zip="$BUILD_DIR/Vibecrafted.app.zip"
+  # Also covers --notarize-only: do not spend a ticket on an older assembly
+  # that lacks host declarations or loses terminal entitlements on re-sign.
+  # The source snapshot is reaped after a build; notarize-only reads the
+  # current checkout's verifier just like verify_update_channel above.
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --app "$APP" --verify-only --verify-signatures \
+    > "$BUILD_DIR/host-permissions-receipt.json"
   verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
     || die "refusing notarization: embedded Runtime Pack Mach-O preflight failed"
   rm -f "$app_zip"

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ from .env_allowlist import (
     filter_headless_worker_env,
     managed_provider_environment,
     provider_identity_shell_prelude,
+    provider_launch_environment_receipt,
     visible_color_shell_prelude,
 )
 from .events import append_event
@@ -182,6 +184,7 @@ class WorkflowLaunchSpec:
     # launch belongs to a lifecycle run, this carries the lifecycle state.json
     # path so the dispatcher can write the worker's terminal truth into it.
     lifecycle_state_path: str = ""
+    source_readonly: bool = False
     # Machine-owned mission binding for lifecycle stage reports. The worker may
     # attest success, but it cannot choose which mission that attestation closes.
     claim_digest: str = ""
@@ -216,6 +219,8 @@ class WorkflowLaunchSpec:
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
         payload = {**asdict(self), "prompt": "", "plan_source": None}
+        if not self.source_readonly:
+            payload.pop("source_readonly", None)
         if not self.remediate_trust_block:
             payload.pop("remediate_trust_block", None)
             payload.pop("remediation_reason", None)
@@ -1219,6 +1224,7 @@ def await_launch_truth(
     hard_cap_seconds: float | None = None,
     require_report: bool = True,
     require_transcript_output: bool = False,
+    on_poll: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     """Await a launched workflow and verify its announced artifact paths.
 
@@ -1244,6 +1250,7 @@ def await_launch_truth(
         timeout_seconds=timeout_seconds,
         interval_seconds=interval_seconds,
         hard_cap_seconds=hard_cap_seconds,
+        **({"on_poll": on_poll} if on_poll is not None else {}),
     )
     run = dict(awaited.get("run") or {})
     await_reason = str(awaited.get("reason") or "")
@@ -2169,6 +2176,8 @@ def build_launch_command(
         ]
         if spec.model:
             launch_command.extend(["--model", spec.model])
+        if not spec.lifecycle_state_path:
+            launch_command.append("--lifecycle")
         return launch_command
 
     worker_agent = spec.agent
@@ -2291,6 +2300,10 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
             receipt[key] = str(payload.get(key) or "")
     if isinstance(payload.get("execution_controls"), dict):
         receipt["execution_controls"] = dict(payload["execution_controls"])
+    if isinstance(payload.get("provider_launch_environment"), dict):
+        receipt["provider_launch_environment"] = dict(
+            payload["provider_launch_environment"]
+        )
     for key in (
         "model_requested",
         "model_effective",
@@ -3106,6 +3119,7 @@ def recover_legacy_dispatch_identity(
                 stored_spec.get("research_synthesizer_model") or ""
             ),
             lifecycle_state_path=str(stored_spec.get("lifecycle_state_path") or ""),
+            source_readonly=bool(stored_spec.get("source_readonly")),
             claim_digest=str(stored_spec.get("claim_digest") or ""),
             run_id=str(stored_spec.get("run_id") or ""),
         )
@@ -3388,6 +3402,9 @@ def launch_workflow(
             spec_digest=idem_spec_digest,
         )
     initial_meta: dict[str, Any] = dict(launch_meta or {})
+    # Launcher requests are measured below from this child's environment;
+    # caller metadata (including a continuation's parent) cannot supply them.
+    initial_meta.pop("provider_launch_environment", None)
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
     initial_meta.update(
@@ -3435,6 +3452,15 @@ def launch_workflow(
         merged_env = selected_runtime_environment(merged_env)
         merged_env["PATH"] = agent_tool_search_path(merged_env)
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
+        if spec.source_readonly:
+            from .marbles_reception import readonly_command
+
+            worker_command, receiver_guard = readonly_command(
+                spec.root, worker_command, spec.agent
+            )
+            merged_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            initial_meta["receiver_guard"] = receiver_guard
+            atomic_write_json(artifacts["meta"], initial_meta)
     except (FileNotFoundError, ValueError) as exc:
         return _finish_launch_idempotency(
             idem_key,
@@ -3492,7 +3518,8 @@ def launch_workflow(
         quiet=spec.runtime in {"terminal", "visible"},
         lifecycle_state_path=spec.lifecycle_state_path,
         salvage_report_from_stream=bool(
-            (launch_meta or {}).get("native_resume")
+            spec.source_readonly
+            or (launch_meta or {}).get("native_resume")
             or (launch_meta or {}).get("native_fork")
         ),
     )
@@ -3595,6 +3622,16 @@ def launch_workflow(
         if spec.runtime == "headless"
         else managed_provider_environment(merged_env)
     )
+    # Only headless Popen consumes this map; visible Frame scripts inherit a
+    # different environment. Do not claim those scripts received these pins.
+    if spec.runtime == "headless":
+        provider_environment = provider_launch_environment_receipt(
+            spec.agent, launch_env
+        )
+        if provider_environment:
+            model_receipt.update(provider_environment)
+            initial_meta.update(provider_environment)
+            atomic_write_json(artifacts["meta"], initial_meta)
 
     append_event(
         kind="launch",

@@ -199,7 +199,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         execution=EXECUTABLE,
         session_id_shape=_SESSION_TOKEN,
         session_id_sources=("jsonl_session_event", "run_meta"),
-        interactive_resume=UNSUPPORTED,
+        interactive_resume=SUPPORTED,
         noninteractive_resume=SUPPORTED,
         native_fork=UNSUPPORTED,
         fork_runtime_restrictions="omp exposes --resume but no native fork command",
@@ -215,9 +215,9 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             required_markers=("--resume", "--mode", "--approval-mode"),
         ),
         notes=(
-            "headless-only worker: no interactive launch/resume builder exists "
-            "(spawn.interactive_policy_command rejects omp), so interactive "
-            "resume is not advertised. "
+            "omp is an interactive TUI client (`omp [flags] <prompt>`) with "
+            "native interactive resume (`omp --resume <id> <prompt>`) and a "
+            "headless JSON stream lane (`omp -p --mode json`). "
             "omp 18.11.0 probed 2026-10-15: stdin prompt lane (`echo … | omp -p` "
             "rc 0), --mode json NDJSON with a leading session event, "
             "--approval-mode/--tools combine with -p (rc 0), and an approval "

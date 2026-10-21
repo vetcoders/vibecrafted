@@ -2386,6 +2386,137 @@ def test_resurrect_workspace_lobby_and_unknown_cwd_do_not_guess_agent_owner(
     assert not wc.list_instances()
 
 
+def test_resurrect_operator_host_cannot_borrow_layout_project_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    project.mkdir()
+    wc.resolve_run_workspace_identity(root=project, env={})
+    before = {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    }
+    runner = Runner()
+    manifest = {
+        "runtime": {"running_roots": []},
+        "frame": {
+            "sessions": [
+                {
+                    "name": "vc-host",
+                    "cwd": str(project),
+                    "layout": f'layout {{ cwd "{project}"; tab {{ pane }} }}',
+                    "panes": [],
+                    "unplaced_agents": [],
+                }
+            ]
+        },
+        "headless_runs": [],
+    }
+    restored = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )["sessions"][0]
+    assert restored["frame_result"] == "live"
+    assert restored["workspace"]["result"] == "not-applicable"
+    assert len([a for a, _ in runner.calls if "--create-background" in a]) == 1
+    assert {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == before
+
+
+@pytest.mark.parametrize("layout_available", [True, False])
+def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout_available: bool
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    inherited = tmp_path / "inherited-server-cwd"
+    project.mkdir()
+    if layout_available:
+        inherited.mkdir()
+    owner = wc.resolve_run_workspace_identity(root=project, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=owner.workspace_id,
+        vibecrafted_session_id=owner.vibecrafted_session_id,
+        workspace_instance_id=owner.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="custom-project-seat",
+        socket_dir=str(SOCKETS),
+        state="live",
+    )
+    runner = Runner()
+    manifest = {
+        "runtime": {"running_roots": []},
+        "frame": {
+            "sessions": [
+                {
+                    "name": "custom-project-seat",
+                    "cwd": str(inherited),
+                    "layout": f'layout {{ cwd "{inherited}"; tab {{ pane }} }}',
+                    "panes": [],
+                    "unplaced_agents": [],
+                }
+            ]
+        },
+        "headless_runs": [],
+    }
+    restored = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )["sessions"][0]
+    assert restored["result"] == "live"
+    assert restored["workspace"]["root"] == str(project)
+    assert restored["workspace"]["root_source"] == "catalog-owner"
+    assert restored["workspace"]["workspace_id"] == owner.workspace_id
+    assert (
+        restored["workspace"]["vibecrafted_session_id"] != owner.vibecrafted_session_id
+    )
+    assert len([a for a, _ in runner.calls if "--create-background" in a]) == 1
+    assert len(wc.read_catalog().workspaces) == 1
+    old = wc.read_workspace_session(owner.vibecrafted_session_id)
+    assert old.attachments[0].state == "missing"
+    assert wc.runtime_session_owner_root(
+        "custom-project-seat", str(SOCKETS), runtime_state="live"
+    ) == str(project)
+
+
+def test_resurrect_unreadable_owner_never_falls_back_to_layout_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    project.mkdir()
+    owner = wc.resolve_run_workspace_identity(root=project, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=owner.workspace_id,
+        vibecrafted_session_id=owner.vibecrafted_session_id,
+        workspace_instance_id=owner.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="unreadable-seat",
+        socket_dir=str(SOCKETS),
+        state="live",
+    )
+    wc.workspace_session_path(owner.vibecrafted_session_id).write_text("{broken")
+    before = {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    }
+    runner = Runner()
+    with pytest.raises(wc.WorkspaceCatalogError, match="ownership is unreadable"):
+        reinstall_clean._prepare_restored_workspace(
+            ctx_for(tmp_path, runner, monkeypatch=monkeypatch),
+            {"name": "unreadable-seat", "cwd": str(project)},
+        )
+    assert not runner.calls
+    assert {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == before
+
+
 @pytest.fixture
 def recovery_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from contextlib import contextmanager

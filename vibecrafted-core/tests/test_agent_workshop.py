@@ -662,7 +662,10 @@ def test_session_names_from_listing_skip_exited_sessions() -> None:
 
 
 @pytest.mark.parametrize("foreign", [False, True])
-@pytest.mark.parametrize("binding", ["live", "dead", "wrong-instance", "missing"])
+@pytest.mark.parametrize(
+    "binding",
+    ["live", "dead", "wrong-instance", "missing", "stale-instance", "wrong-socket"],
+)
 def test_custom_current_seat_requires_exact_project_wes_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign: bool, binding: str
 ) -> None:
@@ -685,7 +688,15 @@ def test_custom_current_seat_requires_exact_project_wes_binding(
             runtime="vc-frame",
             runtime_session_id="workday-440",
             state="dead" if binding == "dead" else "live",
+            socket_dir="/other-frame" if binding == "wrong-socket" else "",
         )
+    if binding == "stale-instance":
+        from vibecrafted_core.workspace_catalog import instance_path
+
+        path = instance_path(identity.workspace_instance_id)
+        payload = json.loads(path.read_text())
+        payload["status"] = "stale"
+        path.write_text(json.dumps(payload))
     for key, value in identity.to_env().items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("VC_FRAME_SESSION_NAME", "workday-440")
@@ -953,6 +964,13 @@ def _prepare_project_creation(
     monkeypatch.setattr(workshop.time, "sleep", lambda _seconds: None)
 
     def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        if command[1:5] in (
+            ["--session", "target", "action", "list-tabs"],
+            ["--session", "target-recovery", "action", "list-tabs"],
+        ):
+            # This fixture models an older Frame without incarnation metadata;
+            # read-only identity probes are separate from launch side effects.
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
         calls.append(command)
         if command == workshop.workspace_shell_argv(
             kwargs["env"], project, "target", prepare=True
@@ -1150,28 +1168,55 @@ def test_live_inventory_probes_pinned_frame_with_same_environment(
     assert error == ""
 
 
-def test_fresh_project_basename_collision_is_not_an_owned_live_destination(
+def test_fresh_project_basename_collision_uses_preparation_before_agent_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workshop = _load()
-    original_ownership = getattr(
-        workshop, "catalog_owns_destination", lambda *_args: False
+    from vibecrafted_core import workspace_catalog as wc
+
+    real_run = subprocess.run
+    workshop, launched, calls, generation = _prepare_project_creation(
+        tmp_path, monkeypatch, recovery=True
     )
-    launched, calls = _prepare_launch(
-        workshop,
-        tmp_path,
-        monkeypatch,
-        destination=tmp_path.name,
-        live=[tmp_path.name],
-        current="source-host",
+    # The helper already registered the selected project. An occupied name
+    # therefore needs proven foreign ownership to permit collision routing;
+    # an unbound same-name seat now correctly refuses a duplicate replacement.
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    with monkeypatch.context() as physical:
+        physical.setattr(subprocess, "run", real_run)
+        foreign = wc.resolve_run_workspace_identity(root=foreign_root, env={})
+        wc.record_runtime_session_attachment(
+            workspace_id=foreign.workspace_id,
+            vibecrafted_session_id=foreign.vibecrafted_session_id,
+            workspace_instance_id=foreign.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id="target",
+            state="live",
+        )
+    monkeypatch.setattr(workshop, "catalog_owns_destination", lambda *_args: False)
+    inventory = iter(
+        [(["target", "source-host"], ""), (["target-recovery", "source-host"], "")]
     )
-    monkeypatch.setattr(workshop, "catalog_owns_destination", original_ownership)
+    monkeypatch.setattr(
+        workshop, "list_live_frame_sessions", lambda **_kwargs: next(inventory)
+    )
 
     launched.launch()
 
     assert launched.mode == "launcher"
-    assert "workspace catalog does not bind it" in launched.error
-    assert calls == []
+    assert launched.error == ""
+    assert len(calls) == 3
+    assert calls[0] == workshop.workspace_shell_argv(
+        {
+            "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+            "VIBECRAFTED_RUNTIME_BIN": str(generation / "bin"),
+        },
+        Path(launched.path),
+        "target",
+        prepare=True,
+    )
+    assert calls[1][1:5] == ["--session", "target-recovery", "action", "new-tab"]
+    assert not any(command[1:3] == ["--session", "target"] for command in calls)
 
 
 def test_registered_live_project_preserves_its_catalog_destination(
@@ -1180,11 +1225,22 @@ def test_registered_live_project_preserves_its_catalog_destination(
     from vibecrafted_core.workspace_catalog import (
         create_workspace,
         operator_session_name,
+        record_runtime_session_attachment,
+        resolve_run_workspace_identity,
     )
 
     record = create_workspace(root=tmp_path, display_label="chosen-project")
     destination = operator_session_name(
         record.workspace_id, display_label=record.display_label
+    )
+    identity = resolve_run_workspace_identity(root=tmp_path, env={})
+    record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id=destination,
+        state="live",
     )
     workshop = _load()
     original_ownership = getattr(
@@ -1272,7 +1328,7 @@ def test_catalog_owned_live_storage_root_refuses_all_launch_side_effects(
     workshop = _load()
     original_ownership = workshop.catalog_owns_destination
     original_destination = workshop.destination_session_for_workspace
-    assert original_ownership(blocked, destination)
+    assert not original_ownership(blocked, destination)
     launched, calls = _prepare_launch(
         workshop,
         blocked,

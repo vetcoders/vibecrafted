@@ -863,3 +863,48 @@ def test_interrupt_stops_live_cuts_by_their_recorded_provider_identity(
     assert result["scheduler_stop"]["accepted"] is True
     assert _receipt_store(repo, plan).read()["scheduler_stop_requested"] is True
     assert state["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_approve_cannot_advance_unsettled_counted_cycle(tmp_path, force):
+    from vibecrafted_core.lifecycle_control import approve_transition
+
+    state = {
+        "human_controls": ["approve_transition"],
+        "workflow": "vc-marbles",
+        "baton": {"next_stage": "audit", "previous_reports": []},
+        "stages": [{"id": "marbles", "workflow": "marbles", "status": "launching"}],
+        "manifest": {"stages": [{"id": "audit", "phase": "read"}]},
+    }
+    with pytest.raises(ValueError, match="counted_cycle_not_settled"):
+        approve_transition(
+            tmp_path / "state.json",
+            state,
+            force=force,
+            run_lifecycle_fn=lambda *_: pytest.fail("unsettled cycle advanced"),
+        )
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_approve_cannot_bypass_invalid_counted_cycle_receipt(tmp_path, force):
+    state = {
+        "human_controls": ["approve_transition"],
+        "workflow": "vc-marbles",
+        "baton": {"next_stage": "audit", "previous_reports": []},
+        "stages": [
+            {
+                "id": "marbles",
+                "workflow": "marbles",
+                "status": "failed",
+                "cycle_receipt_error": "write_cycle_metadata_missing",
+            }
+        ],
+        "manifest": {"stages": [{"id": "audit", "phase": "read"}]},
+    }
+    with pytest.raises(ValueError, match="write_cycle_receipt_invalid"):
+        approve_transition(
+            tmp_path / "state.json",
+            state,
+            force=force,
+            run_lifecycle_fn=lambda *_: pytest.fail("invalid receipt advanced"),
+        )

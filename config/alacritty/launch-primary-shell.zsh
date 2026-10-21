@@ -34,7 +34,12 @@ if [[ -n "${ZSH_VERSION:-}" && "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
   return $?
 fi
 
-# Isolate all interactive startup from the user's .zshrc/.bashrc.
+# Startup is composed, not isolated: the product ZDOTDIR's stages run the
+# global baseline (only where `-d` skipped it), the user's own login files,
+# and the user's own .zshrc before the product interactive profile, so the
+# user's PATH and tools arrive exactly as a native shell would compose them.
+# personal-shell stays the explicit release of the product's interactive
+# pins (Atuin/Starship/ZDOTDIR), never an access gate for user tools.
 export ZDOTDIR="$HOME/.config/vibecrafted/vc-terminal"
 
 tty_path="/dev/tty"

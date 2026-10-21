@@ -25,6 +25,43 @@ candidates=(
 )
 for py in "${candidates[@]}"; do
   [[ "$py" == /* && -x "$py" && ! -d "$py" ]] || continue
+  # Product config is republished on upgrade while an existing Frame retains
+  # its interpreter pin. Pair managed Python panes with that interpreter's
+  # own helper, not the newer shared script. Explicit/private and in-tree
+  # launchers keep their requested path.
+  # Classify the requested path, not a symlink target: an explicit checkout
+  # helper stays explicit even if the shared config directory points there.
+  launcher_dir="$(cd -L "$(dirname "$launcher")" && pwd -L)"
+  managed=false
+  for config_home in "$HOME/.config" "${XDG_CONFIG_HOME:-$HOME/.config}"; do
+    shared="$config_home/vibecrafted/vc-frame"
+    [[ -d "$shared" ]] || continue
+    if [[ "$launcher_dir" == "$(cd -L "$shared" && pwd -L)" ]]; then
+      # Only shipped Python pane entries are ours. Other files in this
+      # directory remain Founder-owned, as in the installer's managed leaves.
+      case "${launcher##*/}" in
+        vc-agent-workshop.py|vc-start-here.py)
+          managed=true
+          break
+          ;;
+      esac
+    fi
+  done
+  if [[ "$managed" == true ]]; then
+    # Resolve the bin directory, not the executable: generation venvs may
+    # symlink CPython outside the generation. No active/PATH/env-root fallback.
+    bin_dir="$(cd "$(dirname "$py")" && pwd -P)"
+    generation="$(cd "$bin_dir/.." && pwd -P)"
+    helpers="$generation/vibecrafted-core/vibecrafted_core/config/vc-frame"
+    counterpart="$helpers/$(basename "$launcher")"
+    if [[ "$bin_dir" != "$generation/bin" || ! -d "$helpers" ||
+          "$(cd "$helpers" && pwd -P)" != "$helpers" ||
+          ! -f "$counterpart" || -L "$counterpart" || ! -r "$counterpart" ]]; then
+      printf '\n  Pane helper unavailable in pinned generation: %s\n  Repair the pinned Runtime Pack; this Frame keeps its current runtime.\n\n' "$counterpart" >&2
+      exit 78
+    fi
+    launcher="$counterpart"
+  fi
   # This wrapper intentionally becomes the selected interpreter.
   # shellcheck disable=SC2093
   exec "$py" "$launcher" "$@"
