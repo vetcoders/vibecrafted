@@ -3703,20 +3703,18 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
         return
     if route == "prepare" or route.startswith("live-"):
         admitted = workshop.ensure_live_destination(
-            scene.root, "selected", ["workday-440"]
+            scene.root, "selected", scene.live()
         )
         assert admitted.session == "selected"
-        assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
         if route.startswith("live-"):
-            assert (
-                admitted.environment[wc.ENV_VIBECRAFTED_SESSION_ID]
-                == identity.vibecrafted_session_id
+            actual = resolve_run_workspace_identity(
+                root=scene.root,
+                env={},
+                runtime_session_id="selected",
+                socket_dir=env["VC_FRAME_SOCKET_DIR"],
+                runtime_state="live",
             )
-            assert (
-                admitted.environment[wc.ENV_WORKSPACE_INSTANCE_ID]
-                == identity.workspace_instance_id
-            )
-            assert admitted.environment[wc.ENV_BUILD_ID] == identity.build_id.rendered
+            assert actual.to_env() == identity.to_env()
             assert {
                 str(p): p.read_bytes()
                 for folder in [wc.instances_dir(), wc.sessions_dir()]
@@ -3729,6 +3727,7 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
                 for c in scene.calls()
             )
             return
+        assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
     else:
         from types import SimpleNamespace
 
@@ -3763,7 +3762,17 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
             assert "exactly one source client" in launched.error
         else:
             assert launched.error == ""
-    receipt = read_workspace_session(identity.vibecrafted_session_id)
+    # Preparation may materialize a new session/build pair. Read the canonical
+    # owner of the admitted physical seat instead of assuming its preflight id.
+    actual = resolve_run_workspace_identity(
+        root=scene.root,
+        env={},
+        runtime_session_id="selected",
+        socket_dir=env["VC_FRAME_SOCKET_DIR"],
+        runtime_state="live",
+    )
+    assert actual.workspace_id == identity.workspace_id
+    receipt = read_workspace_session(actual.vibecrafted_session_id)
     assert any(
         a.runtime_session_id == "selected" and a.state == "live"
         for a in receipt.attachments
