@@ -749,7 +749,7 @@ def test_workshop_failed_create_has_no_live_receipt_and_retry_recovers(
     assert len(_creates(f)) == len(_opened(f)) == 1
 
 
-def test_workshop_foreign_seat_wins_create_race_without_adoption_then_retry_routes_away(
+def test_workshop_create_race_requires_foreign_authority_before_retry_routes_away(
     public_destination, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     f = public_destination
@@ -777,6 +777,17 @@ def test_workshop_foreign_seat_wins_create_race_without_adoption_then_retry_rout
     ]
     assert all(a.state != "live" for s in sessions for a in s.attachments)
     monkeypatch.delenv("VC_DESTINATION_CREATE_RACE")
+    before = _catalog_bytes(f)
+    with pytest.raises(ValueError, match="no verified Frame binding"):
+        f.open_agent("selected")
+    assert _catalog_bytes(f) == before
+    assert raced.read_text() == "foreign race content"
+    assert not _opened(f) and not _creates(f)
+    # The fixture can now supply the foreign creator's real WES ownership.
+    # This changes the authority evidence, never the original physical bytes.
+    foreign = f.scene.tmp_path / "foreign-creator"
+    foreign.mkdir()
+    f.bind(foreign, "selected", physical=False)
     admitted = f.open_agent("selected")
     assert admitted.session != "selected"
     assert raced.read_text() == "foreign race content"
