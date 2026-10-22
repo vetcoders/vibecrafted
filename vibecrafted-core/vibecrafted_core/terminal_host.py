@@ -560,7 +560,22 @@ def host_state(record: dict, host: str, code: CodeIdentity) -> str:
         raise Refusal(EX_TEMPFAIL, f"recorded host {pid} runs another host path")
     if identity.executable != host:
         if identity.executable == record.get("wrapper_executable"):
-            return "starting"
+            # The wrapper is still exec-ing into the host. A missing socket is
+            # not proof of death: the fresh host binds its PID-named socket
+            # lazily, and a legitimately slow start would look identical to a
+            # crashed one. Distinguish by start age, not by socket presence —
+            # otherwise two concurrent first launches both see "stale" and
+            # both exec a host (the exact race test_concurrent_first_launch
+            # pins). A wrapper younger than STARTUP_WAIT_SECONDS is starting;
+            # an older one whose socket never appeared is a crashed wrapper
+            # (or a reused pid), which must not pin the host state forever.
+            try:
+                started = float(record.get("start") or 0)
+            except (TypeError, ValueError):
+                return "stale"
+            if time.time() - started < STARTUP_WAIT_SECONDS:
+                return "starting"
+            return "stale"
         return "stale"
     try:
         current_file = _file_identity(host)
