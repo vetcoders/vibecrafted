@@ -1406,7 +1406,9 @@ install_channel_dmg() {
     [[ -n "$expected" && "$expected" == "$actual" ]] \
       || die "DMG SHA256 mismatch for $(basename "$dmg_url"): expected ${expected:-<unlisted>}, got $actual"
   fi
-  codesign --verify --strict "$dmg" 2>/dev/null || true  # DMG itself is the carrier
+  # The DMG itself is a carrier, not code: its integrity is the SHA256 above.
+  # The App inside is verified below (codesign --deep + spctl), so a DMG-level
+  # codesign is informational only and must never gate the install.
   local mount="/tmp/vibecrafted-dmg.$$"
   hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null \
     || die "Could not mount the downloaded DMG"
@@ -1419,6 +1421,124 @@ install_channel_dmg() {
   local staged_app="$tmpdir/Vibecrafted.app"
   cp -R "$app_src" "$staged_app" || { hdiutil detach "$mount" 2>/dev/null; die "Could not stage the DMG App"; }
   hdiutil detach "$mount" >/dev/null 2>&1 || true
+  # A live Main instance of the App would survive the file swap and then hold
+  # the old binary open; --relaunch (open -n) would start a second instance —
+  # two generations at once. Mirror install-app.sh: gracefully quit the Main
+  # role first (Frame sessions, PTYs and workers survive), then bind the
+  # transaction to its pid/start so the swap waits for a clean exit.
+  local helper_args=()
+  local main_quit="$tmpdir/main-quit.swift"
+  local candidate_root_for_helper="$candidate_root"
+  [[ -d "$candidate_root_for_helper" ]] || candidate_root_for_helper="$(cd "$(dirname "$helper")/.." && pwd -P)"
+  local ownership_swift="$candidate_root_for_helper/vibecrafted-app/shell-agent/app/Vibecrafted/AppInstanceOwnership.swift"
+  local quit_identity=""
+  if [[ -f "$ownership_swift" ]]; then
+    cat "$ownership_swift" >"$main_quit"
+    cat >>"$main_quit" <<'MAIN_QUIT_SWIFT'
+import AppKit
+
+enum MainQuitFailure: Error {
+  case unsafe(String)
+}
+
+func installMainPeer(
+  _ app: NSRunningApplication, destination: URL, identifier: String
+) throws -> AppInstancePeer? {
+  guard !app.isTerminated else { return nil }
+  guard let bundle = app.bundleURL else {
+    throw MainQuitFailure.unsafe("missing running bundle identity")
+  }
+  guard bundle.standardizedFileURL == destination else { return nil }
+  guard app.bundleIdentifier == identifier, app.processIdentifier > 0,
+    let executable = app.executableURL, executable.isFileURL,
+    executable.query == nil, executable.fragment == nil,
+    let main = AppInstanceOwnership.signedMainExecutableURL(
+      bundleURL: bundle, bundleIdentifier: identifier)
+  else { throw MainQuitFailure.unsafe("missing destination executable/signature evidence") }
+  var peer = AppInstancePeer(
+    pid: app.processIdentifier, bundleURL: bundle, executableURL: executable,
+    signedMainExecutableURL: main)
+  if AppInstanceOwnership.isMainHost(peer) {
+    guard let launchDate = app.launchDate else {
+      throw MainQuitFailure.unsafe("missing destination Main start evidence")
+    }
+    peer.launchDate = launchDate
+    return peer
+  }
+  guard executable.host == nil || executable.host == "localhost",
+    executable.standardizedFileURL.deletingLastPathComponent()
+      == main.standardizedFileURL.deletingLastPathComponent()
+  else { throw MainQuitFailure.unsafe("foreign destination executable evidence") }
+  return nil
+}
+
+func installMainSnapshot(destination: URL, identifier: String) throws -> [AppInstancePeer] {
+  let peers = try NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+    .compactMap { try installMainPeer($0, destination: destination, identifier: identifier) }
+  guard peers.count <= 1 else { throw MainQuitFailure.unsafe("ambiguous destination Main instances") }
+  return peers
+}
+
+func installMainStart(_ pid: Int32) throws -> String {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/ps")
+  process.arguments = ["-o", "lstart=", "-p", String(pid)]
+  process.environment = ["PATH": "/usr/bin:/bin", "LC_ALL": "C"]
+  let output = Pipe()
+  process.standardOutput = output
+  process.standardError = FileHandle.nullDevice
+  try process.run()
+  let data = output.fileHandleForReading.readDataToEndOfFile()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0,
+    let raw = String(data: data, encoding: .utf8)
+  else { throw MainQuitFailure.unsafe("unavailable Main process start") }
+  let start = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard start.range(
+    of: #"^[A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$"#,
+    options: .regularExpression) != nil
+  else {
+    throw MainQuitFailure.unsafe("malformed Main process start")
+  }
+  return start
+}
+
+do {
+  guard CommandLine.arguments.count == 2 else { throw MainQuitFailure.unsafe("missing destination") }
+  let destination = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
+  let identifier = AppInstanceOwnership.productBundleIdentifier
+  if let selected = try installMainSnapshot(destination: destination, identifier: identifier).first {
+    let start = try installMainStart(selected.pid)
+    guard try installMainSnapshot(destination: destination, identifier: identifier) == [selected],
+      let app = NSRunningApplication(processIdentifier: selected.pid),
+      try installMainPeer(app, destination: destination, identifier: identifier) == selected,
+      try installMainStart(selected.pid) == start
+    else { throw MainQuitFailure.unsafe("destination Main identity drifted before quit") }
+    guard app.terminate() else { throw MainQuitFailure.unsafe("Main refused graceful termination") }
+    print(selected.pid)
+    print(start)
+  } else {
+    guard try installMainSnapshot(destination: destination, identifier: identifier).isEmpty else {
+      throw MainQuitFailure.unsafe("destination Main appeared during identity check")
+    }
+  }
+} catch {
+  FileHandle.standardError.write(Data("install: refusing Main quit: \(error)\n".utf8))
+  exit(EXIT_FAILURE)
+}
+MAIN_QUIT_SWIFT
+    quit_identity="$(/usr/bin/swift "$main_quit" "$PAIRED_APP_ROOT" 2>"$tmpdir/main-quit.stderr")" \
+      || quit_identity=""
+  fi
+  if [[ -n "$quit_identity" ]]; then
+    local quit_pid quit_start
+    quit_pid="${quit_identity%%$'\n'*}"
+    quit_start="${quit_identity#*$'\n'}"
+    if [[ "$quit_pid" =~ ^[1-9][0-9]*$ && "$quit_start" != "$quit_identity" && -n "$quit_start" ]]; then
+      info "▸ Gracefully quitting the running App Main (pid $quit_pid) — frame sessions survive"
+      helper_args+=(--wait-pid "$quit_pid" --wait-start "$quit_start" --wait-timeout 60)
+    fi
+  fi
   # vc-app-update.sh is the sole UI-bundle mutation owner and requires the full
   # argument set (usage exits 2 without it): --source/--destination/--receipt
   # plus --mode replace --complete --relaunch, mirroring install-app.sh. The
@@ -1438,7 +1558,21 @@ install_channel_dmg() {
     --mode replace \
     --complete \
     --relaunch \
-    || die "App transaction refused (receipt: $transaction_dir/receipt.json); prior App preserved"
+    ${helper_args[@]+"${helper_args[@]}"} \
+    || {
+      # The refusal message must match what actually happened: once the
+      # receipt says replaced=true the App IS swapped — "prior App preserved"
+      # would be a lie. The prior binary survives in the capture directory.
+      local receipt_file="$transaction_dir/receipt.json"
+      local replaced="unknown"
+      if [[ -f "$receipt_file" ]]; then
+        replaced="$("$bootstrap_python" -I -S -c 'import json,sys; print(json.load(open(sys.argv[1])).get("replaced"))' "$receipt_file" 2>/dev/null || echo unknown)"
+      fi
+      if [[ "$replaced" == "True" ]]; then
+        die "App transaction failed AFTER the swap (receipt: $receipt_file says replaced=true). The new App is installed; the prior binary is preserved in the capture directory. Inspect the journal: $transaction_dir/journal.json"
+      fi
+      die "App transaction refused before any swap (receipt: $receipt_file); prior App preserved"
+    }
   info "▸ App installed via $transaction (receipt: $transaction_dir/receipt.json)"
   rm -rf "$staged_app"
 }
@@ -1583,6 +1717,7 @@ macos_pair_channel_app() {
   [[ -f "$helper" ]] || return 1
   info "▸ Installed App does not match the channel; installing the signed App from DMG first…"
   install_channel_dmg "$channel_dmg_url" "$helper" || return 1
+  app_pairing_via_dmg=1
   # Re-probe after the App transaction.
   probe_dir="$tmpdir/pair-probe"
   rm -rf "$probe_dir"; mkdir -p "$probe_dir"
@@ -1608,6 +1743,19 @@ macos_pair_channel_app() {
 # newer releases flag the function (SC2329), older ones its body (SC2317).
 # shellcheck disable=SC2317,SC2329
 install_selected_runtime_pack() {
+  # When the App transaction ran with --complete, vc-app-update.sh already
+  # installed this exact Runtime Pack from the App's bundled copy — a second
+  # install here would be a duplicate publication, not a no-op worth risking.
+  # app_pairing_via_dmg is set by macos_pair_channel_app when the DMG path ran.
+  if [[ "${app_pairing_via_dmg:-0}" == "1" ]]; then
+    info "▸ Runtime Pack already installed by the App transaction (--complete); skipping duplicate"
+    (cd "$candidate_root" \
+      && bash scripts/install-foundations.sh loctree aicx prview screenscribe) \
+      || return $?
+    return 0
+  fi
+  # macOS App pairing is prepared by macos_pair_channel_app (top-level, after
+  # the pack download); here we only forward the prepared args.
   # macOS App pairing is prepared by macos_pair_channel_app (top-level, after
   # the pack download); here we only forward the prepared args.
   # `make -C <candidate>` runs its recipes from the candidate root; so do these.
@@ -1827,6 +1975,7 @@ info "✓ Verified vibecrafted $_installed_version candidate; transactional inst
 # the pairing is re-probed. Off macOS, or without a verified channel pack,
 # this is a no-op: macos_app_args stays empty.
 macos_app_args=()
+app_pairing_via_dmg=0
 if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" && -n "$selected_runtime_pack" && "$use_gui" != "1" ]]; then
   macos_pair_channel_app || die "macOS App pairing failed; nothing was published"
 fi
