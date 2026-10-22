@@ -437,6 +437,54 @@ ensure_pipx() {
   return 1
 }
 
+# ScreenScribe needs Python >= 3.11. A clean Mac has no brew, uv or pipx and
+# only the system python3 3.9, so the pipx path cannot run it there. uv brings
+# its own Python: fetch the pinned uv release the way Node is fetched, checked
+# against its published sha256.
+UV_VERSION="0.9.7"
+UV_RELEASE_BASE="${UV_RELEASE_BASE:-https://github.com/astral-sh/uv/releases/download/$UV_VERSION}"
+
+ensure_uv() {
+  has_cmd uv && return 0
+
+  local uv_target
+  case "$(detect_os)-$(detect_arch)" in
+    macos-aarch64) uv_target="aarch64-apple-darwin" ;;
+    macos-x86_64)  uv_target="x86_64-apple-darwin" ;;
+    linux-x86_64)  uv_target="x86_64-unknown-linux-gnu" ;;
+    linux-aarch64) uv_target="aarch64-unknown-linux-gnu" ;;
+    *) return 1 ;;
+  esac
+  has_cmd curl || return 1
+
+  local uv_url="${UV_RELEASE_BASE}/uv-${uv_target}.tar.gz"
+  local uv_dir="${VIBECRAFTED_HOME}/tools/uv"
+  info "Installing uv ${UV_VERSION} to ${uv_dir}..."
+
+  local tmpdir expected
+  tmpdir="$(mktemp -d)"
+  if curl -fsSL -o "$tmpdir/uv.tar.gz" "$uv_url" \
+    && curl -fsSL -o "$tmpdir/uv.tar.gz.sha256" "$uv_url.sha256"; then
+    expected="$(awk '{print $1; exit}' "$tmpdir/uv.tar.gz.sha256")"
+    if [[ -n "$expected" && "$expected" == "$(sha256_of "$tmpdir/uv.tar.gz")" ]]; then
+      mkdir -p "$uv_dir/bin"
+      tar -xzf "$tmpdir/uv.tar.gz" -C "$uv_dir/bin" --strip-components=1
+      rm -rf "$tmpdir"
+      export PATH="${uv_dir}/bin:${PATH}"
+      if has_cmd uv; then
+        ok "uv ${UV_VERSION} installed to ${uv_dir}"
+        return 0
+      fi
+    else
+      warn "uv ${UV_VERSION} download does not match its sha256; not installing it."
+    fi
+  fi
+
+  rm -rf "$tmpdir"
+  warn "Could not install uv."
+  return 1
+}
+
 _public_pypi() (
   # Scope channel isolation to the command; retain the Founder's settings.
   unset UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL UV_DEFAULT_INDEX UV_FIND_LINKS
@@ -457,7 +505,7 @@ install_screenscribe() {
     return 0
   fi
 
-  if has_cmd uv; then
+  if has_cmd uv || ensure_uv; then
     info "Installing $SCREENSCRIBE_PACKAGE from PyPI via uv (Python >= 3.11)..."
     _public_pypi uv tool install --no-config --force --python '>=3.11' \
       --default-index https://pypi.org/simple "$SCREENSCRIBE_PACKAGE" || {
@@ -815,7 +863,7 @@ Targets:
   aicx            Install aicx / aicx-mcp from npm when missing
   vc-frame        Validate vc-frame product binary
   prview          Install prview from its GitHub release when missing
-  screenscribe    Install screenscribe from PyPI through pipx when missing
+  screenscribe    Install screenscribe from PyPI through uv (fetched when missing) or pipx
   sandbox         Optional microsandbox/libkrun runtime
   iterm2-plugin   vibecrafted iTerm2 / locterm AutoLaunch plugin (macOS, opt-in)
   (no target)     Install missing required foundations from their channels
