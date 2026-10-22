@@ -23,7 +23,7 @@ def test_lifecycle_activity_ignores_today_and_display_limit(monkeypatch) -> None
     monkeypatch.setattr(
         run_board,
         "sync_state",
-        lambda: {
+        lambda **_: {
             "active_runs": [old_active],
             "stalled_runs": [],
             "recent_runs": recent,
@@ -53,7 +53,7 @@ def test_lifecycle_activity_includes_stalled_and_worktree_lanes(
     monkeypatch.setattr(
         run_board,
         "sync_state",
-        lambda: {
+        lambda **_: {
             "active_runs": [worktree],
             "stalled_runs": [stalled, worktree],
             "recent_runs": [],
@@ -75,7 +75,7 @@ def test_status_activity_json_is_the_unfiltered_machine_contract(
     monkeypatch.setattr(
         run_board,
         "sync_state",
-        lambda: {
+        lambda **_: {
             "active_runs": [],
             "stalled_runs": [],
             "recent_runs": [_run("recent", started_at="2026-08-25T01:00:00+00:00")],
@@ -97,7 +97,7 @@ def test_work_count_requires_current_owner_execution_state(monkeypatch) -> None:
     monkeypatch.setattr(
         run_board,
         "sync_state",
-        lambda: {
+        lambda **_: {
             "active_runs": [running, running, lane("active", "active")]
             + [
                 lane(state, state)
@@ -123,10 +123,26 @@ def test_work_count_requires_current_owner_execution_state(monkeypatch) -> None:
     monkeypatch.setattr(
         run_board,
         "sync_state",
-        lambda: {
+        lambda **_: {
             "active_runs": [],
             "stalled_runs": [lane("old-running", "running")],
             "recent_runs": [running],
         },
     )
     assert run_board.collect_lifecycle_activity()["summary"]["running"] == 0
+
+
+def test_lifecycle_activity_skips_the_orphan_artifact_scan(monkeypatch) -> None:
+    # The App polls `status --activity` every 5 s and kills it after 3 s; the
+    # settlement orphan scan rglobs every report file under artifacts/.
+    seen: list[dict] = []
+
+    def fake_sync_state(**kwargs):
+        seen.append(kwargs)
+        return {"active_runs": [], "stalled_runs": [], "recent_runs": []}
+
+    monkeypatch.setattr(run_board, "sync_state", fake_sync_state)
+
+    run_board.collect_lifecycle_activity()
+
+    assert seen == [{"include_orphans": False}]

@@ -3545,3 +3545,50 @@ def test_recycled_launcher_does_not_keep_old_run_live(monkeypatch, state):
     result = control_plane._reconcile_dead_launcher(run)
     assert result["state"] == "failed"
     assert result["terminal_reason"] == "orphaned_no_live_process"
+
+
+def test_one_board_pass_takes_one_process_table(monkeypatch) -> None:
+    # 2026-10-22: a 275-run board spawned ~800 `ps` processes per pass (one
+    # table, plus a fleet-wide environment scan, per unconfirmed run).
+    calls = {"table": 0, "env": 0}
+
+    def table():
+        calls["table"] += 1
+        return ()
+
+    def env():
+        calls["env"] += 1
+        return {}
+
+    monkeypatch.setattr(process_control, "build_process_table", table)
+    monkeypatch.setattr(process_control, "build_env_index", env)
+
+    with control_plane._one_process_snapshot_per_pass():
+        for _ in range(3):
+            control_plane._pass_process_table()
+            control_plane._pass_env_index()
+    assert calls == {"table": 1, "env": 1}
+
+    control_plane._pass_process_table()
+    control_plane._pass_process_table()
+    assert calls["table"] == 3
+
+
+def test_launcher_metas_are_read_at_launcher_depth_only(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path))
+    artifacts = tmp_path / "artifacts"
+    reports = artifacts / "vetcoders/vibecrafted/2026_1022/reports"
+    launcher = [
+        reports / "run.meta.json",
+        reports / "workflow/lane.meta.json",
+        reports / "workflow/run-children/child.meta.json",
+        artifacts / "marbles/reports/marb.meta.json",
+    ]
+    evidence = reports / "workflow/run-evidence/probe/store/copy.meta.json"
+    for path in [*launcher, evidence]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+
+    found = set(control_plane._iter_meta_files())
+
+    assert found == set(launcher)
