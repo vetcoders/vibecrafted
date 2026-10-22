@@ -1419,8 +1419,27 @@ install_channel_dmg() {
   local staged_app="$tmpdir/Vibecrafted.app"
   cp -R "$app_src" "$staged_app" || { hdiutil detach "$mount" 2>/dev/null; die "Could not stage the DMG App"; }
   hdiutil detach "$mount" >/dev/null 2>&1 || true
-  INSTALL_APP_SOURCE="$staged_app" bash "$helper" \
-    || die "App transaction refused (see $helper receipt); prior App preserved"
+  # vc-app-update.sh is the sole UI-bundle mutation owner and requires the full
+  # argument set (usage exits 2 without it): --source/--destination/--receipt
+  # plus --mode replace --complete --relaunch, mirroring install-app.sh. The
+  # state dir keeps the transaction receipts for recovery.
+  local state_dir="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/vibecrafted-product-update"
+  local transaction
+  transaction="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  local transaction_dir="$state_dir/transactions/$transaction"
+  mkdir -p "$transaction_dir"
+  bash "$helper" \
+    --source "$staged_app" \
+    --destination "$PAIRED_APP_ROOT" \
+    --receipt "$transaction_dir/receipt.json" \
+    --admission "$transaction_dir/admission.json" \
+    --journal "$transaction_dir/journal.json" \
+    --transaction "$transaction" \
+    --mode replace \
+    --complete \
+    --relaunch \
+    || die "App transaction refused (receipt: $transaction_dir/receipt.json); prior App preserved"
+  info "▸ App installed via $transaction (receipt: $transaction_dir/receipt.json)"
   rm -rf "$staged_app"
 }
 if [[ "$channel_mode" == "1" ]]; then
