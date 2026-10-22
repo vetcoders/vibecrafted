@@ -9467,7 +9467,9 @@ def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
         host = _FIXED_TERMINAL_HOST
         if not _is_product_bundle_terminal_host(host):
             raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app host missing or malformed; prior runtime preserved"
+                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app host missing or malformed; no prior runtime was touched. "
+                "Install the matching notarized Vibecrafted.app first (open the DMG from https://vibecrafted.io and drag Vibecrafted to /Applications), "
+                "or rerun `curl -fsSL https://vibecrafted.io/install.sh | bash` — the bootstrap installs the paired App from the channel DMG before the Runtime Pack"
             )
         candidate = generation / "libexec/vc-terminal"
         if not candidate.exists():
@@ -9480,7 +9482,9 @@ def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
             )
         if _signed_terminal_identity(host) != _signed_terminal_identity(candidate):
             raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: fixed host differs from candidate signed terminal code; prior runtime preserved"
+                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app differs from this Runtime Pack's signed terminal; no prior runtime was touched. "
+                "Install the matching notarized Vibecrafted.app from the channel DMG first — rerun `curl -fsSL https://vibecrafted.io/install.sh | bash`, "
+                "which installs the paired App before the Runtime Pack"
             )
         if (
             _signed_terminal_identity(host.parents[2])[1]
