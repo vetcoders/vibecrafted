@@ -1440,7 +1440,7 @@ struct CommandDeckIntegrationTests {
     guard let source = NSImage(contentsOf: sourceURL),
       let originalData = source.tiffRepresentation,
       let original = NSBitmapImageRep(data: originalData),
-      let filledData = TrayGlyph.fillingActivityCircle(in: source).tiffRepresentation,
+      let filledData = TrayGlyph.fillingActivityCircle(at: 0, in: source).tiffRepresentation,
       let filled = NSBitmapImageRep(data: filledData)
     else { throw Failure(message: "Canonical tray mask could not be decoded") }
     func alpha(_ bitmap: NSBitmapImageRep, _ x: Int, _ y: Int) -> Int {
@@ -1459,11 +1459,37 @@ struct CommandDeckIntegrationTests {
         }
       }
     }
-    try require(changed.count == 570, "One original eye interior did not fill exactly")
-    try require(alpha(filled, 25, 61) == 255
-      && alpha(filled, 44, 28) == 0
-      && alpha(filled, 63, 61) == 0,
-      "Activity filled more than the lower-left circle")
+    // Slot 0 is the lower-center circle ON SCREEN (mask center (43, 28);
+    // the menu-bar render flips vertically). Measured by flood-fill:
+    // slot 0 = 623px at (43, 28), slot 1 = 566px at (61, 60),
+    // slot 2 = 570px at (25, 60). The fill must cover exactly one interior.
+    try require(changed.count == 623, "Reference slot interior did not fill exactly")
+    try require(alpha(filled, 43, 28) == 255
+      && alpha(filled, 25, 60) == 0
+      && alpha(filled, 61, 60) == 0,
+      "Activity filled more than the reference circle")
+    // Each slot fills exactly one circle interior; the three are disjoint
+    // and together cover all three interiors of the mark.
+    var allFilled = Set<Int>()
+    for slot in 0..<3 {
+      let slotData = TrayGlyph.fillingActivityCircle(at: slot, in: source).tiffRepresentation!
+      let slotBitmap = NSBitmapImageRep(data: slotData)!
+      var slotChanged = Set<Int>()
+      for y in 0..<original.pixelsHigh {
+        for x in 0..<original.pixelsWide {
+          if alpha(original, x, y) == 0 && alpha(slotBitmap, x, y) == 255 {
+            slotChanged.insert(y * original.pixelsWide + x)
+          }
+        }
+      }
+      try require(!slotChanged.isEmpty, "Slot \(slot) filled no circle interior")
+      try require(allFilled.isDisjoint(with: slotChanged),
+        "Slot \(slot) overlaps another slot's circle interior")
+      allFilled.formUnion(slotChanged)
+    }
+    let interiorTotal = [623, 566, 570].reduce(0, +)
+    try require(allFilled.count == interiorTotal,
+      "Three slots must cover all three circle interiors exactly")
     try require(source.tiffRepresentation == originalData, "Source image was mutated")
     func bitmap(_ image: NSImage, pixels: Int) throws -> NSBitmapImageRep {
       guard let result = NSBitmapImageRep(bitmapDataPlanes: nil,
@@ -1507,7 +1533,12 @@ struct CommandDeckIntegrationTests {
         print("Tray viewport side=\(side) rotation=\(step * 60) outside=\(outside) edge=\(edge)")
       }
     }
-    var rotations = Set<Data>()
+    // Founder direction 2026-10-22: the mark does NOT rotate; the white
+    // activity circle moves to a different circle slot. Six step values
+    // must still render distinct glyphs (three circle slots × filled/idle
+    // are the observable states), and idle/unavailable must stay identical
+    // regardless of step or health.
+    var slots = Set<Data>()
     for step in 0..<6 {
       let image = TrayGlyph.statusImage(health: .healthy,
         activity: .running(1), step: step, source: source)
@@ -1516,13 +1547,38 @@ struct CommandDeckIntegrationTests {
       try require(image.accessibilityDescription!.contains("online")
         && image.accessibilityDescription!.contains("executing dispatched"),
         "Health and work labels were conflated")
-      rotations.insert(image.tiffRepresentation!)
+      slots.insert(image.tiffRepresentation!)
     }
-    try require(rotations.count == 6, "Rendered 60-degree orientations did not differ")
+    try require(slots.count == 3,
+      "Working glyph must move the circle across the three mark circles, not rotate the mark")
+    // Each working slot fills exactly one circle: the filled interiors are
+    // disjoint, and together they cover all three circle interiors.
+    var filledPixels = Set<Int>()
+    for step in 0..<6 {
+      let image = TrayGlyph.statusImage(health: .healthy,
+        activity: .running(1), step: step, source: source)
+      guard let data = image.tiffRepresentation,
+        let rendered = NSBitmapImageRep(data: data)
+      else { throw Failure(message: "Work glyph could not be decoded") }
+      for y in 0..<original.pixelsHigh {
+        for x in 0..<original.pixelsWide {
+          if alpha(rendered, x, y) == 255 && alpha(original, x, y) == 0 {
+            try require(!filledPixels.contains(y * original.pixelsWide + x),
+              "Two working slots filled the same circle interior")
+            filledPixels.insert(y * original.pixelsWide + x)
+          }
+        }
+      }
+    }
+    try require(filledPixels.count > 0, "No working slot filled any circle")
+    // Idle and unavailable never show the activity circle, independent of
+    // step or health — the static mark is the idle state.
     let idle = TrayGlyph.statusImage(health: .healthy, activity: .idle, step: 3, source: source)
     let unknown = TrayGlyph.statusImage(health: .failed, activity: .unavailable, step: 4, source: source)
     try require(idle.tiffRepresentation == unknown.tiffRepresentation,
       "Service health or old rotation changed idle contours")
+    try require(idle.tiffRepresentation == source.tiffRepresentation,
+      "Idle glyph must be the untouched static mark")
     try require(idle.isTemplate && unknown.isTemplate, "Idle image ignores system appearance")
     var now: TimeInterval = 100
     var motionReduced = false
