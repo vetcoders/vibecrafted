@@ -2037,7 +2037,13 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
             line for line in gate.splitlines() if line.startswith("SEMGREP_ARGS=(")
         )
         args = shlex.split(command.removeprefix("SEMGREP_ARGS=(").removesuffix(")"))
-    assert args[args.index("--config") + 1] == "auto"
+    config_indices = {index for index, arg in enumerate(args) if arg == "--config"}
+    configs = [args[index + 1] for index in sorted(config_indices)]
+    if gate_path == "scripts/hooks/pre-commit":
+        assert configs == ["p/ci", "p/rust"]
+        assert args[args.index("--metrics") + 1] == "off"
+    else:
+        assert configs == ["auto"]
     assert "--error" in args
     assert args[args.index("--exclude-rule") + 1] == (
         "html.security.audit.missing-integrity.missing-integrity"
@@ -2057,7 +2063,11 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
         "# padding to exceed the default limit\n" * 30_000 + "dangerous_call()\n"
     )
     assert 1_000_000 < source.stat().st_size < 3_000_000
-    args[args.index("--config") + 1] = str(rules)
+    config_parts = config_indices | {index + 1 for index in config_indices}
+    args = [arg for index, arg in enumerate(args) if index not in config_parts]
+    args[1:1] = ["--config", str(rules)]
+    if "--metrics" not in args:
+        args.extend(["--metrics", "off"])
     env = {
         key: value
         for key, value in os.environ.items()
@@ -2070,8 +2080,6 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
             semgrep,
             *args,
             "--json",
-            "--metrics",
-            "off",
             "--disable-version-check",
             *map(str, targets),
         ],
