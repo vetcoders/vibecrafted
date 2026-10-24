@@ -1313,13 +1313,14 @@ def _isolated_product_env(
     tmp_path: Path, *, frame_socket_dir: Path | None = None
 ) -> dict[str, str]:
     home = tmp_path / "isolated-home"
-    runtime = tmp_path / "isolated-runtime"
-    crafted = tmp_path / "isolated-crafted"
-    launcher = tmp_path / "isolated-launcher"
-    xdg_config = tmp_path / "isolated-xdg-config"
-    xdg_data = tmp_path / "isolated-xdg-data"
-    xdg_cache = tmp_path / "isolated-xdg-cache"
-    xdg_state = tmp_path / "isolated-xdg-state"
+    # Foundations enforce the real HOME layout even for private carrier tests.
+    xdg_config = home / ".config"
+    xdg_data = home / ".local/share"
+    xdg_cache = home / ".cache"
+    xdg_state = home / ".local/state"
+    runtime = xdg_data / "vibecrafted"
+    crafted = home / ".vibecrafted"
+    launcher = home / ".local/bin"
     sockets = (
         frame_socket_dir
         if frame_socket_dir is not None
@@ -1367,6 +1368,73 @@ def _isolated_product_env(
         }
     )
     return env
+
+
+@pytest.mark.parametrize("custom_sockets", [False, True])
+def test_isolated_product_env_obeys_runtime_root_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_sockets: bool
+) -> None:
+    root_keys = (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    )
+    directory_keys = (
+        "HOME",
+        *root_keys,
+        "VC_FRAME_SOCKET_DIR",
+        "ZELLIJ_SOCKET_DIR",
+        "TMPDIR",
+    )
+    for key in directory_keys:
+        monkeypatch.setenv(key, str(tmp_path / "ambient-root"))
+    sockets = tmp_path / "private-frame-sockets" if custom_sockets else None
+    env = _isolated_product_env(
+        tmp_path / "private fixture with spaces", frame_socket_dir=sockets
+    )
+    checked = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            (
+                'source "$1"\n'
+                'enforce_runtime_root_contract || exit "$?"\n'
+                "default_vibecrafted_home\n"
+                "default_vibecrafted_runtime_home\n"
+                "default_vibecrafted_launcher_bin\n"
+                "default_vibecrafted_tools_home\n"
+            ),
+            "fixture-root-contract",
+            str(REPO_ROOT / "scripts/lib/runtime-roots.sh"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    resolved = checked.stdout.splitlines()
+    assert resolved[:3] == [env[key] for key in root_keys[:3]]
+    home = Path(env["HOME"]).resolve()
+    assert home.is_relative_to(tmp_path.resolve())
+    assert home != _founder_home().resolve()
+    for path in (*resolved, *(env[key] for key in root_keys)):
+        assert Path(path).resolve().is_relative_to(home), path
+    assert Path(env["XDG_DATA_HOME"]) / "vibecrafted" == Path(
+        env["VIBECRAFTED_RUNTIME_HOME"]
+    )
+    for key in directory_keys:
+        path = Path(env[key])
+        assert path.resolve().is_relative_to(tmp_path.resolve()), key
+        assert path.is_dir() and stat.S_IMODE(path.stat().st_mode) == 0o700, key
+    assert env["VC_FRAME_SOCKET_DIR"] == env["ZELLIJ_SOCKET_DIR"]
+    if sockets is not None:
+        assert Path(env["VC_FRAME_SOCKET_DIR"]) == sockets
 
 
 def _read_installer_publication(runtime_home: Path) -> dict[str, object]:
