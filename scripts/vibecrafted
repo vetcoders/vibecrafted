@@ -7082,7 +7082,7 @@ main() {
     telemetry) cmd_telemetry "$@" ;;
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
-    claims|message|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
+    claims|message|pr-closure|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
     reinstall) cmd_core_cli reinstall "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;
