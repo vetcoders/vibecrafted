@@ -90,11 +90,20 @@ report path; other braces remain data:
 }
 ```
 
-For each counted gate, passed must be positive and failed/skipped must be zero.
-Missing counts, empty reports, ignored tests, failing tests, malformed XML and
-changed evidence block advancement. Existing optional ignored tests are therefore
-visible blockers; do not conceal them by changing the regex. Select and document
-the repository's intended hermetic gate before using a profile for admission.
+For each counted gate, passed must be positive and failed must be zero. Skips
+block by default. A repository's existing source/hermetic contract can explicitly
+permit optional cases with `"allow_skips": true` and a nonblank `"skip_reason"`.
+This option requires a counted gate; the receipt records the policy and reason,
+and keeps skipped counts separate from executed passes. Such cases remain
+**not executed**, with their names and reasons inspectable in the full log/XML.
+Changing this policy invalidates the receipt through the profile digest.
+
+Missing counts, empty reports, failures, malformed XML and changed evidence block
+advancement. An opt-in never excuses zero passes, a nonzero exit, a timeout or a
+changed checkout. A native GitHub check run with conclusion `SKIPPED` still blocks
+admission. Required physical/product acceptance remains in the release contract;
+source-gate exceptions do not certify it. Do not conceal ignored cases by
+changing a regex; select and document the intended contract in the profile.
 
 Receipts retain exact argv, full logs, report hashes, candidate/head/base SHAs,
 branch names, profile digest and review digest. Files must be outside the

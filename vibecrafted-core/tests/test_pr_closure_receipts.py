@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from jsonschema.exceptions import ValidationError
 from vibecrafted_core import pr_closure_receipts as receipts
+from vibecrafted_core.pr_closure import load_profile
 from vibecrafted_core.pr_closure_receipts import validate_receipt, verify_candidate
 
 COUNTS = r"(?P<passed>\d+) passed, (?P<failed>\d+) failed, (?P<skipped>\d+) skipped"
@@ -499,4 +501,152 @@ def test_unsupported_executor_refuses_before_any_subprocess(candidate, monkeypat
     with pytest.raises(ValueError, match="requires POSIX"):
         verify_candidate(profile, repo, snapshot, output)
     with pytest.raises(ValueError, match="requires POSIX"):
+        validate_receipt(profile, repo, snapshot, output)
+
+
+def _counted_selection(profile, kind, *, passed=2, failed=0, skipped=1):
+    if kind == "junit":
+        cases = "".join(f'<testcase name="pass-{i}"/>' for i in range(passed))
+        cases += "".join(
+            f'<testcase name="fail-{i}"><failure/></testcase>' for i in range(failed)
+        )
+        cases += "".join(
+            f'<testcase name="skip-{i}"><skipped/></testcase>' for i in range(skipped)
+        )
+        _junit_profile(profile, f'<testsuite name="selection">{cases}</testsuite>')
+    else:
+        profile["checks"][0]["test_counts_regex"] = (
+            r"test result: (?:ok|FAILED)\. (?P<passed>\d+) passed; "
+            r"(?P<failed>\d+) failed; (?P<skipped>\d+) ignored"
+        )
+        profile["checks"][0]["argv"][-1] = (
+            f"print('test result: ok. {passed} passed; {failed} failed; {skipped} ignored')"
+        )
+    profile["checks"][0].update(
+        allow_skips=True,
+        skip_reason="Canonical hermetic selection excludes optional API/platform tests.",
+    )
+
+
+@pytest.mark.parametrize("kind", ["regex", "junit"])
+def test_explicit_explained_optional_skips_preserve_raw_counts_and_pass(
+    candidate, kind
+):
+    profile, repo, snapshot, output = candidate
+    _counted_selection(profile, kind)
+    result = verify_candidate(profile, repo, snapshot, output)
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["test_counts"] == {"passed": 2, "failed": 0, "skipped": 1}
+    assert check["allow_skips"] is True
+    assert check["skip_reason"] == profile["checks"][0]["skip_reason"]
+    assert validate_receipt(profile, repo, snapshot, output) == result
+    path = output.parent / "profile.json"
+    path.write_text(json.dumps(profile))
+    assert load_profile(path) == profile
+
+
+@pytest.mark.parametrize("kind", ["regex", "junit"])
+@pytest.mark.parametrize("passed,failed", [(0, 0), (2, 1)])
+def test_skip_opt_in_never_excuses_zero_executed_or_failing_tests(
+    candidate, kind, passed, failed
+):
+    profile, repo, snapshot, output = candidate
+    _counted_selection(profile, kind, passed=passed, failed=failed)
+    result = verify_candidate(profile, repo, snapshot, output)
+    assert result["status"] == "failed"
+    with pytest.raises(ValueError):
+        validate_receipt(profile, repo, snapshot, output)
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "timeout", "dirty"])
+def test_skip_opt_in_preserves_exit_timeout_and_clean_checkout_obligations(
+    candidate, failure
+):
+    profile, repo, snapshot, output = candidate
+    _counted_selection(profile, "regex")
+    check = profile["checks"][0]
+    script = "print('test result: ok. 2 passed; 0 failed; 1 ignored', flush=True); "
+    if failure == "nonzero":
+        script += "raise SystemExit(2)"
+    elif failure == "timeout":
+        check["timeout_seconds"] = 1
+        script += "import time; time.sleep(60)"
+    else:
+        script += (
+            "from pathlib import Path; Path('untracked-state').write_text('dirty')"
+        )
+    check["argv"][-1] = script
+    result = verify_candidate(profile, repo, snapshot, output)
+    assert result["status"] == "failed"
+    assert result["checks"][0]["test_counts"] == {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"allow_skips": True},
+        {"allow_skips": True, "skip_reason": ""},
+        {"allow_skips": True, "skip_reason": " \t\n"},
+        {"allow_skips": True, "skip_reason": 3},
+        {"allow_skips": "true", "skip_reason": "optional"},
+        {"allow_skips": 1, "skip_reason": "optional"},
+        {"allow_skips": False, "skip_reason": "optional"},
+    ],
+)
+def test_invalid_skip_policy_refuses_before_execution_in_api_and_profile(
+    candidate, policy
+):
+    profile, repo, snapshot, output = candidate
+    profile["checks"][0].update(policy)
+    with pytest.raises(ValueError):
+        verify_candidate(profile, repo, snapshot, output)
+    assert not output.exists()
+    path = repo.parent / "profile.json"
+    path.write_text(json.dumps(profile))
+    with pytest.raises((ValueError, ValidationError)):
+        load_profile(path)
+
+
+def test_skip_permission_requires_actual_counted_gate(candidate):
+    profile, repo, snapshot, output = candidate
+    profile["checks"].append(
+        {
+            "name": "lint",
+            "argv": [sys.executable, "-c", "pass"],
+            "timeout_seconds": 5,
+            "allow_skips": True,
+            "skip_reason": "optional",
+        }
+    )
+    with pytest.raises(ValueError, match="counted"):
+        verify_candidate(profile, repo, snapshot, output)
+    path = repo.parent / "profile.json"
+    path.write_text(json.dumps(profile))
+    with pytest.raises(ValueError, match="counted"):
+        load_profile(path)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("allow_skips", False), ("skip_reason", "changed selection")]
+)
+def test_skip_policy_profile_changes_and_receipt_tampering_invalidate_evidence(
+    candidate, field, value
+):
+    profile, repo, snapshot, output = candidate
+    _counted_selection(profile, "regex")
+    result = verify_candidate(profile, repo, snapshot, output)
+    changed = copy.deepcopy(profile)
+    changed["checks"][0][field] = value
+    if field == "allow_skips":
+        changed["checks"][0].pop("skip_reason")
+    with pytest.raises(ValueError):
+        validate_receipt(changed, repo, snapshot, output)
+    result["checks"][0][field] = value
+    output.write_text(json.dumps(result))
+    with pytest.raises(ValueError, match="result or log mismatch"):
         validate_receipt(profile, repo, snapshot, output)

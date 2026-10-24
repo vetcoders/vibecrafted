@@ -77,6 +77,8 @@ PROFILE_SCHEMA: dict[str, Any] = {
                     },
                     "test_counts_regex": {"type": "string", "minLength": 1},
                     "junit": {"type": "boolean", "const": True},
+                    "allow_skips": {"type": "boolean"},
+                    "skip_reason": {"type": "string", "pattern": r"\S"},
                 },
             },
         },
@@ -157,6 +159,17 @@ def load_profile(path: Path) -> dict[str, Any]:
     names = [check["name"] for check in profile["checks"]]
     if len(set(names)) != len(names):
         raise ValueError("local check names must be unique")
+    for check in profile["checks"]:
+        if check.get("allow_skips", False):
+            if "test_counts_regex" not in check and not check.get("junit"):
+                raise ValueError("allow_skips requires a counted regex or JUnit gate")
+            if (
+                not isinstance(check.get("skip_reason"), str)
+                or not check["skip_reason"].strip()
+            ):
+                raise ValueError("allow_skips requires a nonblank skip_reason")
+        elif "skip_reason" in check:
+            raise ValueError("skip_reason requires allow_skips=true")
     tests = [
         check
         for check in profile["checks"]
@@ -802,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
                         "name": "Rust tests",
                         "argv": ["make", "verify"],
                         "timeout_seconds": 3600,
-                        "test_counts_regex": r"test result: ok\. (?P<passed>\d+) passed; (?P<failed>\d+) failed; (?P<skipped>\d+) ignored",
+                        "test_counts_regex": r"test result: (?:ok|FAILED)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed; (?P<skipped>\d+) ignored",
                     },
                 ],
                 "remote_checks": [

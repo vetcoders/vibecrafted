@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import subprocess
 import sys
 
@@ -607,7 +608,13 @@ def test_export_is_portable_json_not_an_implicit_launch(tmp_path, capsys):
         )
         == 0
     )
-    assert pr.load_profile(output)["repository"] == "example/project"
+    exported = pr.load_profile(output)
+    assert exported["repository"] == "example/project"
+    failed = re.search(
+        exported["checks"][1]["test_counts_regex"],
+        "test result: FAILED. 2 passed; 1 failed; 0 ignored",
+    )
+    assert failed is not None and failed["failed"] == "1"
     assert (
         pr.main(
             [

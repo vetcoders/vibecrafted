@@ -54,6 +54,30 @@ def _matches(actual: dict, expected: dict) -> bool:
     )
 
 
+def _skip_policy(check: dict) -> None:
+    """Allow only explicit, explained skips on gates with actual test counts."""
+    allowed = check.get("allow_skips", False)
+    if type(allowed) is not bool:
+        raise ReceiptError("allow_skips must be boolean")
+    if allowed:
+        if "test_counts_regex" not in check and check.get("junit") is not True:
+            raise ReceiptError("allow_skips requires a counted regex or JUnit gate")
+        reason = check.get("skip_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ReceiptError("allow_skips requires a nonblank skip_reason")
+    elif "skip_reason" in check:
+        raise ReceiptError("skip_reason requires allow_skips=true")
+
+
+def _counts_pass(check: dict, counts: dict) -> bool:
+    """Skipped tests remain unexecuted; only declared selection policy permits them."""
+    return (
+        counts["passed"] > 0
+        and counts["failed"] == 0
+        and (counts["skipped"] == 0 or check.get("allow_skips") is True)
+    )
+
+
 def _profile_checks(profile: dict) -> list[dict]:
     """Refuse incomplete profiles before executing any supplied command."""
     if profile.get("schema") != _PROFILE_SCHEMA:
@@ -105,6 +129,7 @@ def _profile_checks(profile: dict) -> list[dict]:
             or check["timeout_seconds"] <= 0
         ):
             raise ReceiptError(f"{name}: positive integer timeout_seconds required")
+        _skip_policy(check)
         if "junit" in check:
             if check["junit"] is not True or "test_counts_regex" in check:
                 raise ReceiptError(
@@ -393,11 +418,7 @@ def _run_check(check: dict, repo: Path, log: Path, junit: Path | None = None) ->
         error = str(exc)
     passed = not error and not timed_out and exit_code == 0
     if counts is not None:
-        passed = (
-            passed
-            and counts["passed"] > 0
-            and counts["failed"] == counts["skipped"] == 0
-        )
+        passed = passed and _counts_pass(check, counts)
     return {
         "name": check["name"],
         "argv": check["argv"],
@@ -408,6 +429,8 @@ def _run_check(check: dict, repo: Path, log: Path, junit: Path | None = None) ->
         "junit_sha256": junit_sha256,
         "timeout_seconds": check["timeout_seconds"],
         "test_counts_regex": check.get("test_counts_regex"),
+        "allow_skips": check.get("allow_skips", False),
+        "skip_reason": check.get("skip_reason"),
         "exit_code": exit_code,
         "timed_out": timed_out,
         "error": error,
@@ -605,6 +628,8 @@ def validate_receipt(profile: dict, repo: Path, snapshot: dict, receipt: Path) -
             "junit_sha256": junit_sha256,
             "timeout_seconds": check["timeout_seconds"],
             "test_counts_regex": check.get("test_counts_regex"),
+            "allow_skips": check.get("allow_skips", False),
+            "skip_reason": check.get("skip_reason"),
             "exit_code": 0,
             "timed_out": False,
             "error": "",
@@ -616,9 +641,7 @@ def validate_receipt(profile: dict, repo: Path, snapshot: dict, receipt: Path) -
         }
         if not isinstance(result, dict) or not _matches(result, expected_result):
             raise ReceiptError("receipt check identity, result or log mismatch")
-        if counts is not None and not (
-            counts["passed"] > 0 and counts["failed"] == counts["skipped"] == 0
-        ):
+        if counts is not None and not _counts_pass(check, counts):
             raise ReceiptError("test counts do not prove a nonempty clean pass")
     if _state(repo) != state:
         raise ReceiptError("candidate changed while validating receipt")
