@@ -86,7 +86,7 @@
     ],
     "UserPromptSubmit": [
       {
-        "matcher": "(?i)(zapami[eę]taj|remember|kurwa.*zawsze|raz na zawsze)",
+        "matcher": "(?i)(zapami[eę]taj|remember|na stałe|raz na zawsze)",
         "hooks": [
           {
             "type": "command",

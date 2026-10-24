@@ -24,7 +24,7 @@ Wiele flag `-p` lub lista z przecinkami tworzą sumę zbiorów.
 | `-p /repo`      | **ta sama nazwa repo u każdego właściciela** | **domyślnie w polowaniu na intencje** |
 | `-p name`       | jednoznaczna dokładna nazwa owner lub repo   | tylko bez niejednoznaczności          |
 
-Substring celowo nie jest wspierany: `-p vista` nie pasuje do `vista-portal`.
+Substring celowo nie jest wspierany: `-p demo` nie pasuje do `demo-portal`.
 Niejednoznaczność daje odmowę z listą kandydatów, nie ciszę — ten błąd odpowiada
 na pytanie „jakie tożsamości istnieją”.
 

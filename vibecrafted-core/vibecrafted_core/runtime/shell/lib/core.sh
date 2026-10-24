@@ -351,7 +351,7 @@ _vetcoders_aicx_bin() {
   fi
 
   # Last resort: the Homebrew prefixes, where a brew-installed node drops npm
-  # globals. The product shell's PATH does not carry them (div0, 2026-10-10:
+  # globals. The product shell's PATH does not carry them (host-a, 2026-10-10:
   # aicx installed, workspace entry refused on a healthy machine), so probe
   # them explicitly — after PATH, so an operator-chosen aicx still wins.
   for candidate in /opt/homebrew/bin/aicx /usr/local/bin/aicx; do

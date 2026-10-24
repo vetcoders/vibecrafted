@@ -27866,7 +27866,7 @@ def _ensure_foundations_installed(generation: Path, *, skip: bool) -> dict[str, 
     """Drive the bundled foundations installer after the runtime transaction.
 
     No install scenario may finish green without AICX, Loctree, Screenscribe
-    and PRView (Maciej, 2026-10-07). The pack never carries the foundations
+    and PRView (Vetcoders decision, 2026-10-07). The pack never carries the foundations
     themselves — it carries their installer, and each foundation comes from
     its own public channel (npm, GitHub releases, PyPI). A failure here does
     not undo the already-published runtime generation; it fails the install's

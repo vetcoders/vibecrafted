@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-17",
+  "generated_at": "2026-10-24",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -2481,6 +2481,7 @@
         "398a0c221267dd44ebf39cb429d5041693236ff78f1e0831d6f5d5295c7239d3",
         "414ae324867ca90a372b84867281ad1ac7e77e15b31f0e6298d2fe916c00c795",
         "42dd75101d56f6cd521eb4813305a106303ada6bf8f836cce457729e99765328",
+        "5522dbe2e8c82b099a76550fcadb5d4a1e87bffe727bd1422889175505e6e74d",
         "611e578ffc4a3f1ab6a09d612b73a711080c5bd4ced3adbaea50d2dbf5d30275",
         "654567990725c68e8124a32677085ea24f483f80c28c5be45bccea6d2f6f43f0",
         "6d0c34ccba6d762aa2252ee2438d2333ae5e10428f228372fe69773796a31287",
@@ -2490,6 +2491,7 @@
         "a3379d405deffd6a4bcd31568c571e00c4cb737778dd129136de2299613de24c",
         "a59df032b2f4b9c6f673ff6b8dcb6fcde13c620619aeaa21efd28d9338307872",
         "b0595ae09f3183581956578fa7d697afb69d9032ed48c517abd6da4277f34da0",
+        "b7bbf58b7ea52c486ef9fe4b92d1d06474288c68b53ff83dfb85fafdeb1b4e42",
         "d1a8d746d78901d96f61769cac8b65841c2e55e3940fa1455ce6f132496ce00a",
         "dd24459d42c0c9e3408cc8bbcf23e61259076af3d7ffa90130f01f22feee937c",
         "e83f7b6bb1e7782e5d9a81465d1762f7ef919658eb018159235f221104e5f91a"
@@ -2516,10 +2518,12 @@
           "14c3848238448e3d92051af7699ebb1a805b6b72",
           "22737edc53db0fb0c1331ca3847f2797b3afa529",
           "235aef629e576f270e3367491fc5d41c9e7ca751",
+          "24f667cc72a3ca3a428ad971afd373c08ba5779d",
           "31b82d02f272eeb36175f90bbbbeaa4ed72be02d",
           "35d16a1e63e0faa8b83dde6f0bcf83da69d69cfd",
           "386cf501dd5f3b41ff69ab6918e5b7683b2e4588",
           "43c6735f7a7e2ee418539718a23f5cea2f88a93b",
+          "589ae1903e5049e472a5517dc94da3acb238cac5",
           "615f727ae35f872c0d16efe92d201d9c38e46191",
           "7fae7042202cac7b9e259b53519e0da651a40920",
           "8c40e88c5afd745a2e3d3ec434335ccc92b966d5",
@@ -2547,14 +2551,18 @@
           "ef93a11deda8a5127591b4d4bd6f927f9ef41e87"
         ],
         "examples/codescribe-two-hosts.md": [
+          "2c2845ea6fde49fa0bc8d5530b47d11d50c1fdb7",
           "33e7e6a08323d2e973732c90453e980176d4eb41",
           "bbead6d8d65b587912887740e05f59035ab601a1",
-          "e0b835e0343cf6f4d89501a34c3a610ee9c9b505"
+          "e0b835e0343cf6f4d89501a34c3a610ee9c9b505",
+          "ec22597a6a678cb20a1667dca15f1bc7c8e0a0db"
         ],
         "references/aicx-retrieval.md": [
+          "47084ace27da492068048d5b4a03b1e2256b3b09",
           "60973cd6fefb46a15d6fe78514b36f0a6b996b7b",
           "97d72077d33a85f4bb0b87bde0ee488f67c9d92a",
           "b69d045df4bf7e6424f5fcbff9b782b82bc2c415",
+          "c004ddfb2a76fe198ebbd5c55d97b589838764a3",
           "c25d397eb646d5667ea1ef5e074b9f320c9afc75"
         ],
         "references/confrontation-brief.md": [
@@ -2573,6 +2581,8 @@
         ],
         "references/ledger-schema.md": [
           "1504db79ac6525e76277f3f7f2d20a2a528801d8",
+          "2e71925846479e3f5d5713273f4610fc629c206a",
+          "4e8a82225ad7154bd3705c34f4d9195fee68ca82",
           "7ca2d175d1d79fd3cbe0d6253dca78a10f65d63e",
           "b4ca4e13af93f0abd158bf2becaa51d5a88c6b96",
           "db7cef04866c7a6790dc285b643f9d5b0f5b0b80"
@@ -2584,7 +2594,9 @@
         ],
         "references/replication.md": [
           "1c1893f5cec3ab28d7efd9499a0f0932f6d11c85",
+          "a248b9279bb4c4759bcd86a47339793810446c31",
           "a61c067c42f2529ab4b5ad1ffeeccf7d924ff3be",
+          "a75d82b7fbf547c8268cc49774f273a747c87718",
           "d59930873f5966141a0c54d58bdf8c286b38a2c8"
         ],
         "references/review-surface.md": [
@@ -2644,6 +2656,7 @@
           "3810dadeab5beb98125870b5cbb94452b1dfb219",
           "87cc4ebcd56802eb9ccbc53599961f02535ad26f",
           "c435562d50362840c423cd2c2d68f3d9d6110183",
+          "ca8855adeeddb56a6eecac5295cc94ba9d5c12f1",
           "cea52e6754cff49ca48ade665d936a10dea895c8",
           "fc972e10413b44863079f64d4aa19e39c4e2bebb"
         ],
@@ -4232,6 +4245,7 @@
         "1f31466f1ab4f8c7d5a6cefd4eadffcd9639ed1567372f8d04ef001e079f6915",
         "1fc40774dc0c464a4a03833cb17b5ca7335ebb87444fe6cae73f2810fbc5a9bf",
         "2b25ae8b4b4aba08f87673a2c7e2108ac6eb20c7de9de28e8627bd614383b2f5",
+        "33121d03eda11716fae17108d293fc6bc04f2d76220412b32d217c94fe834a15",
         "3b0fba6a049c8c484aa5641132c481e7a4afa640ae0c523273279611183c3501",
         "41c8d648375ac198a6ccaa2b7db1be99d4aefe86d98821a71ac6691278726ef5",
         "445bd8a41e604d3097945dc27b866056ef1872f3a9ea970612b47da61453c5b5",
@@ -4250,6 +4264,7 @@
         "803d725d621403ef223109ebc56e0d69646c5276b26aec6483eee1211105571c",
         "83c744458c1a275983c615e2bc3898cc4792794ea45db668aac46e767414130e",
         "85f65a259bf691bfa4322ebfe92b10cf1bca4a09724279bb9d40ed0d630f65df",
+        "933a9d603fc5cab84c1aa85a66ea118abf9555a699ec368651bc61db494022d7",
         "98f4843498a9a059feab24ab4f6dc6b30b3b031ea02cff3835aa8c81be0b81c1",
         "9cab0e45a71f2696847bde15be4eec61c854306c39eebb475d6d831e5bcd2f35",
         "9e76c25b81e33decbe2cc579ca86eff9cd55ec5b292706c4b4ea0fa9cce8be2c",
@@ -4318,6 +4333,7 @@
           "3f4c1b0139b9e2f5641741c6bc02fd23d92f6697",
           "41278b4f2df83b23bdd7bb51b916998ce71ba498",
           "414b58f2ab179f66da0f64c6a657bbb54f7ac67b",
+          "442cf2ba80a80be1f45157ba99e700935a9d5e04",
           "4646b8ce7c5d26226ba5468d2efb4fca4b350a8d",
           "4817b8bb2f3e1084835536f465fe8f8776e9d45c",
           "4d82f731980b39bc80e6506182f50bf38c499ac0",
@@ -4344,6 +4360,7 @@
           "9ca3d8f0fffa409d5410aaa94be1abbef33af33b",
           "a9a81de70992d350729a42188ec23b4ba061ddb5",
           "ae43a8d506604066a542adc4f455725c29a41e15",
+          "b324fffb1709164e6067da0e1503b16ad31361f7",
           "b955f7fbc492ff9915e85222077bbad4f2563244",
           "b98aae872a6e7a64538678c5455158d6ca1aab5a",
           "bfd1d0a49f4b20f666748731d62ded19afc39e07",

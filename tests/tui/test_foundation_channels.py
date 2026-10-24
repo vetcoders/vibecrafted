@@ -543,7 +543,7 @@ def test_uv_channel_failure_keeps_foundation_admission_explicit(
 
 
 def test_the_default_run_refuses_a_missing_foundation(tmp_path: Path) -> None:
-    # Maciej's decision (2026-10-06): the public channels (npm, GitHub
+    # Vetcoders decision (2026-10-06): the public channels (npm, GitHub
     # releases, PyPI) exist precisely so a missing foundation can hard-fail —
     # an install that "succeeds" without the product spine is the stale-
     # vendored-copy failure mode the channels were built to kill. No

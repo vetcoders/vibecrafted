@@ -160,7 +160,7 @@ intencja, wiele cytatów.
 
 ```bash
 uv run "$CLI" "$W" lanes                     # po obszarze; domyślnie sześć torów Codescribe
-uv run "$CLI" "$W" plan --stage confront --repo <repo> --host div0 \
+uv run "$CLI" "$W" plan --stage confront --repo <repo> --host host-a \
   --agent 'L1-overlay-ui=kimi:kimi-code/k3' --agent 'L4-quality-lexicon=junie:gemini-3.8-flash' …
 ```
 
@@ -175,7 +175,7 @@ entrypointu do X_ (`loct follow trace`), nie trafienie grepa. Tabela obietnica �
 pytanie → komenda: `references/loctree-questions.md`.
 
 ```bash
-uv run "$CLI" "$W" merge --verdicts div0=<dir> --verdicts dragon=<dir> --primary div0 --project <owner>/<repo>
+uv run "$CLI" "$W" merge --verdicts host-a=<dir> --verdicts host-b=<dir> --primary host-a --project <owner>/<repo>
 ```
 
 `merge` pisze `LEDGER.json` i `replication-report.json`. Zgodność per id przy

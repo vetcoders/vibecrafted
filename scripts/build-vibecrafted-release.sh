@@ -947,7 +947,7 @@ materialize_runtime_payload() {
   install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
   install -m 0755 "$SOURCE_ROOT/scripts/vetcoders_install.py" \
     "$runtime/scripts/vetcoders_install.py"
-  # Pack carries the foundations INSTALLER, never the foundations (Maciej 2026-10-07).
+  # Pack carries the foundations INSTALLER, never the foundations (Vetcoders decision, 2026-10-07).
   install -m 0755 "$SOURCE_ROOT/scripts/install-foundations.sh" \
     "$runtime/scripts/install-foundations.sh"
   install -m 0755 "$SOURCE_ROOT/scripts/vibecrafted_housekeeping.py" \
@@ -1248,7 +1248,7 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Vibecrafted" \
       "$APP/Contents/Info.plist"
-  # Decyzja Macieja 2026-10-06: full Dock identity; an explicit false keeps
+  # Vetcoders decision 2026-10-06: full Dock identity; an explicit false keeps
   # a regression back to the tray-only accessory loud at build time.
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' \
     "$APP/Contents/Info.plist")" == "false" ]] \
