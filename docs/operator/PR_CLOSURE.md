@@ -126,6 +126,11 @@ destinations, resolved review threads, no requested changes and every configured
 check successful on that exact SHA from the specified App. Skipped, neutral,
 pending and failed check runs do not pass. No admin bypass is used. GitHub's
 protection and queue rules remain authoritative for races after local observation.
+Before requesting auto-merge, the command also verifies active server rules:
+the same check names and App pins must be required, with strict base freshness
+or a merge queue, resolved review threads and the configured minimum approval.
+Classic branch protection is not modeled; automatic admission requires modern
+rulesets. Locally green checks cannot substitute for missing server enforcement.
 
 ## Finish the batch and hand off release
 

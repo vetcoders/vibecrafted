@@ -186,7 +186,29 @@ def test_dispatch_refuses_ineligible_candidate(tmp_path, profile, snapshot, chan
         pr.dispatch_plan(profile, tmp_path, snapshot, tmp_path.parent / "reports")
 
 
-def _admission_setup(monkeypatch, snapshot, runs=None):
+def _server_rules(*, strict=True, queue=False, approval=0):
+    rules = [
+        {
+            "type": "required_status_checks",
+            "parameters": {
+                "required_status_checks": [{"context": "CI", "integration_id": 15368}],
+                "strict_required_status_checks_policy": strict,
+            },
+        },
+        {
+            "type": "pull_request",
+            "parameters": {
+                "required_review_thread_resolution": True,
+                "required_approving_review_count": approval,
+            },
+        },
+    ]
+    if queue:
+        rules.append({"type": "merge_queue", "parameters": {}})
+    return rules
+
+
+def _admission_setup(monkeypatch, snapshot, runs=None, rules=None):
     calls = []
     monkeypatch.setattr(pr, "snapshot", lambda *a: copy.deepcopy(snapshot))
     monkeypatch.setattr(
@@ -195,6 +217,8 @@ def _admission_setup(monkeypatch, snapshot, runs=None):
 
     def run(argv, **kwargs):
         calls.append(argv)
+        if "/rules/branches/" in " ".join(argv):
+            return json.dumps([_server_rules() if rules is None else rules])
         if "check-runs" in " ".join(argv):
             return json.dumps(
                 [
@@ -237,6 +261,139 @@ def test_admit_read_only_by_default_and_exact_head_mutation_when_requested(
     pr.admission(profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch)
     assert calls[-1][-2:] == ["--match-head-commit", snapshot["headRefOid"]]
     assert "--admin" not in calls[-1]
+
+
+@pytest.mark.parametrize("strict,queue", [(True, False), (False, True)])
+def test_auto_merge_requires_pinned_checks_and_server_base_freshness(
+    monkeypatch, profile, snapshot, tmp_path, strict, queue
+):
+    calls = _admission_setup(
+        monkeypatch, snapshot, rules=_server_rules(strict=strict, queue=queue)
+    )
+    batch = {
+        "schema": "vibecrafted.pr-closure-batch.v1",
+        "repository": profile["repository"],
+        "profile_sha256": pr._digest(profile),
+        "order": [12],
+        "pull_requests": [{"number": 12}],
+    }
+    result = pr.admission(
+        profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch
+    )
+    assert result["auto_merge_requested"]
+    assert calls[-2][-1].endswith("/rules/branches/develop?per_page=100")
+    assert calls[-1][:3] == ["gh", "pr", "merge"]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "no_rules",
+        "missing_check",
+        "missing_pin",
+        "wrong_pin",
+        "boolean_pin",
+        "stale_base",
+        "unresolved_threads",
+        "missing_pr_rule",
+        "malformed",
+    ],
+)
+def test_weak_effective_branch_policy_never_requests_auto_merge(
+    monkeypatch, profile, snapshot, tmp_path, damage
+):
+    rules = _server_rules()
+    if damage == "no_rules":
+        rules = []
+    elif damage == "missing_check":
+        rules[0]["parameters"]["required_status_checks"][0]["context"] = "other check"
+    elif damage == "missing_pin":
+        rules[0]["parameters"]["required_status_checks"][0].pop("integration_id")
+    elif damage == "wrong_pin":
+        rules[0]["parameters"]["required_status_checks"][0]["integration_id"] = 999
+    elif damage == "boolean_pin":
+        rules[0]["parameters"]["required_status_checks"][0]["integration_id"] = True
+    elif damage == "stale_base":
+        rules[0]["parameters"]["strict_required_status_checks_policy"] = False
+    elif damage == "unresolved_threads":
+        rules[1]["parameters"]["required_review_thread_resolution"] = False
+    elif damage == "missing_pr_rule":
+        rules.pop()
+    else:
+        rules = [None]
+    calls = _admission_setup(monkeypatch, snapshot, rules=rules)
+    batch = {
+        "schema": "vibecrafted.pr-closure-batch.v1",
+        "repository": profile["repository"],
+        "profile_sha256": pr._digest(profile),
+        "order": [12],
+        "pull_requests": [{"number": 12}],
+    }
+    with pytest.raises(ValueError):
+        pr.admission(
+            profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch
+        )
+    assert not any(call[:3] == ["gh", "pr", "merge"] for call in calls)
+
+
+@pytest.mark.parametrize("approval", [0, 1])
+def test_profile_approval_must_also_be_required_by_server(
+    monkeypatch, profile, snapshot, tmp_path, approval
+):
+    profile["require_approval"] = True
+    snapshot["reviews"] = [{"state": "APPROVED", "user": {"login": "reviewer"}}]
+    calls = _admission_setup(
+        monkeypatch, snapshot, rules=_server_rules(approval=approval)
+    )
+    batch = {
+        "schema": "vibecrafted.pr-closure-batch.v1",
+        "repository": profile["repository"],
+        "profile_sha256": pr._digest(profile),
+        "order": [12],
+        "pull_requests": [{"number": 12}],
+    }
+    if approval:
+        assert pr.admission(
+            profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch
+        )["auto_merge_requested"]
+    else:
+        with pytest.raises(ValueError, match="server-enforced approval"):
+            pr.admission(
+                profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch
+            )
+        assert not any(call[:3] == ["gh", "pr", "merge"] for call in calls)
+
+
+def test_read_only_admission_preserves_snapshot_readiness_without_server_policy_check(
+    monkeypatch, profile, snapshot, tmp_path
+):
+    calls = _admission_setup(monkeypatch, snapshot, rules=[])
+    result = pr.admission(profile, tmp_path, 12, tmp_path / "receipt")
+    assert result["ready"] and "when enabling" in result["note"]
+    assert not any("/rules/branches/" in " ".join(call) for call in calls)
+
+
+def test_effective_branch_rule_request_quotes_branch_and_collects_all_pages(
+    monkeypatch, profile
+):
+    rules = _server_rules()
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        return json.dumps([[rules[0]], [rules[1]]])
+
+    monkeypatch.setattr(pr, "_run", run)
+    pr._require_server_policy(profile, "release/0.18")
+    assert calls == [
+        [
+            "gh",
+            "api",
+            "--paginate",
+            "--slurp",
+            "repos/example/project/rules/branches/release%2F0.18?per_page=100",
+        ]
+    ]
 
 
 @pytest.mark.parametrize(

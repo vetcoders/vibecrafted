@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
@@ -269,7 +270,7 @@ def _candidate(profile: dict[str, Any], row: dict[str, Any]) -> None:
         raise ValueError("candidate must be an open, non-draft PR")
     if row["baseRefName"] not in profile["target_branches"]:
         raise ValueError(
-            "stacked PR must be explicitly retargeted after its parent lands"
+            "PR base is outside permitted targets; verify its dependency or intended retargeting"
         )
     if row["head_repository"] != profile["repository"]:
         raise ValueError("fork publication is outside this profile's owned repository")
@@ -442,6 +443,82 @@ def publish(
     }
 
 
+def _require_server_policy(profile: dict[str, Any], branch: str) -> None:
+    """Require active rulesets to preserve admission conditions after local reads.
+
+    The effective-rules endpoint omits disabled/evaluate rulesets. Classic branch
+    protection is deliberately not inferred from an empty modern-rules response.
+    """
+    endpoint = f"repos/{profile['repository']}/rules/branches/{quote(branch, safe='')}?per_page=100"
+    pages = json.loads(_run(["gh", "api", "--paginate", "--slurp", endpoint]))
+    if not isinstance(pages, list) or any(
+        not isinstance(page, list)
+        or any(
+            not isinstance(rule, dict) or not isinstance(rule.get("type"), str)
+            for rule in page
+        )
+        for page in pages
+    ):
+        raise ValueError(
+            "effective branch rules response is malformed; auto-merge refused"
+        )
+    rules = [rule for page in pages for rule in page]
+    policy_types = {"required_status_checks", "merge_queue", "pull_request"}
+    if any(
+        rule["type"] in policy_types and not isinstance(rule.get("parameters"), dict)
+        for rule in rules
+    ):
+        raise ValueError(
+            "effective branch rule parameters are missing; auto-merge refused"
+        )
+    status_rules = [
+        rule["parameters"] for rule in rules if rule["type"] == "required_status_checks"
+    ]
+    required_checks: set[tuple[str, int]] = set()
+    strict = False
+    for parameters in status_rules:
+        checks = parameters.get("required_status_checks")
+        if not isinstance(checks, list) or any(
+            not isinstance(check, dict) for check in checks
+        ):
+            raise ValueError(
+                "effective required status checks are malformed; auto-merge refused"
+            )
+        for check in checks:
+            context, app_id = check.get("context"), check.get("integration_id")
+            if isinstance(context, str) and type(app_id) is int:
+                required_checks.add((context, app_id))
+        strict |= (
+            bool(checks)
+            and parameters.get("strict_required_status_checks_policy") is True
+        )
+    for check in profile["remote_checks"]:
+        if (check["name"], check["app_id"]) not in required_checks:
+            raise ValueError(
+                f"active modern branch rulesets must require {check['name']} "
+                f"from app {check['app_id']}; classic protection is not modeled"
+            )
+    queued = any(rule["type"] == "merge_queue" for rule in rules)
+    if not strict and not queued:
+        raise ValueError(
+            "auto-merge requires strict required status checks or an active merge queue"
+        )
+    pull_request_rules = [
+        rule["parameters"] for rule in rules if rule["type"] == "pull_request"
+    ]
+    if not any(
+        parameters.get("required_review_thread_resolution") is True
+        for parameters in pull_request_rules
+    ):
+        raise ValueError("auto-merge requires server-enforced review thread resolution")
+    if profile["require_approval"] and not any(
+        type(parameters.get("required_approving_review_count")) is int
+        and parameters["required_approving_review_count"] >= 1
+        for parameters in pull_request_rules
+    ):
+        raise ValueError("auto-merge requires at least one server-enforced approval")
+
+
 def admission(
     profile: dict[str, Any],
     repo: Path,
@@ -511,6 +588,7 @@ def admission(
             raise ValueError("PR is outside the frozen batch")
         for previous in batch["order"][: batch["order"].index(number)]:
             _confirmed_merge(profile, previous)
+        _require_server_policy(profile, row["baseRefName"])
         _run(
             [
                 "gh",
@@ -530,7 +608,7 @@ def admission(
         "auto_merge_requested": enable,
         "head_sha": proof["tested_head_sha"],
         "merged": False,
-        "note": "GitHub protection and merge queue remain authoritative; request is not merge confirmation",
+        "note": "Snapshot readiness only; server enforcement is checked when enabling auto-merge. A request is not merge confirmation.",
     }
 
 
