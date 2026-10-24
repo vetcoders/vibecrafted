@@ -1972,8 +1972,15 @@ select_update_python() {
     [[ -d "$app/Contents/Resources/runtime" ]] || continue
     # Verify the entire App, pinned to the same product/team as the mutation
     # owner, before copying or executing its portable interpreter.
-    verify_signed_app "$app" || return 1
-    without_update_lock_fd /usr/bin/codesign --verify --strict --deep "$app" || return 1
+    if ! verify_signed_app "$app" || \
+      ! without_update_lock_fd /usr/bin/codesign --verify --strict --deep "$app"; then
+      # Historical SOURCE refusal has the same signed-identity status as
+      # require_exact_identity(), even before Python can read the journal.
+      if [[ "$app" == "$SOURCE" && ( "$MODE" == "restore" || "$MODE" == "recover" ) ]]; then
+        return 15
+      fi
+      return 1
+    fi
     UPDATE_PYTHON_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/.vc-update-python.XXXXXX")" || return 1
     private_app="$UPDATE_PYTHON_ROOT/Interpreter.app"
     without_update_lock_fd /usr/bin/ditto "$app" "$private_app" || return 1

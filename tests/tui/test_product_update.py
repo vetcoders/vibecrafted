@@ -762,6 +762,96 @@ def test_product_update_helper_refuses_unsigned_source(tmp_path: Path) -> None:
     assert not receipt.exists()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires native codesign refusal")
+@pytest.mark.parametrize("mode", ["replace", "restore", "recover"])
+@pytest.mark.parametrize("runtime_app", ["source", "destination"])
+@pytest.mark.parametrize("explicit_unusable_python", [False, True])
+def test_product_update_bootstrap_signature_refusal_contract(
+    tmp_path: Path, mode: str, runtime_app: str, explicit_unusable_python: bool
+) -> None:
+    env = _isolated_product_env(tmp_path)
+    env.pop("VIBECRAFTED_UPDATE_HELPER_HARNESS", None)
+    env.pop("VIBECRAFTED_UPDATE_PYTHON", None)
+    transaction = "bootstrap-refusal-123"
+    source = _unsigned_app(
+        tmp_path / f".vc-update-capture-{transaction}/prior.app", "prior"
+    )
+    dest = _unsigned_app(tmp_path / "Installed.app", "current")
+    app = source if runtime_app == "source" else dest
+    interpreter = app / "Contents/Resources/runtime/bin/python3"
+    interpreter.parent.mkdir(parents=True)
+    executed = tmp_path / "untrusted-python-executed"
+    interpreter.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(executed))}\nexit 1\n")
+    interpreter.chmod(0o755)
+    if explicit_unusable_python:
+        # Explicit selection must still fail on its own merits, with no fallback.
+        explicit = tmp_path / "unusable-python"
+        explicit.write_text("#!/bin/sh\nexit 1\n")
+        explicit.chmod(0o755)
+        env["VIBECRAFTED_UPDATE_PYTHON"] = str(explicit)
+    publication = Path(env["VIBECRAFTED_RUNTIME_HOME"]) / "active.json"
+    publication.write_text('{"version":"preserve-current"}\n')
+    (publication.parent / "install-receipt.json").write_text(publication.read_text())
+    before = {
+        path: path.read_bytes()
+        for root in (source, dest, publication.parent)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    receipt, admission, journal = (
+        tmp_path / name for name in ("receipt.json", "admission.json", "journal.json")
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-x",
+            str(HELPER),
+            "--source",
+            str(source),
+            "--destination",
+            str(dest),
+            "--receipt",
+            str(receipt),
+            "--admission",
+            str(admission),
+            "--journal",
+            str(journal),
+            "--transaction",
+            transaction,
+            "--mode",
+            mode,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    historical_source = runtime_app == "source" and mode in ("restore", "recover")
+    expected = 15 if historical_source and not explicit_unusable_python else 1
+    assert result.returncode == expected, result.stderr[-2000:]
+    error = (
+        "explicit App update Python is unusable"
+        if explicit_unusable_python
+        else "codesign --verify --strict failed"
+    )
+    assert error in result.stderr
+    assert not executed.exists()
+    # Trace the real helper: cleanup cannot hide an attempted interpreter copy.
+    assert "/usr/bin/ditto " not in result.stderr
+    assert "locate_prior_pack" not in result.stderr
+    assert not list(Path(env["TMPDIR"]).iterdir())
+    assert not receipt.exists() and not admission.exists() and not journal.exists()
+    assert not (tmp_path / ".vc-update.lock").exists()
+    assert not (tmp_path / f".vc-update-prepared-{transaction}.app").exists()
+    assert before == {
+        path: path.read_bytes()
+        for root in (source, dest, publication.parent)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_product_update_helper_times_out_live_parent(tmp_path: Path) -> None:
     dest = tmp_path / "Installed.app"
     dest.mkdir()
