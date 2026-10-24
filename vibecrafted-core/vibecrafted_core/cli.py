@@ -220,6 +220,10 @@ def _render_core_surface_help(topic: str) -> int:
         from .repository_claims import claims_cli_main
 
         return _invoke_owned_main(claims_cli_main, ["--help"])
+    if topic == "pr-closure":
+        from .pr_closure import main as pr_closure_main
+
+        return _invoke_owned_main(pr_closure_main, ["--help"])
     if topic == "settlements":
         parser = _build_parser()
         return _invoke_owned_main(
@@ -2399,6 +2403,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .dispatch.cli import main as dispatch_main
 
         return dispatch_main(raw_args[1:])
+    if raw_args and raw_args[0] == "pr-closure":
+        from .pr_closure import main as pr_closure_main
+
+        return _invoke_owned_main(pr_closure_main, raw_args[1:])
     if raw_args and raw_args[0] == "ship":
         from .ship import main as ship_main
 

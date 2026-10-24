@@ -402,6 +402,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
 CORE_SURFACE_COMMANDS = (
     "claims",
     "message",
+    "pr-closure",
     "reinstall",
     "relocate",
     "resume-session",
@@ -471,6 +472,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  pr-closure           Portable JSON PR preparation, verification receipts and admission
   scaffold-doctor     Plan-package gate before implement handoff
   message              Persist/inspect run-addressed Codex queue receipts
   capabilities         Launcher catalog: agents, models, controls, environments (--json)
