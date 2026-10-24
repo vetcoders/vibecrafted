@@ -3230,6 +3230,7 @@ def _run_relaunch_harness(
             f"OPEN_BIN={json.dumps(str(opener))}",
             "RELAUNCH=1",
             "UPDATE_LOCK_FD=",
+            f"UPDATE_PYTHON={shlex.quote(sys.executable)}",
         ]
     )
     script = "\n".join(

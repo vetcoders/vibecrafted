@@ -1065,7 +1065,7 @@ bootstrap_next_step() {
     return
   fi
 
-  if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
+  if [[ "$target" == "vibecrafted" ]] && { ! is_interactive_session || [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; }; then
     printf '%s\n' "run the compact installer"
     return
   fi
@@ -1327,7 +1327,7 @@ route_needs_make=0
 if [[ "$channel_mode" == "0" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
   route_needs_make=1
 elif [[ "$target" == "vibecrafted" ]]; then
-  if [[ "$use_gui" != "1" ]] && is_interactive_session; then
+  if [[ "$use_gui" != "1" && ! ( "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ) ]] && is_interactive_session; then
     route_needs_make=1
   fi
 elif ! pack_install_target "$target"; then
@@ -1336,7 +1336,14 @@ fi
 # Generation-local native entrypoints use file to reject scripts/foreign formats.
 # Bare Debian does not provide it; refuse before download instead of installing
 # a vc-frame wrapper that later misreports its present engine as missing.
-preflight_tools=(tar python3 openssl file)
+preflight_tools=(tar openssl file)
+if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; then
+  # Stock macOS supplies these tools; /usr/bin/python3 may only be a CLT shim.
+  # Never invoke that shim, xcrun, Swift or xcode-select on the public lane.
+  preflight_tools+=(plutil hdiutil codesign spctl)
+else
+  preflight_tools+=(python3)
+fi
 if [[ "$route_needs_make" == "1" ]]; then
   preflight_tools+=(make)
 fi
@@ -1344,10 +1351,85 @@ if [[ -n "$archive_url" || -n "$runtime_pack_url" || "$channel_mode" == "1" ]]; 
   preflight_tools+=(curl)
 fi
 preflight_require_all "${preflight_tools[@]}"
-bootstrap_python="$(command -v python3)"
-[[ -n "$bootstrap_python" && -f "$bootstrap_python" ]] \
-  || die "Could not resolve the bootstrap-owned Python interpreter"
+bootstrap_python=""
+staged_channel_app=""
+channel_manifest=""
+bootstrap_consent_obtained=0
+current_link="$tools_dir/vibecrafted-current"
 
+# Only system code runs until the pinned Developer ID and notarization admit
+# the App. The DMG URL is untrusted transport metadata, never a trust root.
+verify_channel_app() {
+  local app="$1"
+  [[ -d "$app" && ! -L "$app" ]] || return 1
+  codesign --verify --strict --deep -R '=anchor apple generic and identifier "io.vetcoders.vibecrafted" and certificate leaf[subject.OU] = "MW223P3NPX"' "$app" \
+    || return 1
+  spctl --assess --type execute "$app" >/dev/null 2>&1
+}
+
+stage_channel_app() {
+  [[ -n "$staged_channel_app" ]] && return 0
+  [[ "$channel_dmg_url" == https://* ]] \
+    || die "macOS channel must bind an HTTPS dmg_url for the authenticated bootstrap interpreter"
+  local dmg="$tmpdir/channel.dmg" mount="$tmpdir/mount"
+  curl -fsSL "$channel_dmg_url" -o "$dmg" \
+    || die "Could not download the Vibecrafted App DMG $channel_dmg_url"
+  mkdir -p "$mount"
+  hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null \
+    || die "Could not mount the downloaded DMG"
+  if ! verify_channel_app "$mount/Vibecrafted.app"; then
+    hdiutil detach "$mount" >/dev/null 2>&1 || true
+    die "DMG App failed pinned signed/notarized identity; no carrier code was executed"
+  fi
+  if ! cp -R "$mount/Vibecrafted.app" "$tmpdir/Vibecrafted.app"; then
+    hdiutil detach "$mount" >/dev/null 2>&1 || true
+    die "Could not stage the authenticated App"
+  fi
+  hdiutil detach "$mount" >/dev/null 2>&1 || die "Could not detach the downloaded DMG"
+  verify_channel_app "$tmpdir/Vibecrafted.app" \
+    || die "Staged App failed pinned signed/notarized identity"
+  staged_channel_app="$tmpdir/Vibecrafted.app"
+}
+
+if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; then
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")" \
+    || die "Could not create a private bootstrap workspace"
+  tmpdir="$(cd "$tmpdir" && pwd -P)"
+  channel_url="https://vibecrafted.io/channel/${ref}.json"
+  channel_manifest="$(curl -fsSL "$channel_url")" \
+    || die "Could not fetch the channel manifest $channel_url"
+  printf '%s' "$channel_manifest" >"$tmpdir/channel.json"
+  channel_dmg_url="$(plutil -extract dmg_url raw -expect string -o - "$tmpdir/channel.json")" \
+    || die "Channel manifest must bind dmg_url for macOS cold installation"
+  prompt_attended_consent
+  bootstrap_consent_obtained=1
+  stage_channel_app
+  bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/python3"
+else
+  bootstrap_python="$(command -v python3)"
+  # A present Apple shim is not a usable interpreter. Skip without executing it
+  # (and without provoking software-install UI); explicit source lanes still
+  # require a working, separately installed Python.
+  if [[ "$PLATFORM_OS" == "macos" && "$bootstrap_python" -ef /usr/bin/python3 ]]; then
+    bootstrap_python=""
+    # xcode-select -p only reads the selected directory; unlike invoking the
+    # shim it never requests installation. Source-only/offline lanes may use
+    # the real interpreter from an already installed developer toolchain.
+    developer_dir="$(/usr/bin/xcode-select -p 2>/dev/null)" || developer_dir=""
+    if [[ -n "$developer_dir" && -x "$developer_dir/usr/bin/python3" ]]; then
+      bootstrap_python="$developer_dir/usr/bin/python3"
+    fi
+  fi
+fi
+[[ -n "$bootstrap_python" && -f "$bootstrap_python" && -x "$bootstrap_python" ]] \
+  || die "A usable Python 3 interpreter is required for this install route"
+if ! "$bootstrap_python" -I -S - <<'PY_BOOTSTRAP_USABLE'
+import ctypes, hashlib, json, sys, tarfile
+assert sys.version_info >= (3, 9)
+PY_BOOTSTRAP_USABLE
+then
+  die "The selected bootstrap Python is unusable (Python 3.9 or newer required)"
+fi
 
 # macOS App pairing (side-by-side generation contract, 2026-10-22).
 # The Runtime Pack installer refuses to publish when the fixed host
@@ -1395,141 +1477,17 @@ app_pairing_args() {
 install_channel_dmg() {
   local dmg_url="$1" helper="$2"
   [[ -n "$dmg_url" ]] || die "macOS needs the channel dmg_url to pair a new App generation; refusing an unpaired Runtime Pack install"
-  local dmg
-  dmg="$tmpdir/$(basename "$dmg_url")"
-  curl -fsSL "$dmg_url" -o "$dmg" \
-    || die "Could not download the Vibecrafted App DMG $dmg_url"
-  if [[ -f "$dmg.sha256" ]]; then
-    local expected actual
-    expected="$(awk -v n="$(basename "$dmg_url")" 'NF>=2{n2=$2; sub(/^\*/,"",n2); if(n2==n){print $1; exit}}' "$dmg.sha256")"
-    actual="$(sha256_of_file "$dmg")"
-    [[ -n "$expected" && "$expected" == "$actual" ]] \
-      || die "DMG SHA256 mismatch for $(basename "$dmg_url"): expected ${expected:-<unlisted>}, got $actual"
-  fi
-  # The DMG itself is a carrier, not code: its integrity is the SHA256 above.
-  # The App inside is verified below (codesign --deep + spctl), so a DMG-level
-  # codesign is informational only and must never gate the install.
-  local mount="/tmp/vibecrafted-dmg.$$"
-  hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null \
-    || die "Could not mount the downloaded DMG"
-  local app_src="$mount/Vibecrafted.app"
-  [[ -d "$app_src" ]] || { hdiutil detach "$mount" 2>/dev/null; die "DMG does not contain Vibecrafted.app"; }
-  codesign --verify --strict --deep "$app_src" \
-    || { hdiutil detach "$mount" 2>/dev/null; die "DMG App failed codesign --verify --strict --deep"; }
-  spctl --assess --type install "$app_src" >/dev/null 2>&1 \
-    || { hdiutil detach "$mount" 2>/dev/null; die "DMG App is not notarized (spctl rejected)"; }
-  local staged_app="$tmpdir/Vibecrafted.app"
-  cp -R "$app_src" "$staged_app" || { hdiutil detach "$mount" 2>/dev/null; die "Could not stage the DMG App"; }
-  hdiutil detach "$mount" >/dev/null 2>&1 || true
+  stage_channel_app
+  local staged_app="$staged_channel_app"
   # A live Main instance of the App would survive the file swap and then hold
   # the old binary open; --relaunch (open -n) would start a second instance —
   # two generations at once. Mirror install-app.sh: gracefully quit the Main
   # role first (Frame sessions, PTYs and workers survive), then bind the
   # transaction to its pid/start so the swap waits for a clean exit.
   local helper_args=()
-  local main_quit="$tmpdir/main-quit.swift"
-  local candidate_root_for_helper="$candidate_root"
-  [[ -d "$candidate_root_for_helper" ]] || candidate_root_for_helper="$(cd "$(dirname "$helper")/.." && pwd -P)"
-  local ownership_swift="$candidate_root_for_helper/vibecrafted-app/shell-agent/app/Vibecrafted/AppInstanceOwnership.swift"
   local quit_identity=""
-  if [[ -f "$ownership_swift" ]]; then
-    cat "$ownership_swift" >"$main_quit"
-    cat >>"$main_quit" <<'MAIN_QUIT_SWIFT'
-import AppKit
-
-enum MainQuitFailure: Error {
-  case unsafe(String)
-}
-
-func installMainPeer(
-  _ app: NSRunningApplication, destination: URL, identifier: String
-) throws -> AppInstancePeer? {
-  guard !app.isTerminated else { return nil }
-  guard let bundle = app.bundleURL else {
-    throw MainQuitFailure.unsafe("missing running bundle identity")
-  }
-  guard bundle.standardizedFileURL == destination else { return nil }
-  guard app.bundleIdentifier == identifier, app.processIdentifier > 0,
-    let executable = app.executableURL, executable.isFileURL,
-    executable.query == nil, executable.fragment == nil,
-    let main = AppInstanceOwnership.signedMainExecutableURL(
-      bundleURL: bundle, bundleIdentifier: identifier)
-  else { throw MainQuitFailure.unsafe("missing destination executable/signature evidence") }
-  var peer = AppInstancePeer(
-    pid: app.processIdentifier, bundleURL: bundle, executableURL: executable,
-    signedMainExecutableURL: main)
-  if AppInstanceOwnership.isMainHost(peer) {
-    guard let launchDate = app.launchDate else {
-      throw MainQuitFailure.unsafe("missing destination Main start evidence")
-    }
-    peer.launchDate = launchDate
-    return peer
-  }
-  guard executable.host == nil || executable.host == "localhost",
-    executable.standardizedFileURL.deletingLastPathComponent()
-      == main.standardizedFileURL.deletingLastPathComponent()
-  else { throw MainQuitFailure.unsafe("foreign destination executable evidence") }
-  return nil
-}
-
-func installMainSnapshot(destination: URL, identifier: String) throws -> [AppInstancePeer] {
-  let peers = try NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
-    .compactMap { try installMainPeer($0, destination: destination, identifier: identifier) }
-  guard peers.count <= 1 else { throw MainQuitFailure.unsafe("ambiguous destination Main instances") }
-  return peers
-}
-
-func installMainStart(_ pid: Int32) throws -> String {
-  let process = Process()
-  process.executableURL = URL(fileURLWithPath: "/bin/ps")
-  process.arguments = ["-o", "lstart=", "-p", String(pid)]
-  process.environment = ["PATH": "/usr/bin:/bin", "LC_ALL": "C"]
-  let output = Pipe()
-  process.standardOutput = output
-  process.standardError = FileHandle.nullDevice
-  try process.run()
-  let data = output.fileHandleForReading.readDataToEndOfFile()
-  process.waitUntilExit()
-  guard process.terminationStatus == 0,
-    let raw = String(data: data, encoding: .utf8)
-  else { throw MainQuitFailure.unsafe("unavailable Main process start") }
-  let start = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-  guard start.range(
-    of: #"^[A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$"#,
-    options: .regularExpression) != nil
-  else {
-    throw MainQuitFailure.unsafe("malformed Main process start")
-  }
-  return start
-}
-
-do {
-  guard CommandLine.arguments.count == 2 else { throw MainQuitFailure.unsafe("missing destination") }
-  let destination = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
-  let identifier = AppInstanceOwnership.productBundleIdentifier
-  if let selected = try installMainSnapshot(destination: destination, identifier: identifier).first {
-    let start = try installMainStart(selected.pid)
-    guard try installMainSnapshot(destination: destination, identifier: identifier) == [selected],
-      let app = NSRunningApplication(processIdentifier: selected.pid),
-      try installMainPeer(app, destination: destination, identifier: identifier) == selected,
-      try installMainStart(selected.pid) == start
-    else { throw MainQuitFailure.unsafe("destination Main identity drifted before quit") }
-    guard app.terminate() else { throw MainQuitFailure.unsafe("Main refused graceful termination") }
-    print(selected.pid)
-    print(start)
-  } else {
-    guard try installMainSnapshot(destination: destination, identifier: identifier).isEmpty else {
-      throw MainQuitFailure.unsafe("destination Main appeared during identity check")
-    }
-  }
-} catch {
-  FileHandle.standardError.write(Data("install: refusing Main quit: \(error)\n".utf8))
-  exit(EXIT_FAILURE)
-}
-MAIN_QUIT_SWIFT
-    quit_identity="$(/usr/bin/swift "$main_quit" "$PAIRED_APP_ROOT" 2>"$tmpdir/main-quit.stderr")" \
-      || quit_identity=""
-  fi
+  quit_identity="$("$bootstrap_python" -I -S "$candidate_root/scripts/lib/app-main-identity.py" "$PAIRED_APP_ROOT" --quit)" \
+    || die "Could not establish exact App Main ownership; prior App preserved"
   if [[ -n "$quit_identity" ]]; then
     local quit_pid quit_start
     quit_pid="${quit_identity%%$'\n'*}"
@@ -1537,6 +1495,8 @@ MAIN_QUIT_SWIFT
     if [[ "$quit_pid" =~ ^[1-9][0-9]*$ && "$quit_start" != "$quit_identity" && -n "$quit_start" ]]; then
       info "▸ Gracefully quitting the running App Main (pid $quit_pid) — frame sessions survive"
       helper_args+=(--wait-pid "$quit_pid" --wait-start "$quit_start" --wait-timeout 60)
+    else
+      die "Malformed Main ownership receipt; prior App preserved"
     fi
   fi
   # vc-app-update.sh is the sole UI-bundle mutation owner and requires the full
@@ -1548,7 +1508,7 @@ MAIN_QUIT_SWIFT
   transaction="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
   local transaction_dir="$state_dir/transactions/$transaction"
   mkdir -p "$transaction_dir"
-  bash "$helper" \
+  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" bash "$helper" \
     --source "$staged_app" \
     --destination "$PAIRED_APP_ROOT" \
     --receipt "$transaction_dir/receipt.json" \
@@ -1574,7 +1534,6 @@ MAIN_QUIT_SWIFT
       die "App transaction refused before any swap (receipt: $receipt_file); prior App preserved"
     }
   info "▸ App installed via $transaction (receipt: $transaction_dir/receipt.json)"
-  rm -rf "$staged_app"
 }
 if [[ "$channel_mode" == "1" ]]; then
 
@@ -1582,8 +1541,7 @@ if [[ "$channel_mode" == "1" ]]; then
   # Each failure names itself: unreachable channel, unreadable document, or an
   # incomplete release tuple are three different truths for the operator.
   channel_url="https://vibecrafted.io/channel/${ref}.json"
-  channel_manifest=""
-  if ! channel_manifest="$(curl -fsSL "$channel_url")"; then
+  if [[ -z "$channel_manifest" ]] && ! channel_manifest="$(curl -fsSL "$channel_url")"; then
     die "Could not fetch the channel manifest $channel_url (network, proxy, or unknown --ref '$ref')"
   fi
   channel_fields=""
@@ -1640,13 +1598,18 @@ fi
 
 current_link="$tools_dir/vibecrafted-current"
 
-prompt_attended_consent
+if [[ "$bootstrap_consent_obtained" != "1" ]]; then
+  prompt_attended_consent
+fi
 
 mkdir -p "$tools_dir"
 
 # on_bootstrap_exit removes the private workspace on every exit path.
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")" \
-  || die "Could not create a private bootstrap workspace under ${TMPDIR:-/tmp}"
+if [[ -z "$tmpdir" ]]; then
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")" \
+    || die "Could not create a private bootstrap workspace under ${TMPDIR:-/tmp}"
+fi
+tmpdir="$(cd "$tmpdir" && pwd -P)"
 
 selected_runtime_pack="$runtime_pack_file"
 if [[ -n "$runtime_pack_url" ]]; then
@@ -1688,29 +1651,31 @@ run_candidate_command() {
 # re-probe. The helper is the sole UI-bundle mutation owner and its refusal is
 # final; the prior App is preserved either way.
 macos_pair_channel_app() {
-  # A pack that is not a real Runtime Pack tarball (test fixtures, hand-built
-  # archives) cannot be probed for pairing. Skip silently: the pack installer
-  # itself still enforces the App/host signature pairing on real installs.
-  tar -tzf "$selected_runtime_pack" >/dev/null 2>&1 || return 0
-  # The pack is still a .tar.gz here; extract just enough to probe helpers.
-  local probe_dir="$tmpdir/pair-probe"
-  rm -rf "$probe_dir"; mkdir -p "$probe_dir"
-  tar -xzf "$selected_runtime_pack" -C "$probe_dir" \
-    VibecraftedRuntime/libexec/vc-terminal \
-    VibecraftedRuntime/libexec/vc-frame \
-    VibecraftedRuntime/bin/python3 \
-    VibecraftedRuntime/vibecrafted-core 2>/dev/null || return 1
-  local payload="$probe_dir/VibecraftedRuntime"
-  [[ -d "$payload/vibecrafted-core" ]] || return 1
-  local pairing
-  pairing="$(app_pairing_args "$payload" 2>/dev/null)" || pairing=""
+  # Authenticate the supplied pack and its closed inventory before any pairing
+  # decision or App mutation. The candidate source signature was checked with
+  # the publisher key sealed in the authenticated App.
+  bash "$candidate_root/scripts/install-runtime-pack.sh" --pack "$selected_runtime_pack" \
+    --verify-only --expected-source-revision "$expected_revision" >"$tmpdir/runtime-pack-verification.json" \
+    || die "Channel Runtime Pack failed authentication/provenance; prior App preserved"
+  local bundled_packs=("$staged_channel_app"/Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_*.tar.gz)
+  [[ ${#bundled_packs[@]} -eq 1 && -f "${bundled_packs[0]}" ]] \
+    || die "Authenticated App must contain exactly one Runtime Pack"
+  [[ "$(sha256_of_file "${bundled_packs[0]}")" == "$(sha256_of_file "$selected_runtime_pack")" ]] \
+    || die "Channel App/Runtime Pack mismatch; prior App and runtime preserved"
+  local payload="$staged_channel_app/Contents/Resources/runtime"
+  local pairing=""
+  local installed_packs=("$PAIRED_APP_ROOT"/Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_*.tar.gz)
+  # Donor helpers can be identical across App releases. Only a valid App with
+  # this exact embedded pack is already the channel's complete generation.
+  if [[ ${#installed_packs[@]} -eq 1 && -f "${installed_packs[0]}" && ! -L "${installed_packs[0]}" ]] \
+    && verify_channel_app "$PAIRED_APP_ROOT" \
+    && [[ "$(sha256_of_file "${installed_packs[0]}")" == "$(sha256_of_file "$selected_runtime_pack")" ]]; then
+    pairing="$(app_pairing_args "$payload" 2>/dev/null)" || pairing=""
+  fi
   if [[ -n "$pairing" ]]; then
-    # shellcheck disable=SC2206
-    macos_app_args=(${pairing})
-    rm -rf "$probe_dir"
+    while IFS= read -r arg; do macos_app_args+=("$arg"); done <<< "$pairing"
     return 0
   fi
-  rm -rf "$probe_dir"
   # App does not match the channel pack: install the channel DMG first.
   local helper="$candidate_root/scripts/vc-app-update.sh"
   [[ -f "$helper" ]] || helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/scripts/vc-app-update.sh"
@@ -1718,20 +1683,11 @@ macos_pair_channel_app() {
   info "▸ Installed App does not match the channel; installing the signed App from DMG first…"
   install_channel_dmg "$channel_dmg_url" "$helper" || return 1
   app_pairing_via_dmg=1
-  # Re-probe after the App transaction.
-  probe_dir="$tmpdir/pair-probe"
-  rm -rf "$probe_dir"; mkdir -p "$probe_dir"
-  tar -xzf "$selected_runtime_pack" -C "$probe_dir" \
-    VibecraftedRuntime/libexec/vc-terminal \
-    VibecraftedRuntime/libexec/vc-frame \
-    VibecraftedRuntime/bin/python3 \
-    VibecraftedRuntime/vibecrafted-core 2>/dev/null || return 1
-  payload="$probe_dir/VibecraftedRuntime"
-  pairing="$(app_pairing_args "$payload" 2>/dev/null)" || pairing=""
-  rm -rf "$probe_dir"
-  [[ -n "$pairing" ]] || die "App DMG installed but still does not match the channel Runtime Pack; prior App preserved"
-  # shellcheck disable=SC2206
-  macos_app_args=(${pairing})
+  # The updater installs the pack sealed in the App. It must be the exact
+  # channel pack, not a second generation selected just because it is signed.
+  [[ -n "$(app_pairing_args "$PAIRED_APP_ROOT/Contents/Resources/runtime")" ]] \
+    || die "App transaction completed but installed helper pairing is unverified; inspect its journal"
+
 }
 
 # Install the verified, supplied Runtime Pack without make: the Makefile
@@ -1818,7 +1774,14 @@ verify_signature() {
   [[ -n "$release_name" ]] \
     || die "Archive URL $file_url does not name a release asset; cannot match it against SHA256SUMS"
 
-  if ! curl -fsSL "${base_url}/vibecrafted-signing.pub" -o "$pub_file" 2>/dev/null; then
+  if [[ -n "$staged_channel_app" ]]; then
+    pub_file="$staged_channel_app/Contents/Resources/runtime-pack/vibecrafted-signing-v1.pub"
+    [[ -f "$pub_file" && ! -L "$pub_file" ]] || die "Authenticated App is missing the publisher trust key"
+    curl -fsSL "${base_url}/${release_name}.sig" -o "$sig_file" \
+      || die "Missing authenticated source signature for $release_name"
+    openssl dgst -sha256 -verify "$pub_file" -signature "$sig_file" "$file" >/dev/null 2>&1 \
+      || die "Source signature verification FAILED for $release_name"
+  elif ! curl -fsSL "${base_url}/vibecrafted-signing.pub" -o "$pub_file" 2>/dev/null; then
     info "  [warn] Could not fetch signing key — skipping signature verification"
     return 0
   fi
@@ -2010,12 +1973,12 @@ if [[ "$target" == "vibecrafted" && "$use_gui" == "1" ]]; then
       --expected-source-revision "$expected_revision"
     )
   fi
-  run_candidate_command python3 "$gui_installer" --source "$candidate_root" \
+  run_candidate_command "$bootstrap_python" "$gui_installer" --source "$candidate_root" \
     ${gui_pack_args[@]+"${gui_pack_args[@]}"}
 fi
 
-if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
-  # Non-TTY public installs use the same automation lane as local source
+if [[ "$target" == "vibecrafted" ]] && { ! is_interactive_session || [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; }; then
+  # macOS channel installs and non-TTY public installs use the same automation lane as local source
   # installs. Hand the private verified candidate to the manifest-owned
   # installer; it publishes under the installer lease.
   for _p in "$HOME/.local/bin" "${tools_dir}/node/bin"; do
