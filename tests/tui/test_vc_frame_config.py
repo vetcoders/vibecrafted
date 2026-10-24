@@ -42,7 +42,9 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
 
     assert 'unbind "Alt f" "Alt n" "Alt i" "Alt o"' in payload
     assert 'bind "Ctrl n" { NewTab; }' in payload
-    assert "Ctrl Shift" not in payload
+    # Shifted punctuation is distinguishable through Kitty; keep Ctrl+Shift
+    # letter chords free while allowing the creation shortcuts on =/+.
+    assert re.search(r'bind\s+"Ctrl Shift [a-zA-Z]"', payload) is None
 
 
 def test_ctrl_n_opens_a_new_tab() -> None:
