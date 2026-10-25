@@ -381,6 +381,10 @@ Keep the standard 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. quality bar:
 - semgrep as first-choice security guard when available; the default
   invocation in this repo is `make semgrep`, mirrored by the hooks under
   `scripts/hooks/pre-commit` and `scripts/hooks/pre-push`
+- ruff runs at one pinned version in this repo: `RUFF_SPEC` in
+  `scripts/hooks/pre-commit` and `scripts/hooks/pre-push`, kept equal by
+  `tests/tui/test_living_tree_hooks.py`. A bare `uvx ruff` resolves the
+  host's cached version, so its result is not evidence for or against the gate
 - Rust repos: `cargo clippy -- -D warnings`
 - Non-Rust repos: choose the closest equivalent lint/type/test gate
 - Tests: run if reviewing; write if implementing new behavior; prefer real e2e coverage for the actual pipeline
