@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
@@ -538,6 +539,75 @@ def test_live_and_delayed_handoff_not_pruned(lane):
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=5)
+
+
+def _exclusive_install_lease(env: dict[str, str]) -> int:
+    lock = Path(env["VIBECRAFTED_RUNTIME_HOME"]) / "tools/.vibecrafted-install.lock"
+    assert lock.is_file() and not lock.is_symlink()
+    descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return descriptor
+
+
+def _settle_child(args: list[str], env: dict[str, str]) -> subprocess.Popen[str]:
+    command = [
+        "/bin/bash",
+        str(HELPER),
+        *args,
+        "--mode",
+        "settle",
+        "--expected-team",
+        "not set",
+        "--open-bin",
+        "/usr/bin/true",
+    ]
+    return subprocess.Popen(
+        _app_child_command(command, env),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def test_settlement_waits_out_transient_install_lease(lane):
+    # A relaunched App adopts the runtime under the exclusive install lease
+    # while --complete settles; settlement must not report that as failure.
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    env = {**env, "VIBECRAFTED_UPDATE_SETTLEMENT_LEASE_SECONDS": "30"}
+    descriptor = _exclusive_install_lease(env)
+    child = _settle_child(args, env)
+    try:
+        time.sleep(6)
+        assert child.poll() is None, child.communicate()[1]
+    finally:
+        os.close(descriptor)
+    _out, err = child.communicate(timeout=60)
+    assert child.returncode == 0, err
+    assert not list(parent.glob(".vc-update-capture-*"))
+    settled = json.loads((state / "receipt.json.settlement.json").read_text())
+    assert settled["status"] == "disposed"
+
+
+def test_settlement_keeps_capture_when_install_lease_outlives_budget(lane):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    env = {**env, "VIBECRAFTED_UPDATE_SETTLEMENT_LEASE_SECONDS": "1"}
+    descriptor = _exclusive_install_lease(env)
+    try:
+        child = _settle_child(args, env)
+        _out, err = child.communicate(timeout=60)
+    finally:
+        os.close(descriptor)
+    assert child.returncode == 20
+    assert "runtime installation is in progress" in err
+    assert (parent / ".vc-update-capture-capture-test-00000001/prior.app").is_dir()
+    assert not (state / "receipt.json.settlement.json").exists()
 
 
 @pytest.mark.parametrize("tamper", ["runtime-bytes", "selector", "publication-source"])
