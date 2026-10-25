@@ -40,7 +40,7 @@ history_ignore = [
     "atuin search", "atuin sync",
     # Sensitive commands
     "pass", "password", "secret", "token", "key", "auth",
-    # Gang of Bastards - keep our secrets
+    # Sensitive commands - keep secrets out of history
     "export OPENAI_API_KEY", "export GITHUB_TOKEN",
     "cat *.env", "echo $OPENAI_API_KEY", "echo $GITHUB_TOKEN"
 ]
