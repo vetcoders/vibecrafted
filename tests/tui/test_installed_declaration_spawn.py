@@ -161,6 +161,15 @@ def packaged_generation(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # generation from the provider-boundary bootstrap scrub. Copy the binary
     # so this packaged-layout fixture retains its real invocation identity.
     shutil.copy2(raw, gen / "python" / "bin" / RAW_INTERPRETER)
+    # Standalone distributions link a sibling private libpython (for example
+    # uv's macOS build uses @executable_path/../lib). Carry that dependency too,
+    # exactly as a Runtime Pack does; copying only the executable cannot start.
+    library_name = sysconfig.get_config_var("LDLIBRARY")
+    if library_name and not sysconfig.get_config_var("PYTHONFRAMEWORK"):
+        library = Path(sys.base_prefix) / "lib" / library_name
+        if library.is_file():
+            (gen / "python" / "lib").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(library, gen / "python" / "lib" / library_name)
     # Standalone CPython discovers its prefix from these adjacent landmarks.
     # Copying only the executable falls back to its build prefix (/install)
     # and fails before payload execution. Carry stdlib, including lib-dynload,

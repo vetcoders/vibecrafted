@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import sys
@@ -515,7 +514,7 @@ def test_guest_entry_preserves_python_uv_winners_and_launcher_availability(
             "HOME": str(home),
             "XDG_CONFIG_HOME": str(config_home),
             "PATH": "/usr/bin:/bin",
-            "TMPDIR": os.environ["TMPDIR"],
+            "TMPDIR": str(tmp_path),
             "TERM": "dumb",
         },
         capture_output=True,

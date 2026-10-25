@@ -461,7 +461,9 @@ def test_omp_agent_interactive_unavailability_and_cycling(
     assert form.error
 
 
-def test_stale_launch_failure_invalidation_on_config_change(tmp_path: Path) -> None:
+def test_stale_launch_failure_invalidation_on_config_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Changing agent or path immediately clears stale failed launch result."""
     workshop = _load()
     form = workshop.Workshop(RecordingWindow(), mode="launcher")
@@ -482,6 +484,8 @@ def test_stale_launch_failure_invalidation_on_config_change(tmp_path: Path) -> N
     form.error = "Previous launch failed"
     form.error_stage = "Workspace preparation"
 
+    # Provider discovery is separate; make a selectable replacement available.
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
     # User changes configuration: changes agent
     form.row = 0
     form._cycle_agent(1)

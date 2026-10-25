@@ -151,7 +151,7 @@ def test_release_builder_configures_before_signing_and_notarize_only_never_write
         'unified_product_manifest.py" app'
     )
     assert body.index("verify_update_channel") > body.index(
-        '"${CODESIGN_KEYCHAIN_ARGS[@]}" "$APP"'
+        '"${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"'
     )
     notarize = builder[builder.rindex('if [[ "$MODE" == "notarize" ]]; then') :]
     assert "configure_update_channel" not in notarize

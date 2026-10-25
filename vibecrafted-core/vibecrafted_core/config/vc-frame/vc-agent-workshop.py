@@ -2471,6 +2471,16 @@ class Workshop:
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
+        # cbreak retains IXON: the terminal would consume the advertised Ctrl+Q
+        # shortcut as XON before get_wch can receive it. Keep ISIG/Ctrl+C intact;
+        # curses.endwin restores the saved shell terminal mode on exit.
+        if os.name == "posix" and sys.stdin.isatty():
+            import termios
+
+            mode = termios.tcgetattr(sys.stdin.fileno())
+            mode[0] &= ~termios.IXON
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, mode)
+            curses.def_prog_mode()
         self.window.keypad(True)
         self.window.timeout(500)
         try:
