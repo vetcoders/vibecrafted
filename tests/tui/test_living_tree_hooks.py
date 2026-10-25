@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -184,11 +185,24 @@ def test_prepush_checks_commit_projection_not_foreign_dirty_worktree(
     assert source.read_text(encoding="utf-8") == "x=1\n"
 
 
+def repo_hook_ruff_spec(hook: str) -> str:
+    text = (REPO_ROOT / "scripts" / "hooks" / hook).read_text(encoding="utf-8")
+    match = re.search(r'^RUFF_SPEC="(ruff@\d+\.\d+\.\d+)"$', text, re.MULTILINE)
+    assert match, f"scripts/hooks/{hook} must pin one exact ruff version"
+    return match.group(1)
+
+
+def test_repo_hooks_pin_one_ruff_version() -> None:
+    """Unpinned `uvx ruff` made the pre-push gate differ across hosts."""
+    assert repo_hook_ruff_spec("pre-commit") == repo_hook_ruff_spec("pre-push")
+
+
 def test_ruff_format_check_on_repo_root_passes() -> None:
     """Husky full-repo ruff and a manual `ruff format --check .` must stay green.
 
     ruff 0.16 includes Markdown. Fenced examples in docs used to fail this
     gate and refuse `git push` even when every `*.py` file was formatted.
+    The check runs the same ruff the repository hooks pin.
     """
     if shutil.which("uvx") is None:
         pytest.skip("uvx is required for the repository-wide Ruff contract")
@@ -196,7 +210,14 @@ def test_ruff_format_check_on_repo_root_passes() -> None:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     result = subprocess.run(
-        ["uvx", "ruff", "format", "--check", "--", str(REPO_ROOT)],
+        [
+            "uvx",
+            repo_hook_ruff_spec("pre-push"),
+            "format",
+            "--check",
+            "--",
+            str(REPO_ROOT),
+        ],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,

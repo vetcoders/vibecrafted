@@ -6,6 +6,10 @@ echo "⚒  Running pre-commit checks..."
 
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
 
+# Same pin as pre-push: bare `uvx ruff` formats with each host's cached
+# version, and the pre-push gate then disagrees across machines.
+RUFF_SPEC="ruff@0.17.2"
+
 if [ -z "$STAGED_FILES" ]; then
     exit 0
 fi
@@ -31,8 +35,8 @@ fi
 if [ ${#PY_FILES[@]} -gt 0 ]; then
     echo "▸ ruff (${#PY_FILES[@]} files)"
     if command -v uvx >/dev/null 2>&1; then
-        uvx ruff check --fix "${PY_FILES[@]}"
-        uvx ruff format "${PY_FILES[@]}"
+        uvx "$RUFF_SPEC" check --fix "${PY_FILES[@]}"
+        uvx "$RUFF_SPEC" format "${PY_FILES[@]}"
         git add "${PY_FILES[@]}"
     else
         echo "[warn] uvx unavailable; skipping ruff auto-fix"
