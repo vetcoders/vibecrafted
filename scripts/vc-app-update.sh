@@ -1561,22 +1561,32 @@ restore_previous_tuple() {
 # inventory so an interrupted deletion can be retried without re-inventing
 # authority from a half-deleted signature. It never enumerates captures to own.
 settle_capture() {
-  local runtime_home
+  local runtime_home lease_seconds=60
   runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
+  # Same verifier budget as install-app.sh; only the harness may shorten it.
+  if [[ "$HARNESS" -eq 1 && -n "${VIBECRAFTED_UPDATE_SETTLEMENT_LEASE_SECONDS:-}" ]]; then
+    lease_seconds="$VIBECRAFTED_UPDATE_SETTLEMENT_LEASE_SECONDS"
+  fi
   without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$DESTINATION" "$RECEIPT" "$ADMISSION" "$JOURNAL" \
     "$TRANSACTION" "$runtime_home" "$EXPECTED_IDENTIFIER" "$EXPECTED_TEAM" \
-    "$HISTORICAL_EVIDENCE" "$FAIL_AFTER" "$PLAN_ONLY" "$ADMIT_PLAN" <<'PY'
+    "$HISTORICAL_EVIDENCE" "$FAIL_AFTER" "$PLAN_ONLY" "$ADMIT_PLAN" "$lease_seconds" <<'PY'
+import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-dest, receipt_path, admission_path, journal_path, txn, runtime, identifier, team, historical, fail, plan_only, admitted_plan = sys.argv[1:]
+dest, receipt_path, admission_path, journal_path, txn, runtime, identifier, team, historical, fail, plan_only, admitted_plan, lease_seconds = sys.argv[1:]
 dest, runtime = Path(dest), Path(runtime)
+lease_seconds = float(lease_seconds)
+if not math.isfinite(lease_seconds) or lease_seconds < 0:
+    raise SystemExit("settlement install-lease budget must be finite and non-negative")
 parent = dest.parent
 capture = parent / (".vc-update-capture-" + txn)
 base = Path(receipt_path)
@@ -1635,6 +1645,51 @@ def signed_identity(path):
     require(bool(re.fullmatch(r"[0-9a-f]+", fields.get("CDHash", ""))), "missing cdhash")
     return "cdhash:" + fields["CDHash"]
 
+IN_PROGRESS = {"schema": "vibecrafted.runtime-resolution.v1", "status": "unusable",
+               "reason": "runtime installation is in progress", "runtime": None}
+install_lease = None  # shared tools-install lease, held until this settlement exits
+
+def share_install_lease():
+    # A relaunched App (or another publisher) holds the exclusive install lease
+    # briefly. Wait for it within the budget, then keep the shared lease so no
+    # new publication can start between observation and disposal.
+    global install_lease
+    if install_lease is not None:
+        return True
+    lock = physical(runtime / "tools/.vibecrafted-install.lock")
+    try:
+        descriptor = os.open(str(lock), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    try:
+        def owned():
+            opened, named = os.fstat(descriptor), lock.lstat()
+            require(stat.S_ISREG(opened.st_mode) and opened.st_uid == os.geteuid() and opened.st_nlink == 1
+                    and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino), "install lease identity drift")
+        owned()
+        deadline = time.monotonic() + lease_seconds
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(descriptor)
+                    return False
+                time.sleep(0.05)
+        owned()
+    except BaseException:
+        os.close(descriptor)
+        raise
+    install_lease = descriptor
+    return True
+
+def transient_install(checked):
+    try:
+        return checked.returncode == 2 and json.loads(checked.stdout) == IN_PROGRESS
+    except ValueError:
+        return False
+
 def publication():
     pointer = read(runtime / "active.json")
     install = read(runtime / "install-receipt.json")
@@ -1666,7 +1721,12 @@ def publication():
     for key in ("PYTHONPATH", "PYTHONHOME"):
         environment.pop(key, None)
     environment.update(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
-    checked = subprocess.run([str(python), "-B", str(verifier), "runtime-resolve", "--runtime-home", str(runtime), "--json"], env=environment, capture_output=True, text=True, timeout=60)
+    def resolve():
+        return subprocess.run([str(python), "-B", str(verifier), "runtime-resolve", "--runtime-home", str(runtime), "--json"], env=environment, capture_output=True, text=True, timeout=60)
+    checked = resolve()
+    # Only the canonical in-progress refusal is retried, once, under the shared lease.
+    if transient_install(checked) and share_install_lease():
+        checked = resolve()
     require(checked.returncode == 0, "canonical destination verifier refused: " + (checked.stdout + checked.stderr)[-1500:])
     resolution = json.loads(checked.stdout)
     require(resolution.get("schema") == "vibecrafted.runtime-resolution.v1" and resolution.get("status") == "ready", "canonical destination is not ready")
