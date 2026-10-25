@@ -919,7 +919,7 @@ init-hooks:
 		git config core.hooksPath scripts/hooks >/dev/null; \
 		chmod +x scripts/hooks/pre-commit scripts/hooks/pre-push scripts/hooks/commit-msg; \
 		command -v uv >/dev/null 2>&1 || { echo "bootstrapping uv..."; curl -LsSf https://astral.sh/uv/install.sh | sh; }; \
-		uvx ruff --version >/dev/null 2>&1 || echo "  [warn] ruff unavailable via uvx"; \
+		uvx "$$(bash scripts/lib/ruff-spec.sh)" --version >/dev/null 2>&1 || echo "  [warn] pinned ruff unavailable via uvx"; \
 		command -v semgrep >/dev/null 2>&1 || uvx semgrep --version >/dev/null 2>&1 || echo "  [warn] semgrep unavailable"; \
 		npx --yes prettier --version >/dev/null 2>&1 || echo "  [warn] prettier unavailable via npx"; \
 	else \

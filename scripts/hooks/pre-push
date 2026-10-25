@@ -6,11 +6,6 @@ echo "⚒  Running pre-push checks..."
 
 ALL_FILES=$(git ls-files)
 
-# One ruff for every host. Bare `uvx ruff` resolves whatever version each
-# host has cached, so the same tree passed on one machine and failed on
-# another. Keep in sync with pre-commit (tests/tui/test_living_tree_hooks.py).
-RUFF_SPEC="ruff@0.17.2"
-
 SH_FILES=()
 PY_FILES=()
 MD_YAML_FILES=()
@@ -57,6 +52,10 @@ if [ ${#PY_FILES[@]} -gt 0 ]; then
     # Pass explicit *.py paths. ruff 0.16+ includes Markdown by default and
     # would format-check fenced examples in docs (that is a prettier lane).
     if command -v uvx >/dev/null 2>&1; then
+        # One ruff for every host. Bare `uvx ruff` resolves whatever version
+        # each host has cached, so the same tree passed on one machine and
+        # failed on another. The pin lives in pyproject.toml.
+        RUFF_SPEC="$(bash scripts/lib/ruff-spec.sh)"
         uvx "$RUFF_SPEC" check "${PY_FILES[@]}"
         uvx "$RUFF_SPEC" format --check "${PY_FILES[@]}"
     else
