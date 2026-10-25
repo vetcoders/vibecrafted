@@ -216,7 +216,7 @@ It MUST contain all six:
    **Only a delivery-verifier flips `[~]→[x]`; an agent's claim NEVER reaches `[x]` on its own.**
    The rule lives IN the DRIVER on purpose — so that mid-dispatch nobody promotes a claim to done
    without re-running the verifier. That promotion-without-proof is the single failure mode that
-   wrecks an operator run ("się zajebiemy"). Encode it where the dispatcher's eyes are.
+   wrecks an operator run ("rozjedziemy się"). Encode it where the dispatcher's eyes are.
 5. **Live status snapshot** + `dou-index = |[x]| / total`.
 6. **Reception matrix (Odbiór) — R12, Founder 2026-09-15.** A section
    `## Odbiór (matryca wyników)` with one row per cut

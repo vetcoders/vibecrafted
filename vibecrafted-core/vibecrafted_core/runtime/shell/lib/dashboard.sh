@@ -91,7 +91,8 @@ _vetcoders_product_workspace_prepare() {
     [[ "$resolve_status" -ne 0 ]] || resolve_status=1
     printf "vc-start: could not resolve requested workspace root '%s' (status %s).\n" \
       "$requested_root" "$resolve_status" >&2
-    printf "vc-start: inconsistent workspace ownership requires explicit recovery; no seat was adopted.\n" >&2
+    printf 'vc-start: saved workspace details could not be verified; automatic return stopped.\n' >&2
+    _vetcoders_start_preserving_return_hint "$runtime_session" "$runtime_state"
     return "$resolve_status"
   fi
   while IFS= read -r line; do
@@ -939,7 +940,16 @@ _vetcoders_resume_operator_session() {
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 1
   }
-  _vetcoders_resume_workspace "$session_name"
+  # Public project return shares start's locked physical admission. Preserve
+  # EXITED evidence, but never publish a concurrent creator by name alone.
+  _vetcoders_start_read_inventory_state "$session_name"
+  if [[ "$_vetcoders_start_inventory_state" == dead ]]; then
+    local dead_name="$session_name"
+    _vetcoders_record_vc_frame_attachment dead "$dead_name" || return $?
+    session_name="$(_vetcoders_recovery_vc_frame_session_name "$dead_name")"
+    printf "Session '%s' is dead; preserving it and creating '%s'.\n" "$dead_name" "$session_name" >&2
+  fi
+  _vetcoders_start_launch_workspace "$session_name" "$VIBECRAFTED_WORKSPACE_ROOT"
 }
 
 # Resume an ordinary durable workspace. Native switching moves only the caller's
@@ -992,9 +1002,9 @@ _vetcoders_resume_workspace() {
 #   1. root  -- explicit --repo/--root, else the Git top-level of the caller's
 #               directory, else that directory. Never the runtime generation
 #               or an ambient wrapper root: those name sessions after releases.
-#   2. name  -- the explicit bare argument, else the root's basename VERBATIM,
-#               validated once. A repository whose name is not a legal session
-#               name is refused with the explicit-name form, never normalized.
+#   2. name  -- the explicit bare argument stays verbatim, validated once.
+#               Automatic entry requests the basename and reports the canonical
+#               resolver's effective owned/free project destination and reason.
 #   3. check -- the selected engine's own `list-sessions` in the product socket
 #               namespace, markers cleared. An unreadable inventory refuses
 #               (exit 4): doubt is not permission to duplicate.
@@ -1127,6 +1137,7 @@ _vetcoders_start_read_inventory_state() {
   }
   listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
   _vetcoders_start_cached_live_hosts=""
+  _vetcoders_start_cached_occupied_hosts=""
   _vetcoders_start_inventory_cache_valid=0
   if ((rc != 0)); then
     if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
@@ -1151,6 +1162,7 @@ _vetcoders_start_read_inventory_state() {
         ;;
     esac
     name="${line%% \[Created *}"
+    _vetcoders_start_cached_occupied_hosts+="${name}"$'\n'
     if [[ "$line" != *"(EXITED"* ]]; then
       _vetcoders_start_cached_live_hosts+="${name}"$'\n'
     fi
@@ -1319,6 +1331,7 @@ _vetcoders_start_check_existing_owner() {
   owner="$(_vetcoders_product_core_cli workspace session-owner \
     --runtime-session-id "$name" --socket-dir "$socket_dir" --runtime-state "$state" 2>/dev/null)" || {
     printf 'vc-start: could not verify the owner of workspace %s.\n' "$(_vetcoders_shell_quote "$name")" >&2
+    _vetcoders_start_preserving_return_hint "$name" "$state"
     return 4
   }
   if [[ -n "$owner" && "$owner" != "$root" ]]; then
@@ -1326,6 +1339,23 @@ _vetcoders_start_check_existing_owner() {
     return $?
   fi
   return 0
+}
+
+# An inventory-observed live session can be inspected explicitly even when
+# automatic WES admission refuses. This is advice, never adoption or a retry:
+# use the selected engine and socket, drop inherited identities, and leave
+# catalog/session records untouched. Do not offer resurrection for dead or
+# unknown inventory, or fall back to an ambient PATH engine.
+_vetcoders_start_preserving_return_hint() {
+  local name="${1:-}" state="${2:-}" engine="" socket_dir=""
+  [[ -n "$name" && "$state" == live ]] || return 0
+  engine="$(_vetcoders_vc_frame_bin 2>/dev/null)" || return 0
+  socket_dir="$(_vetcoders_vc_frame_socket_dir)" || return 0
+  printf 'From another terminal, inspect the existing session before choosing where to continue:\n' >&2
+  printf '    env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME -u VIBECRAFTED_WORKSPACE_ID -u VIBECRAFTED_SESSION_ID -u VIBECRAFTED_WORKSPACE_INSTANCE_ID -u VIBECRAFTED_BUILD_ID -u VIBECRAFTED_OPERATOR_SESSION -u VIBECRAFTED_WORKSPACE_ROOT %s %s %s attach %s\n' \
+    "$(_vetcoders_shell_quote "VC_FRAME_SOCKET_DIR=$socket_dir")" \
+    "$(_vetcoders_shell_quote "ZELLIJ_SOCKET_DIR=$socket_dir")" \
+    "$(_vetcoders_shell_quote "$engine")" "$(_vetcoders_shell_quote "$name")" >&2
 }
 
 # Refuse when the inventory cannot answer. Exit 4.
@@ -1419,10 +1449,6 @@ _vetcoders_start_create_workspace_session() {
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     return 4
   fi
-  if [[ "$kind" != chrome ]]; then
-    create_argv+=(--new-session-with-layout "$layout_file")
-  fi
-  create_argv+=(attach --create-background "$session_name")
   _vetcoders_start_acquire_create_lock "$session_name" || return $?
   _vetcoders_start_read_inventory_state "$session_name"
   state="$_vetcoders_start_inventory_state"
@@ -1435,6 +1461,33 @@ _vetcoders_start_create_workspace_session() {
     _vetcoders_start_release_create_lock
     return 3
   fi
+  if [[ "$kind" != chrome ]]; then
+    if ! _vetcoders_vc_frame_developer_mode; then
+      local core_dir="" python_bin=""
+      core_dir="$(_vetcoders_owned_core_dir)" || rc=$?
+      if ((rc == 0)); then
+        python_bin="$(_vetcoders_owned_python_bin)" || rc=$?
+      fi
+      if ((rc == 0)); then
+        layout_file="$(PYTHONPATH="$core_dir" "$python_bin" -c '
+import sys
+from pathlib import Path
+from vibecrafted_core.vc_frame_delivery import publish_selected_project_layout
+try:
+    print(publish_selected_project_layout(Path(sys.argv[1])))
+except OSError as exc:
+    print(f"vc-start: selected project layout refused: {exc}", file=sys.stderr)
+    sys.exit(4)
+' "$layout_file")" || rc=$?
+      fi
+      if ((rc != 0)); then
+        _vetcoders_start_release_create_lock
+        return "$rc"
+      fi
+    fi
+    create_argv+=(--new-session-with-layout "$layout_file")
+  fi
+  create_argv+=(attach --create-background "$session_name")
   # The embedded Operator is independent of any project workspace record.
   if [[ "$kind" != chrome ]]; then
     _vetcoders_record_vc_frame_attachment missing "$session_name" || {
@@ -1741,7 +1794,7 @@ _vetcoders_start_create_before_terminal() {
 # the root). Re-read the inventory (cheap; the create below is exclusive
 # anyway), create unless this very start already did, then enter.
 _vetcoders_start_launch_workspace() {
-  local session_name="${1:-}" root="${2:-}" entry_mode="${3:-enter}" vc_frame_bin="" state="" rc=0
+  local session_name="${1:-}" root="${2:-}" entry_mode="${3:-enter}" layout_file="${4:-}" vc_frame_bin="" state="" rc=0
   # Internal Workshop preparation reuses this owner without the public terminal
   # front door. Keep the parser's name guard before a create-lock path is used.
   _vetcoders_start_validate_workspace_name "$session_name" || return $?
@@ -1764,6 +1817,7 @@ _vetcoders_start_launch_workspace() {
   }
   _vetcoders_load_frontier_sidecars
 
+  export VIBECRAFTED_OPERATOR_SESSION="$session_name"
   _vetcoders_start_read_inventory_state "$session_name"
   state="$_vetcoders_start_inventory_state"
   if [[ "$state" == live || "$state" == dead ]]; then
@@ -1781,7 +1835,7 @@ _vetcoders_start_launch_workspace() {
       _vetcoders_start_resurrect_workspace_session "$vc_frame_bin" "$session_name" || return $?
       ;;
     missing)
-      _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" || rc=$?
+      _vetcoders_start_create_project_session "$vc_frame_bin" "$session_name" "$root" "$layout_file" || rc=$?
       if ((rc == 3)); then
         _vetcoders_start_read_inventory_state "$session_name"
         state="$_vetcoders_start_inventory_state"
@@ -2098,7 +2152,15 @@ _vetcoders_start_entry() {
       _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
       [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
     fi
-    _vetcoders_product_entry_prepare "$root" || return $?
+    local return_session="" return_state=""
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 ]]; then
+      _vetcoders_prepare_project_destination "$root" "" || return $?
+      return_session="$VIBECRAFTED_OPERATOR_SESSION"
+      _vetcoders_start_read_inventory_state "$return_session"
+      return_state="$_vetcoders_start_inventory_state"
+    fi
+    _vetcoders_product_entry_prepare "$root" "$return_session" "$return_state" || return $?
+    [[ -z "$return_session" ]] || export VIBECRAFTED_OPERATOR_SESSION="$return_session"
     if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
       _vetcoders_product_entry_probe_print
       return $?
@@ -2121,6 +2183,10 @@ _vetcoders_start_entry() {
   session_name="${_vetcoders_start_workspace_name:-}"
   if [[ -z "$session_name" ]]; then
     session_name="$(_vetcoders_start_default_workspace_name "$root")" || return $?
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != 1 ]]; then
+      _vetcoders_prepare_project_destination "$root" "$session_name" || return $?
+      session_name="$VIBECRAFTED_OPERATOR_SESSION"
+    fi
   fi
 
   # Tests/doctor: preparation effects only; no inventory, no create, no attach.

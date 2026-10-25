@@ -4,6 +4,17 @@ set -euo pipefail
 die() { printf 'Linux Runtime Pack build failed: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+prepare_sources() {
+  python3 "$repo_root/scripts/build-source-runtime-pack.py" --materialize "$1"
+}
+# Build-only probe: the same materialization used below, without native compilation.
+if [[ "${1:-}" == "--prepare-sources" ]]; then
+  (($# == 2)) || die "usage: $0 --prepare-sources <new-directory>"
+  prepare_sources "$2"
+  exit
+fi
+
 [[ "$(uname -s)" == "Linux" ]] || die "builder must run natively on Linux"
 case "$(uname -m)" in
   aarch64|arm64)
@@ -17,9 +28,8 @@ case "$(uname -m)" in
   *) die "unsupported Linux architecture: $(uname -m)" ;;
 esac
 platform="linux-$architecture"
-for tool in cargo cc curl make npm python3 sha256sum tar uv; do require "$tool"; done
+for tool in cargo cc curl git make npm python3 sha256sum tar uv; do require "$tool"; done
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 output="${1:-$repo_root/build/Vibecrafted_RuntimePack_${platform}.tar.gz}"
 source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || die "VIBECRAFTED_SOURCE_REVISION must be a full Git SHA"
@@ -51,10 +61,6 @@ if command -v g++ >/dev/null 2>&1; then
 fi
 
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
-terminal_revision="38ef2f918383ca4dde797d22869b619097c81d05"
-terminal_archive_sha256="a395232e497151c1fe1885cafe80d0db0531050dee2b833116a6021284168a52"
-frame_revision="0b91c4f0806356b5c92e46c82bf0fdf0310c0222"
-frame_archive_sha256="490f07a02a6588f2676b85b2bfca85af447aa4dfe6ad6e67d81654f7229821b2"
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 payload="$work/payload"
@@ -62,41 +68,30 @@ mkdir -p "$payload/bin" "$payload/libexec" "$payload/scripts" \
   "$payload/vibecrafted-core" "$payload/vibecrafted-mcp" \
   "$payload/config" "$payload/server/site"
 
-fetch_source() {
-  local url="$1" expected="$2" archive="$3" destination="$4"
-  curl -fL --proto '=https' --tlsv1.2 "$url" -o "$archive"
-  [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$expected" ]] \
-    || die "source archive checksum mismatch: $url"
-  mkdir -p "$destination"
-  tar -xzf "$archive" --strip-components=1 -C "$destination"
-}
+prepare_sources "$work/sources"
+selection="$work/sources/selection.json"
+terminal_revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["components"]["vc-terminal"]["revision"])' "$selection")"
+frame_revision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["components"]["vc-frame"]["revision"])' "$selection")"
 
-fetch_source \
-  "https://codeload.github.com/vetcoders/vc-terminal/tar.gz/$terminal_revision" \
-  "$terminal_archive_sha256" "$work/vc-terminal.tar.gz" "$work/vc-terminal"
-fetch_source \
-  "https://codeload.github.com/vetcoders/vc-frame/tar.gz/$frame_revision" \
-  "$frame_archive_sha256" "$work/vc-frame.tar.gz" "$work/vc-frame"
-
-make -C "$work/vc-terminal" release-bins
-install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/libexec/vc-terminal"
+make -C "$work/sources/vc-terminal" release-bins
+install -m 0755 "$work/sources/vc-terminal/target/release/alacritty" "$payload/libexec/vc-terminal"
 install -m 0755 "$repo_root/scripts/vc-terminal-product-entry.sh" \
   "$payload/scripts/vc-terminal-product-entry.sh"
 install -m 0755 "$payload/scripts/vc-terminal-product-entry.sh" "$payload/bin/vc-terminal"
-rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"
+rm -rf "$work/sources/vc-terminal" "$work/sources/vc-terminal.tar"
 
 frame_sha="$frame_revision"
 (
-  cd "$work/vc-frame"
+  cd "$work/sources/vc-frame"
   CARGO_PROFILE_RELEASE_STRIP=false \
-    RUSTFLAGS="--remap-path-prefix=$work/vc-frame=/usr/src/vc-frame" \
+    RUSTFLAGS="--remap-path-prefix=$work/sources/vc-frame=/usr/src/vc-frame" \
     VC_FRAME_GIT_SHA="$frame_sha" VC_FRAME_GIT_DIRTY=0 \
     VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
     cargo xtask build --release
 )
-install -m 0755 "$work/vc-frame/target/release/vc-frame" "$payload/libexec/vc-frame"
+install -m 0755 "$work/sources/vc-frame/target/release/vc-frame" "$payload/libexec/vc-frame"
 install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/bin/vc-frame"
-rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"
+rm -rf "$work/sources/vc-frame" "$work/sources/vc-frame.tar"
 
 voc_target="$work/voc-target"
 CARGO_TARGET_DIR="$voc_target" cargo build --locked \
@@ -135,7 +130,7 @@ install -m 0755 "$repo_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted" 
   "$payload/bin/vibecrafted"
 install -m 0755 "$repo_root/scripts/vibecrafted" "$payload/scripts/vibecrafted"
 install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetcoders_install.py"
-# The pack never carries the foundations themselves (Maciej, 2026-10-07); it
+# The pack never carries the foundations themselves (Vetcoders decision, 2026-10-07); it
 # carries their installer so runtime-install can pull each from its own channel.
 install -m 0755 "$repo_root/scripts/install-foundations.sh" "$payload/scripts/install-foundations.sh"
 install -m 0755 "$repo_root/scripts/vibecrafted_housekeeping.py" "$payload/scripts/vibecrafted_housekeeping.py"
@@ -197,17 +192,18 @@ find "$payload" -type l -print -quit | grep -q . && die "payload contains symlin
 
 PAYLOAD="$payload" SOURCE_REVISION="$source_revision" \
 RUNTIME_PLATFORM="$platform" RUNTIME_ARCHITECTURE="$architecture" RUNTIME_TARGET="$target" \
-TERMINAL_REVISION="$terminal_revision" FRAME_REVISION="$frame_revision" \
-TERMINAL_ARCHIVE_SHA256="$terminal_archive_sha256" FRAME_ARCHIVE_SHA256="$frame_archive_sha256" python3 - <<'PY'
+DONOR_SELECTION="$selection" python3 - <<'PY'
 import hashlib, json, os, subprocess
 from pathlib import Path
 
 root = Path(os.environ["PAYLOAD"])
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
+donors = json.loads(Path(os.environ["DONOR_SELECTION"]).read_text())["components"]
 sources = {
     "vibecrafted": ("https://github.com/vetcoders/vibecrafted", os.environ["SOURCE_REVISION"], source_manifest_sha, "MIT"),
-    "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], os.environ["TERMINAL_ARCHIVE_SHA256"], "Apache-2.0"),
-    "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], os.environ["FRAME_ARCHIVE_SHA256"], "MIT"),
+    **{name: (pin["repository"], pin["revision"], pin["source_archive_sha256"], license_name)
+       for name, license_name in (("vc-terminal", "Apache-2.0"), ("vc-frame", "MIT"))
+       for pin in (donors[name],)},
 }
 owners = {
     "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",

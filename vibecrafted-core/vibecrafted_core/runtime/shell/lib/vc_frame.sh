@@ -909,7 +909,8 @@ _vetcoders_import_legacy_vc_frame_sessions() {
   [[ "$legacy_socket_dir" != "$current_socket_dir" ]] || return 0
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 0
   listing="$(
-    VC_FRAME_SOCKET_DIR="$legacy_socket_dir" \
+    env -u VC_FRAME_SESSION_NAME -u ZELLIJ_SESSION_NAME \
+      VC_FRAME_SOCKET_DIR="$legacy_socket_dir" \
       ZELLIJ_SOCKET_DIR="$legacy_socket_dir" \
       "$vc_frame_bin" ls 2>/dev/null | _vetcoders_strip_ansi || true
   )"
@@ -1426,6 +1427,50 @@ _vetcoders_ensure_vc_frame_session() {
 #      exists where nobody can see it and a "launched" nobody can act on.
 # Other sessions are never killed, renamed or re-targeted. A failed create is
 # a failed declaration: nothing is launched anywhere else instead.
+# Read-only routing through the catalog owner, using the public inventory parser.
+# The selected name still has to pass the existing locked create/live admission.
+_vetcoders_prepare_project_destination() {
+  local root="$1" requested="$2" line="" key="" value="" resolved="" name=""
+  local -a args=(workspace resolve --root "$root" --destination --requested-session "$requested" --env)
+  _vetcoders_start_read_inventory_state "$requested"
+  if [[ "${_vetcoders_start_inventory_state:-error}" == error ]]; then
+    _vetcoders_start_refuse_inventory "$requested"
+    return $?
+  fi
+  args+=(--socket-dir "$(_vetcoders_vc_frame_socket_dir)")
+  while IFS= read -r name; do
+    [[ -z "$name" ]] || args+=(--live-session "$name")
+  done <<<"${_vetcoders_start_cached_live_hosts:-}"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] || args+=(--occupied-session "$name")
+  done <<<"${_vetcoders_start_cached_occupied_hosts:-}"
+  local effective="" attempt=0
+  while ((attempt < 4)); do
+    resolved="$(_vetcoders_product_core_cli "${args[@]}")" || return 4
+    effective=""
+    while IFS= read -r line; do
+      key="${line%%=*}" value="${line#*=}"
+      case "$key" in
+        VIBECRAFTED_OPERATOR_SESSION) effective="$value" ;;
+        VIBECRAFTED_REQUESTED_FRAME_SESSION|VIBECRAFTED_FRAME_DESTINATION_REASON) export "$key=$value" ;;
+      esac
+    done <<<"$resolved"
+    [[ -n "$effective" ]] || { printf 'vc-start: project destination receipt is incomplete.\n' >&2; return 4; }
+    _vetcoders_start_validate_workspace_name "$effective" || return $?
+    # An alternate may be occupied by an EXITED cache omitted from live names.
+    # Keep that evidence and ask the same resolver for the next free route.
+    _vetcoders_start_read_inventory_state "$effective"
+    [[ "$_vetcoders_start_inventory_state" != error ]] || { _vetcoders_start_refuse_inventory "$effective"; return $?; }
+    if [[ "$_vetcoders_start_inventory_state" != dead || "$effective" == "${VIBECRAFTED_REQUESTED_FRAME_SESSION:-}" ]]; then
+      break
+    fi
+    args+=(--occupied-session "$effective")
+    attempt=$((attempt + 1))
+  done
+  ((attempt < 4)) || { printf 'vc-start: project destinations remain occupied; retry after refreshing.\n' >&2; return 4; }
+  export VIBECRAFTED_OPERATOR_SESSION="$effective"
+}
+
 _vetcoders_prepare_declared_workspace_target() {
   local declared_root="${1:-}"
   local verb="${2:-resume}"
@@ -1451,7 +1496,8 @@ _vetcoders_prepare_declared_workspace_target() {
   local ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
   unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH VIBECRAFTED_PENDING_VC_FRAME_SWITCH
 
-  _vetcoders_ensure_canonical_workspace_identity "$declared_root" || return $?
+  # Route before generic materialization can stale a physically live older build.
+  _vetcoders_prepare_project_destination "$declared_root" "" || return $?
   local place="${VIBECRAFTED_OPERATOR_SESSION:-}"
   if _vetcoders_is_legacy_operator_session_name "$place"; then
     place="$(_vetcoders_operator_session_name)"
@@ -1467,7 +1513,11 @@ _vetcoders_prepare_declared_workspace_target() {
   export VIBECRAFTED_DECLARED_WORKSPACE_ROOT="$declared_root"
 
   local state=""
-  state="$(_vetcoders_vc_frame_session_state "$place")"
+  _vetcoders_start_read_inventory_state "$place"
+  state="$_vetcoders_start_inventory_state"
+  [[ "$state" != error ]] || { _vetcoders_start_refuse_inventory "$place"; return $?; }
+  _vetcoders_product_workspace_prepare "$declared_root" "$place" "$state" || return $?
+  export VIBECRAFTED_OPERATOR_SESSION="$place"
 
   if [[ -n "$ambient_session" && "$ambient_session" == "$place" && "$state" == live ]]; then
     # The attached client already lives in the declared workspace.
@@ -1504,29 +1554,13 @@ _vetcoders_prepare_declared_workspace_target() {
   _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
 
-  if [[ "$state" != live ]]; then
-    local layout_file=""
-    layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
-    [[ -n "$layout_file" ]] || {
-      printf '%s: no operator layout is available; cannot create the workspace session %s for %s.\n' \
-        "$verb" "$place" "$declared_root" >&2
-      return 1
-    }
-    if [[ "$state" == dead ]]; then
-      # Dead incarnations are recovery evidence; never recreate the same name.
-      local dead_place="$place"
-      _vetcoders_record_vc_frame_attachment dead "$dead_place" || return $?
-      place="$(_vetcoders_recovery_vc_frame_session_name "$dead_place")"
-      printf "Session '%s' is dead; preserving it and creating '%s'.\n" \
-        "$dead_place" "$place" >&2
-    fi
-    if ! _vetcoders_create_vc_frame_session_detached "$vc_frame_bin" "$place" "$layout_file"; then
-      printf '%s: could not create the workspace session %s for %s; nothing was launched elsewhere.\n' \
-        "$verb" "$place" "$declared_root" >&2
-      return 1
-    fi
-    place="${VIBECRAFTED_PREPARED_VC_FRAME_SESSION:-$place}"
+  if [[ "$state" == dead ]]; then
+    local dead_place="$place"
+    _vetcoders_record_vc_frame_attachment dead "$dead_place" || return $?
+    place="$(_vetcoders_recovery_vc_frame_session_name "$dead_place")"
+    printf "Session '%s' is dead; preserving it and creating '%s'.\n" "$dead_place" "$place" >&2
   fi
+  _vetcoders_start_launch_workspace "$place" "$declared_root" background >&2 || return $?
 
   export VIBECRAFTED_OPERATOR_SESSION="$place"
   export VC_FRAME_SESSION_NAME="$place"

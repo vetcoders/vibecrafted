@@ -229,8 +229,12 @@ sign_macho_app_bundles() {
   [[ -n "${SIGNING_IDENTITY:-}" ]] \
     || macho_signing_die "SIGNING_IDENTITY is empty" || return 1
   while IFS= read -r -d '' bundle; do
+    # Sealing re-signs the bundle's main executable. Keep the
+    # exact entitlements assigned by the preceding controlled tree walk. Bundle
+    # identifiers still come from their canonical Info.plist, as before.
     codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$bundle" \
+      --preserve-metadata=entitlements \
+      ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} "$bundle" \
       || macho_signing_die "could not seal bundle ${bundle#"$root"/}" || return 1
   done < <(find "$root" -depth -type d -iname '*.app' -print0)
 }
@@ -255,14 +259,32 @@ verify_macho_app_bundles() {
 
 sign_macho_tree() {
   local root="$1" excluded="${2:-}" candidate
+  local permission_executable="${3:-}" permission_entitlements="${4:-}" target
+  local -a entitlement_args permission_executables=("${3:-}")
+  if (( $# > 4 )); then
+    shift 4
+    permission_executables+=("$@")
+  fi
   [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
   [[ -n "${SIGNING_IDENTITY:-}" ]] \
     || macho_signing_die "SIGNING_IDENTITY is empty" || return 1
   while IFS= read -r -d '' candidate; do
     [[ -z "$excluded" || "$candidate" != "$excluded" ]] || continue
     if is_macho_file "$candidate"; then
+      entitlement_args=()
+      for target in "${permission_executables[@]}"; do
+        if [[ -n "$target" && "$candidate" == "$target" ]]; then
+          [[ -s "$permission_entitlements" ]] \
+            || macho_signing_die "missing host entitlements: $permission_entitlements" || return 1
+          # Copies use one explicit code identifier, independent of donor seals
+          # or surrounding bundles. Only the exact permission targets get it.
+          entitlement_args=(--identifier "$(basename "$permission_executable")" \
+            --entitlements "$permission_entitlements")
+        fi
+      done
       codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" "$candidate" \
+        ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
+        ${entitlement_args[@]+"${entitlement_args[@]}"} "$candidate" \
         || macho_signing_die "could not sign ${candidate#"$root"/}" || return 1
     fi
   done < <(find "$root" -type f -print0)

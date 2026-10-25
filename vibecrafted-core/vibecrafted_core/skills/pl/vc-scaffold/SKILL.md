@@ -224,7 +224,7 @@ MUSI zawierać wszystkie sześć:
    **Tylko delivery-verifier przerzuca `[~]→[x]`; twierdzenie agenta NIGDY samo nie dochodzi do `[x]`.**
    Reguła żyje W DRIVER-ze celowo — po to, żeby w trakcie dispatchu nikt nie promował twierdzenia do done
    bez ponownego uruchomienia verifiera. Ta promocja-bez-dowodu to jedyny tryb porażki, który
-   wykłada przebieg operatora („się zajebiemy"). Zakoduj to tam, gdzie są oczy dispatchera.
+   wykłada przebieg operatora („rozjedziemy się"). Zakoduj to tam, gdzie są oczy dispatchera.
 5. **Snapshot statusu na żywo** + `dou-index = |[x]| / total`.
 6. **Matryca odbioru (Odbiór) — R12, Founder 2026-09-15.** Sekcja
    `## Odbiór (matryca wyników)` z jednym wierszem na cięcie

@@ -73,9 +73,22 @@ def directory_chain(path: Path, boundary: Path) -> list[Path]:
 @contextlib.contextmanager
 def lease(path: Path, *, exclusive: bool, create: bool = False) -> Iterator[int]:
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
-    if create:
-        flags |= os.O_CREAT
-    fd = os.open(path, flags, 0o600)
+    if os.name != "nt" and not exclusive:
+        # Existing POSIX readers need no source write permission. NONBLOCK
+        # keeps a substituted FIFO finite until fstat rejects its identity.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            if not create:
+                raise
+            # Preparation may create a missing lease, but never adopt a file
+            # published in the gap or retry against a changed identity.
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    else:
+        if create:
+            flags |= os.O_CREAT
+        fd = os.open(path, flags, 0o600)
     try:
         info = os.fstat(fd)
         named = path.lstat()
@@ -87,8 +100,15 @@ def lease(path: Path, *, exclusive: bool, create: bool = False) -> Iterator[int]
         ):
             raise CacheDeferred("unsafe-build-lease")
         lock.flock(fd, (lock.LOCK_EX if exclusive else lock.LOCK_SH) | lock.LOCK_NB)
+        held = os.fstat(fd)
         named = path.lstat()
-        if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or held.st_uid != os.getuid()
+            or held.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (held.st_dev, held.st_ino)
+            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+        ):
             raise CacheDeferred("build-lease-identity-changed")
         yield fd
     finally:

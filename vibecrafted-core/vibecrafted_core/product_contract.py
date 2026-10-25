@@ -69,6 +69,11 @@ OUTER_BUNDLE_CODE_IDENTITY = "outer-bundle-codesign-v1"
 MACHO_CODE_IDENTITY = "macho-code-v1"
 TRUSTED_RUNNER_PUBLIC_KEY_NAME = "vibecrafted-signing-v1.pub"
 RELEASE_POLICY_NAME = "release-policy.v1.json"
+HOST_ENTITLEMENTS = {"com.apple.security.device.audio-input": True}
+HOST_USAGE_DESCRIPTION_KEYS = (
+    "NSMicrophoneUsageDescription",
+    "NSSpeechRecognitionUsageDescription",
+)
 RELEASE_DMG_PATTERN = (
     r"^Vibecrafted_[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-"
     r"[0-9]{8}-[0-9a-f]{8}\.dmg$"
@@ -790,7 +795,7 @@ def _release_policy() -> Mapping[str, Any]:
             'certificate leaf[subject.OU] = "MW223P3NPX"'
         ),
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": HOST_ENTITLEMENTS,
     }
     if policy != expected:
         _fail(E_PROOF, "packaged release policy does not match the v1 trust contract")
@@ -2286,6 +2291,7 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, f"Info.plist executable must be {PRODUCT_EXECUTABLE}")
     if plist.get("CFBundleIconFile") != PRODUCT_ICON_FILE:
         _fail(E_BUNDLE, f"Info.plist icon must be {PRODUCT_ICON_FILE}")
+    _validate_host_usage_descriptions(plist)
     icon_path = app / "Contents/Resources" / PRODUCT_ICON_FILE
     if not icon_path.is_file() or icon_path.is_symlink():
         _fail(E_BUNDLE, f"application icon is missing: {PRODUCT_ICON_FILE}")
@@ -2409,8 +2415,8 @@ def _codesign_release_evidence(app: Path) -> dict[str, Any]:
             _fail(E_PROOF, f"final app entitlements are malformed: {exc}")
     else:
         # codesign exits successfully with an empty stdout when the signature
-        # carries no entitlement blob. That is the required release policy,
-        # distinct from an unreadable query (non-zero exit above).
+        # carries no entitlement blob. Observation must stay distinct from an
+        # unreadable query; release policy comparison rejects this empty set.
         entitlements = {}
     if not isinstance(entitlements, dict):
         _fail(E_PROOF, "final app entitlements are not a dictionary")
@@ -2436,6 +2442,52 @@ def _release_relative_path(root: Path, value: Any, *, field: str) -> Path:
     return candidate
 
 
+def _validate_host_usage_descriptions(plist: Mapping[str, Any]) -> None:
+    for key in HOST_USAGE_DESCRIPTION_KEYS:
+        value = plist.get(key)
+        if not isinstance(value, str) or not value.strip() or "$(" in value:
+            _fail(E_BUNDLE, f"host requires a non-empty {key}")
+
+
+def _verify_host_permission_signatures(
+    app: Path, *, targets: tuple[Path, ...] | None = None
+) -> None:
+    """Read the final signatures; a signing plan is not entitlement evidence."""
+    for target in (
+        targets if targets is not None else (app, app / "Contents/MacOS/vc-terminal")
+    ):
+        result = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(target)],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            _fail(E_PROOF, f"host entitlements are unreadable: {target.name}")
+        try:
+            observed = plistlib.loads(result.stdout)
+        except (plistlib.InvalidFileException, ExpatError, ValueError) as exc:
+            _fail(E_PROOF, f"host entitlements are missing or malformed: {exc}")
+        # Strict bool identity also refuses integer 1 in place of plist true.
+        if (
+            not isinstance(observed, dict)
+            or observed.keys() != HOST_ENTITLEMENTS.keys()
+            or observed.get("com.apple.security.device.audio-input") is not True
+        ):
+            _fail(E_PROOF, f"host entitlement policy mismatch: {target.name}")
+        metadata = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--verbose=4", str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if metadata.returncode != 0 or not re.search(
+            r"^CodeDirectory .*flags=.*\([^)]*\bruntime\b[^)]*\)",
+            metadata.stdout + metadata.stderr,
+            re.MULTILINE,
+        ):
+            _fail(E_PROOF, f"host requires hardened runtime: {target.name}")
+
+
 def _verify_release_signer_policy(
     app: Path, outer: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2451,6 +2503,7 @@ def _verify_release_signer_policy(
         _fail(E_PROOF, "release output signer policy violates packaged policy")
     if observed_signer != {"cdhash": outer["cdhash"], **expected_signer}:
         _fail(E_PROOF, "final app signer evidence does not match release output")
+    _verify_host_permission_signatures(app)
     return observed_signer, expected_signer
 
 
@@ -3715,6 +3768,386 @@ def _scenario_bundled_console(
     return {"bundled_console_reachable": result.stdout.strip()}
 
 
+_WORKSHOP_ROUTE_TIMEOUT = 20.0
+_WORKSHOP_EXIT_TIMEOUT = 5.0
+_WORKSHOP_ROWS, _WORKSHOP_COLS = 45, 160
+# A real Workshop session repaints a few hundred KiB at most; anything beyond
+# these budgets is malformed output and must fail closed, not stall the route.
+_WORKSHOP_TRANSCRIPT_BUDGET = 4 * 1024 * 1024
+_WORKSHOP_RENDER_WORK_BUDGET = 4_000_000
+_WORKSHOP_CSI_PARAM_LIMIT = 64
+_WORKSHOP_CSI_NUMBER_DIGITS = 6
+
+
+def _render_screen(
+    raw: bytes, rows: int = _WORKSHOP_ROWS, cols: int = _WORKSHOP_COLS
+) -> str:
+    """Replay curses output onto a cell grid and return what the screen shows.
+
+    ncurses repaints only cells that changed, so a needle can be split across
+    cursor moves in the byte stream; the replayed grid is the rendered truth.
+
+    Every count and region is clamped to the actual grid, and a transcript or
+    replay-work budget overrun raises instead of rendering truncated output.
+    """
+    import unicodedata
+
+    if len(raw) > _WORKSHOP_TRANSCRIPT_BUDGET:
+        raise RuntimeError("installed Workshop output exceeded the transcript budget")
+    text = raw.decode("utf-8", errors="replace")
+    grid = [[" "] * cols for _ in range(rows)]
+    row = col = 0
+    top, bottom = 0, rows - 1
+    saved = (0, 0)
+    last = " "
+
+    work = 0
+
+    def charge(units: int) -> None:
+        nonlocal work
+        work += units
+        if work > _WORKSHOP_RENDER_WORK_BUDGET:
+            raise RuntimeError("installed Workshop output exceeded the render budget")
+
+    def scroll(start: int, end: int, count: int) -> None:
+        shift = min(max(0, count), end - start + 1)
+        if shift:
+            charge(shift)
+            del grid[start : start + shift]
+            at = end - shift + 1
+            grid[at:at] = [[" "] * cols for _ in range(shift)]
+
+    def unscroll(start: int, end: int, count: int) -> None:
+        shift = min(max(0, count), end - start + 1)
+        if shift:
+            charge(shift)
+            del grid[end - shift + 1 : end + 1]
+            grid[start:start] = [[" "] * cols for _ in range(shift)]
+
+    def linefeed() -> None:
+        nonlocal row
+        if row == bottom:
+            scroll(top, bottom, 1)
+        else:
+            row = min(rows - 1, row + 1)
+
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if char == "\x1b" and index + 1 < length:
+            kind = text[index + 1]
+            if kind == "[":
+                end = index + 2
+                while end < length and not "@" <= text[end] <= "~":
+                    end += 1
+                if end >= length:
+                    break
+                params, final = text[index + 2 : end], text[end]
+                index = end + 1
+                charge(1)
+                if params[:1] in {"?", ">", "=", "<"}:
+                    continue
+                if len(params) > _WORKSHOP_CSI_PARAM_LIMIT:
+                    continue
+                nums = [
+                    (
+                        int(part[:_WORKSHOP_CSI_NUMBER_DIGITS])
+                        if part.isascii() and part.isdigit()
+                        else 0
+                    )
+                    for part in params.split(";")
+                ]
+                count = min(nums[0] if nums and nums[0] else 1, max(rows, cols))
+                if final in "Hf":
+                    row = (nums[0] if nums and nums[0] else 1) - 1
+                    col = (nums[1] if len(nums) > 1 and nums[1] else 1) - 1
+                elif final == "A":
+                    row -= count
+                elif final in "Be":
+                    row += count
+                elif final in "Ca":
+                    col += count
+                elif final == "D":
+                    col -= count
+                elif final in "G`":
+                    col = count - 1
+                elif final == "d":
+                    row = count - 1
+                elif final == "J":
+                    mode = nums[0] if nums else 0
+                    if mode == 0:
+                        grid[row][col:] = [" "] * (cols - col)
+                        for line in grid[row + 1 :]:
+                            line[:] = [" "] * cols
+                    elif mode == 1:
+                        grid[row][: col + 1] = [" "] * (col + 1)
+                        for line in grid[:row]:
+                            line[:] = [" "] * cols
+                    else:
+                        for line in grid:
+                            line[:] = [" "] * cols
+                elif final == "K":
+                    mode = nums[0] if nums else 0
+                    if mode == 0:
+                        grid[row][col:] = [" "] * (cols - col)
+                    elif mode == 1:
+                        grid[row][: col + 1] = [" "] * (col + 1)
+                    else:
+                        grid[row][:] = [" "] * cols
+                elif final == "X":
+                    for cell in range(col, min(cols, col + count)):
+                        grid[row][cell] = " "
+                elif final == "b":
+                    for _ in range(min(count, max(0, cols - col))):
+                        grid[row][col] = last
+                        col += 1
+                elif final == "@":
+                    grid[row][col:col] = [" "] * min(count, max(0, cols - col))
+                    del grid[row][cols:]
+                elif final == "P":
+                    del grid[row][col : col + count]
+                    grid[row].extend([" "] * (cols - len(grid[row])))
+                elif final == "L" and top <= row <= bottom:
+                    unscroll(row, bottom, count)
+                elif final == "M" and top <= row <= bottom:
+                    scroll(row, bottom, count)
+                elif final == "S":
+                    scroll(top, bottom, count)
+                elif final == "T":
+                    unscroll(top, bottom, count)
+                elif final == "r":
+                    new_top = (nums[0] if nums and nums[0] else 1) - 1
+                    new_bottom = (
+                        min(rows, nums[1] if len(nums) > 1 and nums[1] else rows) - 1
+                    )
+                    if 0 <= new_top < new_bottom:
+                        top, bottom = new_top, new_bottom
+                        row = col = 0
+                row = max(0, min(rows - 1, row))
+                col = max(0, min(cols - 1, col))
+                continue
+            if kind == "]":
+                end = index + 2
+                while (
+                    end < length
+                    and text[end] != "\x07"
+                    and text[end : end + 2] != "\x1b\\"
+                ):
+                    end += 1
+                index = end + (2 if text[end : end + 2] == "\x1b\\" else 1)
+                continue
+            if kind in "()#":
+                index += 3
+                continue
+            if kind == "7":
+                saved = (row, col)
+            elif kind == "8":
+                row, col = saved
+            elif kind == "M":
+                if row == top:
+                    unscroll(top, bottom, 1)
+                else:
+                    row = max(0, row - 1)
+            elif kind in "DE":
+                linefeed()
+                if kind == "E":
+                    col = 0
+            index += 2
+            continue
+        index += 1
+        if char == "\r":
+            col = 0
+        elif char in "\n\x0b\x0c":
+            linefeed()
+        elif char == "\b":
+            col = max(0, min(cols - 1, col) - 1)
+        elif char == "\t":
+            col = min(cols - 1, (col // 8 + 1) * 8)
+        elif ord(char) >= 32 and char != "\x7f":
+            if unicodedata.combining(char):
+                continue
+            if col >= cols:
+                col = 0
+                linefeed()
+            grid[row][col] = char
+            last = char
+            col += 1
+            if unicodedata.east_asian_width(char) in {"W", "F"} and col < cols:
+                grid[row][col] = ""
+                col += 1
+    return "\n".join("".join(line).rstrip() for line in grid)
+
+
+class _WorkshopPty:
+    """Installed Agents-tab Workshop driven through a private PTY."""
+
+    def __init__(
+        self, argv: Sequence[str | Path], *, cwd: Path, env: Mapping[str, str]
+    ):
+        import pty
+        import termios
+
+        self.master, slave = pty.openpty()
+        # 0x11 (Ctrl+Q, the Workshop quit key) is XON under software flow
+        # control; the line discipline would swallow it before curses saw it.
+        attrs = termios.tcgetattr(slave)
+        attrs[0] &= ~(termios.IXON | termios.IXOFF)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        import fcntl
+
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
+        self.output = bytearray()
+        try:
+            self.process = subprocess.Popen(
+                [str(item) for item in argv],
+                cwd=cwd,
+                env={**env, "TERM": "xterm-256color", "LINES": "45", "COLUMNS": "160"},
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except BaseException:
+            os.close(self.master)
+            raise
+        finally:
+            os.close(slave)
+
+    def drain(self, timeout: float) -> None:
+        import select
+
+        ready, _, _ = select.select([self.master], [], [], max(0.0, timeout))
+        if ready:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:
+                chunk = b""
+            self.output.extend(chunk)
+            if len(self.output) > _WORKSHOP_TRANSCRIPT_BUDGET:
+                raise RuntimeError(
+                    "installed Workshop output exceeded the transcript budget"
+                )
+            if not chunk:
+                time.sleep(min(0.05, max(0.0, timeout)))
+
+    def screen(self) -> str:
+        return _render_screen(bytes(self.output))
+
+    def await_screen(
+        self, needle: str, *, deadline: float, absent: str | None = None
+    ) -> str:
+        while True:
+            screen = self.screen()
+            if needle in screen and (absent is None or absent not in screen):
+                return screen
+            if self.process.poll() is not None or time.monotonic() >= deadline:
+                break
+            self.drain(min(0.1, deadline - time.monotonic()))
+        raise RuntimeError(
+            f"installed Workshop did not render {needle!r} on the Agents route"
+        )
+
+    def send(self, data: bytes) -> None:
+        os.write(self.master, data)
+
+    def close(self) -> int | None:
+        try:
+            if self.process.poll() is None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                return self.process.wait(timeout=_WORKSHOP_EXIT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                return None
+        finally:
+            os.close(self.master)
+
+
+def _scenario_workshop_typography(
+    scenario: _WalkaroundScenario, layout_payload: bytes
+) -> bytes:
+    """Walk Agents -> New agent -> Setup / Font in the installed Workshop.
+
+    The Agents tab of the installed operator layout runs the generation-pinned
+    ``pane-python`` over ``vc-agent-workshop.py launcher``; this probe runs the
+    same installed pair in a private PTY, presses the visible chip key, proves
+    Step 2 typography rendered, then backs out without choosing a font.
+    """
+    if b'tab name="Agents"' not in layout_payload or (
+        b"vc-agent-workshop.py" not in layout_payload
+    ):
+        raise RuntimeError("installed operator layout has no Agents Workshop tab")
+    frame_config = scenario.product_config / "vc-frame"
+    runner = frame_config / "pane-python"
+    workshop = frame_config / "vc-agent-workshop.py"
+    if not (runner.is_file() and os.access(runner, os.X_OK)):
+        raise RuntimeError("installed Agents tab has no generation-pinned pane-python")
+    if not workshop.is_file():
+        raise RuntimeError("installed Agents tab has no Workshop launcher")
+    policies = [
+        scenario.product_config / name
+        for name in ("config.toml", "terminal-policy.toml")
+    ]
+    before = [path.read_bytes() if path.is_file() else None for path in policies]
+    deadline = time.monotonic() + _WORKSHOP_ROUTE_TIMEOUT
+    session = _WorkshopPty(
+        [runner, workshop, "launcher"], cwd=scenario.root, env=scenario.environment
+    )
+    exit_code: int | None = None
+    try:
+        new_agent = session.await_screen("[ Setup / Font (f) ]", deadline=deadline)
+        if "New agent" not in new_agent:
+            raise RuntimeError("installed Workshop did not render the New agent card")
+        session.send(b"f")
+        typography = session.await_screen(
+            "Step 2: Terminal Typography", deadline=deadline
+        )
+        if "Glyph sample:" not in typography:
+            raise RuntimeError("installed Workshop typography has no glyph preview")
+        # Esc: Step 2 -> Step 1, Esc: close setup, Ctrl+Q: leave the launcher,
+        # discarding the probe's private in-memory draft without applying it.
+        session.send(b"\x1b")
+        session.await_screen(
+            "[ Close (Esc) ]", deadline=deadline, absent="Terminal Typography"
+        )
+        session.send(b"\x1b")
+        session.await_screen(
+            "[ Setup / Font (f) ]", deadline=deadline, absent="[ Close (Esc) ]"
+        )
+        session.send(b"\x11")
+        exit_deadline = min(deadline, time.monotonic() + _WORKSHOP_EXIT_TIMEOUT)
+        confirmed = False
+        while session.process.poll() is None and time.monotonic() < exit_deadline:
+            session.drain(0.1)
+            if not confirmed and "Unsaved form changes" in session.screen():
+                session.send(b"y")
+                confirmed = True
+        exit_code = session.process.poll()
+        if exit_code is None:
+            raise RuntimeError("installed Workshop did not exit after Ctrl+Q")
+        session.drain(0)
+        transcript = bytes(session.output)
+    finally:
+        session.close()
+    if exit_code != 0:
+        raise RuntimeError(f"installed Workshop exited {exit_code} on the Agents route")
+    after = [path.read_bytes() if path.is_file() else None for path in policies]
+    if after != before:
+        raise RuntimeError(
+            "Workshop typography probe changed the installed user policy"
+        )
+    return (
+        hashlib.sha256(runner.read_bytes()).digest()
+        + hashlib.sha256(workshop.read_bytes()).digest()
+        + new_agent.encode()
+        + typography.encode()
+        + hashlib.sha256(transcript).digest()
+    )
+
+
 def _scenario_start_here(
     scenario: _WalkaroundScenario,
 ) -> Mapping[str, bytes | str]:
@@ -3729,7 +4162,12 @@ def _scenario_start_here(
     # retired "Start the operator vc-frame session").
     if b"Create a vc-frame workspace for a repository" not in help_output:
         raise RuntimeError("installed vc-start onboarding help is unavailable")
-    return {"onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()}
+    rendered = _scenario_workshop_typography(scenario, payload)
+    return {
+        "onboarding_reachable": hashlib.sha256(
+            payload + help_output + rendered
+        ).hexdigest()
+    }
 
 
 def _scenario_update(
@@ -4169,6 +4607,8 @@ def _self_test() -> int:
                     "CFBundleShortVersionString": "1.0.0",
                     "CFBundleVersion": "1",
                     "ATSApplicationFontsPath": "fonts",
+                    "NSMicrophoneUsageDescription": "Voice input when requested.",
+                    "NSSpeechRecognitionUsageDescription": "Transcribe speech when requested.",
                 },
                 handle,
             )

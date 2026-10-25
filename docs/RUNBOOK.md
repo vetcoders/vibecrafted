@@ -86,6 +86,7 @@ In `~/.config/vibecrafted/config.toml` (honoring `XDG_CONFIG_HOME`), keep the
 global auto-first default and opt into bypass only where intended:
 
 ```toml
+[runtime.picking]
 permissions = "auto"
 
 [agents.omp]
@@ -94,10 +95,18 @@ permissions = "bypass"
 
 Precedence: explicit dispatch (`--permissions`) > `agents.<provider>.permissions`
 
-> global `permissions` > `auto`. Malformed settings and unsupported combinations
-> refuse launch, never silently bypass. Sandbox remains independent. The admitted
-> policy is frozen through argv, metadata and native resume, including direct
-> portable launchers, which use the central resolver rather than a no-flag lane.
+> Settings' `runtime.picking.permissions` > `auto`. Legacy top-level `permissions`
+> is used only when the Settings key is absent; a blank Settings value clears that
+> override to `auto`, even if a legacy value remains. Malformed selected settings
+> refuse launch. Sandbox remains independent. The admitted policy is frozen through
+> argv, metadata and supported native resume, including direct portable launchers,
+> which use the central resolver rather than a no-flag lane.
+
+Junie headless adapts requested `bypass` to effective `auto`: its native `--brave`
+flag is interactive-only. Receipts retain the requested word and configuration
+source with `permissions_reason: junie-headless-no-bypass`; they never claim
+bypass was enforced. Read-only, accept-edits and explicit sandbox requests still
+refuse where Junie cannot enforce them. Native headless resume remains unverified.
 
 OMP `auto` selects its native write tier; headless execution refuses an exec
 prompt requirement. Read-only uses a tool whitelist; bypass selects native yolo
@@ -220,6 +229,44 @@ Do not delete sessions or replay a brief just because a window vanished.
 <!-- Sources: vibecrafted-core/vibecrafted_core/workflow.py
      _effective_operator_session; scripts/vibecrafted cmd_start_help /
      cmd_dashboard_help. -->
+
+### 5a. Terminal Typography (Setup / Font)
+
+Choose the terminal font from the installed UI; no source checkout, Python
+command or config editing is required.
+
+1. Open **Agents** (the project's agent home inside the Frame session).
+2. Select **New agent** (button, or press `n` / `Enter`).
+3. In the New agent form, select **Setup / Font** (`[ Setup / Font (f) ]`, top
+   right) or press `f` while no text field is being edited. The chip is hidden
+   in narrow panes. On the Agents home, `f` opens the same screen directly.
+4. **ZenEntry Setup** opens on **Terminal Typography** (step 2 of 2). Each row
+   shows a font, its description and a status such as `font file present` or
+   `font file missing`. Rows marked missing cannot be applied.
+5. Pick a row (click, `↑`/`↓`, or `1`–`9`), then **Apply Font** (`Enter`).
+   `b` or `Esc` goes back to step 1 (provider check); `Esc` there closes the
+   screen. Closing without Apply leaves the font unchanged.
+
+What it lists: the five Monaspace Nerd Font families (Xenon, Argon, Neon, Radon,
+Krypton NF) and, when one is already configured, your current family, which is
+preserved until you choose another. A family is selectable only when its font
+file is installed in `~/Library/Fonts` or `/Library/Fonts`; the screen does not
+install fonts for you.
+
+What Apply does: it writes the family into the `[font.normal]`, `[font.bold]`
+and `[font.italic]` sections of
+`${XDG_CONFIG_HOME:-~/.config}/vibecrafted/terminal-policy.toml` on **this
+machine** and confirms with `Typography set to <family>`. Other keys in the file
+are left alone. Nothing is synced to other machines, and merely opening the
+screen changes nothing. When an already-open terminal picks up the new policy
+is not specified here.
+
+<!-- Sources: vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py
+     (draw_home, draw_launcher "[ Setup / Font (f) ]", draw_onboarding step 2,
+     _onboarding_apply_font); vibecrafted_core/command_bridge_onboarding.py
+     (MONASPACE_FONT_VARIANTS, default_font_dirs, terminal_policy_path,
+     select_font_family). Installed receipt: eb94709e Agents -> New agent ->
+     Setup / Font -> Terminal Typography rendered, no policy applied. -->
 
 ## 6. Event bus and the Slack bridge
 

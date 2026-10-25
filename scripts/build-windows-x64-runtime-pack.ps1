@@ -10,7 +10,8 @@
 [CmdletBinding()]
 param(
     [string]$Output = "",
-    [string]$SourceRevision = $env:VIBECRAFTED_SOURCE_REVISION
+    [string]$SourceRevision = $env:VIBECRAFTED_SOURCE_REVISION,
+    [string]$PrepareSources = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,10 +22,20 @@ function Die([string]$Message) {
     exit 1
 }
 
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+function Prepare-DonorSources([string]$Destination) {
+    & python (Join-Path $repoRoot "scripts\build-source-runtime-pack.py") --materialize $Destination
+    if ($LASTEXITCODE -ne 0) { Die "canonical donor selection failed" }
+}
+# Build-only probe of the actual source path; also useful before provisioning MSVC.
+if ($PrepareSources) {
+    Prepare-DonorSources $PrepareSources
+    return
+}
+
 if ($env:OS -notmatch "Windows") { Die "builder must run natively on Windows" }
 if ($env:PROCESSOR_ARCHITECTURE -match "ARM64") { Die "this builder is x64-only" }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $SourceRevision) {
     $SourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
 }
@@ -39,12 +50,6 @@ if (-not $env:VIBECRAFTED_SOURCE_OWNER_REPO) {
     $env:VIBECRAFTED_SOURCE_OWNER_REPO = "vetcoders/vibecrafted"
 }
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot "VERSION") -Raw).Trim()
-# Same donor revisions the Linux assembler builds. Provenance records these
-# only after this Windows builder actually compiles them (fail closed below).
-$terminalRevision = "38ef2f918383ca4dde797d22869b619097c81d05"
-$terminalArchiveSha256 = "a395232e497151c1fe1885cafe80d0db0531050dee2b833116a6021284168a52"
-$frameRevision = "0b91c4f0806356b5c92e46c82bf0fdf0310c0222"
-$frameArchiveSha256 = "490f07a02a6588f2676b85b2bfca85af447aa4dfe6ad6e67d81654f7229821b2"
 # Canonical carrier name matches Linux/darwin Runtime Pack shape:
 # Vibecrafted_RuntimePack_<ver>-<YYYYMMDD>-<sha8>-win32-x64.tar.gz
 # (platform token stays win32-x64 for install-runtime-pack.ps1 contract).
@@ -57,6 +62,14 @@ if (-not $Output) {
 }
 
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("vc-win-pack-" + [guid]::NewGuid().ToString("N"))
+$sources = Join-Path $work "sources"
+Prepare-DonorSources $sources
+$selectionPath = Join-Path $sources "selection.json"
+$selection = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+$terminalRevision = $selection.components.'vc-terminal'.revision
+$frameRevision = $selection.components.'vc-frame'.revision
+$terminalSrc = Join-Path $sources "vc-terminal"
+$frameSrc = Join-Path $sources "vc-frame"
 $payload = Join-Path $work "payload"
 New-Item -ItemType Directory -Path (Join-Path $payload "bin") | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $payload "scripts") | Out-Null
@@ -72,7 +85,7 @@ function Copy-Tree($Source, $Destination) {
 
 Set-Content -LiteralPath (Join-Path $payload "VERSION") -Value "$version`n" -Encoding ascii
 Copy-Item (Join-Path $repoRoot "scripts\vetcoders_install.py") (Join-Path $payload "scripts\vetcoders_install.py")
-# Pack carries the foundations INSTALLER, never the foundations (Maciej 2026-10-07).
+# Pack carries the foundations INSTALLER, never the foundations (Vetcoders decision, 2026-10-07).
 Copy-Item (Join-Path $repoRoot "scripts\install-foundations.sh") (Join-Path $payload "scripts\install-foundations.sh")
 New-Item -ItemType Directory -Force -Path (Join-Path $payload "scripts\lib") | Out-Null
 Copy-Item (Join-Path $repoRoot "scripts\lib\runtime-roots.sh") (Join-Path $payload "scripts\lib\runtime-roots.sh")
@@ -157,46 +170,11 @@ $controlCoreToml = Join-Path $repoRoot "vibecrafted-server\control-core\Cargo.to
 Install-CargoBin $controlCoreToml "scaffold-doctor" "scaffold-doctor" | Out-Null
 Install-CargoBin $controlCoreToml "control-observe" "control-observe" | Out-Null
 
-function Get-Sha256File([string]$Path) {
-    return ([BitConverter]::ToString(
-        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-            [System.IO.File]::ReadAllBytes($Path)
-        )
-    ) -replace '-', '').ToLowerInvariant()
-}
-
-function Fetch-DonorSource([string]$Url, [string]$ExpectedSha256, [string]$Archive, [string]$Destination) {
-    Write-Host "Fetching donor: $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $Archive
-    $actual = Get-Sha256File $Archive
-    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
-        Die "donor archive checksum mismatch for $Url (got $actual expected $ExpectedSha256)"
-    }
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    & tar -xzf $Archive -C $Destination --strip-components=1
-    if ($LASTEXITCODE -ne 0) {
-        # Windows tar may lack --strip-components; fall back to nested extract.
-        $nestedRoot = Join-Path $work ("donor-extract-" + [guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Path $nestedRoot -Force | Out-Null
-        & tar -xzf $Archive -C $nestedRoot
-        if ($LASTEXITCODE -ne 0) { Die "donor archive extract failed: $Archive" }
-        $inner = Get-ChildItem -LiteralPath $nestedRoot -Directory | Select-Object -First 1
-        if (-not $inner) { Die "donor archive produced no directory: $Archive" }
-        Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
-            Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Destination $_.Name) -Force
-        }
-        Remove-Item -LiteralPath $nestedRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Die "cargo is required to build Windows vc-terminal and vc-frame"
 }
 if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
-    Die "tar is required to extract vc-terminal and vc-frame donor archives"
+    Die "tar is required to extract canonical Git source archives"
 }
 
 # vc-frame's prost-build needs protoc on PATH (fail closed with a clear hint).
@@ -267,19 +245,6 @@ if (-not $env:OPENSSL_INCLUDE_DIR) {
 }
 $env:OPENSSL_NO_VENDOR = "1"
 Write-Host "Using OPENSSL_DIR=$env:OPENSSL_DIR"
-
-$terminalSrc = Join-Path $work "vc-terminal"
-$frameSrc = Join-Path $work "vc-frame"
-Fetch-DonorSource `
-    "https://codeload.github.com/vetcoders/vc-terminal/tar.gz/$terminalRevision" `
-    $terminalArchiveSha256 `
-    (Join-Path $work "vc-terminal.tar.gz") `
-    $terminalSrc
-Fetch-DonorSource `
-    "https://codeload.github.com/vetcoders/vc-frame/tar.gz/$frameRevision" `
-    $frameArchiveSha256 `
-    (Join-Path $work "vc-frame.tar.gz") `
-    $frameSrc
 
 Write-Host "Building vc-terminal (alacritty) for win32-x64 at $terminalRevision"
 Push-Location $terminalSrc
@@ -422,8 +387,6 @@ from pathlib import Path
 
 root = Path(os.environ["PAYLOAD"])
 source_revision = os.environ["SOURCE_REVISION"]
-terminal_revision = os.environ["TERMINAL_REVISION"]
-frame_revision = os.environ["FRAME_REVISION"]
 source_manifest_sha = hashlib.sha256((root / "source-provenance.json").read_bytes()).hexdigest()
 mandatory = ["python", "vc-server", "vc-terminal", "vc-frame"]
 optional = {
@@ -442,15 +405,7 @@ def exe_path(name):
     return root / "bin" / f"{name}.exe"
 records = []
 unsupported = []
-donor_revisions = {"vc-terminal": terminal_revision, "vc-frame": frame_revision}
-donor_archive_sha256 = {
-    "vc-terminal": os.environ["TERMINAL_ARCHIVE_SHA256"],
-    "vc-frame": os.environ["FRAME_ARCHIVE_SHA256"],
-}
-donor_urls = {
-    "vc-terminal": f"https://github.com/vetcoders/vc-terminal/tree/{terminal_revision}",
-    "vc-frame": f"https://github.com/vetcoders/vc-frame/tree/{frame_revision}",
-}
+donors = json.loads(Path(os.environ["DONOR_SELECTION"]).read_text())["components"]
 for name in mandatory:
     path = exe_path(name)
     if not path.is_file():
@@ -473,9 +428,9 @@ for name in mandatory:
         "name": name, "path": path.relative_to(root).as_posix(),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "version_argv": argv, "version_output": output,
-        "source_url": donor_urls.get(name, "https://github.com/vetcoders/vibecrafted"),
-        "source_revision": donor_revisions.get(name, source_revision),
-        "source_archive_sha256": donor_archive_sha256.get(name, source_manifest_sha),
+        "source_url": donors[name]["repository"] if name in donors else "https://github.com/vetcoders/vibecrafted",
+        "source_revision": donors[name]["revision"] if name in donors else source_revision,
+        "source_archive_sha256": donors[name]["source_archive_sha256"] if name in donors else source_manifest_sha,
         "target": "x86_64-pc-windows-msvc", "license": "MIT",
     })
 reasons = {
@@ -517,10 +472,7 @@ manifest = {
 '@ | Set-Content -LiteralPath $inventoryScript -Encoding utf8
 $env:PAYLOAD = $payload
 $env:SOURCE_REVISION = $SourceRevision
-$env:TERMINAL_REVISION = $terminalRevision
-$env:FRAME_REVISION = $frameRevision
-$env:TERMINAL_ARCHIVE_SHA256 = $terminalArchiveSha256
-$env:FRAME_ARCHIVE_SHA256 = $frameArchiveSha256
+$env:DONOR_SELECTION = $selectionPath
 & python $inventoryScript
 if ($LASTEXITCODE -ne 0) { Die "inventory closed with missing mandatory payload" }
 

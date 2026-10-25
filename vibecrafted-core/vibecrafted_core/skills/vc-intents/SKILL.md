@@ -159,7 +159,7 @@ Deduplicate statements, never provenance: one intent, many citations.
 
 ```bash
 uv run "$CLI" "$W" lanes                     # by subject; default six Codescribe lanes
-uv run "$CLI" "$W" plan --stage confront --repo <repo> --host div0 \
+uv run "$CLI" "$W" plan --stage confront --repo <repo> --host host-a \
   --agent 'L1-overlay-ui=kimi:kimi-code/k3' --agent 'L4-quality-lexicon=junie:gemini-3.8-flash' …
 ```
 
@@ -174,7 +174,7 @@ entrypoint to X_ (`loct follow trace`), not a grep hit. The promise → question
 → command table is `references/loctree-questions.md`.
 
 ```bash
-uv run "$CLI" "$W" merge --verdicts div0=<dir> --verdicts dragon=<dir> --primary div0 --project <owner>/<repo>
+uv run "$CLI" "$W" merge --verdicts host-a=<dir> --verdicts host-b=<dir> --primary host-a --project <owner>/<repo>
 ```
 
 `merge` writes `LEDGER.json` and `replication-report.json`. Agreement per id

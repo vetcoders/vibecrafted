@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import errno
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core import cache_lifecycle as cache
+from vibecrafted_core.marbles_reception import readonly_command, tree_receipt
 from vibecrafted_core.server_supervisor import _atomic_json
 from vibecrafted_core.settlement import TrustReceiptV1
 
@@ -288,3 +292,270 @@ def test_lease_outside_scan_root_does_not_claim_whole_home(tmp_path):
     with cache.build_lease(home):
         assert cache.clean_cache(home, path, observe=lambda _: None) == "deleted"
     assert cache.owner_path(home, path).is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS READ guard")
+@pytest.mark.parametrize("existing", [True, False])
+def test_native_read_guard_holds_existing_build_leases(tmp_path, existing):
+    root = tmp_path / "repo"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(shared), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "agents@vetcoders.io")
+    git("config", "user.name", "Lease fixture")
+    (shared / "source.txt").write_text("preserve source\n")
+    (shared / ".gitignore").write_text(".venv/\n")
+    git("add", "--", "source.txt", ".gitignore")
+    git("commit", "-qm", "private lease fixture")
+    git("worktree", "add", "-b", "reader", str(root), "HEAD")
+    targets = [root / ".venv", root / "vibecrafted-core/.venv"]
+    leases = [target / cache.LEASE_NAME for target in targets]
+    for target, path in zip(targets, leases, strict=True):
+        target.mkdir(parents=True)
+        if existing:
+            path.write_bytes(b"")
+            subprocess.run(
+                ["git", "-C", str(root), "check-ignore", "-q", "--", str(path)],
+                check=True,
+                timeout=15,
+            )
+    before = tree_receipt(str(root))
+    inodes = [path.stat().st_ino for path in leases] if existing else []
+    # Each contender opens its own descriptor/process, never inherits the holder.
+    contender = """import fcntl,os,sys
+fd=os.open(sys.argv[1],os.O_RDONLY)
+try:
+ fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+except BlockingIOError:
+ sys.exit(23)
+sys.exit(0)
+"""
+    canary = """import errno,fcntl,json,os,subprocess,sys
+from pathlib import Path
+root=Path(sys.argv[1]); contender=sys.argv[2]; observations=[]
+for relative in ['.venv/.vc-build-lease','vibecrafted-core/.venv/.vc-build-lease']:
+ path=root/relative; expected=path.stat(); matches=[]
+ for fd in range(3,256):
+  try: info=os.fstat(fd)
+  except OSError: continue
+  if (info.st_dev,info.st_ino)==(expected.st_dev,expected.st_ino): matches.append(fd)
+ assert len(matches)==1, matches
+ fd=matches[0]
+ assert fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY
+ if relative.startswith('.venv/'):
+  assert fd==int(os.environ['VIBECRAFTED_BUILD_LEASE_FD'])
+ for _ in range(2):
+  result=subprocess.run([sys.executable,'-I','-B','-c',contender,str(path)],timeout=10,check=False)
+  assert result.returncode==23, result.returncode
+ observations.append({'lease':relative,'mode':'O_RDONLY','exclusive_blocked':True})
+for path in [root/'source.txt',Path(sys.argv[3])/'config']:
+ try: fd=os.open(path,os.O_RDWR)
+ except OSError as exc: assert exc.errno==errno.EPERM
+ else: os.close(fd); raise AssertionError('source/Git write admitted')
+print(json.dumps(observations))
+"""
+    worker = (
+        "import sys; sys.path.insert(0,sys.argv.pop(1)); "
+        "from vibecrafted_core.cache_lifecycle import main; raise SystemExit(main())"
+    )
+    command, guard = readonly_command(
+        str(root),
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            worker,
+            str(Path(cache.__file__).resolve().parents[1]),
+            "--root",
+            str(targets[0]),
+            "--lease-root",
+            str(targets[1]),
+            "--",
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            canary,
+            str(root),
+            contender,
+            str(shared / ".git"),
+        ],
+    )
+    result = subprocess.run(
+        command, check=False, capture_output=True, text=True, timeout=30
+    )
+    assert tree_receipt(str(root)) == before
+    assert guard["kind"] == "macos_source_write_deny"
+    assert guard["git_common_dir"] == str(shared / ".git")
+    if existing:
+        assert result.returncode == 0, result.stderr
+        assert len(json.loads(result.stdout)) == 2
+        assert [path.stat().st_ino for path in leases] == inodes
+        for path in leases:
+            subprocess.run(
+                [sys.executable, "-I", "-B", "-c", contender, str(path)],
+                check=True,
+                timeout=10,
+            )
+    else:
+        assert result.returncode == 75, result.stderr
+        assert not result.stdout
+        assert "Operation not permitted" in result.stderr
+        assert all(not path.exists() for path in leases)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor access")
+def test_build_lease_creates_readonly_cloexec_holder(tmp_path):
+    import fcntl
+
+    path = tmp_path / cache.LEASE_NAME
+    with cache.build_lease(tmp_path) as fd:
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+        assert not os.get_inheritable(fd)
+        with pytest.raises(BlockingIOError), cache.lease(path, exclusive=True):
+            pass
+    with cache.lease(path, exclusive=True):
+        pass
+    with pytest.raises(OSError) as closed:
+        os.fstat(fd)
+    assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory", "foreign"])
+def test_shared_lease_rejects_unsafe_identity(tmp_path, monkeypatch, kind):
+    path = tmp_path / cache.LEASE_NAME
+    external = tmp_path / "external"
+    external.write_bytes(b"preserve")
+    if kind == "symlink":
+        path.symlink_to(external)
+    elif kind == "hardlink":
+        os.link(external, path)
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        path.touch()
+        monkeypatch.setattr(cache.os, "getuid", lambda: external.stat().st_uid + 1)
+    with (
+        pytest.raises((OSError, cache.CacheDeferred)),
+        cache.lease(path, exclusive=False, create=True),
+    ):
+        pytest.fail("unsafe shared lease admitted")
+    assert external.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("phase", ["open", "flock", "hardlink-after-flock"])
+def test_shared_lease_rejects_acquisition_identity_drift(tmp_path, monkeypatch, phase):
+    path = tmp_path / cache.LEASE_NAME
+    path.touch()
+    original_open, original_flock = os.open, cache.lock.flock
+
+    def change():
+        if phase == "hardlink-after-flock":
+            os.link(path, tmp_path / "alias")
+        else:
+            path.rename(tmp_path / "old")
+            os.close(original_open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+
+    def open_changed(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        change()
+        return fd
+
+    def flock_changed(*args):
+        original_flock(*args)
+        change()
+
+    if phase == "open":
+        monkeypatch.setattr(cache.os, "open", open_changed)
+    else:
+        monkeypatch.setattr(cache.lock, "flock", flock_changed)
+    with pytest.raises(cache.CacheDeferred), cache.build_lease(tmp_path):
+        pytest.fail("changed identity admitted")
+
+
+def test_missing_shared_lease_never_retries_a_creation_race(tmp_path, monkeypatch):
+    path = tmp_path / cache.LEASE_NAME
+    original_open = os.open
+    calls = []
+
+    def competing_open(name, flags, mode=0o777):
+        calls.append(flags)
+        if len(calls) == 1:
+            path.write_text("competitor")
+            raise FileNotFoundError(errno.ENOENT, "absent at first open", name)
+        return original_open(name, flags, mode)
+
+    monkeypatch.setattr(cache.os, "open", competing_open)
+    with pytest.raises(FileExistsError), cache.build_lease(tmp_path):
+        pytest.fail("creation race admitted")
+    assert len(calls) == 2
+    assert path.read_text() == "competitor"
+
+
+def test_windows_shared_lease_retains_writable_lock_byte_contract(
+    tmp_path, monkeypatch
+):
+    # Exercise the platform choice on Darwin; this is not Windows execution.
+    proxy = SimpleNamespace(**vars(os))
+    proxy.name = "nt"
+    monkeypatch.setattr(cache, "os", proxy)
+
+    def writable_lock_byte(fd, operation):
+        assert operation == cache.lock.LOCK_SH | cache.lock.LOCK_NB
+        os.write(fd, b"\n")  # portable_lock's Windows empty-region requirement
+
+    monkeypatch.setattr(cache.lock, "flock", writable_lock_byte)
+    with cache.build_lease(tmp_path):
+        pass
+    assert (tmp_path / cache.LEASE_NAME).read_bytes() == b"\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS READ guard")
+def test_native_read_guard_rejects_fifo_with_finite_admission(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, timeout=15)
+    target = root / ".venv"
+    target.mkdir()
+    path = target / cache.LEASE_NAME
+    os.mkfifo(path, 0o600)
+    before = path.lstat()
+    worker = (
+        "import sys; sys.path.insert(0,sys.argv.pop(1)); "
+        "from vibecrafted_core.cache_lifecycle import main; raise SystemExit(main())"
+    )
+    command, _ = readonly_command(
+        str(root),
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            worker,
+            str(Path(cache.__file__).resolve().parents[1]),
+            "--root",
+            str(target),
+            "--",
+            sys.executable,
+            "-c",
+            "print('not admitted')",
+        ],
+    )
+    result = subprocess.run(
+        command, check=False, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 75, result.stderr
+    assert "unsafe-build-lease" in result.stderr
+    assert not result.stdout
+    assert path.lstat().st_ino == before.st_ino

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -41,7 +42,7 @@ def repository_environment() -> dict[str, str]:
 
 def git(*args: str, cwd: Path) -> str:
     return subprocess.check_output(
-        ["git", "-C", str(cwd), *args],
+        ["git", "--no-replace-objects", "-C", str(cwd), *args],
         text=True,
         stderr=subprocess.DEVNULL,
         env=repository_environment(),
@@ -50,7 +51,10 @@ def git(*args: str, cwd: Path) -> str:
 
 def load_pins(path: Path) -> dict[str, dict[str, str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("schema") != "vibecrafted.source-components.v1":
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != "vibecrafted.source-components.v1"
+    ):
         raise ValueError("unsupported source component manifest")
     pins = data.get("components")
     if not isinstance(pins, dict) or set(pins) != set(COMPONENTS):
@@ -125,6 +129,7 @@ def select_repository(
             "--quiet",
             "--depth",
             "1",
+            "--",
             pin["repository"],
             pin["revision"],
         ],
@@ -136,15 +141,33 @@ def select_repository(
     return destination
 
 
-def verify_version(name: str, pin: dict[str, str], repo: Path) -> None:
+def verify_version(
+    name: str, pin: dict[str, str], repo: Path, *, exported: bool = False
+) -> None:
     _, _, manifest_path, table = COMPONENTS[name]
-    blob = subprocess.check_output(
-        ["git", "-C", str(repo), "show", f"{pin['revision']}:{manifest_path}"],
-        env=repository_environment(),
+    blob = (
+        (repo / manifest_path).read_bytes()
+        if exported
+        else subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(repo),
+                "show",
+                f"{pin['revision']}:{manifest_path}",
+            ],
+            env=repository_environment(),
+        )
     )
-    version = tomllib.loads(blob.decode("utf-8"))[table][
-        "package" if table == "workspace" else "version"
-    ]
+    manifest = tomllib.loads(blob.decode("utf-8"))
+    expected_name = "vc-frame" if name == "vc-frame" else "alacritty"
+    package = manifest.get("package")
+    if not isinstance(package, dict) or package.get("name") != expected_name:
+        raise ValueError(
+            f"{name} source manifest must identify package {expected_name}"
+        )
+    version = manifest[table]["package" if table == "workspace" else "version"]
     if table == "workspace":
         version = version["version"]
     if version != pin["version"]:
@@ -153,12 +176,103 @@ def verify_version(name: str, pin: dict[str, str], repo: Path) -> None:
         )
 
 
+def materialize_sources(
+    pins: dict[str, dict[str, str]], repositories: dict[str, Path], destination: Path
+) -> None:
+    """Export verified Git objects, never a donor's index or working files.
+
+    Both native platform assemblers consume this receipt. Its archive digest is
+    of the exact Git-generated tar extracted here, not an unrelated hosted zip.
+    The receipt describes source selection, not a compiled or released pack.
+    """
+    destination.mkdir(parents=True)
+    records = {}
+    for name, repo in repositories.items():
+        pin = pins[name]
+        archive = destination / f"{name}.tar"
+        source = destination / name
+        source.mkdir()
+        # Read canonical objects through an empty bare repository: archive in
+        # the donor would also consume its uncommitted info/attributes. Neither
+        # donor config/templates nor caller/global/system attributes may shape
+        # a receipt that names this immutable commit. Committed attributes still
+        # apply, including export-ignore and export-subst.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+            and key not in {"TAR_OPTIONS", "TAR_READER_OPTIONS"}
+        }
+        environment.update(
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_ATTR_NOSYSTEM="1",
+            GIT_NO_REPLACE_OBJECTS="1",
+        )
+        objects = Path(git("rev-parse", "--git-path", "objects", cwd=repo))
+        if not objects.is_absolute():
+            objects = repo / objects
+        with tempfile.TemporaryDirectory(prefix="vibecrafted-export-") as temp:
+            isolated = Path(temp)
+            subprocess.run(
+                ["git", "init", "--bare", "--template=", "--quiet", str(isolated)],
+                env=environment,
+                check=True,
+            )
+            (isolated / "objects/info/alternates").write_text(
+                objects.resolve().as_posix() + "\n", encoding="utf-8"
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(isolated),
+                    "-c",
+                    f"core.attributesFile={os.devnull}",
+                    "archive",
+                    "--format=tar",
+                    f"--output={archive}",
+                    pin["revision"],
+                ],
+                env=environment,
+                check=True,
+            )
+        # Git produces paths rooted at the repository, so no strip-components
+        # or Windows-only nested-archive fallback is needed.
+        subprocess.run(
+            ["tar", "-xf", str(archive), "-C", str(source)],
+            env=environment,
+            check=True,
+        )
+        verify_version(name, pin, source, exported=True)
+        with archive.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        records[name] = {**pin, "source_archive_sha256": digest}
+    (destination / "selection.json").write_text(
+        json.dumps(
+            {"schema": "vibecrafted.source-selection.v1", "components": records},
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="verify pins and donor availability without building",
+    )
+    mode.add_argument(
+        "--materialize",
+        type=Path,
+        help="export verified donors and selection.json to a new build directory",
     )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_PINS)
     args = parser.parse_args()
@@ -177,6 +291,9 @@ def main() -> int:
                 flush=True,
             )
         if args.check:
+            return 0
+        if args.materialize:
+            materialize_sources(pins, repositories, args.materialize.resolve())
             return 0
         environment = repository_environment()
         for name, repository in repositories.items():
@@ -200,6 +317,12 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.CalledProcessError,
+    ) as exc:
         print(f"source Runtime Pack build failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

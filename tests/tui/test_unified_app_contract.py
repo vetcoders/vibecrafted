@@ -16,6 +16,7 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+import time
 import tomllib
 from argparse import Namespace
 from collections.abc import Callable
@@ -53,13 +54,292 @@ def test_onboarding_probe_requires_launchpad_layout(
         return subprocess.CompletedProcess(argv, 0, stdout=help_output)
 
     monkeypatch.setattr(contract, "_scenario_command", command)
+    monkeypatch.setattr(
+        contract,
+        "_scenario_workshop_typography",
+        lambda _scenario, layout: b"rendered:" + layout,
+    )
     if tab_name == "Start here":
         with pytest.raises(RuntimeError, match="has no Launchpad tab"):
             contract._scenario_start_here(scenario)
     else:
         assert contract._scenario_start_here(scenario) == {
-            "onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()
+            "onboarding_reachable": hashlib.sha256(
+                payload + help_output + b"rendered:" + payload
+            ).hexdigest()
         }
+
+
+_AGENTS_LAYOUT = (
+    b'layout { tab name="Launchpad" {} tab name="Agents" { pane command="bash" '
+    b'{ args "-lc" "exec \\"$root/pane-python\\" \\"$root/vc-agent-workshop.py\\" '
+    b'launcher" } } }'
+)
+
+# A curses stand-in for the installed Workshop with the normal Agents route:
+# New agent card -> `f` Setup / Font -> Step 2 typography -> Esc/Esc/Ctrl+Q.
+_FAKE_WORKSHOP = r"""
+import curses, os, pathlib, sys, time
+BROKEN = {broken!r}
+pathlib.Path({pid_file!r}).write_text(str(os.getpid()))
+
+def main(w):
+    curses.raw()
+    w.keypad(True)
+    state, confirm = "launcher", False
+    while True:
+        w.erase()
+        if state == "launcher":
+            w.addstr(5, 10, "New agent", curses.A_BOLD)
+            w.addstr(5, 60, "[ Setup / Font (f) ]", curses.A_DIM)
+            w.addstr(6, 10, "Choose a provider, then Launch.", curses.A_DIM)
+            if confirm:
+                w.addstr(20, 10, "Unsaved form changes - press Ctrl+Q or y to close")
+        elif state == "step2":
+            w.addstr(6, 10, "Step 2: Terminal Typography - policy preserved", curses.A_DIM)
+            if BROKEN != "no-glyph":
+                w.addstr(7, 10, "Glyph sample: 0O1lI -> !==")
+            w.addstr(9, 10, "[ Apply Font (Enter) ]  [ Close (Esc) ]")
+        else:
+            w.addstr(6, 10, "Step 1: Choose your agent")
+            w.addstr(9, 10, "[ Confirm (Enter) ]  [ Close (Esc) ]")
+        w.refresh()
+        key = w.getch()
+        if state == "launcher":
+            if confirm:
+                if key in (17, ord("y")):
+                    if BROKEN == "hang":
+                        while True:
+                            time.sleep(1)
+                    return
+                confirm = False
+            elif key == 17:
+                confirm = True
+            elif key == ord("f") and BROKEN != "f-ignored":
+                if BROKEN == "writes-policy":
+                    pathlib.Path({policy!r}).write_text("[font]\nfamily = 'x'\n")
+                state = "step2"
+        elif key == 27:
+            state = "step1" if state == "step2" else "launcher"
+
+os.environ.setdefault("ESCDELAY", "25")
+curses.wrapper(main)
+"""
+
+
+def _installed_workshop(
+    tmp_path: Path, *, broken: str = "", layout: bytes = _AGENTS_LAYOUT
+) -> Namespace:
+    frame = tmp_path / "config/vibecrafted/vc-frame"
+    (frame / "layouts").mkdir(parents=True)
+    (frame / "layouts/operator.kdl").write_bytes(layout)
+    policy = tmp_path / "config/vibecrafted/terminal-policy.toml"
+    policy.write_text("[font]\nfamily = 'Monaspace Xenon NF'\n")
+    if broken != "help-only":
+        runner = frame / "pane-python"
+        runner.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        runner.chmod(0o755)
+        (frame / "vc-agent-workshop.py").write_text(
+            _FAKE_WORKSHOP.format(
+                broken=broken,
+                pid_file=str(tmp_path / "workshop.pid"),
+                policy=str(policy),
+            )
+        )
+    return Namespace(
+        root=tmp_path,
+        product_config=tmp_path / "config/vibecrafted",
+        launchers=tmp_path / "launchers",
+        environment={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(tmp_path),
+        },
+    )
+
+
+def _start_here(scenario: Namespace, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    help_output = b"Create a vc-frame workspace for a repository"
+    monkeypatch.setattr(
+        contract,
+        "_scenario_command",
+        lambda _scenario, argv: subprocess.CompletedProcess(
+            argv, 0, stdout=help_output
+        ),
+    )
+    return dict(contract._scenario_start_here(scenario))
+
+
+def _assert_workshop_reaped(tmp_path: Path) -> None:
+    pid_file = tmp_path / "workshop.pid"
+    if not pid_file.exists():
+        return
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"probe left the Workshop process {pid} running")
+
+
+def test_onboarding_walks_installed_agents_route_to_typography(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _installed_workshop(tmp_path)
+    policy = scenario.product_config / "terminal-policy.toml"
+    before = policy.read_bytes()
+
+    result = _start_here(scenario, monkeypatch)
+
+    digest = result["onboarding_reachable"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert policy.read_bytes() == before
+    _assert_workshop_reaped(tmp_path)
+    rendered = contract._scenario_workshop_typography(scenario, _AGENTS_LAYOUT).decode(
+        "utf-8", errors="replace"
+    )
+    assert "Step 2: Terminal Typography" in rendered
+    assert "Glyph sample: 0O1lI" in rendered
+
+
+@pytest.mark.parametrize(
+    ("broken", "layout", "message"),
+    [
+        ("help-only", _AGENTS_LAYOUT, "no generation-pinned pane-python"),
+        ("", b'layout { tab name="Launchpad" {} }', "no Agents Workshop tab"),
+        ("f-ignored", _AGENTS_LAYOUT, "did not render 'Step 2: Terminal Typography'"),
+        ("no-glyph", _AGENTS_LAYOUT, "typography has no glyph preview"),
+        ("hang", _AGENTS_LAYOUT, "did not exit after Ctrl\\+Q"),
+        ("writes-policy", _AGENTS_LAYOUT, "changed the installed user policy"),
+    ],
+    ids=[
+        "help-only",
+        "no-agents-tab",
+        "f-ignored",
+        "no-glyph",
+        "hang",
+        "writes-policy",
+    ],
+)
+def test_onboarding_refuses_help_only_or_broken_installed_typography(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    broken: str,
+    layout: bytes,
+    message: str,
+) -> None:
+    scenario = _installed_workshop(tmp_path, broken=broken, layout=layout)
+    monkeypatch.setattr(contract, "_WORKSHOP_ROUTE_TIMEOUT", 4.0)
+    monkeypatch.setattr(contract, "_WORKSHOP_EXIT_TIMEOUT", 1.5)
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match=message):
+        _start_here(scenario, monkeypatch)
+
+    assert time.monotonic() - started < 12
+    _assert_workshop_reaped(tmp_path)
+
+
+def test_render_screen_keeps_cells_skipped_by_curses_diffing() -> None:
+    first = b"\x1b[H\x1b[2J\x1b[2;3HChoose a provider"
+    # ncurses repaints only changed cells: the shared `r` is skipped and the
+    # stale tail is erased in place.
+    update = b"\x1b[2;3HStep 2: Te\x1b[2;14Hminal\x1b[K"
+    screen = contract._render_screen(first + update, rows=4, cols=40)
+    assert screen.splitlines()[1] == "  Step 2: Terminal"
+
+
+_RENDER_CHILD = (
+    "import sys; sys.path.insert(0, sys.argv[1]);"
+    "from vibecrafted_core import product_contract as c;"
+    "raw = sys.stdin.buffer.read();"
+    "\ntry:\n print('screen', repr(c._render_screen(raw, rows=4, cols=40)))"
+    "\nexcept RuntimeError as error:\n print('budget', error)"
+)
+
+
+def _render_in_child(raw: bytes, *, timeout: float = 8.0) -> tuple[str, float]:
+    """Render in a private child so a regression cannot hang the test run."""
+    core = str(REPO_ROOT / "vibecrafted-core")
+    started = time.monotonic()
+    child = subprocess.Popen(
+        [sys.executable, "-c", _RENDER_CHILD, core],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, err = child.communicate(raw, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, 9)
+        child.communicate()
+        pytest.fail(f"renderer exceeded {timeout}s on {len(raw)} bytes of input")
+    assert child.returncode == 0, err.decode(errors="replace")
+    return out.decode(), time.monotonic() - started
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\x1b[999999999S",
+        b"\x1b[999999999T",
+        b"\x1b[2;3H\x1b[999999999L",
+        b"\x1b[2;3H\x1b[999999999M",
+        b"\x1b[999999999@",
+        b"\x1b[999999999P",
+        b"A\x1b[999999999b",
+        b"\x1b[999999999X",
+        b"\x1b[0;999r\x1b[999999999S",
+        b"\x1b[3;2r\x1b[999999999T",
+        b"\x1b[99;999r\x1b[999999999M",
+        b"\x1b[" + b"9" * 6000 + b"S",
+        "\x1b[\u00b2S\x1b[\u00b2;\u00b2r\x1b[\u00b2L".encode(),
+    ],
+    ids=[
+        "scroll-up",
+        "scroll-down",
+        "insert-lines",
+        "delete-lines",
+        "insert-chars",
+        "delete-chars",
+        "repeat",
+        "erase-chars",
+        "region-zero-top",
+        "region-inverted",
+        "region-offscreen",
+        "thousands-of-digits",
+        "unicode-digits",
+    ],
+)
+def test_render_screen_is_bounded_on_huge_csi_counts(payload: bytes) -> None:
+    out, elapsed = _render_in_child(payload)
+    assert out.startswith("screen "), out
+    assert elapsed < 5
+
+
+def test_render_screen_clamps_scroll_to_the_grid() -> None:
+    text = b"\x1b[H\x1b[2Jtop\x1b[999999999S\x1b[2;1Hlow"
+    out, _ = _render_in_child(text)
+    assert out.strip() == "screen '\\nlow\\n\\n'"
+
+
+def test_render_screen_ignores_invalid_scroll_region() -> None:
+    out, _ = _render_in_child(b"\x1b[Hone\x1b[9;2r\x1b[2;1Htwo\x1b[1S")
+    # The invalid region is ignored; the full-screen scroll lifts row two to one.
+    assert out.strip() == "screen 'two\\n\\n\\n'"
+
+
+def test_render_screen_fails_closed_on_budget_exhaustion() -> None:
+    oversized = b"x" * (contract._WORKSHOP_TRANSCRIPT_BUDGET + 1)
+    with pytest.raises(RuntimeError, match="transcript budget"):
+        contract._render_screen(oversized, rows=4, cols=40)
+    churn = b"\x1b[4S" * (contract._WORKSHOP_RENDER_WORK_BUDGET // 4 + 1)
+    out, elapsed = _render_in_child(churn)
+    assert out.startswith("budget "), out[:80]
+    assert elapsed < 6
 
 
 def _sha256(path: Path) -> str:
@@ -207,8 +487,21 @@ def _macho_dependencies(path: Path) -> list[str]:
 
 
 def _codesign_macho(path: Path) -> None:
+    permission_args = (
+        [
+            "--options",
+            "runtime",
+            "--entitlements",
+            str(
+                REPO_ROOT
+                / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.entitlements"
+            ),
+        ]
+        if path.name == "vc-terminal"
+        else []
+    )
     result = subprocess.run(
-        ["codesign", "--force", "--sign", "-", str(path)],
+        ["codesign", "--force", "--sign", "-", *permission_args, str(path)],
         check=False,
         capture_output=True,
         text=True,
@@ -218,7 +511,20 @@ def _codesign_macho(path: Path) -> None:
 
 def _codesign_app(app: Path) -> None:
     result = subprocess.run(
-        ["codesign", "--force", "--sign", "-", str(app)],
+        [
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--entitlements",
+            str(
+                REPO_ROOT
+                / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.entitlements"
+            ),
+            str(app),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -572,6 +878,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1",
                 "ATSApplicationFontsPath": "fonts",
+                "NSMicrophoneUsageDescription": "Voice input when requested.",
+                "NSSpeechRecognitionUsageDescription": "Transcribe speech when requested.",
             },
             handle,
         )
@@ -866,7 +1174,7 @@ def _release_output_fixture(
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
     }
     policy = contract._release_policy()
     executable = app / product["outer_bundle_code"]["path"]
@@ -1012,7 +1320,7 @@ def _developer_id_release_app(root: Path, macho_executable: Path) -> Path:
     ]
     nested_before = {path: _sha256(path) for path in nested}
     empty_entitlements = root / "empty-entitlements.plist"
-    empty_entitlements.write_bytes(plistlib.dumps({}))
+    empty_entitlements.write_bytes(plistlib.dumps(contract.HOST_ENTITLEMENTS))
     signed = subprocess.run(
         [
             "/usr/bin/codesign",
@@ -3406,7 +3714,7 @@ def test_packaged_release_policy_pins_the_existing_public_key() -> None:
     assert policy["public_key_spki_sha256"] == contract.RELEASE_KEY_SPKI_SHA256
     assert policy["team_id"] == "MW223P3NPX"
     assert policy["hardened_runtime"] is True
-    assert policy["entitlements"] == {}
+    assert policy["entitlements"] == {"com.apple.security.device.audio-input": True}
 
 
 def test_signed_release_output_binds_live_artifacts_and_signer_policy(
@@ -4135,7 +4443,7 @@ def test_real_developer_id_requirement_passes_and_entitlement_drift_fails(
     app = tmp_path / "Vibecrafted.app"
     _app_fixture(app, macho_executable)
     empty_entitlements = tmp_path / "empty-entitlements.plist"
-    empty_entitlements.write_bytes(plistlib.dumps({}))
+    empty_entitlements.write_bytes(plistlib.dumps(contract.HOST_ENTITLEMENTS))
     signed = subprocess.run(
         [
             "codesign",
@@ -4407,7 +4715,7 @@ def test_release_output_rejects_foreign_signer_or_entitlement_drift_even_with_sa
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
         **signer_drift,
     }
     receipt, signature, _, _ = _release_output_fixture(
@@ -4858,7 +5166,7 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
         "team_id": "MW223P3NPX",
         "designated_requirement": contract._release_policy()["designated_requirement"],
         "hardened_runtime": True,
-        "entitlements": {},
+        "entitlements": dict(contract.HOST_ENTITLEMENTS),
     }
     monkeypatch.setattr(
         unified_product_manifest.contract,

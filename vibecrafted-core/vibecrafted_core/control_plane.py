@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import datetime as dt
 import errno
 
@@ -44,7 +45,7 @@ from .report_contract import (
     validate_report_file,
     worker_authored_report,
 )
-from .run_mutation import run_mutation_locks
+from .run_mutation import RunMetaMutationError, read_run_meta, run_mutation_locks
 from .run_signal import wait_for_run_signal
 from .runtime_paths import vibecrafted_home
 from .settlement import (
@@ -1547,6 +1548,48 @@ def _worker_is_alive(run: dict[str, Any]) -> bool:
     return _worker_process_truth(run)[0]
 
 
+# One board pass asks "is this worker alive?" for every retained run. Each
+# unconfirmed run fell back to a fresh `ps -A -ww` plus a fleet-wide environment
+# scan, so a 275-run board spawned ~800 ps processes and took ~40 s, while the
+# App polls `status --activity` every 5 s and kills it after 3 s. Inside one
+# pass the process table is a single observation; outside a pass it is taken
+# fresh as before.
+_PASS_PROCESS_SNAPSHOT: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("_PASS_PROCESS_SNAPSHOT", default=None)
+)
+
+
+@contextlib.contextmanager
+def _one_process_snapshot_per_pass() -> Iterator[None]:
+    token = _PASS_PROCESS_SNAPSHOT.set({})
+    try:
+        yield
+    finally:
+        _PASS_PROCESS_SNAPSHOT.reset(token)
+
+
+def _pass_observation(key: str, build: Callable[[], Any]) -> Any:
+    memo = _PASS_PROCESS_SNAPSHOT.get()
+    if memo is not None and key in memo:
+        return memo[key]
+    value = build()
+    if memo is not None:
+        memo[key] = value
+    return value
+
+
+def _pass_process_table() -> Any:
+    from .process_control import build_process_table
+
+    return _pass_observation("table", build_process_table)
+
+
+def _pass_env_index() -> dict[int, str]:
+    from .process_control import build_env_index
+
+    return _pass_observation("env", build_env_index)
+
+
 def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
     """Validate persisted PID/PGID/start-token/run-id ownership.
 
@@ -1554,11 +1597,7 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
     process group.  That child counts only when the kernel environment still
     binds it to this run; an arbitrary process sharing a recycled PGID does not.
     """
-    from .process_control import (
-        build_env_index,
-        build_process_table,
-        validate_process_identity,
-    )
+    from .process_control import validate_process_identity
 
     run_id = str(run.get("run_id") or "").strip()
     worker_pid = _coerce_int(run.get("worker_pid"))
@@ -1585,6 +1624,7 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
         # non-dispositive. Avoid reopening a fleet-wide ``ps axeww`` scan for
         # every scoped run projection.
         env_index={},
+        table=_pass_process_table(),
     )
     if valid:
         owner_pid = _coerce_int(run.get("owner_pid"))
@@ -1602,6 +1642,7 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
             ),
             expected_run_id=run_id,
             env_index={},
+            table=_pass_process_table(),
         )
         return owner_valid, owner_reason
 
@@ -1609,8 +1650,8 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
     # provider.  Preserve ownership only for a same-PGID child whose environment
     # independently names this run.
     try:
-        table = build_process_table()
-        env_index = build_env_index()
+        table = _pass_process_table()
+        env_index = _pass_env_index()
     except OSError:
         return False, reason
     if any(
@@ -2000,12 +2041,31 @@ def _append_event(event: dict[str, Any]) -> None:
             os.close(fd)
 
 
+# Launchers write ``<stem>.meta.json`` beside their report:
+# artifacts/<org>/<repo>/<day>/reports/[<lane>/[<children>/]]<stem>.meta.json
+# (marbles: artifacts/marbles/reports/...). Deeper copies sit inside report
+# evidence bundles and acceptance session stores; they are not launcher metas,
+# and the unbounded rglob walked every evidence file (~550k on a long-lived
+# machine) on each 5 s App poll of `status --activity`.
+_LAUNCHER_META_MAX_DEPTH = 7
+
+
 def _iter_meta_files() -> Iterator[Path]:
-    """All ``*.meta.json`` launcher artifact files under artifacts/."""
+    """Launcher ``*.meta.json`` files under artifacts/, at launcher depth."""
     artifacts_root = vibecrafted_home() / "artifacts"
     if not artifacts_root.is_dir():
         return iter(())
-    return artifacts_root.rglob("*.meta.json")
+    return _walk_launcher_metas(artifacts_root)
+
+
+def _walk_launcher_metas(root: Path) -> Iterator[Path]:
+    base_depth = len(root.parts)
+    for current, dirs, files in os.walk(root):
+        if len(Path(current).parts) - base_depth >= _LAUNCHER_META_MAX_DEPTH - 1:
+            dirs[:] = []
+        for name in files:
+            if name.endswith(".meta.json"):
+                yield Path(current) / name
 
 
 def _iter_lock_files() -> Iterator[Path]:
@@ -3829,7 +3889,9 @@ def _project_run_payload(
     return payload
 
 
-def sync_state(only_run_id: str | None = None) -> dict[str, Any]:
+def sync_state(
+    only_run_id: str | None = None, *, include_orphans: bool = True
+) -> dict[str, Any]:
     """Project on-disk run artifacts into control-plane snapshots.
 
     ``only_run_id`` scopes the whole pass to one run and its child rounds. The
@@ -3854,7 +3916,7 @@ def sync_state(only_run_id: str | None = None) -> dict[str, Any]:
         return not scoped or run_id == scope or run_id.startswith(child_prefix)
 
     lock_ctx = contextlib.nullcontext() if scoped else _sync_lock(purpose="board-sync")
-    with lock_ctx:
+    with lock_ctx, _one_process_snapshot_per_pass():
         previous_snapshots = _load_existing_snapshots()
         archived_ids = set() if scoped else _archived_run_ids()
         merged: dict[str, RunStatus] = {}
@@ -3953,7 +4015,7 @@ def sync_state(only_run_id: str | None = None) -> dict[str, Any]:
     # Contract rule 6: legacy Untitled*.md under artifacts/ lands as n.
     # Full board only — scoped single-run polls must not pay the rglob cost.
     orphan_runs: list[dict[str, Any]] = []
-    if not scoped:
+    if not scoped and include_orphans:
         try:
             orphan_runs = orphan_settlement_payloads(vibecrafted_home() / "artifacts")
         except OSError:
@@ -4090,6 +4152,12 @@ def resolve_run(run_id: str) -> ResolvedRun:
     if run_dir.is_dir():
         meta = run_dir / "meta.json"
         transcript = run_dir / "transcript.log"
+        # Nested providers keep their announced transcript beside the report;
+        # their canonical metadata still owns that exact path.
+        if not transcript.is_file() and meta.is_file():
+            recorded = _read_json(meta).get("transcript")
+            if recorded:
+                transcript = Path(str(recorded))
         return ResolvedRun(
             run_id=target,
             source="runtime_runs",
@@ -4553,13 +4621,90 @@ def await_run(
     outruns the dispatcher's own boot (no socket, no durable trace yet) gets
     one bounded launch-grace slice before the run is declared missing.
 
-    ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
-    only paces liveness re-checks while no socket exists.
+    ``on_poll`` receives owned raw-output growth on existing socket events and
+    a reconciled snapshot at each terminal/missing-socket wake. Heartbeats
+    alone never produce raw-output progress. ``interval_seconds`` only paces
+    liveness re-checks while no socket exists.
     """
     target = str(run_id or "").strip()
     if not target:
         raise ValueError("run_id is required")
     hard_cap = _resolve_await_hard_cap(hard_cap_seconds)
+    checked_output_bytes = 0
+
+    def observed_output(event: Any) -> None:
+        nonlocal checked_output_bytes
+        from .process_control import validate_process_identity
+
+        # The existing dispatcher stream wakes us; durable, exact owned run
+        # identity and raw transcript growth decide whether this was progress.
+        # Heartbeats, replayed events and provider-supplied child labels do not.
+        if on_poll is None:
+            return
+        try:
+            meta = read_run_meta(
+                _runtime_run_dir(target) / "meta.json", expected_run_id=target
+            )
+            identity = meta.get("worker_identity")
+            if not isinstance(identity, dict) or event.get(
+                "dispatcher_pid"
+            ) != identity.get("ppid"):
+                return
+            transcript = Path(str(meta.get("transcript") or ""))
+            expected = meta.get("transcript_identity")
+            if not isinstance(expected, dict) or any(
+                not isinstance(expected.get(key), int)
+                or isinstance(expected.get(key), bool)
+                for key in ("device", "inode")
+            ):
+                return
+            visible = transcript.lstat()
+            if not stat.S_ISREG(visible.st_mode):
+                return
+            descriptor = os.open(
+                transcript,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                key = (opened.st_dev, opened.st_ino)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or key != (visible.st_dev, visible.st_ino)
+                    or key != (expected["device"], expected["inode"])
+                ):
+                    return
+                size = opened.st_size
+                if size <= checked_output_bytes:
+                    return
+                # Coalesce notifications before OS checks. The expected file
+                # identity comes from the descriptor the actual writer holds,
+                # never from this reader's first observation of a pathname.
+                checked_output_bytes = size
+                valid, _reason, current = validate_process_identity(
+                    identity,
+                    expected_pid=meta.get("worker_pid"),
+                    expected_pgid=meta.get("worker_pgid"),
+                    expected_run_id=target,
+                    env_index={},
+                )
+                visible_after = transcript.lstat()
+                if (
+                    not valid
+                    or current is None
+                    or current.ppid != event.get("dispatcher_pid")
+                    or not stat.S_ISREG(visible_after.st_mode)
+                    or key != (visible_after.st_dev, visible_after.st_ino)
+                ):
+                    return
+            finally:
+                os.close(descriptor)
+        except (OSError, RunMetaMutationError, ValueError):
+            return
+        on_poll({**meta, "transcript_bytes": size})
+
     try:
         rearm_interval = max(float(interval_seconds), 0.01)
     except (TypeError, ValueError):
@@ -4581,7 +4726,11 @@ def await_run(
     )
 
     while True:
-        signal = wait_for_run_signal(target, timeout=hard_cap)
+        signal = (
+            wait_for_run_signal(target, timeout=hard_cap, _on_event=observed_output)
+            if on_poll is not None
+            else wait_for_run_signal(target, timeout=hard_cap)
+        )
         kind = str(signal.get("kind") or "missing")
 
         runtime_meta_path = _runtime_run_dir(target) / "meta.json"

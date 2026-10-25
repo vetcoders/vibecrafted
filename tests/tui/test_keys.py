@@ -1,3 +1,6 @@
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -253,9 +256,10 @@ def test_install_launcher_dedupes_zshrc_path_entries_with_consent(
     vetcoders_install._install_launcher(repo_root, dry_run=False, update_rc=True)
 
     zshrc_content = zshrc.read_text(encoding="utf-8")
-    assert zshrc_content.count(path_line) == 1
-    assert zshrc_content.count("# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher") == 1
-    assert "$HOME/.local/bin" in zshrc_content
+    assert path_line not in zshrc_content
+    assert zshrc_content.count(vetcoders_install._user_rc_guest_line()) == 1
+    assert "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher" not in zshrc_content
+    assert "vibecrafted/shell/rc.sh" in zshrc_content
     assert ".vibecrafted/bin" not in zshrc_content
     launcher_bin = home / ".local" / "bin"
     canonical = launcher_bin / "vibecrafted"
@@ -338,7 +342,65 @@ def test_install_launcher_replaces_old_blind_local_bin_path(
 
     zshrc_content = zshrc.read_text(encoding="utf-8")
     assert 'export PATH="$HOME/.local/bin:$PATH"' not in zshrc_content.splitlines()
-    assert zshrc_content.count(vetcoders_install._launcher_path_line()) == 1
+    assert vetcoders_install._launcher_path_line() not in zshrc_content
+    assert zshrc_content.count(vetcoders_install._user_rc_guest_line()) == 1
+
+
+def test_install_launcher_wires_the_shell_guest_line_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The managed guest line is appended exactly once, never creates or
+    reorders the user's file, stages a live rc.sh, and returns the receipt of
+    what changed."""
+
+    home = tmp_path / "home"
+    repo_root = tmp_path / "repo"
+    launcher_src = repo_root / "scripts" / "vibecrafted"
+    rc_source = (
+        repo_root
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "shell"
+        / "rc.sh"
+    )
+    zshrc = home / ".zshrc"
+
+    launcher_src.parent.mkdir(parents=True)
+    launcher_src.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    rc_source.parent.mkdir(parents=True)
+    rc_source.write_text("# guest rc\n", encoding="utf-8")
+    home.mkdir()
+    original = '# user config\nexport PATH="$HOME/cargo/bin:$PATH"'
+    zshrc.write_text(original, encoding="utf-8")  # no trailing newline
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    _write_installed_runtime_deck(home)
+
+    line = vetcoders_install._user_rc_guest_line()
+    first = vetcoders_install._install_launcher(
+        repo_root, dry_run=False, update_rc=True
+    )
+
+    staged = home / ".config" / "vibecrafted" / "shell" / "rc.sh"
+    assert staged.read_bytes() == rc_source.read_bytes()
+    content = zshrc.read_text(encoding="utf-8")
+    assert content.startswith(original + "\n")
+    assert content.count(line) == 1
+    assert content.count(f"# {vetcoders_install._USER_RC_GUEST_COMMENT}") == 1
+    assert not (home / ".bashrc").exists()  # never create the user's rc file
+    actions = {(record["path"], record["action"]) for record in first}
+    assert (str(staged), "staged") in actions
+    assert (str(zshrc), "appended") in actions
+
+    second = vetcoders_install._install_launcher(
+        repo_root, dry_run=False, update_rc=True
+    )
+    assert zshrc.read_text(encoding="utf-8") == content
+    actions = {(record["path"], record["action"]) for record in second}
+    assert (str(staged), "current") in actions
+    assert (str(zshrc), "present") in actions
 
 
 def test_pipeline_category_describes_release_not_removed_ship_skill() -> None:
@@ -367,3 +429,111 @@ def test_app_installer_writes_deck_verb_wrappers() -> None:
         if name != "vc-start"
     }
     assert vetcoders_install._RUNTIME_WRAPPER_VERBS == expected
+
+
+@pytest.mark.parametrize("lane", ["install", "doctor", "manual"])
+def test_guest_entry_preserves_python_uv_winners_and_launcher_availability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, lane: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    config_home = home / ".config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    _write_installed_runtime_deck(home)
+    repo = tmp_path / "source"
+    source = repo / "vibecrafted-core/vibecrafted_core/runtime/shell/rc.sh"
+    source.parent.mkdir(parents=True)
+    shutil.copy2(
+        Path(__file__).resolve().parents[2]
+        / "vibecrafted-core/vibecrafted_core/runtime/shell/rc.sh",
+        source,
+    )
+    (repo / "scripts").mkdir()
+    (repo / "scripts/vibecrafted").write_text("#!/bin/sh\nexit 0\n")
+    preferred = home / "preferred"
+    preferred.mkdir()
+    local = home / ".local/bin"
+    local.mkdir(parents=True, exist_ok=True)
+    for directory, marker in [(preferred, "PREFERRED"), (local, "LOCAL")]:
+        for name in ["python3", "uv"]:
+            tool = directory / name
+            tool.write_text(f"#!/bin/sh\necho {marker}_{name}\n")
+            tool.chmod(0o755)
+    vc_tool = local / "vc-fixture-tool"
+    vc_tool.write_text("#!/bin/sh\necho VC_AVAILABLE\n")
+    vc_tool.chmod(0o755)
+    if lane == "doctor":
+        wrapper = local / "vibecrafted"
+        wrapper.write_text("#!/bin/sh\nexit 0\n")
+        wrapper.chmod(0o755)
+    original = f'# user config\nexport PATH="{preferred}:$PATH"\n'
+    rc = home / ".zshrc"
+    legacy = f"# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher\n{vetcoders_install._launcher_path_line()}\n"
+    rc.write_text(original + (legacy if lane != "manual" else ""))
+    vetcoders_install._stage_user_rc_guest(repo, dry_run=False)
+
+    def compose() -> None:
+        if lane == "doctor":
+            findings = vetcoders_install._doctor_fix_rc_files()
+            assert any(
+                f.component == "rc-fix:.zshrc" and f.level == "ok" for f in findings
+            )
+        else:
+            vetcoders_install._install_launcher(
+                repo, dry_run=False, update_rc=lane == "install"
+            )
+            output = capsys.readouterr().out
+            if lane == "manual":
+                instruction = (
+                    output.split(
+                        "Shell rc files unchanged. To expose launchers, add:\n", 1
+                    )[1]
+                    .splitlines()[0]
+                    .strip()
+                )
+                assert rc.read_text() == original
+                rc.write_text(original + instruction + "\n")
+
+    compose()
+    first = rc.read_text()
+    if lane != "manual":
+        compose()
+        assert rc.read_text() == first
+    result = subprocess.run(
+        [
+            "/bin/zsh",
+            "-d",
+            "-i",
+            "-c",
+            (
+                "command -v python3; python3; command -v uv; uv; vc-fixture-tool; "
+                'print -r -- "HOMEVAR=${PYTHONHOME-UNSET} PATHVAR=${PYTHONPATH-UNSET}"'
+            ),
+        ],
+        env={
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(config_home),
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": os.environ["TMPDIR"],
+            "TERM": "dumb",
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"{preferred}/python3" in result.stdout
+    assert f"{preferred}/uv" in result.stdout
+    assert "PREFERRED_python3" in result.stdout
+    assert "PREFERRED_uv" in result.stdout
+    assert "LOCAL_" not in result.stdout
+    assert "VC_AVAILABLE" in result.stdout
+    assert "HOMEVAR=UNSET PATHVAR=UNSET" in result.stdout
+    assert first.count(vetcoders_install._user_rc_guest_line()) == 1
+    assert vetcoders_install._launcher_path_line() not in first
+    cleaned = first
+    for line, comment in vetcoders_install._uninstall_rc_entries():
+        cleaned, _ = vetcoders_install._strip_rc_entry(cleaned, line, comment)
+    assert cleaned.rstrip() == original.rstrip()

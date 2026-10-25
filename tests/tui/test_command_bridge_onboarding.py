@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -217,3 +218,494 @@ def test_unknown_provider_and_surface_are_refused(homes: dict[str, Path]) -> Non
     with pytest.raises(ValueError, match="unknown surface"):
         cbo.admit("billing")
     assert not cbo.record_path().exists()
+
+
+def test_curated_file_route_is_diagnostic_only(tmp_path: Path) -> None:
+    policy = tmp_path / "terminal-policy.toml"
+    fonts = tmp_path / "Fonts"
+    fonts.mkdir()
+    assert cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts]) == []
+    assert (
+        cbo.proposed_font_family(policy_path=policy, font_dirs=[fonts])
+        == cbo.FALLBACK_FONT_FAMILY
+    )
+    (fonts / "MonaspaceXenonNF-Regular.otf").write_bytes(b"fixture")
+    variants = cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts])
+    assert [v.family for v in variants] == ["Monaspace Xenon NF"]
+    assert not variants[0].selectable and not variants[0].active
+    assert variants[0].face_styles == ("", "", "")
+    assert (
+        cbo.proposed_font_family(policy_path=policy, font_dirs=[fonts])
+        == cbo.FALLBACK_FONT_FAMILY
+    )
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            variants[0].family, policy_path=policy, font_dirs=[fonts]
+        )
+    assert not policy.exists()
+
+
+def test_preserving_ineligible_configured_family_is_read_only(tmp_path: Path) -> None:
+    policy = tmp_path / "terminal-policy.toml"
+    original = '[font.normal]\nfamily = "JetBrains Mono"\nstyle = "Custom"\n'
+    policy.write_text(original)
+    fonts = tmp_path / "Fonts"
+    fonts.mkdir()
+    # Arbitrary filename presence cannot prove fixed pitch.
+    (fonts / "JetBrainsMono.ttf").write_bytes(b"fixture")
+    (fonts / "MonaspaceXenonNF.ttf").write_bytes(b"fixture")
+    variants = cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts])
+    assert [v.family for v in variants] == ["Monaspace Xenon NF", "JetBrains Mono"]
+    current = variants[-1]
+    assert current.active and current.preserved_custom
+    assert not current.selectable and not current.font_file_present
+    assert (
+        cbo.proposed_font_family(policy_path=policy, font_dirs=[fonts])
+        == current.family
+    )
+    cbo.select_font_family(current.family, policy_path=policy, font_dirs=[fonts])
+    assert policy.read_text() == original
+
+
+def test_coretext_traits_order_dedupe_and_face_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    mono = 1 << 10
+    faces = [
+        cbo._FontFace("Fake Mono", "Regular", 0),
+        cbo._FontFace("Menlo", "Regular", mono),
+        cbo._FontFace("Menlo", "Bold", mono | 2),
+        cbo._FontFace("Menlo", "ExtraLight Italic", mono | 1),
+        cbo._FontFace("Menlo", "ExtraBold", mono | 2),
+        cbo._FontFace("Menlo", "Italic", mono | 1),
+        cbo._FontFace("menlo", "Regular", mono),
+        cbo._FontFace("Menlo", "Regular", mono),
+        cbo._FontFace("Monaspace Neon NF", "Regular", mono),
+        cbo._FontFace("Monaspace Xenon NF", "Regular", mono),
+        cbo._FontFace("Courier", "Regular", mono),
+        cbo._FontFace("Courier", "Proportional Italic", 1),
+    ]
+    monkeypatch.setattr(cbo, "_native_font_faces", lambda: list(reversed(faces)))
+    policy = tmp_path / "terminal-policy.toml"
+    original = (
+        "# retained\n[font]\nsize = 17.5\n[font.offset]\nx = -2\ny = -6\n"
+        '[font.normal]\nfamily = "Fake Mono"\nstyle = "Old"\n'
+        '[font.bold]\nfamily = "Fake Mono"\nstyle = "Demi" # retained style comment\n'
+        '[font.italic]\nfamily = "Fake Mono"\nstyle = "Oblique"\n'
+        "[window]\nopacity = 0.85\n"
+    )
+    policy.write_text(original)
+    variants = cbo.inspect_font_variants(policy_path=policy)
+    assert [v.family for v in variants if v.selectable] == [
+        "Monaspace Xenon NF",
+        "Monaspace Neon NF",
+        "Courier",
+        "Menlo",
+    ]
+    assert variants[-1].family == "Fake Mono" and not variants[-1].selectable
+    assert variants[-1].active and policy.read_text() == original
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family("Other Mono", policy_path=policy)
+    assert policy.read_text() == original
+    cbo.select_font_family("Menlo", policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
+        {"family": "Menlo", "style": style} for style in ("Regular", "Bold", "Italic")
+    ]
+    assert result["font"]["size"] == 17.5
+    assert result["font"]["offset"] == {"x": -2, "y": -6}
+    assert result["window"]["opacity"] == 0.85
+    assert "# retained style comment" in policy.read_text()
+    cbo.select_font_family("Courier", policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert all(
+        result["font"][key]["style"] == "Regular"
+        for key in ("normal", "bold", "italic")
+    )
+
+
+def test_native_catalogue_failure_refuses_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+
+    def fail() -> list[cbo._FontFace]:
+        raise cbo.OnboardingError("catalogue unavailable")
+
+    monkeypatch.setattr(cbo, "_native_font_faces", fail)
+    policy = tmp_path / "terminal-policy.toml"
+    policy.write_text('[font.normal]\nfamily = "Missing"\n')
+    before = policy.read_bytes()
+    with pytest.raises(cbo.OnboardingError):
+        cbo.select_font_family("Menlo", policy_path=policy)
+    assert policy.read_bytes() == before
+
+
+def test_non_macos_catalogue_is_deterministic_and_does_not_probe_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "linux")
+    monkeypatch.setattr(
+        cbo, "_native_font_faces", lambda: pytest.fail("native probe on Linux")
+    )
+    fonts = tmp_path / "Library" / "Fonts"
+    fonts.mkdir(parents=True)
+    (fonts / "MonaspaceXenonNF.ttf").write_bytes(b"fixture")
+    (fonts / "AnythingMono.ttf").write_bytes(b"fixture")
+    first = cbo.inspect_font_variants(home=tmp_path, policy_path=tmp_path / "policy")
+    assert first == cbo.inspect_font_variants(
+        home=tmp_path, policy_path=tmp_path / "policy"
+    )
+    assert [v.family for v in first] == ["Monaspace Xenon NF"]
+    assert not first[0].active and not first[0].selectable
+
+
+def test_select_font_family_refuses_missing_file_without_modifying_policy(
+    tmp_path: Path,
+) -> None:
+    policy = tmp_path / "terminal-policy.toml"
+    font_dir = tmp_path / "Fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+
+    initial_content = '[font.normal]\nfamily = "Spot Mono"\n'
+    policy.write_text(initial_content, encoding="utf-8")
+
+    # Trying to select Monaspace Argon NF when its file is not in font_dir raises FontNotAvailableError
+    with pytest.raises(cbo.FontNotAvailableError) as exc_info:
+        cbo.select_font_family(
+            "Monaspace Argon NF",
+            policy_path=policy,
+            font_dirs=[font_dir],
+        )
+
+    assert "Monaspace Argon NF" in str(exc_info.value)
+    # Policy file is completely untouched
+    assert policy.read_text(encoding="utf-8") == initial_content
+
+
+def test_select_font_family_updates_only_font_families_without_live_config_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
+
+    policy = tmp_path / "terminal-policy.toml"
+
+    policy.write_text(
+        """# Custom terminal policy comments
+[window]
+opacity = 0.95
+
+[font]
+size = 14.0
+
+[font.normal]
+family = "Spot Mono"
+style = "Regular"
+
+[font.bold]
+family = "Spot Mono"
+style = "Bold"
+
+[font.italic]
+family = "Spot Mono"
+style = "Italic"
+
+[colors]
+primary.background = "#1e1e1e"
+""",
+        encoding="utf-8",
+    )
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    assert 'family = "Monaspace Neon NF"' in result
+    assert "Spot Mono" not in result
+    assert "opacity = 0.95" in result
+    assert "size = 14.0" in result
+    assert 'primary.background = "#1e1e1e"' in result
+    assert "live_config_reload" not in result
+    assert cbo.read_configured_font_family(policy) == "Monaspace Neon NF"
+
+
+def test_select_font_family_preserves_existing_live_config_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
+
+    policy = tmp_path / "terminal-policy.toml"
+
+    initial = (
+        "live_config_reload = false\n\n"
+        '[font.normal]\nfamily = "Spot Mono"\nstyle = "Regular"\n\n'
+        '[font.bold]\nfamily = "Spot Mono"\nstyle = "Bold"\n\n'
+        '[font.italic]\nfamily = "Spot Mono"\nstyle = "Italic"\n'
+    )
+    policy.write_text(initial, encoding="utf-8")
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    parsed = tomllib.loads(result)
+    assert parsed.get("live_config_reload") is False
+    assert parsed["font"]["normal"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["bold"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["italic"]["family"] == "Monaspace Neon NF"
+    assert "live_config_reload = false" in result
+
+
+def test_select_font_family_preserves_commented_table_headers_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
+
+    policy = tmp_path / "terminal-policy.toml"
+
+    initial = (
+        "[font.normal] # primary font section\n"
+        'family = "Spot Mono"\n'
+        'style = "Regular"\n\n'
+        "[font.bold] # bold style\n"
+        'family = "Spot Mono"\n'
+        'style = "Bold"\n\n'
+        "[font.italic] # italic style\n"
+        'family = "Spot Mono"\n'
+        'style = "Italic"\n'
+    )
+    policy.write_text(initial, encoding="utf-8")
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    parsed = tomllib.loads(result)
+    assert parsed["font"]["normal"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["bold"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["italic"]["family"] == "Monaspace Neon NF"
+    assert "# primary font section" in result
+    assert "# bold style" in result
+    assert "# italic style" in result
+    assert result.count("[font.normal]") == 1
+    assert result.count("[font.bold]") == 1
+    assert result.count("[font.italic]") == 1
+
+
+def test_select_font_family_refuses_malformed_input_toml_without_modifying_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
+
+    policy = tmp_path / "terminal-policy.toml"
+
+    malformed = '[font.normal]\nfamily = "Spot Mono\ninvalid toml syntax [[['
+    policy.write_text(malformed, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="terminal-policy.toml is malformed"):
+        cbo.select_font_family(
+            "Monaspace Neon NF",
+            policy_path=policy,
+        )
+
+    assert policy.read_text(encoding="utf-8") == malformed
+
+
+def test_select_font_family_preserves_quoted_table_headers_and_escapes_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_execution_boundary(monkeypatch)
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo,
+        "_native_font_faces",
+        lambda: [
+            cbo._FontFace("Monaspace Neon NF", style, (1 << 10) | traits)
+            for style, traits in (("Regular", 0), ("Bold", 2), ("Italic", 1))
+        ],
+    )
+
+    policy = tmp_path / "terminal-policy.toml"
+
+    initial = (
+        '[ "font" . "normal" ] # quoted normal header\n'
+        'family = "Spot Mono"\n'
+        'style = "Regular"\n\n'
+        "[ 'font' . 'bold' ] # quoted bold header\n"
+        'family = "Spot Mono"\n'
+        'style = "Bold"\n\n'
+        '[ "font" . "italic" ]\n'
+        'family = "Spot Mono"\n'
+        'style = "Italic"\n'
+    )
+    policy.write_text(initial, encoding="utf-8")
+
+    cbo.select_font_family(
+        "Monaspace Neon NF",
+        policy_path=policy,
+    )
+
+    result = policy.read_text(encoding="utf-8")
+    parsed = tomllib.loads(result)
+    assert parsed["font"]["normal"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["bold"]["family"] == "Monaspace Neon NF"
+    assert parsed["font"]["italic"]["family"] == "Monaspace Neon NF"
+    assert '[ "font" . "normal" ] # quoted normal header' in result
+    assert "[ 'font' . 'bold' ] # quoted bold header" in result
+    assert '[ "font" . "italic" ]' in result
+    assert result.count("[font.normal]") == 0
+    assert result.count("[font.bold]") == 0
+    assert result.count("[font.italic]") == 0
+
+
+def test_genuine_quoted_family_and_style_comment_survive_policy_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    family = 'Founder\'s "Fixed"'
+    monkeypatch.setattr(
+        cbo, "_native_font_faces", lambda: [cbo._FontFace(family, "Book", 1 << 10)]
+    )
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        '[font.normal]\nfamily = "Old"\nstyle = "Old # Face" # keep this\n'
+    )
+    cbo.select_font_family(family, policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert all(
+        result["font"][key] == {"family": family, "style": "Book"}
+        for key in ("normal", "bold", "italic")
+    )
+    assert "# keep this" in policy.read_text()
+
+
+def test_explicit_current_eligible_family_harmonizes_other_faces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cbo, "_native_font_faces", lambda: [cbo._FontFace("Menlo", "Regular", 1 << 10)]
+    )
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        '[font.normal]\nfamily = "Menlo"\nstyle = "Wrong"\n[font.bold]\nfamily = "Other"\nstyle = "Demi"\n'
+    )
+    original = policy.read_bytes()
+    cbo.inspect_font_variants(policy_path=policy)
+    assert policy.read_bytes() == original
+    cbo.select_font_family("Menlo", policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert all(
+        result["font"][key] == {"family": "Menlo", "style": "Regular"}
+        for key in ("normal", "bold", "italic")
+    )
+
+
+@pytest.mark.parametrize("family", ["Monaspace Xenon NF", "Custom Fixed"])
+def test_unverified_files_never_authorize_selection_or_clobber_current_styles(
+    family: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "linux")
+    monkeypatch.setattr(cbo, "_native_font_faces", lambda: pytest.fail("native probe"))
+    fonts = tmp_path / "Fonts"
+    fonts.mkdir()
+    for name in ("MonaspaceXenonNF-Regular.otf", "CustomFixed-Bold.ttf"):
+        (fonts / name).write_bytes(b"not verified font metadata")
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        "[font]\nsize = 17.5\n[font.offset]\nx = -2\ny = -6\n"
+        + "".join(
+            f'[font.{key}]\nfamily = "{family}"\nstyle = "{style}"\n'
+            for key, style in (
+                ("normal", "Book"),
+                ("bold", "Bold"),
+                ("italic", "Italic"),
+            )
+        )
+    )
+    original = policy.read_bytes()
+    variants = cbo.inspect_font_variants(policy_path=policy, font_dirs=[fonts])
+    assert not any(v.selectable for v in variants)
+    assert next(v for v in variants if v.active).family == family
+    cbo.select_font_family(family, policy_path=policy, font_dirs=[fonts])
+    assert policy.read_bytes() == original
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            "Monaspace Neon NF", policy_path=policy, font_dirs=[fonts]
+        )
+    assert policy.read_bytes() == original
+    policy.unlink()
+    with pytest.raises(cbo.FontNotAvailableError):
+        cbo.select_font_family(
+            "Monaspace Xenon NF", policy_path=policy, font_dirs=[fonts]
+        )
+    assert not policy.exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_casefolded_family_merges_split_genuine_styles(
+    reverse: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cbo.sys, "platform", "darwin")
+    faces = [
+        cbo._FontFace("Example", "Book", 1 << 10),
+        cbo._FontFace("example", "Bold", (1 << 10) | 2),
+        cbo._FontFace("EXAMPLE", "Oblique", (1 << 10) | 1),
+        cbo._FontFace("Example", "Proportional Bold", 2),
+    ]
+    monkeypatch.setattr(
+        cbo, "_native_font_faces", lambda: faces[::-1] if reverse else faces
+    )
+    policy = tmp_path / "policy.toml"
+    variants = cbo.inspect_font_variants(policy_path=policy)
+    assert len(variants) == 1
+    assert variants[0].face_styles == ("Book", "Bold", "Oblique")
+    cbo.select_font_family(variants[0].family, policy_path=policy)
+    result = tomllib.loads(policy.read_text())
+    assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
+        {"family": variants[0].family, "style": style}
+        for style in ("Book", "Bold", "Oblique")
+    ]

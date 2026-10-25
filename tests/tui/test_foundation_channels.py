@@ -45,6 +45,9 @@ def _run_installer(
         "HOME": str(tmp_path / "home"),
         "PATH": ":".join([*map(str, path), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
         "TMPDIR": str(tmp_path),
+        # No test reaches GitHub: a missing uv falls back to pipx unless a test
+        # stages its own uv release.
+        "UV_RELEASE_BASE": f"file://{tmp_path / 'no-uv-release'}",
         **extra,
     }
     return subprocess.run(
@@ -456,6 +459,76 @@ def test_screenscribe_installs_from_pypi_through_pipx(
     ]
 
 
+def _uv_release(tmp_path: Path, *, checksum: str | None = None) -> Path:
+    """A file:// directory shaped like astral-sh/uv release assets for this host."""
+    target = {
+        ("Darwin", "arm64"): "aarch64-apple-darwin",
+        ("Darwin", "x86_64"): "x86_64-apple-darwin",
+        ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+        ("Linux", "aarch64"): "aarch64-unknown-linux-gnu",
+    }[(platform.system(), platform.machine())]
+    staged = tmp_path / "uv-staged" / f"uv-{target}"
+    _executable(
+        staged / "uv",
+        "#!/bin/sh\nset -eu\n"
+        'if [ "$1 $2" = "tool dir" ]; then\n'
+        '  dirname "$SCREENSCRIBE_BIN"\n'
+        'elif [ "$1 $2" = "tool install" ]; then\n'
+        '  printf "#!/bin/sh\\nexit 0\\n" > "$SCREENSCRIBE_BIN"\n'
+        '  chmod +x "$SCREENSCRIBE_BIN"\n'
+        "else\n  exit 2\nfi\n",
+    )
+    release = tmp_path / "uv-release"
+    release.mkdir()
+    asset = release / f"uv-{target}.tar.gz"
+    with tarfile.open(asset, "w:gz") as archive:
+        archive.add(staged, arcname=staged.name)
+    digest = checksum or hashlib.sha256(asset.read_bytes()).hexdigest()
+    (release / f"{asset.name}.sha256").write_text(f"{digest}  {asset.name}\n")
+    return release
+
+
+def test_a_clean_host_fetches_uv_to_install_screenscribe(tmp_path: Path) -> None:
+    # A clean Mac (2026-10-22): no brew, uv or pipx, system python3 3.9.
+    # `pip install --user pipx` landed outside PATH and 3.9 cannot run
+    # ScreenScribe, so the public install exited 1 with a working runtime.
+    release = _uv_release(tmp_path)
+    screenscribe = tmp_path / "provider-bin/screenscribe"
+    screenscribe.parent.mkdir()
+
+    result = _run_installer(
+        tmp_path,
+        "screenscribe",
+        path=[tmp_path / "bin"],
+        REQUIRE_FOUNDATIONS="1",
+        SCREENSCRIBE_BIN=str(screenscribe),
+        UV_RELEASE_BASE=f"file://{release}",
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert list((tmp_path / "home").rglob("tools/uv/bin/uv")), output
+    assert "Installing screenscribe from PyPI via uv" in output
+    assert screenscribe.exists()
+
+
+def test_a_uv_download_that_misses_its_sha256_is_refused(tmp_path: Path) -> None:
+    release = _uv_release(tmp_path, checksum="0" * 64)
+
+    result = _run_installer(
+        tmp_path,
+        "screenscribe",
+        path=[tmp_path / "bin"],
+        REQUIRE_FOUNDATIONS="1",
+        UV_RELEASE_BASE=f"file://{release}",
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, output
+    assert "does not match its sha256" in output
+    assert not list((tmp_path / "home").rglob("tools/uv/bin/uv"))
+
+
 @pytest.mark.parametrize("required", ["0", "1"])
 def test_uv_channel_failure_keeps_foundation_admission_explicit(
     tmp_path: Path, required: str
@@ -470,7 +543,7 @@ def test_uv_channel_failure_keeps_foundation_admission_explicit(
 
 
 def test_the_default_run_refuses_a_missing_foundation(tmp_path: Path) -> None:
-    # Maciej's decision (2026-10-06): the public channels (npm, GitHub
+    # Vetcoders decision (2026-10-06): the public channels (npm, GitHub
     # releases, PyPI) exist precisely so a missing foundation can hard-fail —
     # an install that "succeeds" without the product spine is the stale-
     # vendored-copy failure mode the channels were built to kill. No

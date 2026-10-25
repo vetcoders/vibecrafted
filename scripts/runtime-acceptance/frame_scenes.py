@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live vc-frame acceptance scenes over a real PTY client.
 
-Canon (2026-10-04, dragon):
+Canon (2026-10-04, host-b):
 - populated world: navigation scenes run with >=2 sessions; a verdict of
   "dead" taken from a single-element world is not a verdict;
 - every scene prints PASS/FAIL/WARN + one evidence line; exit != 0 on FAIL;

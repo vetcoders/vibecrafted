@@ -41,6 +41,7 @@ from .env_allowlist import (
     dispatcher_identity,
     filter_headless_worker_env,
     managed_provider_environment,
+    provider_launch_environment_receipt,
     provider_workspace_environment,
     visible_color_environment,
 )
@@ -1372,18 +1373,6 @@ def resolve_provider_policy(
             False,
             reason=f"junie {permissions} is interactive-only",
         )
-    if provider == "omp" and mode == "interactive":
-        # OMP is a headless worker (print/NDJSON lane). No interactive argv or
-        # resume builder exists, so advertising an interactive cell would be a
-        # receipted lie that fails later with "unsupported provider".
-        return ProviderPolicy(
-            provider,
-            runtime,
-            permissions,
-            mode,
-            False,
-            reason="omp is a headless-only worker: no interactive launch or resume lane",
-        )
     if (
         provider == "kimi"
         and mode == "headless"
@@ -1543,7 +1532,7 @@ def container_usage_capability(provider: str) -> ProviderUsageCapability:
 
 # Providers whose interactive CLI can re-open one exact native conversation.
 INTERACTIVE_RESUME_PROVIDERS = frozenset(
-    {"codex", "claude", "grok", "agy", "junie", "cursor"}
+    {"codex", "claude", "grok", "agy", "junie", "cursor", "omp"}
 )
 
 
@@ -1891,6 +1880,12 @@ def interactive_policy_command(
             ["--session-id", provider_session_id] if provider_session_id else []
         )
         return ["copilot", *flags, *session_flags, "-i", prompt]
+    if provider == "omp":
+        if continuity.mode == "bare-fork":
+            raise ValueError(
+                "omp native fork is unsupported; use fresh or interactive --resume"
+            )
+        return ["omp", *flags, prompt]
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -2183,7 +2178,7 @@ def interactive_workspace_command(
         native_session = _validated_continuity_id(
             native_session, label="native session"
         )
-        if provider not in {"codex", "claude", "grok", "agy", "junie", "cursor"}:
+        if provider not in {"codex", "claude", "grok", "agy", "junie", "cursor", "omp"}:
             raise ValueError(f"interactive native resume unsupported for {provider}")
         from .workflow import _worker_process_alive, find_run_for_identity_token
 
@@ -3074,6 +3069,8 @@ def launch_interactive_workspace(
             command[1:1] = ["--resume", "--session-id", native_session]
         elif provider == "cursor":
             pass  # interactive_policy_command already supplied the exact chat ID
+        elif provider == "omp":
+            command[1:1] = ["--resume", native_session]
         else:
             raise ValueError(f"interactive native resume unsupported for {provider}")
         provider_session_id = native_session
@@ -5902,6 +5899,7 @@ def write_meta(
         "liveness": "pid_pending",
         "model": model,
     }
+    payload.update(provider_launch_environment_receipt(agent, os.environ))
     requested = str(model_requested or model or "").strip()
     if requested:
         payload["model_requested"] = requested

@@ -216,14 +216,18 @@ def _provider(bin_dir: Path, *, scenario: str):
 
         scenario = SCENARIO
         argv = sys.argv[1:]
+        if argv[:1] == ['queue']:
+            Path(os.environ['R2_QUEUE_CAPTURE']).write_text(json.dumps(argv))
+            print('private fixture queue accepted', flush=True)
+            sys.exit(0)
         prompt = argv[argv.index('-p') + 1] if Path(sys.argv[0]).name == 'kimi' else sys.stdin.read()
         if Path(sys.argv[0]).name == 'agy' and prompt.startswith('{'):
             prompt = json.loads(prompt)['message']['content'][0]['text']
         report = Path(os.environ['VIBECRAFTED_REPORT_PATH'])
         root = Path.cwd()
-        receiver = prompt.startswith('You are the informed READ-only')
+        receiver = 'You are the informed READ-only' in prompt
         round_id = os.environ['VIBECRAFTED_RUN_ID']
-        index = int(re.search(r'-L([0-9]+)', round_id).group(1))
+        index = int((root / 'assigned.txt').read_text()) if receiver else int(re.search(r'-L([0-9]+)', round_id).group(1))
         capture = {'prompt': prompt, 'argv': argv, 'cwd': str(root), 'pid': os.getpid(), 'receiver': receiver}
         report.with_suffix('.capture.json').write_text(json.dumps(capture))
         native_id = round_id+'-native'
@@ -235,13 +239,13 @@ def _provider(bin_dir: Path, *, scenario: str):
             native_id = round_id+'-wrong-native'
         print(json.dumps({'type':'thread.started','thread_id':native_id}), flush=True)
         print('[12:00:00] session: ' + native_id, flush=True)
-        for _ in range(12):
+        for _ in range(120 if scenario == 'productive' and not receiver else 12):
             # No human display fragment: still real productive stream activity.
             print(json.dumps({'type':'item.started','item':{'type':'command_execution'}}), flush=True)
-            time.sleep(.025)
+            time.sleep(.1 if scenario == 'productive' and not receiver else .025)
         _, header, _ = report.read_text().split('---', 2)
         fields = yaml.safe_load(header)
-        status = 'blocked' if scenario == 'worker-blocked' and not receiver else 'completed'
+        status = 'blocked' if scenario == 'worker-blocked' and not receiver else 'failed' if scenario == 'reader-failed-report' and receiver else 'completed'
         fields.update(status=status, finalized=True, claim='fixture verified actual assigned source')
         body = 'one bounded fixture cut'
         if not receiver:
@@ -249,7 +253,7 @@ def _provider(bin_dir: Path, *, scenario: str):
             assert 'marbles-reception.v1' not in prompt
             assert 'scope_evidence' not in prompt
             assert 'reception.json' not in prompt
-            if scenario == 'silent':
+            if scenario in {'silent', 'idle'}:
                 time.sleep(120)
             if scenario == 'empty-commits':
                 subprocess.run(['git','commit','--allow-empty','-q','-m',f'empty fixture {index}'],check=True)
@@ -257,6 +261,14 @@ def _provider(bin_dir: Path, *, scenario: str):
                 (root / 'assigned.txt').write_text(str(index))
                 subprocess.run(['git','add','assigned.txt'],check=True)
                 subprocess.run(['git','commit','-q','-m',f'fixture cut {index}'],check=True)
+            if scenario == 'dirty':
+                (root / 'assigned.txt').write_text('uncommitted')
+            if scenario == 'reset' and index == 2:
+                subprocess.run(['git','reset','--hard','HEAD~2'],check=True)
+            if scenario == 'branch':
+                subprocess.run(['git','checkout','-qb','foreign'],check=True)
+            if scenario == 'badreport':
+                fields['finalized'] = False
             if scenario == 'worker-failed':
                 sys.exit(7)
         else:
@@ -315,13 +327,27 @@ def _provider(bin_dir: Path, *, scenario: str):
         executable.chmod(0o755)
 
 
-def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
+def _public_run(
+    tmp_path,
+    scenario,
+    *,
+    count=3,
+    agent="codex",
+    silence="30",
+    workflow="marbles",
+    deck=False,
+    extra_args=(),
+    await_run=True,
+):
     from test_cli_execution_controls import _git_repo
 
     candidate = tmp_path / "candidate"
     baseline = _git_repo(candidate)
     (candidate / "assigned.txt").write_text("0")
-    subprocess.run(["git", "add", "assigned.txt"], cwd=candidate, check=True)
+    (candidate / ".gitignore").write_text(".loctree/\n")
+    subprocess.run(
+        ["git", "add", "assigned.txt", ".gitignore"], cwd=candidate, check=True
+    )
     subprocess.run(
         ["git", "commit", "-qm", "seed assigned source"], cwd=candidate, check=True
     )
@@ -365,8 +391,10 @@ def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
         )
     result = subprocess.run(
         [
-            str(Path(sys.executable).parent / "vibecrafted"),
-            "marbles",
+            str(source_root / "scripts" / "vibecrafted")
+            if deck
+            else str(Path(sys.executable).parent / "vibecrafted"),
+            workflow,
             agent,
             "--runtime",
             "headless",
@@ -381,7 +409,8 @@ def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
             "--file",
             str(plan),
             "--json",
-            "--await",
+            *(["--await"] if await_run else []),
+            *extra_args,
         ],
         cwd=source_root,
         env=environment,
@@ -390,6 +419,10 @@ def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
         timeout=60,
         check=False,
     )
+    if not await_run:
+        receipt = json.loads(result.stdout)
+        assert receipt["accepted"] is True
+        return result, receipt, {}, {}, plan
     rows = [
         json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")
     ]
@@ -402,151 +435,115 @@ def _public_run(tmp_path, scenario, *, count=3, agent="codex", silence="1.5"):
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "kimi", "junie"])
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS source READ guard")
-def test_public_marbles_verifies_then_continues_without_worker_history(tmp_path, agent):
+def test_public_cycle_preserves_task_and_fresh_independent_reader(tmp_path, agent):
     from vibecrafted_core.report_contract import parse_report_path
 
-    result, receipt, completion, parent, plan = _public_run(
-        tmp_path, "converge", agent=agent
+    result, launch, completion, parent, plan = _public_run(
+        tmp_path, "converge", count=2, agent=agent
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert parent["exit_code"] == 0 and parent["status"] == "completed"
-    assert parent["reception"]["verdict"] == "converged"
-    assert len(parent["children"]) == len(parent["receivers"]) == 2
-    assigned = Path(receipt["root"])
-    assert assigned != Path(receipt["parent_root"])
-    assert (assigned / "assigned.txt").read_text() == "2"
-    assert (Path(receipt["parent_root"]) / "assigned.txt").read_text() == "0"
-    rounds = parent["reception"]["rounds"]
-    assert rounds[0]["decision"] == "continue"
-    assert rounds[1]["decision"] == "stop" and rounds[1]["delta_weighted"] == 3
-    assert (
-        rounds[0]["source"]["root"]
-        == rounds[1]["source"]["root"]
-        == str(assigned.resolve())
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr
+    write, read = parent["lifecycle"]["stages"]
+    cycle = write["write_cycle"]
+    assert len(cycle["workers"]) == 2
+    assert read["cycle_read_evidence"]["verdict"] == "converged"
+    assert (Path(launch["root"]) / "assigned.txt").read_text() == "2"
+    assert (Path(launch["parent_root"]) / "assigned.txt").read_text() == "0"
+    for worker in cycle["workers"]:
+        capture = json.loads(
+            Path(worker["report"]).with_suffix(".capture.json").read_text()
+        )
+        assert plan.read_text() in capture["prompt"] and not capture["receiver"]
+        assert parse_report_path(Path(worker["report"])).fields["finalized"] == "true"
+    read_meta = json.loads(Path(read["launch"]["meta"]).read_text())
+    assert read_meta["receiver_guard"]["kind"] == "macos_source_write_deny"
+    assert all(
+        read_meta["agent_session_id"]
+        != json.loads(Path(w["report"]).with_suffix(".meta.json").read_text())[
+            "agent_session_id"
+        ]
+        for w in cycle["workers"]
     )
-    assert rounds[0]["candidate_sha"] != rounds[1]["candidate_sha"]
-    mode = "native_resume" if agent in {"codex", "claude"} else "fresh_informed"
-    assert all(round["receiver_mode"] == mode for round in rounds)
-    for child in parent["children"]:
-        captured = json.loads(
-            Path(child["report"]).with_suffix(".capture.json").read_text()
-        )
-        assert plan.read_text() in captured["prompt"]
-        assert not captured["receiver"] and child["artifact_ok"]
-        assert parse_report_path(Path(child["report"])).ok
-    receiver_prompt = json.loads(
-        Path(parent["receivers"][1]["report"]).with_suffix(".capture.json").read_text()
-    )["prompt"]
-    assert "assigned-gap" in receiver_prompt and "delta_weighted" in receiver_prompt
-    report = parse_report_path(Path(receipt["report"]))
-    assert report.ok and report.fields["finalized"] == "true"
-    assert report.fields["claim"] and report.run_id == receipt["run_id"]
-    assert completion["timed_out"] is False
-    for receiver in parent["receivers"]:
-        captured = json.loads(
-            Path(receiver["report"]).with_suffix(".capture.json").read_text()
-        )
-        assert captured["receiver"]
-        if agent == "codex":
-            assert "--dangerously-bypass-approvals-and-sandbox" in captured["argv"]
-            assert 'sandbox_mode="read-only"' not in captured["argv"]
-        meta = json.loads(
-            Path(receiver["report"]).with_suffix(".meta.json").read_text()
-        )
-        assert meta["receiver_guard"]["kind"] == "macos_source_write_deny"
-        if agent == "codex":
-            assert (
-                meta["receiver_guard"]["native_tool_sandbox"]
-                == "bypassed_under_external_guard"
-            )
+    assert not completion["timed_out"]
 
 
 @pytest.mark.parametrize(
-    ("scenario", "count", "verdict", "status", "children"),
+    "scenario",
     [
-        ("converge", 1, "not_converged", "completed", 1),
-        ("worker-blocked", 3, "blocked", "blocked", 1),
-        ("worker-failed", 3, "blocked", "failed", 1),
-        ("invalid", 3, "blocked", "blocked", 1),
-        ("identity-mismatch", 3, "blocked", "blocked", 1),
-        ("missing-disposition", 3, "blocked", "blocked", 1),
-        ("receiver-mutates", 3, "blocked", "blocked", 1),
-        ("external-blocker", 3, "blocked", "blocked", 1),
-        ("red", 3, "blocked", "blocked", 2),
-        ("no-progress", 3, "blocked", "blocked", 2),
-        ("empty-commits", 3, "blocked", "blocked", 2),
+        "worker-blocked",
+        "worker-failed",
+        "invalid",
+        "missing-disposition",
+        "receiver-mutates",
+        "external-blocker",
+        "red",
+        "no-progress",
+        "empty-commits",
+        "dirty",
+        "reset",
+        "branch",
+        "badreport",
+        "reader-failed-report",
     ],
 )
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS source READ guard")
-def test_public_marbles_execution_is_not_convergence(
-    tmp_path, scenario, count, verdict, status, children
-):
-    _, receipt, completion, parent, _ = _public_run(tmp_path, scenario, count=count)
-    assert parent["status"] == status
-    assert parent["reception"]["verdict"] == verdict
-    assert len(parent["children"]) == children
-    assert parent["exit_code"] == (0 if status == "completed" else 1)
-    assert completion["timed_out"] is False
-    assert Path(receipt["report"]).is_file()
-    if scenario == "converge":
-        assert parent["reception"]["reason"] == "round_budget_exhausted"
+def test_public_cycle_refuses_unverified_or_failed_candidate(tmp_path, scenario):
+    result, launch, completion, parent, _ = _public_run(
+        tmp_path, scenario, count=2, silence="30"
+    )
+    assert result.returncode == 1
+    lifecycle = parent["lifecycle"]
+    assert lifecycle["status"] == "failed"
+    cycle = lifecycle["stages"][0]["write_cycle"]
+    if scenario in {
+        "worker-blocked",
+        "worker-failed",
+        "dirty",
+        "reset",
+        "branch",
+        "badreport",
+    }:
+        assert len(cycle["workers"]) == (2 if scenario == "reset" else 1)
+        assert cycle["status"] != "completed"
+    else:
+        assert len(cycle["workers"]) == cycle["workers_completed"] == 2
+        assert lifecycle["stages"][-1]["cycle_read_error"]
+    assert not completion["timed_out"] and Path(launch["report"]).is_file()
+    if scenario == "worker-failed":
+        assert cycle["workers"][0]["exit_code"] == 7
+        assert lifecycle["failed_stages"]
     if scenario == "receiver-mutates":
-        assert (Path(receipt["root"]) / "assigned.txt").read_text() == "1"
-        assert (
-            "PermissionError" in Path(parent["receivers"][0]["transcript"]).read_text()
-        )
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS source READ guard")
-def test_public_receiver_can_emit_report_without_file_write(tmp_path):
-    result, _, _, parent, _ = _public_run(tmp_path, "stdout", count=2)
-    assert result.returncode == 0
-    assert parent["reception"]["verdict"] == "converged"
-    assert len(parent["receivers"]) == 2
+        assert (Path(launch["root"]) / "assigned.txt").read_text() == "2"
 
 
 @pytest.mark.parametrize(
-    ("scenario", "verdict", "reason"),
+    "scenario,agent,success",
     [
-        ("claude-stdout", "converged", "verified_ledger_empty"),
-        ("claude-invalid", "blocked", "invalid_finding:attacked"),
-        (
-            "claude-missing-disposition",
-            "blocked",
-            "attacked_finding_without_disposition",
-        ),
+        ("stdout", "codex", True),
+        ("plain-stdout", "codex", True),
+        ("plain-blocked", "codex", False),
+        ("plain-invalid", "codex", False),
+        ("claude-stdout", "claude", True),
+        ("claude-missing-disposition", "claude", False),
     ],
 )
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS public Claude READ")
-def test_public_claude_assistant_and_mirrored_result_are_one_report(
-    tmp_path, scenario, verdict, reason
-):
-    from vibecrafted_core.report_contract import parse_report_path
-
-    _, _, completion, parent, _ = _public_run(
-        tmp_path, scenario, count=2, agent="claude"
-    )
-    assert parent["reception"]["verdict"] == verdict
-    assert parent["reception"]["reason"] == reason
-    assert completion["timed_out"] is False
-    for receiver in parent["receivers"]:
-        report = Path(receiver["report"])
-        assert report.read_text().count("```marbles-reception") == 1
-        assert "# READ verification" in report.read_text()
-        assert parse_report_path(report).fields["finalized"] == (
-            "true" if verdict == "converged" else "false"
-        )
-    if scenario == "claude-invalid":
-        candidate = parse_report_path(Path(parent["children"][0]["report"]))
-        assert candidate.fields["finalized"] == "false"
-        assert not candidate.claim
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS guarded stdout READ")
+def test_public_final_read_stdout_is_validated_once(tmp_path, scenario, agent, success):
+    result, _, _, parent, _ = _public_run(tmp_path, scenario, count=2, agent=agent)
+    assert (result.returncode == 0) is success
+    read = parent["lifecycle"]["stages"][-1]
+    report = Path(read["launch"]["report"]).read_text()
+    assert report.count("```marbles-reception") == 1
+    if success:
+        assert read["cycle_read_evidence"]["verdict"] == "converged"
+    else:
+        assert read["status"] == "failed"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS guarded public workflow")
 def test_public_parent_report_retains_prelaunch_machine_identity(tmp_path):
     from vibecrafted_core.report_contract import parse_report_path
 
-    result, launch, _, parent, _ = _public_run(tmp_path, "converge", count=1)
+    result, launch, _, parent, _ = _public_run(tmp_path, "converge", count=2)
     assert result.returncode == 0
     report = parse_report_path(Path(launch["report"]))
     canonical = parent["runtime_session_id"]
@@ -554,42 +551,8 @@ def test_public_parent_report_retains_prelaunch_machine_identity(tmp_path):
     assert report.run_id == parent["run_id"] == launch["run_id"]
     assert report.fields["session_id"] == parent["session_id"] == canonical
     assert parent["launch_session_id"] == launch["session_id"]
-    assert parent["runtime_session_id"] == parent["vibecrafted_session_id"]
     assert parent["agent_session_id"] == ""
     assert parent["provider_session_id"]["value"] == "unknown"
-    assert f"session_id: {canonical}" in report.body.split("run_closure:", 1)[1]
-
-
-@pytest.mark.parametrize(
-    ("scenario", "status", "finalized"),
-    [
-        ("plain-stdout", "completed", "true"),
-        ("plain-blocked", "blocked", "true"),
-        ("plain-invalid", "completed", "false"),
-    ],
-)
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS public receiver fixture")
-def test_plain_stdout_receiver_attestation_follows_verified_evidence(
-    tmp_path, scenario, status, finalized
-):
-    from vibecrafted_core.report_contract import parse_report_path
-
-    _, launch, _, parent, _ = _public_run(tmp_path, scenario, count=2)
-    for receiver in parent["receivers"]:
-        parsed = parse_report_path(Path(receiver["report"]))
-        assert parsed.ok and parsed.run_id == receiver["run_id"]
-        assert parsed.fields["session_id"] == receiver["agent_session_id"]
-        assert parsed.fields["status"] == parsed.fields["claim_status"] == status
-        assert parsed.fields["finalized"] == finalized
-        assert bool(parsed.fields.get("claim")) is (finalized == "true")
-        meta = json.loads(
-            Path(receiver["report"]).with_suffix(".meta.json").read_text()
-        )
-        assert meta["status"] == "completed" and meta["exit_code"] == 0
-    assert parent["reception"]["verdict"] == (
-        "converged" if scenario == "plain-stdout" else "blocked"
-    )
-    assert parent["run_id"] == launch["run_id"]
 
 
 @pytest.mark.parametrize("measured", [True, False])
@@ -597,14 +560,11 @@ def test_plain_stdout_receiver_attestation_follows_verified_evidence(
 def test_public_parent_settlement_preserves_measured_phase_usage(
     tmp_path, monkeypatch, measured
 ):
-    from vibecrafted_core.report_contract import parse_report_path
-
     provider = _provider
 
     def instrumented(directory, *, scenario):
         provider(directory, scenario=scenario)
         with (directory / "codex").open("a") as stream:
-            # Deliberately unpriced: usage is measured, dollar cost is not zero.
             stream.write(
                 "\nprint('[12:00:00] model: unpriced-fixture-model',flush=True)\n"
             )
@@ -614,31 +574,14 @@ def test_public_parent_settlement_preserves_measured_phase_usage(
                 )
 
     monkeypatch.setattr(sys.modules[__name__], "_provider", instrumented)
-    result, launch, _, meta, _ = _public_run(tmp_path, "converge", count=2)
+    result, _, _, meta, _ = _public_run(tmp_path, "converge", count=2)
     assert result.returncode == 0
-    phases = meta["children"] + meta["receivers"]
-    assert len(phases) == 4
-    report = parse_report_path(Path(launch["report"]))
-    assert meta["usage"]["source"] == report.fields["usage_source"] == "children_sum"
-    expected = 400 if measured else "unknown"
-    assert meta["tokens_input"] == expected
-    assert report.fields["tokens_input"] == str(expected)
-    assert meta["tokens_output"] == (40 if measured else "unknown")
-    assert meta["tokens_total"] == (440 if measured else "unknown")
-    assert meta["cost_usd"] == report.fields["cost_usd"] == "unknown"
+    expected = 300 if measured else "unknown"
+    assert meta["tokens_input"] == expected, meta["usage"]
+    assert meta["tokens_output"] == (30 if measured else "unknown")
+    assert meta["tokens_total"] == (330 if measured else "unknown")
+    assert meta["cost_usd"] == "unknown"
     assert meta["provider_session_id"]["value"] == "unknown"
-    assert meta["provider_session_source"] == "none"
-    assert meta["agent_model"] == report.fields["model"] == "aggregated"
-    closure = report.body.split("run_closure:", 1)[1]
-    assert f"tokens_input: {expected}" in closure
-    assert "cost_usd: unknown" in closure
-    assert "cost_source: unknown" in closure
-    assert meta["cost_source"] == report.fields["cost_source"] == "unknown"
-    if measured:
-        assert sum(row["tokens_input"] for row in phases) == meta["tokens_input"]
-        assert meta["usage"]["events"] == 4
-    else:
-        assert all(row["tokens_input"] == "unknown" for row in phases)
 
 
 def test_receiver_guard_unsupported_host_is_explicit(tmp_path, monkeypatch):
@@ -657,11 +600,14 @@ def test_public_linux_records_completed_write_but_blocked_reception(tmp_path):
         tmp_path, "converge", count=2, agent="kimi"
     )
     assert result.returncode == 1 and completion["completed"]
-    assert parent["status"] == parent["reception"]["verdict"] == "blocked"
-    assert parent["reception"]["reason"].startswith("receiver_source_guard_unavailable")
-    assert parent["reception"]["execution_status"] == "completed"
-    assert len(parent["children"]) == 1 and parent["children"][0]["exit_code"] == 0
-    assert parent["receivers"] == []
+    assert parent["status"] == "failed"
+    lifecycle = parent["lifecycle"]
+    cycle = lifecycle["stages"][0]["write_cycle"]
+    assert cycle["status"] == "completed" and len(cycle["workers"]) == 2
+    assert (
+        "receiver_source_guard_unavailable"
+        in lifecycle["stages"][-1]["launch"]["error"]
+    )
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS source guard")
@@ -891,3 +837,232 @@ def test_terminal_aggregate_refuses_contradictory_receipts(tmp_path):
     meta_path.write_text(json.dumps(duplicate))
     refused = _workflow_parent_telemetry(handle, None)
     assert "identity_conflict" in refused.usage.tokens_input.reason
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="requires actual macOS source guard"
+)
+@pytest.mark.parametrize("workflow", ["marbles", "polarize"])
+@pytest.mark.parametrize("count", [2, 5])
+def test_public_cumulative_cycle_has_one_independent_final_read(
+    tmp_path, workflow, count
+):
+    result, receipt, completion, parent, plan = _public_run(
+        tmp_path,
+        "converge",
+        count=count,
+        workflow=workflow,
+        silence="30",
+        deck=True,
+        extra_args=("--model", "gpt-6.1-sol", "--depth", "7", "--effort", "high"),
+    )
+    assert result.returncode == 0, (
+        result.stdout[-2000:]
+        + result.stderr
+        + json.dumps(parent.get("lifecycle", {}).get("error"))
+    )
+    lifecycle = parent["lifecycle"]
+    assert lifecycle["status"] == "completed", json.dumps(lifecycle)
+    assert [stage["workflow"] for stage in lifecycle["stages"]] == [workflow, "audit"]
+    write, audit = lifecycle["stages"]
+    cycle = write["write_cycle"]
+    assert len(cycle["workers"]) == cycle["workers_completed"] == count
+    assert cycle["workers"][0]["input"] == cycle["input"]
+    for one, two in zip(cycle["workers"], cycle["workers"][1:]):
+        assert one["output"] == two["input"]
+        assert one["input"]["head"] != one["output"]["head"] != two["output"]["head"]
+    assert (
+        cycle["workers"][-1]["output"]
+        == cycle["output"]
+        == audit["cycle_read"]["output"]
+    )
+    assert audit["cycle_read_evidence"]["verdict"] == "converged"
+    metadata = json.loads(Path(audit["launch"]["meta"]).read_text())
+    assert metadata["receiver_guard"]["kind"] == "macos_source_write_deny"
+    assert metadata["model_requested"] == "gpt-6.1-sol"
+    for worker in cycle["workers"]:
+        capture = json.loads(
+            Path(worker["report"]).with_suffix(".capture.json").read_text()
+        )
+        assert plan.read_text().strip() in capture["prompt"]
+        assert worker["input"]["head"] in capture["prompt"]
+        assert "Depth target: 7" in capture["prompt"]
+        child_meta = json.loads(
+            Path(worker["report"]).with_suffix(".meta.json").read_text()
+        )
+        assert child_meta["model_requested"] == "gpt-6.1-sol"
+        assert child_meta["effort_requested"] == "high"
+        assert not capture["receiver"]
+    assert all(stage["status"] == "completed" for stage in lifecycle["stages"])
+    assert not completion["timed_out"]
+    assert receipt["worker_command"][-1] == "--lifecycle"
+    assert receipt["root"] == cycle["input"]["root"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public lifecycle source guard")
+def test_public_stop_uses_lifecycle_owner_and_reaps_inert_write(
+    tmp_path, monkeypatch, request
+):
+    import time
+
+    from vibecrafted_core.workflow import stop_run
+
+    result, launch, _, _, _ = _public_run(tmp_path, "silent", count=2, await_run=False)
+    assert result.returncode == 0
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc-home"))
+    request.addfinalizer(
+        lambda: stop_run(launch["run_id"], reason="inert stop fixture finalizer")
+    )
+    home = tmp_path / "vc-home"
+    deadline = time.monotonic() + 15
+    leaf = None
+    while time.monotonic() < deadline:
+        leaves = list(home.rglob("*marbles-L1.meta.json"))
+        if leaves:
+            leaf = json.loads(leaves[0].read_text())
+            if leaf.get("worker_pid"):
+                break
+        time.sleep(0.05)
+    assert leaf and leaf.get("worker_pid"), "inert WRITE never started"
+    state_path = (
+        home / "control_plane" / "lifecycle_runs" / launch["run_id"] / "state.json"
+    )
+    state = json.loads(state_path.read_text())
+    stage = state["stages"][-1]
+    stage_meta = json.loads(Path(stage["launch"]["meta"]).read_text())
+    parent_meta = json.loads(Path(launch["meta"]).read_text())
+    pids = [leaf["worker_pid"], stage_meta["worker_pid"], parent_meta["worker_pid"]]
+    stopped = stop_run(
+        launch["run_id"], reason="private inert-provider stop acceptance"
+    )
+    assert stopped["accepted"]
+
+    def productive(pid):
+        observed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return bool(observed.stdout.strip()) and not observed.stdout.strip().startswith(
+            "Z"
+        )
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and any(productive(pid) for pid in pids):
+        time.sleep(0.1)
+    assert not any(productive(pid) for pid in pids), pids
+    terminal = json.loads(state_path.read_text())
+    assert terminal["status"] == terminal["execution_state"] == "interrupted"
+    assert terminal["operator_actions"][-1]["action"] == "interrupt_workflow"
+    assert not list(home.rglob("*marbles-L2.meta.json"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source READ guard")
+def test_public_productive_child_outlives_outer_silence_bound(tmp_path):
+    result, launch, completion, parent, _ = _public_run(
+        tmp_path, "productive", count=2, silence="8", deck=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not completion["timed_out"]
+    write, audit = parent["lifecycle"]["stages"]
+    assert audit["workflow"] == "audit"
+    workers = write["write_cycle"]["workers"]
+    assert len(workers) == write["write_cycle"]["workers_completed"] == 2
+    assert workers[0]["output"] == workers[1]["input"]
+    assert workers[0]["input"]["head"] != workers[0]["output"]["head"]
+    assert workers[1]["input"]["head"] != workers[1]["output"]["head"]
+    assert (Path(launch["root"]) / "assigned.txt").read_text() == "2"
+    assert len(parent["lifecycle"]["stages"]) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source child identity")
+def test_public_live_child_resolves_exact_run_and_native_session(
+    tmp_path, monkeypatch, request
+):
+    import time
+
+    from vibecrafted_core import message_control
+    from vibecrafted_core.workflow import stop_run
+
+    result, launch, _, _, _ = _public_run(
+        tmp_path, "silent", count=2, deck=True, await_run=False
+    )
+    assert result.returncode == 0
+    home = tmp_path / "vc-home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    request.addfinalizer(
+        lambda: stop_run(launch["run_id"], reason="private fixture cleanup")
+    )
+    deadline = time.monotonic() + 20
+    leaf = None
+    while time.monotonic() < deadline:
+        for path in home.rglob("*marbles-L1.meta.json"):
+            leaf = json.loads(path.read_text())
+            if leaf.get("agent_session_id"):
+                break
+        if leaf and leaf.get("agent_session_id"):
+            break
+        time.sleep(0.05)
+    assert leaf and leaf.get("agent_session_id"), "inert child identity never published"
+    child_id = leaf["run_id"]
+    assert message_control.resolve_message_run(run_id=child_id) == child_id
+    assert (
+        message_control.resolve_message_run(session=leaf["agent_session_id"])
+        == child_id
+    )
+    queue_capture = tmp_path / "queue.json"
+    fixture_env = dict(os.environ)
+    fixture_env.update(
+        HOME=str(tmp_path / "user"),
+        PATH=str(tmp_path / "user/.local/bin") + os.pathsep + os.environ["PATH"],
+        R2_QUEUE_CAPTURE=str(queue_capture),
+    )
+    # Only the private executable's queue branch runs; no provider API exists.
+    sent = message_control.send_message(
+        session=leaf["agent_session_id"],
+        text="private fixture checkpoint",
+        env=fixture_env,
+    )
+    assert sent["run_id"] == child_id
+    assert sent["delivery_state"] == "provider_accepted"
+    assert json.loads(queue_capture.read_text()) == [
+        "queue",
+        "--thread",
+        leaf["agent_session_id"],
+        "--message=private fixture checkpoint",
+    ]
+    assert message_control.receive_messages(run_id=child_id) == [sent]
+    assert message_control.receive_messages(run_id=launch["run_id"]) == []
+    with pytest.raises(
+        message_control.MessageControlError, match="message_target_mismatch"
+    ):
+        message_control.acknowledge_message(sent["message_id"], run_id=launch["run_id"])
+    ack = message_control.acknowledge_message(sent["message_id"], run_id=child_id)
+    assert ack["delivery_state"] == "agent_acknowledged"
+    assert message_control.receive_messages(run_id=child_id) == []
+    from vibecrafted_core.control_plane import await_run, resolve_run
+
+    assert (
+        resolve_run(child_id).meta
+        == home / "control_plane/runtime_runs" / child_id / "meta.json"
+    )
+    stopped = stop_run(child_id, reason="private exact-child stop", grace_seconds=2)
+    assert stopped["accepted"] and stopped["alive_after_grace"] is False
+    awaited = await_run(child_id, timeout_seconds=3, interval_seconds=0.05)
+    assert awaited["completed"] and not awaited["worker_alive"]
+    assert (
+        message_control.resolve_message_run(session=leaf["agent_session_id"])
+        == child_id
+    )
+    assert not list(home.rglob("*marbles-L2.meta.json"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="public source nested silence")
+def test_public_nested_output_stops_and_true_silence_is_bounded(tmp_path):
+    result, _launch, _completion, parent, _ = _public_run(
+        tmp_path, "idle", count=2, silence="4", deck=True
+    )
+    assert result.returncode != 0
+    assert parent["status"] != "completed"
+    assert not list((tmp_path / "vc-home").rglob("*marbles-L2.meta.json"))

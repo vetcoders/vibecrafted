@@ -29,6 +29,32 @@ from vibecrafted_core.lifecycle_runner import (
 )
 from vibecrafted_core.workflows.model import WorkflowManifest, WorkflowStage
 
+
+def test_stage_progress_forwards_only_exact_growing_raw_transcript(monkeypatch, capsys):
+    from vibecrafted_core import lifecycle_runner
+
+    launch = {"run_id": "owned-stage", "transcript": "/private-fixture/raw.log"}
+
+    def awaiter(payload, *, on_poll, **_kwargs):
+        for run in [
+            {**launch, "transcript_bytes": 10},
+            {**launch, "transcript_bytes": 10, "heartbeat_at": "later"},
+            {**launch, "transcript_bytes": 9},
+            {**launch, "transcript_bytes": 999, "run_id": "sibling"},
+            {**launch, "transcript_bytes": 999, "transcript": "/unrelated"},
+            {**launch, "transcript_bytes": True},
+            {**launch, "transcript_bytes": 20},
+        ]:
+            on_poll(run)
+        return {"completed": True}
+
+    monkeypatch.setattr(lifecycle_runner, "await_launch_truth", awaiter)
+    assert LifecycleRunner._await_stage(launch) == {"completed": True}
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [row["bytes"] for row in rows] == [10, 20]
+    assert all(row["child_run_id"] == "owned-stage" for row in rows)
+
+
 from .lifecycle_schema_assertions import (
     assert_lifecycle_state_matches_packaged_schema,
     assert_worker_report_frontmatter_matches_packaged_schema,
@@ -63,6 +89,106 @@ def _init_read_stage_repo(root: Path) -> Path:
         capture_output=True,
     )
     return tracked
+
+
+def _with_counted_cycle_fixture(launcher, root):
+    """Abstract stage launchers still return the counted-stage artifact contract."""
+    from vibecrafted_core.marbles_reception import tree_receipt
+
+    cycle = None
+
+    def launch(spec, source):
+        nonlocal cycle
+        if spec.skill in {"marbles", "polarize"} and not (root / ".git").exists():
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_text("*\n")
+            subprocess.run(
+                ["git", "-C", str(root), "add", "-f", ".gitignore"], check=True
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+        payload = launcher(spec, source)
+        if spec.skill in {"marbles", "polarize"}:
+            tree = tree_receipt(str(root))
+            cycle = {
+                "schema": "vibecrafted.write-cycle.v1",
+                "root": str(root.resolve()),
+                "run_id": payload["run_id"],
+                "workflow": spec.skill,
+                "status": "completed",
+                "count": spec.count or 3,
+                "input": tree,
+                "output": tree,
+                "workers_completed": spec.count or 3,
+                "workers": [
+                    {
+                        "index": n,
+                        "input": tree,
+                        "output": tree,
+                        "status": "completed",
+                        "run_id": f"{payload['run_id']}-W{n}",
+                        "report": payload["report"],
+                        "exit_code": 0,
+                        "artifact_ok": True,
+                    }
+                    for n in range(1, (spec.count or 3) + 1)
+                ],
+            }
+            Path(payload["meta"]).write_text(
+                json.dumps(
+                    {
+                        "run_id": payload["run_id"],
+                        "skill": spec.skill,
+                        "write_cycle": cycle,
+                    }
+                )
+            )
+        elif cycle is not None and spec.source_readonly:
+            data = {
+                "schema": "vibecrafted.marbles-reception.v1",
+                "candidate_run_id": cycle["run_id"],
+                "candidate_sha": cycle["output"]["head"],
+                "root": str(root.resolve()),
+                "scope_verified": True,
+                "scope_evidence": "abstract stage fixture verified",
+                "gate": "pass",
+                "blocker": "",
+                "checks": [
+                    {
+                        "command": "fixture gate",
+                        "exit_code": 0,
+                        "evidence": "verified fixture",
+                    }
+                ],
+                **{
+                    key: []
+                    for key in (
+                        "attacked",
+                        "resolved",
+                        "still_open",
+                        "discovered",
+                        "regressions",
+                    )
+                },
+            }
+            with Path(payload["report"]).open("a") as report:
+                report.write("\n```marbles-reception\n" + json.dumps(data) + "\n```\n")
+        return payload
+
+    return launch
 
 
 def _write_read_stage_report(path: Path, *, run_id: str, code_mutation: str) -> None:
@@ -107,7 +233,7 @@ def test_lifecycle_runner_honors_reserved_parent_run_id(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -159,7 +285,7 @@ def test_lifecycle_runner_preserves_terminal_stage_failure(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": False,
             "artifact_ok": False,
@@ -222,7 +348,10 @@ def test_lifecycle_runner_triggers_audit_after_marbles(
             "report": payload["report"],
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -244,7 +373,11 @@ def test_lifecycle_runner_triggers_audit_after_marbles(
     assert (
         state["supervisor"] == "vibecrafted_core.lifecycle_runner.LifecycleSupervisor"
     )
-    assert state["human_controls"] == ["interrupt_workflow", "force_audit"]
+    assert state["human_controls"] == [
+        "approve_transition",
+        "interrupt_workflow",
+        "force_audit",
+    ]
     assert state["baton"]["from_stage"] == "audit"
     assert state["baton"]["next_stage"] == ""
     assert [stage["phase"] for stage in state["stages"]] == ["write", "read"]
@@ -285,7 +418,7 @@ def test_lifecycle_runner_propagates_polarize_loop_options(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -306,7 +439,7 @@ def test_lifecycle_runner_propagates_polarize_loop_options(
         )
     )
 
-    assert loop_options == [("polarize", 2, 4)]
+    assert loop_options == [("polarize", 2, 4), ("audit", None, None)]
     assert state["status"] == "completed"
 
 
@@ -337,7 +470,10 @@ def test_lifecycle_runner_stamps_packaged_schema_contract(
             "report": payload["report"],
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -420,7 +556,10 @@ def test_lifecycle_runner_honours_worker_requested_next_stage(
             result["next_stage"] = next(steering, "")
         return result
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -478,7 +617,10 @@ def test_lifecycle_runner_hands_baton_to_worker_requested_next_agent(
             result["next_agent"] = "chatgpt"
         return result
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -565,7 +707,10 @@ def test_lifecycle_runner_stage_agent_pin_overrides_baton_holder(
             "report": payload["report"],
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -616,7 +761,10 @@ def test_lifecycle_runner_stage_cap_stops_runaway_steering(
             "next_stage": "marbles",
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -870,7 +1018,10 @@ def test_lifecycle_runner_validated_report_reaches_finalized_snapshot(
         }
 
     state = asyncio.run(
-        LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter).run(
+        LifecycleRunner(
+            launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+            awaiter=fake_awaiter,
+        ).run(
             LifecycleRunSpec(
                 workflow_id="vc-implement",
                 agent="codex",
@@ -921,7 +1072,10 @@ def test_read_stage_detects_mutation_to_preexisting_dirty_file(
     def fake_awaiter(payload):
         return {"completed": True, "artifact_ok": True, "report": payload["report"]}
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -1021,7 +1175,10 @@ def test_read_stage_attribution_uses_worker_claim_not_global_delta(
         }
 
     state = asyncio.run(
-        LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter).run(
+        LifecycleRunner(
+            launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+            awaiter=fake_awaiter,
+        ).run(
             LifecycleRunSpec(
                 workflow_id="vc-dou",
                 agent="codex",
@@ -1185,7 +1342,10 @@ def test_lifecycle_runner_records_commits_created_during_stage(
             "report": payload["report"],
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -1232,7 +1392,10 @@ def test_lifecycle_runner_records_worker_reported_dou_index(
             "dou_index": 4,
         }
 
-    runner = LifecycleRunner(launcher=fake_launcher, awaiter=fake_awaiter)
+    runner = LifecycleRunner(
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
+        awaiter=fake_awaiter,
+    )
     state = asyncio.run(
         runner.run(
             LifecycleRunSpec(
@@ -1457,56 +1620,49 @@ def test_single_stage_wrapper_uses_canonical_launch(
     assert json.loads(capsys.readouterr().out)["run_id"] == "alias-test"
 
 
-def test_vc_marbles_wrapper_uses_lifecycle_runner_with_loop_options(
-    monkeypatch, tmp_path: Path
-) -> None:
-    captured: list[LifecycleRunSpec] = []
+@pytest.mark.parametrize("skill", ["marbles", "polarize"])
+def test_counted_wrapper_uses_public_lifecycle_owner_with_loop_options(
+    monkeypatch, tmp_path, skill
+):
+    from vibecrafted_core.workflow import build_launch_command
 
-    def fake_run_lifecycle(spec: LifecycleRunSpec):
+    _init_read_stage_repo(tmp_path)
+    captured = []
+
+    def launch(spec, _):
         captured.append(spec)
         return {
-            "run_id": "life-marbles-test",
-            "workflow": spec.workflow_id,
-            "status": "launching",
-            "state_path": str(tmp_path / "state.json"),
-            "report_path": str(tmp_path / "report.md"),
+            "accepted": True,
+            "run_id": "inert-wrapper",
+            "agent": spec.agent,
+            "skill": spec.skill,
         }
 
-    monkeypatch.setattr(
-        "vibecrafted_core.lifecycle_runner.run_lifecycle", fake_run_lifecycle
+    monkeypatch.setattr(cli, "launch_workflow", launch)
+    assert (
+        getattr(wrappers, skill + "_main")(
+            [
+                "codex",
+                "--repo",
+                str(tmp_path),
+                "--prompt",
+                "bounded fixture",
+                "--count",
+                "5",
+                "--depth",
+                "7",
+                "--model",
+                "gpt-6.1-sol",
+            ]
+        )
+        == 0
     )
-    rc = wrappers.marbles_main(["codex", "--count", "5", "--depth", "7"])
-
-    assert rc == 0
-    assert captured[0].workflow_id == "vc-marbles"
-    assert captured[0].count == 5
-    assert captured[0].depth == 7
-
-
-def test_vc_polarize_wrapper_uses_lifecycle_runner_with_loop_options(
-    monkeypatch, tmp_path: Path
-) -> None:
-    captured: list[LifecycleRunSpec] = []
-
-    def fake_run_lifecycle(spec: LifecycleRunSpec):
-        captured.append(spec)
-        return {
-            "run_id": "life-polarize-test",
-            "workflow": spec.workflow_id,
-            "status": "launching",
-            "state_path": str(tmp_path / "state.json"),
-            "report_path": str(tmp_path / "report.md"),
-        }
-
-    monkeypatch.setattr(
-        "vibecrafted_core.lifecycle_runner.run_lifecycle", fake_run_lifecycle
-    )
-    rc = wrappers.polarize_main(["codex", "--count", "5", "--depth", "7"])
-
-    assert rc == 0
-    assert captured[0].workflow_id == "vc-polarize"
-    assert captured[0].count == 5
-    assert captured[0].depth == 7
+    spec = captured[0]
+    assert spec.skill == skill and spec.count == 5 and spec.depth == 7
+    assert spec.model == "gpt-6.1-sol"
+    command = build_launch_command(spec, tmp_path)
+    assert "--lifecycle" in command
+    assert command[command.index("--workflow") + 1] == skill
 
 
 @pytest.mark.parametrize(
@@ -1711,7 +1867,7 @@ def test_start_stage_carries_lifecycle_state_path_to_launch_spec(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -1856,7 +2012,7 @@ def test_lifecycle_run_casts_stage_agents_from_mission_frontmatter(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -1913,7 +2069,7 @@ def test_lifecycle_run_casts_stage_models_from_mission_frontmatter(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -2037,7 +2193,7 @@ def test_write_stage_with_n_cuts_records_n_cut_id_children(
         "# Mission: fleet the WRITE stage\n"
     )
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -2097,7 +2253,7 @@ def test_read_stage_with_cuts_does_not_record_fleet(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
@@ -2283,3 +2439,425 @@ def test_public_lifecycle_construction_dispatches_the_fleet_by_default(
     assert receipts["configured_concurrency"] == 3
     for cut_id in ("W0-a", "W0-b", "W0-c"):
         assert receipts["cuts"][cut_id]["provider_run_id"] == f"provider-{cut_id}"
+
+
+def test_failed_write_then_successful_diagnostic_read_never_completes(
+    monkeypatch, tmp_path
+):
+    from vibecrafted_core import lifecycle_runner
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "runtime"))
+    manifest = WorkflowManifest(
+        id="failed-write-diagnostic",
+        name="diagnostic",
+        description="retained failure",
+        stages=(
+            WorkflowStage(
+                id="write",
+                workflow="implement",
+                phase="write",
+                order=1,
+                next_stage="audit",
+            ),
+            WorkflowStage(id="audit", workflow="audit", phase="read", order=2),
+        ),
+    )
+    monkeypatch.setattr(lifecycle_runner, "workflow_manifest", lambda _: manifest)
+    monkeypatch.setattr(lifecycle_runner, "workflow_manifest_payload", lambda _: {})
+    monkeypatch.setattr(lifecycle_runner, "load_context_atlas", lambda *a, **k: {})
+    from types import SimpleNamespace
+
+    audit_seal = SimpleNamespace(
+        granted=True,
+        claim_digest="diagnostic-only",
+        to_payload=lambda: {"granted": True},
+        axes_payload=lambda: {
+            "execution_state": "exited",
+            "proof_state": "declared",
+            "delivery_state": "sealed",
+        },
+    )
+    monkeypatch.setattr(
+        lifecycle_runner,
+        "_maybe_seal_awaited_stage",
+        lambda **values: audit_seal if values["record"]["id"] == "audit" else None,
+    )
+    calls = []
+
+    def launch(spec, _):
+        calls.append(spec.skill)
+        report = tmp_path / (spec.skill + ".md")
+        _write_read_stage_report(report, run_id=spec.run_id, code_mutation="false")
+        return {"accepted": True, "run_id": spec.run_id, "report": str(report)}
+
+    def settled(payload):
+        failed = "implement" in payload["run_id"] or calls[-1] == "implement"
+        return {
+            "artifact_ok": True,
+            "completed": True,
+            "exit_code": None,
+            "run": {"exit_code": 9 if failed else 0},
+            "report": payload["report"],
+        }
+
+    state = asyncio.run(
+        LifecycleRunner(launcher=launch, awaiter=settled).run(
+            LifecycleRunSpec(
+                workflow_id=manifest.id,
+                agent="codex",
+                root=str(tmp_path),
+                prompt="diagnose",
+                await_stages=True,
+            )
+        )
+    )
+    assert calls == ["implement", "audit"]
+    assert [stage["status"] for stage in state["stages"]] == ["failed", "completed"]
+    assert state["status"] == state["execution_state"] == "failed"
+    assert state["failed_stages"] == ["write"]
+    assert state["delivery_state"] == "unverified"
+    assert "lifecycle_seal" not in state
+    assert state["stages"][-1]["lifecycle_seal"]["granted"] is True
+    assert state["stages"][0]["await"]["run"]["exit_code"] == 9
+
+
+def test_next_write_requires_exact_source_of_verified_cycle(monkeypatch, tmp_path):
+    from vibecrafted_core import lifecycle_runner
+    from vibecrafted_core.marbles_reception import tree_receipt
+
+    tracked = _init_read_stage_repo(tmp_path)
+    tree = tree_receipt(str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path.parent / "drift-runtime"))
+    monkeypatch.setattr(lifecycle_runner, "load_context_atlas", lambda *a, **k: {})
+    tracked.write_text("foreign source after READ\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Foreign",
+            "-c",
+            "user.email=foreign@example.test",
+            "commit",
+            "-qm",
+            "foreign",
+        ],
+        check=True,
+    )
+
+    def forbidden(*args):
+        raise AssertionError("next WRITE launched over source drift")
+
+    state = asyncio.run(
+        LifecycleRunner(launcher=forbidden).run(
+            LifecycleRunSpec(
+                workflow_id="vc-marbles",
+                agent="codex",
+                root=str(tmp_path),
+                prompt="next cycle",
+                await_stages=True,
+                write_cycle={
+                    "status": "completed",
+                    "output": tree,
+                    "read_attestation": {
+                        "verdict": "converged",
+                        "candidate_sha": tree["head"],
+                    },
+                },
+            )
+        )
+    )
+    assert state["status"] == "failed" and not state["stages"]
+    assert state["error"] == "verified_cycle_source_drift_before_next_write"
+
+
+def test_cycle_read_retains_existing_dou_stage_contract(monkeypatch, tmp_path):
+    from vibecrafted_core.marbles_reception import tree_receipt
+    from vibecrafted_core.workflows.registry import workflow_manifest
+
+    _init_read_stage_repo(tmp_path)
+    tree = tree_receipt(str(tmp_path))
+    manifest = workflow_manifest("vc-ship")
+    stage = manifest.stage("dou")
+    captured = []
+    runner = LifecycleRunner(
+        launcher=lambda spec, _: (
+            captured.append(spec) or {"accepted": True, "run_id": spec.run_id}
+        )
+    )
+    asyncio.run(
+        runner._start_stage(
+            manifest=manifest,
+            stage=stage,
+            spec=LifecycleRunSpec(workflow_id="vc-ship", agent="codex"),
+            agent="codex",
+            model="",
+            source_prompt="unchanged complete task",
+            root=tmp_path,
+            previous_reports=["whole-polarize-report.md"],
+            context={},
+            write_cycle={
+                "run_id": "cycle",
+                "status": "completed",
+                "workflow": "polarize",
+                "output": tree,
+                "workers": [],
+            },
+        )
+    )
+    prompt = captured[0].prompt
+    assert "dou_index: <int>" in prompt
+    assert "unchanged complete task" in prompt and "whole-polarize-report.md" in prompt
+    assert "Phase: READ" in prompt
+    assert captured[0].source_readonly
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["absent", "missing_file", "missing_key", "null", "list", "string", "wrong_schema"],
+)
+def test_counted_cycle_metadata_must_not_fall_through_to_read(
+    tmp_path, monkeypatch, shape
+):
+    from vibecrafted_core import lifecycle_runner
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "input.txt").write_text("source")
+    subprocess.run(["git", "-C", str(root), "add", "input.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+        check=True,
+    )
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setattr(lifecycle_runner, "load_context_atlas", lambda *a, **k: {})
+    calls = []
+
+    def launch(spec, _):
+        calls.append(spec.skill)
+        report = tmp_path / (spec.skill + ".md")
+        report.write_text(
+            "---\nrun_id: "
+            + spec.run_id
+            + "\nagent: codex\nskill: "
+            + spec.skill
+            + "\nstatus: completed\n---\nfixture\n"
+        )
+        result = {"accepted": True, "run_id": spec.run_id, "report": str(report)}
+        meta = tmp_path / (spec.skill + ".json")
+        if shape != "absent":
+            result["meta"] = str(meta)
+        if shape not in ("absent", "missing_file"):
+            value = {
+                "missing_key": {},
+                "null": {"write_cycle": None},
+                "list": {"write_cycle": []},
+                "string": {"write_cycle": "wrong"},
+                "wrong_schema": {
+                    "write_cycle": {"schema": "wrong", "status": "completed"}
+                },
+            }[shape]
+            value.update(run_id=spec.run_id, skill=spec.skill)
+            meta.write_text(json.dumps(value))
+        return result
+
+    state = asyncio.run(
+        LifecycleRunner(
+            launcher=launch,
+            awaiter=lambda p: {
+                "artifact_ok": True,
+                "completed": True,
+                "exit_code": 0,
+                "report": p["report"],
+            },
+        ).run(
+            LifecycleRunSpec(
+                workflow_id="vc-marbles",
+                agent="codex",
+                root=str(root),
+                prompt="cycle boundary",
+                count=2,
+                await_stages=True,
+            )
+        )
+    )
+    assert state["status"] == "failed"
+    assert calls == ["marbles"]
+    assert state["stages"][0].get("cycle_receipt_error")
+
+
+@pytest.mark.parametrize("nested_exit", [False, True])
+def test_failed_guarded_final_read_clears_lifecycle_success(
+    monkeypatch, tmp_path, nested_exit
+):
+    from types import SimpleNamespace
+
+    from vibecrafted_core import lifecycle_runner
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setattr(lifecycle_runner, "load_context_atlas", lambda *a, **k: {})
+    write_seal = SimpleNamespace(
+        granted=True,
+        claim_digest="phase-local-write",
+        to_payload=lambda: {"granted": True},
+        axes_payload=lambda: {
+            "execution_state": "exited",
+            "proof_state": "declared",
+            "delivery_state": "sealed",
+        },
+    )
+    monkeypatch.setattr(
+        lifecycle_runner,
+        "_maybe_seal_awaited_stage",
+        lambda **values: write_seal if values["record"]["phase"] == "write" else None,
+    )
+    calls = []
+
+    def launch(spec, _):
+        calls.append(spec.skill)
+        report = tmp_path / (spec.skill + ".md")
+        _write_read_stage_report(report, run_id=spec.run_id, code_mutation="false")
+        return {
+            "accepted": True,
+            "run_id": spec.run_id,
+            "report": str(report),
+            "meta": str(tmp_path / (spec.skill + ".json")),
+        }
+
+    def settled(payload):
+        failed = calls[-1] == "audit"
+        return {
+            "artifact_ok": True,
+            "completed": True,
+            "exit_code": None if nested_exit else (9 if failed else 0),
+            "run": {"exit_code": 9 if failed else 0},
+            "report": payload["report"],
+        }
+
+    state = asyncio.run(
+        LifecycleRunner(
+            launcher=_with_counted_cycle_fixture(launch, tmp_path), awaiter=settled
+        ).run(
+            LifecycleRunSpec(
+                workflow_id="vc-marbles",
+                agent="codex",
+                root=str(tmp_path),
+                prompt="complete then audit",
+                count=2,
+                await_stages=True,
+            )
+        )
+    )
+    assert calls == ["marbles", "audit"]
+    assert state["status"] == state["execution_state"] == "failed"
+    assert state["delivery_state"] == "unverified"
+    assert state["failed_stages"] == ["audit"]
+    assert "lifecycle_seal" not in state
+    assert state["stages"][0]["lifecycle_seal"]["granted"] is True
+    assert (
+        state["stages"][1]["cycle_read_error"]
+        == "receiver_execution_or_artifact_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "top_null",
+        "top_list",
+        "top_string",
+        "count",
+        "count_bool",
+        "run_id",
+        "root",
+        "chain",
+        "worker_exit",
+        "artifact",
+        "workers_null",
+        "completed_count",
+    ],
+)
+def test_counted_cycle_rejects_tampered_terminal_proof(monkeypatch, tmp_path, damage):
+    from vibecrafted_core import lifecycle_runner
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setattr(lifecycle_runner, "load_context_atlas", lambda *a, **k: {})
+    calls = []
+
+    def launch(spec, _):
+        calls.append(spec.skill)
+        report = tmp_path / (spec.skill + ".md")
+        _write_read_stage_report(report, run_id=spec.run_id, code_mutation="false")
+        return {
+            "accepted": True,
+            "run_id": spec.run_id,
+            "report": str(report),
+            "meta": str(tmp_path / (spec.skill + ".json")),
+        }
+
+    fixture_launch = _with_counted_cycle_fixture(launch, tmp_path)
+
+    def damaged_launch(spec, root):
+        payload = fixture_launch(spec, root)
+        meta = Path(payload["meta"])
+        data = json.loads(meta.read_text())
+        cycle = data["write_cycle"]
+        if damage.startswith("top_"):
+            data = {"top_null": None, "top_list": [], "top_string": "wrong"}[damage]
+        elif damage == "count":
+            cycle["count"] = 3
+        elif damage == "count_bool":
+            cycle["count"] = True
+        elif damage in {"run_id", "root"}:
+            cycle[damage] = "other"
+        elif damage == "chain":
+            cycle["workers"][1]["input"]["head"] = "0" * 40
+        elif damage == "worker_exit":
+            cycle["workers"][0]["exit_code"] = 9
+        elif damage == "artifact":
+            cycle["workers"][0]["artifact_ok"] = False
+        elif damage == "workers_null":
+            cycle["workers"] = None
+        elif damage == "completed_count":
+            cycle["workers_completed"] = 1
+        meta.write_text(json.dumps(data))
+        return payload
+
+    state = asyncio.run(
+        LifecycleRunner(
+            launcher=damaged_launch,
+            awaiter=lambda p: {
+                "artifact_ok": True,
+                "exit_code": 0,
+                "report": p["report"],
+            },
+        ).run(
+            LifecycleRunSpec(
+                workflow_id="vc-marbles",
+                agent="codex",
+                root=str(tmp_path),
+                prompt="proof required",
+                count=2,
+                await_stages=True,
+            )
+        )
+    )
+    assert calls == ["marbles"]
+    assert state["status"] == state["execution_state"] == "failed"
+    assert state["failed_stages"] == ["marbles"]
+    assert state["stages"][0]["cycle_receipt_error"]
+    assert "lifecycle_seal" not in state

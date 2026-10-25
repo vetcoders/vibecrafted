@@ -14,6 +14,7 @@ move a live pin; a missing pin is a clear error.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -348,12 +349,14 @@ def test_product_shell_zdotdir_restores_the_door_in_nested_login_shells(
     world: dict[str, Path],
 ) -> None:
     """Terminal, Frame panes and Quick cmd run with a product ZDOTDIR; the
-    installer's stage files bring the door back after path_helper."""
+    staged login files compose the user's own login startup and bring the
+    door back in front of it."""
 
     product = world["home"] / ".config/vibecrafted/vc-terminal"
     product.mkdir(parents=True)
+    product_stages = REPO_ROOT / "config/runtime-pin/zsh-product"
     for stage in (".zshenv", ".zprofile", ".zlogin"):
-        (product / stage).write_text(installer._PRODUCT_ZDOTDIR_PIN_STAGE)
+        shutil.copy2(product_stages / stage, product / stage)
     env = _entered(world, ZDOTDIR=str(product))
     env["PATH"] = f"{world['generation'] / 'config/runtime-pin/bin'}:{env['PATH']}"
     for argv in (
@@ -521,3 +524,273 @@ def test_both_door_names_are_one_file() -> None:
     assert os.access(door / "python", os.X_OK)
     assert os.access(door / "python3", os.X_OK)
     assert sorted(path.name for path in door.iterdir()) == ["python", "python3"]
+
+
+@pytest.fixture
+def aliased_profile(tmp_path: Path) -> dict[str, Path]:
+    """Real interactive zsh, inert tools, and only private profile state."""
+
+    home = tmp_path / "home"
+    home.mkdir()
+    generation = home / "generation"
+    (generation / "bin").mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / "config/runtime-pin", generation / "config/runtime-pin")
+    interpreter = generation / "bin/python3"
+    interpreter.write_text(
+        '#!/bin/sh\nprintf "%s\\0" "$VIBECRAFTED_PYTHON" "$@" >> "$PIN_CAPTURE"\n'
+    )
+    interpreter.chmod(0o755)
+    profile = home / "interactive.zsh"
+    shutil.copy2(REPO_ROOT / "config/vc-terminal/interactive.zsh", profile)
+    return {"home": home, "generation": generation, "profile": profile}
+
+
+@pytest.mark.parametrize(
+    "alias_case", ["none", "reload", "aliases", "personal-shell", "public", "all"]
+)
+def test_profile_declarations_parse_with_preexisting_aliases(
+    aliased_profile: dict[str, Path], alias_case: str
+) -> None:
+    """Parse the complete profile before any of its alias cleanup can run."""
+
+    home = aliased_profile["home"]
+    generation = aliased_profile["generation"]
+    profile = aliased_profile["profile"]
+    declarations = re.findall(
+        r"(?m)^\s*(?:function\s+)?([A-Za-z_][-A-Za-z0-9_.]*)"
+        r"(?:\s*\(\))?\s*\{",
+        profile.read_text(),
+    )
+    public = ["reload", "aliases", "personal-shell"]
+    assert set(public + ["python", "python3"]) <= set(declarations)
+    names = (
+        declarations
+        if alias_case == "all"
+        else public
+        if alias_case == "public"
+        else []
+        if alias_case == "none"
+        else [alias_case]
+    )
+    # Exercise both conditional declarations with inert init output. Nothing
+    # here consults the real user's rc, tools, plugins or runtime generation.
+    tools = home / "tools"
+    tools.mkdir()
+    for name, output in {
+        "atuin": "function _atuin_search { :; }; function atuin-search { :; }",
+        "zoxide": "function z { :; }",
+        "starship": "function starship_precmd { :; }",
+    }.items():
+        tool = tools / name
+        tool.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
+        tool.chmod(0o700)
+    config = home / ".config/vibecrafted"
+    config.mkdir(parents=True)
+    (config / "starship.toml").write_text("add_newline = true\n")
+    (home / ".zshrc").write_text(
+        "(( PERSONAL_LOAD_COUNT += 1 ))\n"
+        "alias python='print WRONG_PERSONAL_PYTHON'\n"
+        "alias python3='print WRONG_PERSONAL_PYTHON3'\n"
+    )
+    script = home / "declarations.zsh"
+    aliases = "".join(
+        f"alias {name}='print -r -- USER_ALIAS_{name}'\n"
+        if name in public + ["python", "python3"]
+        # Helpers keep forwarding so this test isolates declaration safety
+        # from the independent policy for aliases at command invocation.
+        else f"alias {name}='\\{name}'\n"
+        for name in names
+    )
+    script.write_text(
+        aliases
+        + "alias ordinary='print -r -- ORDINARY_ALIAS_SURVIVED'\n"
+        + 'source "$PROFILE" || exit 91\n'
+        + "[[ $_VC_TERMINAL_PROFILE_LOADED == 1 && -o aliases ]] || exit 92\n"
+        + "(( $+functions[_vc_terminal_start_completion] )) || exit 93\n"
+        + "(( $+functions[_vc_terminal_atuin_up_or_history] )) || exit 94\n"
+        + "initial_cwd=$PWD\ninitial_history=$HISTFILE\n"
+        + "'aliases' Profile || exit 95\n"
+        # Reload must re-read definitions from disk, twice, while aliases
+        # remain present. Quoting deliberately reaches the public function.
+        + "function aliases { print STALE_DEFINITION; }\n"
+        + "'reload' || exit 96\n'aliases' Profile || exit 97\n"
+        + "'reload' || exit 98\n"
+        + '[[ $PWD == "$initial_cwd" && $HISTFILE == "$initial_history" ]] || exit 99\n'
+        + "python3 'space argument' '' '*?[literal]'\n"
+        + "'personal-shell' || exit 100\n"
+        + "[[ $PERSONAL_LOAD_COUNT == 1 && -z ${STARSHIP_CONFIG:-} "
+        "&& -z ${ATUIN_CONFIG_DIR:-} && -z ${ZDOTDIR:-} ]] || exit 101\n"
+        + '[[ $HISTFILE == "$HOME/.zsh_history" ]] || exit 102\n'
+        + "python 'after personal'\n"
+        + "'reload' || exit 103\n"
+        + '[[ $STARSHIP_CONFIG == "$HOME/.config/vibecrafted/starship.toml" ]] || exit 104\n'
+        + "ordinary\n"
+        + "".join(
+            f"[[ ${{aliases[{name}]-}} == 'print -r -- USER_ALIAS_{name}' ]] || exit 105\n"
+            if name in public
+            else f"[[ ${{aliases[{name}]-}} == '\\{name}' ]] || exit 106\n"
+            for name in names
+            if name not in ["python", "python3"]
+        )
+        # An unquoted public command still follows the user's alias. This
+        # repair must not silently decide the command-precedence policy.
+        + "".join(f"{name}\n" for name in names if name in public)
+        + "[[ -o aliases ]] || exit 107\nprint PROFILE_DECLARATIONS_OK\n"
+    )
+    result = _run(
+        ["/bin/zsh", "-dfi", str(script)],
+        {
+            "HOME": str(home),
+            "PATH": f"{tools}:/usr/bin:/bin",
+            "TERM": "dumb",
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+            "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+            "VIBECRAFTED_PYTHON": str(generation / "bin/python3"),
+            "VC_TERMINAL_PLUGIN_PREFIXES": str(home / "no-plugins"),
+            "PROFILE": str(profile),
+            "PIN_CAPTURE": str(home / "calls"),
+        },
+        home,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "parse error" not in result.stderr
+    assert "defining function based on alias" not in result.stderr
+    assert "PROFILE_DECLARATIONS_OK" in result.stdout
+    assert "ORDINARY_ALIAS_SURVIVED" in result.stdout
+    assert "STALE_DEFINITION" not in result.stdout
+    assert "WRONG_PERSONAL" not in result.stdout
+    assert "re-read the installed product profile" in result.stdout
+    for name in names:
+        if name in public:
+            assert f"USER_ALIAS_{name}" in result.stdout
+    assert (home / "calls").read_bytes().split(b"\0") == [
+        str(generation / "bin/python3").encode(),
+        b"space argument",
+        b"",
+        b"*?[literal]",
+        str(generation / "bin/python3").encode(),
+        b"after personal",
+        b"",
+    ]
+
+
+def test_profile_declarations_require_alias_safe_syntax() -> None:
+    """Guard every declaration, including future nested/conditional helpers."""
+
+    profile = (REPO_ROOT / "config/vc-terminal/interactive.zsh").read_text()
+    unsafe = re.findall(
+        r"(?m)^\s*(?:function\s+)?[A-Za-z_][-A-Za-z0-9_.]*\s*\(\s*\)",
+        profile,
+    )
+    assert not unsafe, f"Use alias-safe `function name {{ ... }}`: {unsafe}"
+
+
+def test_aliased_profile_binds_owned_python_and_reloads_exact_arguments(
+    aliased_profile: dict[str, Path],
+) -> None:
+    """Aliases exist before the entire enclosing function is parsed."""
+
+    home = aliased_profile["home"]
+    generation = aliased_profile["generation"]
+    capture = home / "calls"
+    script = home / "probe.zsh"
+    shebang = home / "shebang"
+    shebang.write_text("#!/usr/bin/env python3\n")
+    shebang.chmod(0o755)
+    script.write_text(
+        "alias python='print -r -- WRONG_PYTHON_ALIAS'\n"
+        "alias python3='print -r -- WRONG_PYTHON3_ALIAS'\n"
+        "alias ordinary='print -r -- ORDINARY_ALIAS_SURVIVED'\n"
+        'source "$PROFILE" || exit 91\n'
+        "[[ $_vc_terminal_python_bound == 1 ]] || exit 92\n"
+        "[[ $+functions[python] == 1 && $+functions[python3] == 1 ]] || exit 93\n"
+        'python "$@"\npython3 "$@"\ncommand python3 "$@"\n'
+        '/usr/bin/env python "$@"\n"$HOME/shebang" "$@"\n'
+        # Personal aliases may have been restored before a reload.
+        "alias python='print -r -- WRONG_RELOADED_ALIAS'\n"
+        "alias python3='print -r -- WRONG_RELOADED_ALIAS'\n"
+        "reload || exit 94\n"
+        'python "$@"\npython3 "$@"\n'
+        'ordinary\nprint -r -- "pin=$VIBECRAFTED_PYTHON"\n'
+    )
+    args = ["-c", "space argument", "", "*?[literal]", "line\nbreak", "$literal"]
+    result = _run(
+        ["/bin/zsh", "-dfi", str(script), *args],
+        {
+            "HOME": str(home),
+            "PATH": "/usr/bin:/bin",
+            "TERM": "dumb",
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+            "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+            "VIBECRAFTED_PYTHON": str(generation / "bin/python3"),
+            "VC_TERMINAL_PLUGIN_PREFIXES": str(home / "no-plugins"),
+            "VC_QUICK_CMD": "1",
+            "PROFILE": str(aliased_profile["profile"]),
+            "PIN_CAPTURE": str(capture),
+        },
+        home,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "parse error" not in result.stderr
+    assert "WRONG_" not in result.stdout + result.stderr
+    assert "ORDINARY_ALIAS_SURVIVED" in result.stdout
+    assert f"pin={generation / 'bin/python3'}" in result.stdout
+    call = [str(generation / "bin/python3"), *args]
+    expected = (
+        call * 4 + [str(generation / "bin/python3"), str(shebang), *args] + call * 2
+    )
+    assert capture.read_bytes().split(b"\0") == [s.encode() for s in expected] + [b""]
+
+
+@pytest.mark.parametrize("selected_root", [False, True])
+def test_aliased_profile_without_pin_preserves_aliases_or_refuses_selected_door(
+    aliased_profile: dict[str, Path], selected_root: bool
+) -> None:
+    """No root leaves personal aliases intact; a selected door never guesses."""
+
+    home = aliased_profile["home"]
+    generation = aliased_profile["generation"]
+    # A usable active generation must not become an implicit replacement pin.
+    tools = home / ".local/share/vibecrafted/tools"
+    tools.mkdir(parents=True)
+    (tools / "vibecrafted-current").symlink_to(generation)
+    script = home / "probe.zsh"
+    script.write_text(
+        "alias python='print -r -- PERSONAL_PYTHON'\n"
+        "alias python3='print -r -- PERSONAL_PYTHON3'\n"
+        "alias ordinary='print -r -- ORDINARY_ALIAS_SURVIVED'\n"
+        'source "$PROFILE" || exit 91\n'
+        "reload || exit 92\n"
+        "[[ -z ${VIBECRAFTED_PYTHON:-} ]] || exit 93\n"
+        "ordinary\npython --version\n"
+        'print -r -- "python_status=$?"\n'
+        'python3 --version\nprint -r -- "python3_status=$?"\n'
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "TERM": "dumb",
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "VC_TERMINAL_PLUGIN_PREFIXES": str(home / "no-plugins"),
+        "VC_QUICK_CMD": "1",
+        "PROFILE": str(aliased_profile["profile"]),
+        "PIN_CAPTURE": str(home / "calls"),
+    }
+    if selected_root:
+        env["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
+    result = _run(["/bin/zsh", "-dfi", str(script)], env, home)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "parse error" not in result.stderr
+    assert "ORDINARY_ALIAS_SURVIVED" in result.stdout
+    assert not (home / "calls").exists()
+    if selected_root:
+        assert "PERSONAL_PYTHON" not in result.stdout
+        assert "python_status=127" in result.stdout
+        assert "python3_status=127" in result.stdout
+        assert result.stderr.count("no interpreter is pinned") == 2
+    else:
+        assert "PERSONAL_PYTHON --version" in result.stdout
+        assert "PERSONAL_PYTHON3 --version" in result.stdout
+        assert "python_status=0" in result.stdout
+        assert "python3_status=0" in result.stdout
+        assert "no interpreter is pinned" not in result.stderr

@@ -27,7 +27,8 @@
 #      other children must not inherit a copy of that descriptor: a leftover
 #      copy keeps the inode held after this helper is SIGTERM'd.
 #
-# System tools only: the destination App and its runtime Python may be moving.
+# Bind one usable Python before reading journals. A private copy of the signed
+# App runtime survives displacement, detached execution and recovery.
 set -euo pipefail
 
 SOURCE=""
@@ -412,7 +413,7 @@ journal_get() {
   if [[ ! -f "$JOURNAL" ]]; then
     return 1
   fi
-  without_update_lock_fd /usr/bin/python3 - "$JOURNAL" "$key" <<'PY'
+  without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$JOURNAL" "$key" <<'PY'
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
 try:
@@ -541,7 +542,7 @@ write_terminal_receipt() {
 # false and does not record the journal phase — the claim stays fail-closed.
 mark_receipt_relaunched() {
   local sidecar="${RECEIPT}.relaunch.json"
-  without_update_lock_fd python3 - "$RECEIPT" "$sidecar" <<'PY'
+  without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$RECEIPT" "$sidecar" <<'PY'
 import json
 import os
 import sys
@@ -669,8 +670,8 @@ flock_update_lock_nb() {
     ' "$fd"
     return
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c '
+  if [[ -n "${UPDATE_PYTHON:-}" ]]; then
+    "$UPDATE_PYTHON" -I -S -c '
 import fcntl
 import sys
 try:
@@ -793,7 +794,7 @@ observe_published_generation() {
   runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
   pointer="$runtime_home/active.json"
   receipt="$runtime_home/install-receipt.json"
-  without_update_lock_fd /usr/bin/python3 - "$pointer" "$receipt" <<'PY'
+  without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$pointer" "$receipt" <<'PY'
 import json, sys
 pointer, receipt = sys.argv[1], sys.argv[2]
 try:
@@ -1562,7 +1563,7 @@ restore_previous_tuple() {
 settle_capture() {
   local runtime_home
   runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
-  without_update_lock_fd /usr/bin/python3 - "$DESTINATION" "$RECEIPT" "$ADMISSION" "$JOURNAL" \
+  without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$DESTINATION" "$RECEIPT" "$ADMISSION" "$JOURNAL" \
     "$TRANSACTION" "$runtime_home" "$EXPECTED_IDENTIFIER" "$EXPECTED_TEAM" \
     "$HISTORICAL_EVIDENCE" "$FAIL_AFTER" "$PLAN_ONLY" "$ADMIT_PLAN" <<'PY'
 import hashlib
@@ -1935,6 +1936,71 @@ finish_replacement() {
   fi
 }
 
+# Do not execute the Apple CLT shim, even as a usability probe: it can open
+# software-install UI. An explicit interpreter is supplied by the authenticated
+# channel bootstrap. Other callers may use a supported host Python, or the
+# runtime sealed in their signed App. Never download an interpreter here.
+UPDATE_PYTHON=""
+UPDATE_PYTHON_ROOT=""
+usable_update_python() {
+  local py="$1"
+  [[ -n "$py" && "$py" == /* && -f "$py" && -x "$py" ]] || return 1
+  if [[ "$(uname -s)" == Darwin && "$py" -ef /usr/bin/python3 ]]; then
+    return 1
+  fi
+  "$py" -I -S -c 'import ctypes, fcntl, hashlib, json, sys; assert sys.version_info >= (3, 11)' >/dev/null 2>&1
+}
+
+# Registered via EXIT; cleanup runs after the bound transaction.
+# shellcheck disable=SC2329,SC2317
+cleanup_update_python() {
+  [[ -z "$UPDATE_PYTHON_ROOT" ]] || /bin/rm -rf -- "$UPDATE_PYTHON_ROOT"
+}
+trap cleanup_update_python EXIT
+
+select_update_python() {
+  local py app private_app
+  if [[ -n "${VIBECRAFTED_UPDATE_PYTHON:-}" ]]; then
+    usable_update_python "$VIBECRAFTED_UPDATE_PYTHON" || {
+      echo "explicit App update Python is unusable; refusing before mutation" >&2
+      return 1
+    }
+    UPDATE_PYTHON="$VIBECRAFTED_UPDATE_PYTHON"
+    return 0
+  fi
+  for app in "$SOURCE" "$DESTINATION"; do
+    [[ -d "$app/Contents/Resources/runtime" ]] || continue
+    # Verify the entire App, pinned to the same product/team as the mutation
+    # owner, before copying or executing its portable interpreter.
+    if ! verify_signed_app "$app" || \
+      ! without_update_lock_fd /usr/bin/codesign --verify --strict --deep "$app"; then
+      # Historical SOURCE refusal has the same signed-identity status as
+      # require_exact_identity(), even before Python can read the journal.
+      if [[ "$app" == "$SOURCE" && ( "$MODE" == "restore" || "$MODE" == "recover" ) ]]; then
+        return 15
+      fi
+      return 1
+    fi
+    UPDATE_PYTHON_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/.vc-update-python.XXXXXX")" || return 1
+    private_app="$UPDATE_PYTHON_ROOT/Interpreter.app"
+    without_update_lock_fd /usr/bin/ditto "$app" "$private_app" || return 1
+    verify_signed_app "$private_app" || return 1
+    without_update_lock_fd /usr/bin/codesign --verify --strict --deep "$private_app" || return 1
+    py="$private_app/Contents/Resources/runtime/bin/python3"
+    usable_update_python "$py" || return 1
+    UPDATE_PYTHON="$py"
+    return 0
+  done
+  while IFS= read -r py; do
+    if usable_update_python "$py"; then
+      UPDATE_PYTHON="$py"
+      return 0
+    fi
+  done < <(type -a -p python3 2>/dev/null || true)
+  echo "no usable Python 3.11+ or authenticated App runtime; refusing before mutation" >&2
+  return 1
+}
+
 validate_transaction_id "$TRANSACTION"
 if [[ "$RESUME" -eq 1 && -z "$JOURNAL" ]]; then
   JOURNAL="${RECEIPT}.journal.json"
@@ -1984,6 +2050,10 @@ LOCKDIR="${parent}/.vc-update.lock"
 SOURCE_IDENTITY=""
 PRIOR_IDENTITY=""
 
+select_update_python
+# The temporary bootstrap hint must not leak into the relaunched App.
+unset VIBECRAFTED_UPDATE_PYTHON
+
 if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
   # Fresh restore/recover must compare the original preserved capture identity.
   # A leftover replace journal is the authority; do not hash whatever is live.
@@ -2008,7 +2078,7 @@ if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
   fi
 fi
 
-trap 'release_lock' EXIT
+trap 'release_lock; cleanup_update_python' EXIT
 trap 'exit 143' TERM INT
 acquire_lock
 
@@ -2022,7 +2092,7 @@ if [[ "$RESUME" -ne 1 && ( "$MODE" == "restore" || "$MODE" == "recover" ) && "$(
   # available forever. Never overwrite the replacement's terminal receipt.
   [[ "$(journal_require receipt)" != "$RECEIPT" ]] || { echo "recovery requires a distinct receipt path" >&2; exit 14; }
   assert_no_symlink_components "$JOURNAL.replace.json"
-  without_update_lock_fd /usr/bin/python3 - "$JOURNAL" "$JOURNAL.replace.json" <<'PY'
+  without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$JOURNAL" "$JOURNAL.replace.json" <<'PY'
 import os, sys
 source, archive = sys.argv[1:]
 with open(source, "rb") as handle:
@@ -2066,7 +2136,7 @@ fi
 
 assert_no_symlink_components "$CAPTURE"
 mkdir -m 700 "$CAPTURE" || { echo "capture already exists or cannot be created" >&2; exit 7; }
-without_update_lock_fd /usr/bin/python3 - "$CAPTURE" "$RECEIPT.capture-owner.json" "$TRANSACTION" <<'PY'
+without_update_lock_fd "$UPDATE_PYTHON" -I -S - "$CAPTURE" "$RECEIPT.capture-owner.json" "$TRANSACTION" <<'PY'
 import json, os, sys
 from pathlib import Path
 capture, record, transaction = sys.argv[1:]

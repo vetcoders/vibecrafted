@@ -343,7 +343,9 @@ def test_reinstall_preserves_shell_preferences_and_private_shell_state(
     assert (product / "vc-terminal/interactive.zsh").read_bytes() == (
         pack / "config/vc-terminal/interactive.zsh"
     ).read_bytes()
-    assert "launch-primary-shell.zsh" in (product / "vc-terminal/.zshrc").read_text()
+    assert (product / "vc-terminal/.zshrc").read_bytes() == (
+        pack / "config/runtime-pin/zsh-product/.zshrc"
+    ).read_bytes()
     assert _snapshot(private) == before
     assert private_rc.read_text() == "# My terminal\nexport PERSONAL_SHELL=1\n"
     assert private_history.read_text() == "private history sentinel\n"

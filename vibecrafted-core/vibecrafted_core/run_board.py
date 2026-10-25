@@ -117,9 +117,11 @@ def collect_lifecycle_activity() -> dict[str, Any]:
 
     ``sync_state`` owns lifecycle classification. This projection deliberately
     consumes only its canonical active/stalled buckets; it never reclassifies
-    recent rows by state, date, health text, or display limit.
+    recent rows by state, date, health text, or display limit. The App polls
+    this every 5 s, so the settlement orphan scan of artifacts/ (an rglob over
+    every report file) stays with the human board.
     """
-    board = sync_state()
+    board = sync_state(include_orphans=False)
     seen: set[str] = set()
     lanes: list[dict[str, Any]] = []
     for bucket in ("active_runs", "stalled_runs"):
