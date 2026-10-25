@@ -912,6 +912,7 @@ def test_reused_pid_with_foreign_start_token_is_stale(fx: Fixture) -> None:
     assert inert.poll() is None
     assert json.loads((fx.state / "host.json").read_text())["pid"] == host.pid
 
+
 def test_stale_wrapper_record_older_than_startup_wait_is_not_starting(
     fx: Fixture,
 ) -> None:
@@ -950,7 +951,6 @@ def test_stale_wrapper_record_older_than_startup_wait_is_not_starting(
     record = json.loads((fx.state / "host.json").read_text())
     assert record["pid"] == host.pid
     assert record["pid"] != inert.pid
-
 
 
 @pytest.mark.parametrize("damage", ["mode", "symlink", "record-symlink", "record-mode"])
