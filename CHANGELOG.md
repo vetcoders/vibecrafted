@@ -3,6 +3,16 @@
 All notable changes to 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- App capture settlement waits out the transient install lease of a relaunched
+  App instead of failing `install.sh` after a successful swap. `vc-app-update`
+  retries only the canonical `runtime installation is in progress` refusal,
+  once, under the shared install lease within the existing 60-second budget,
+  so every caller shares the recovery `install-app.sh` already carried.
+
 ## [4.5.0] - 2026-10-21
 
 ### Changed
