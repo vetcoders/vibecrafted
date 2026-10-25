@@ -197,7 +197,7 @@ if rest[:1] == ["action"]:
             sys.stderr.write("There is no active session!\\n")
             sys.exit(1)
         path = layouts().get(session, "")
-        if path == "builtin:operator":
+        if path == "builtin:operator" or session == "vc-host":
             print("layout { frame_host true; pane; }")
         elif path and os.path.isfile(path):
             print(open(path).read(), end="")
@@ -2405,6 +2405,7 @@ def _run_child_resume(
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     _install_canonical_launcher(home)
+    gen.install_product_vc_frame_config(home)
     # The operator layout lives under the canonical config owner.
     _write(
         home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl",
@@ -2513,7 +2514,7 @@ def _foreground_attach_index(calls: list[list[str]]) -> int:
     appears in the call that must come FIRST.
     """
     for index, argv in enumerate(calls):
-        if argv[:1] == ["attach"]:
+        if argv[:1] == ["attach"] and "--create-background" not in argv:
             return index
     return -1
 
@@ -2571,7 +2572,9 @@ def test_session_creation_uses_the_native_detached_form(tmp_path: Path) -> None:
     assert created_name and not created_name.startswith("-"), argv
 
     # The terminal is handed to the session that was actually prepared.
-    attaches = [a for a in calls if a[:1] == ["attach"]]
+    attaches = [
+        a for a in calls if a[:1] == ["attach"] and "--create-background" not in a
+    ]
     assert attaches, f"the terminal was never handed over: {calls}"
     assert attaches[-1][1:2] == [created_name], (attaches, created_name)
 
@@ -2837,7 +2840,11 @@ def test_child_creates_exactly_one_tab_and_one_aicx_pack(tmp_path: Path) -> None
     _result, calls = _run_child_resume(tmp_path)
 
     panes = _interactive_panes(calls)
-    attaches = [argv for argv in calls if argv[:1] == ["attach"]]
+    attaches = [
+        argv
+        for argv in calls
+        if argv[:1] == ["attach"] and "--create-background" not in argv
+    ]
     assert not _retired_tabs(calls), calls
     assert len(panes) == 1, f"expected exactly one provider pane, got {panes}"
     assert len(attaches) == 1, f"expected exactly one handover, got {attaches}"

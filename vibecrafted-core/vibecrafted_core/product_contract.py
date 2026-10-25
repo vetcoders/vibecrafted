@@ -4105,8 +4105,14 @@ def _scenario_workshop_typography(
         typography = session.await_screen(
             "Step 2: Terminal Typography", deadline=deadline
         )
-        if "Glyph sample:" not in typography:
-            raise RuntimeError("installed Workshop typography has no glyph preview")
+        # PTY reads may split one curses repaint between the heading and glyph
+        # row. Wait for both using the same bounded route deadline.
+        try:
+            typography = session.await_screen("Glyph sample:", deadline=deadline)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "installed Workshop typography has no glyph preview"
+            ) from error
         # Esc: Step 2 -> Step 1, Esc: close setup, Ctrl+Q: leave the launcher,
         # discarding the probe's private in-memory draft without applying it.
         session.send(b"\x1b")

@@ -134,6 +134,72 @@ def test_source_check_fetches_missing_donor_objects_into_temporary_repositories(
     )
 
 
+def test_source_materialization_preserves_lf_alternates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runpy
+    import tempfile
+
+    from _source_component_fixture import source_fixture
+
+    checkout, pins, _ = source_fixture(tmp_path / "upstream with spaces")
+    builder = runpy.run_path(str(checkout / "scripts/build-source-runtime-pack.py"))
+    destination = tmp_path / "export with spaces"
+    scratch = tmp_path / "temporary donors with spaces"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    for name in ("VIBECRAFTED_FRAME_REPO", "VIBECRAFTED_TERMINAL_REPO"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--materialize", str(destination)],
+    )
+    real_open = Path.open
+    alternates = []
+
+    def windows_text_open(path, mode="r", *args, **kwargs):
+        # Windows text writes translate LF to CRLF by default. Git's alternates
+        # parser treats that CR as part of the object directory on every OS.
+        if (
+            path.name == "alternates"
+            and "w" in mode
+            and "b" not in mode
+            and kwargs.get("newline") is None
+        ):
+            kwargs["newline"] = "\r\n"
+        return real_open(path, mode, *args, **kwargs)
+
+    real_run = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if command[0] == "git" and "archive" in command:
+            isolated = Path(command[command.index("-C") + 1])
+            raw = (isolated / "objects/info/alternates").read_bytes()
+            alternates.append(raw)
+            # These are fetched scratch donors, which must still exist while
+            # the real Git archive consumes their objects.
+            assert Path(raw.rstrip(b"\r\n").decode()).is_dir()
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", windows_text_open)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert builder["main"]() == 0
+    assert len(alternates) == 2
+    assert all(raw.endswith(b"\n") and b"\r" not in raw for raw in alternates)
+    assert not list(scratch.iterdir()), "temporary donors must be cleaned after export"
+    selection = json.loads((destination / "selection.json").read_text())
+    assert {
+        name: component["revision"]
+        for name, component in selection["components"].items()
+    } == {name: pin["revision"] for name, pin in pins["components"].items()}
+    for name, manifest in (
+        ("vc-frame", "Cargo.toml"),
+        ("vc-terminal", "alacritty/Cargo.toml"),
+    ):
+        assert (destination / name / manifest).is_file()
+
+
 @pytest.mark.parametrize("builder", ["helper", "linux", "windows"])
 @pytest.mark.parametrize("use_override", [False, True])
 def test_builders_materialize_changed_pins_and_preserve_local_work(

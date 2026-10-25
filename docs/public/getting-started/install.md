@@ -133,6 +133,11 @@ the distro. That is not the native Windows product.
 Ordinary users do not need this section. The one-command install and the DMG
 above already carry everything.
 
+The separate [GitHub Releases](https://github.com/vetcoders/vibecrafted/releases/latest)
+publisher lists versioned carriers and their checksums. Its latest release can
+differ from the website channel; choose the matching App and Runtime Pack from
+one release.
+
 The signed App is one Developer ID signed and notarized artifact carrying
 matching builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete
 Vibecrafted runtime; no companion repository installer is required. The App

@@ -112,6 +112,25 @@ def _cold_fixture(tmp_path: Path, *, damage="none"):
     (scripts / "lib").mkdir(parents=True)
     helper = UPDATER.read_text()
     helper = helper.replace("/usr/bin/codesign", shlex.quote(str(tools / "codesign")))
+    if sys.platform != "darwin":
+        # Linux has no ditto. Double only the filesystem-copy OS boundary;
+        # the real updater still owns staging, capture, displacement and restore.
+        _python_script(
+            tools / "ditto",
+            """import os,shutil,sys
+from pathlib import Path
+assert len(sys.argv) == 3
+source, destination = (Path(arg).resolve() for arg in sys.argv[1:])
+root = Path(os.environ['DMG_APP']).resolve().parents[1]
+assert source.is_relative_to(root) and destination.is_relative_to(root)
+assert source.is_dir() and source != destination
+shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
+with open(os.environ['EVENTS'], 'a') as log:
+    log.write('ditto-copy ' + str(source) + ' -> ' + str(destination) + '\\n')
+""",
+        )
+        assert "/usr/bin/ditto" in helper
+        helper = helper.replace("/usr/bin/ditto", shlex.quote(str(tools / "ditto")))
     helper = helper.replace(
         'OPEN_BIN="/usr/bin/open"', f"OPEN_BIN={shlex.quote(str(tools / 'open'))}"
     )
@@ -624,6 +643,8 @@ def test_app_owned_updater_without_bootstrap_env_resumes_and_restores(
     assert Path(str(journal) + ".replace.json").is_file()
     # The exact App copies are verified before any portable interpreter call.
     events = Path(env["EVENTS"]).read_text().splitlines()
+    if sys.platform != "darwin":
+        assert any(event.startswith("ditto-copy ") for event in events)
     assert events.index("carrier-python") > next(
         i for i, event in enumerate(events) if "--deep" in event
     )
