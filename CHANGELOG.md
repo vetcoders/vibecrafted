@@ -5,7 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-10-26
+
 ### Fixed
+
+- Frame clears vacated floating-pane regions during forced repaint, including
+  sparse workspaces, preventing trails when panes move, resize, hide or close.
+- Fork worktree selection accepts an omitted execution selector and follows the
+  task runtime rather than a conflicting implicit default.
+- Foundation installation refreshes executable lookup after npm and uses a
+  writable per-user prefix when the ambient global installation is unavailable.
 
 - App capture settlement waits out the transient install lease of a relaunched
   App instead of failing `install.sh` after a successful swap. `vc-app-update`

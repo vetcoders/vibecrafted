@@ -1,4 +1,4 @@
-# Cut 4.5.0 with six carriers
+# Cut 4.5.1 with six carriers
 
 This is the Agent-Operator preparation sequence. Merging into `main`, creating
 and pushing the release tag, publication, and replacing a live App remain
@@ -7,8 +7,8 @@ Founder actions. [RELEASE_KICKOFF.md](RELEASE_KICKOFF.md) defines the product;
 
 ## 0. One immutable release
 
-One GitHub Release `v4.5.0` carries one framework commit and one recorded
-terminal/Frame donor tuple. `VERSION` is already `4.5.0`.
+One GitHub Release `v4.5.1` carries one framework commit and one recorded
+terminal/Frame donor tuple. `VERSION` is already `4.5.1`.
 
 The publisher's closed allowlist contains **16 assets**:
 
@@ -36,7 +36,7 @@ The portable archive is a source distribution, not proof of a native runtime.
 Inspect the exact source and donor commits before any build:
 
 ```bash
-test "$(tr -d '[:space:]' < VERSION)" = "4.5.0"
+test "$(tr -d '[:space:]' < VERSION)" = "4.5.1"
 git status --porcelain
 git rev-parse HEAD
 git -C ../vc-terminal status --porcelain
@@ -179,8 +179,8 @@ RELEASE_SHA="$(git rev-parse HEAD)"
 gh workflow run gate-rehearsal.yml --ref main
 # Wait for success on exactly RELEASE_SHA, then admit immediately before tagging.
 bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
-  git tag -a v4.5.0 -m "Vibecrafted 4.5.0" "$RELEASE_SHA"
-git push origin v4.5.0
+  git tag -a v4.5.1 -m "Vibecrafted 4.5.0" "$RELEASE_SHA"
+git push origin v4.5.1
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```
 
