@@ -2147,9 +2147,11 @@ def interactive_workspace_command(
             "selection_root": str(Path(root).resolve()),
         }
         base = ""  # validate current checkout without changing historical baseline
-    execution = execution_runtime or (
-        "living-tree" if runtime in {"local-native", "local-vm"} else runtime
-    )
+    # local-native selects the host environment, not a checkout substrate.
+    # Leave its omitted selector empty so --worktree can select the substrate.
+    execution = execution_runtime
+    if not execution and runtime != "local-native":
+        execution = "living-tree" if runtime == "local-vm" else runtime
     spec = normalize_launch_spec(
         {
             "agent": provider,
