@@ -246,6 +246,43 @@ def test_loctree_and_aicx_install_from_npm_when_missing(
         ) in calls
 
 
+@pytest.mark.parametrize(
+    "target,names",
+    [("aicx", ("aicx", "aicx-mcp")), ("loctree", ("loct", "loctree", "loctree-mcp"))],
+)
+def test_npm_install_rechecks_new_executables_after_broken_legacy_shims(
+    tmp_path: Path, target: str, names: tuple[str, ...]
+) -> None:
+    fake_bin = tmp_path / "bin"
+    npm_bin = tmp_path / "npm-prefix/bin"
+    legacy_bin = tmp_path / "legacy-bin"
+    capture = tmp_path / "npm-args.txt"
+    _fake_node_and_npm(fake_bin, npm_bin, capture)
+    legacy_bytes = "#!/bin/sh\nexit 19\n"
+    for name in names:
+        _executable(legacy_bin / name, legacy_bytes)
+
+    # The first lookup executes and caches the broken shim. npm creates a
+    # working own-channel binary earlier on PATH during this same Bash process.
+    result = _run_installer(
+        tmp_path,
+        target,
+        path=[npm_bin, legacy_bin, fake_bin],
+        NPM_CAPTURE=str(capture),
+        NPM_PREFIX_BIN=str(npm_bin),
+        REQUIRE_FOUNDATIONS="1",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.exists()
+    for name in names:
+        assert (legacy_bin / name).read_text() == legacy_bytes
+        assert (
+            subprocess.run([str(npm_bin / name), "--version"], check=False).returncode
+            == 0
+        )
+
+
 def test_a_working_foundation_is_left_exactly_as_the_user_installed_it(
     tmp_path: Path,
 ) -> None:
