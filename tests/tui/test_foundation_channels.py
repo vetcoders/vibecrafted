@@ -203,6 +203,7 @@ def _fake_node_and_npm(fake_bin: Path, prefix: Path, capture: Path) -> None:
         fake_bin / "npm",
         "#!/bin/sh\n"
         "set -eu\n"
+        'if [ "$1 $2" = "prefix -g" ]; then dirname "$NPM_PREFIX_BIN"; exit 0; fi\n'
         'printf "%s\\n" "$*" >> "$NPM_CAPTURE"\n'
         'case "$3" in\n'
         '  @loctree/loctree) names="loct loctree loctree-mcp loctree-lsp" ;;\n'
