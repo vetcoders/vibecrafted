@@ -350,6 +350,20 @@ ensure_node() {
   return 1
 }
 
+npm_prefix_writable() {
+  local prefix="$1" candidate
+  [[ "$prefix" == /* ]] || return 1
+  # npm needs both the global package directory and its executable links.
+  # A missing directory is creatable only through a writable parent.
+  for candidate in "$prefix" "$prefix/bin" "$prefix/lib/node_modules"; do
+    while [[ ! -e "$candidate" && ! -L "$candidate" ]]; do
+      candidate="${candidate%/*}"
+      [[ -n "$candidate" ]] || candidate="/"
+    done
+    [[ -d "$candidate" && -w "$candidate" && -x "$candidate" ]] || return 1
+  done
+}
+
 install_from_npm() {
   local package="$1" binary="${2:-$1}"
 
@@ -363,7 +377,20 @@ install_from_npm() {
     return 1
   }
 
+  local npm_prefix private_prefix=""
   local npm_args=(install -g "$package")
+  npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+  if ! npm_prefix_writable "$npm_prefix"; then
+    # Reuse the private Node prefix already searched by the command deck.
+    # Override this invocation only; leave the user's npm configuration alone.
+    private_prefix="$VIBECRAFTED_HOME/tools/node"
+    if ! mkdir -p "$private_prefix/bin" || ! npm_prefix_writable "$private_prefix"; then
+      warn "No writable npm prefix for $package: $private_prefix"
+      return 1
+    fi
+    npm_args+=(--prefix "$private_prefix")
+    info "Using user-writable npm prefix: $private_prefix"
+  fi
   case "$package" in
     "$LOCTREE_NPM_PACKAGE"|"$AICX_NPM_PACKAGE")
       # An ambient or scoped registry must not redirect public foundations.
@@ -377,6 +404,16 @@ install_from_npm() {
     return 1
   }
 
+  if [[ -n "$private_prefix" ]]; then
+    # Keep working user-installed commands first, as the command deck does.
+    case ":$PATH:" in
+      *":$private_prefix/bin:"*) ;;
+      *) export PATH="${PATH:+$PATH:}$private_prefix/bin" ;;
+    esac
+  fi
+  # Earlier readiness probes can cache an obsolete shim. npm may have put its
+  # replacement earlier on PATH without changing PATH in this Bash process.
+  hash -r
   binary_runs "$binary"
 }
 
