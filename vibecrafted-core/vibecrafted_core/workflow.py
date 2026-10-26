@@ -5511,7 +5511,7 @@ def manual_fork_session(
                 "model": model,
                 "base": base,
                 "worktree": worktree,
-                "execution_runtime": execution_runtime,
+                "runtime_class": execution_runtime,
                 "permissions": permissions,
             },
             source_dir,
