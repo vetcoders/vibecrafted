@@ -283,6 +283,52 @@ def test_npm_install_rechecks_new_executables_after_broken_legacy_shims(
         )
 
 
+@pytest.mark.parametrize("ambient_writable", [False, True])
+def test_npm_uses_writable_prefix_without_changing_user_configuration(
+    tmp_path: Path, ambient_writable: bool
+) -> None:
+    fake_bin = tmp_path / "bin"
+    ambient = tmp_path / "ambient-prefix"
+    if ambient_writable:
+        (ambient / "bin").mkdir(parents=True)
+    else:
+        ambient.write_text("unavailable shared prefix\n")
+    config = tmp_path / "user.npmrc"
+    original_config = "registry=https://private.example.invalid/\n"
+    config.write_text(original_config)
+    capture = tmp_path / "npm-args.txt"
+    _executable(fake_bin / "node")
+    _executable(
+        fake_bin / "npm",
+        "#!/bin/sh\nset -eu\n"
+        'if [ "$1 $2" = "prefix -g" ]; then printf "%s\\n" "$AMBIENT_PREFIX"; exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$NPM_CAPTURE"\n'
+        'test "$1 $2 $3" = "install -g @loctree/aicx" || exit 20\n'
+        'selected="$AMBIENT_PREFIX"\n'
+        'while [ "$#" -gt 0 ]; do if [ "$1" = --prefix ]; then shift; selected="$1"; fi; shift; done\n'
+        'mkdir -p "$selected/bin"\n'
+        'for name in aicx aicx-mcp; do printf "#!/bin/sh\\nexit 0\\n" > "$selected/bin/$name"; chmod +x "$selected/bin/$name"; done\n',
+    )
+    crafted = tmp_path / "home/.vibecrafted"
+    result = _run_installer(
+        tmp_path,
+        "aicx",
+        path=[ambient / "bin", fake_bin],
+        VIBECRAFTED_HOME=str(crafted),
+        AMBIENT_PREFIX=str(ambient),
+        NPM_CAPTURE=str(capture),
+        NPM_CONFIG_USERCONFIG=str(config),
+        REQUIRE_FOUNDATIONS="1",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert config.read_text() == original_config
+    expected = ambient if ambient_writable else crafted / "tools/node"
+    assert (expected / "bin/aicx").is_file()
+    assert ("--prefix" in capture.read_text()) is (not ambient_writable)
+    if not ambient_writable:
+        assert ambient.read_text() == "unavailable shared prefix\n"
+
+
 def test_a_working_foundation_is_left_exactly_as_the_user_installed_it(
     tmp_path: Path,
 ) -> None:
