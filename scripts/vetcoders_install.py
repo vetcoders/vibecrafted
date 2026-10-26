@@ -24861,22 +24861,27 @@ def _reclaim_foreign_launcher_names(
     byte-identical file is removed and its collision backup (if any) restored,
     so the pre-Vibecrafted owner of a public name resurfaces. A bare foreign
     name whose bytes moved on is left untouched — that is the user's own
-    install now (canonical releases land there), and the user's PATH install
-    always wins. A retired name inside the Vibecrafted namespace is ours under
-    any drift: divergent bytes are preserved under `.installer-backups/drift`
-    and the wrapper is removed, so no stale `vibecrafted-*` surface lingers.
+    install now (canonical releases land there), and its stale ownership and
+    automatic collision restore are released without deleting backup history.
+    The user's PATH install always wins. A retired name inside the Vibecrafted
+    namespace is ours under any drift: divergent bytes are preserved under
+    `.installer-backups/drift` and the wrapper is removed, so no stale
+    `vibecrafted-*` surface lingers.
 
     Returns the retired paths so the caller can repoint their dependents.
     """
     published = _runtime_published_launcher_names(bin_dir)
     previous_owned = previous.get("owned_files", {})
+    previous_links = previous.get("owned_symlinks", {})
     retired: list[Path] = []
-    for stale_key in sorted(previous_owned):
+    for stale_key in sorted(set(previous_owned) | set(previous_links)):
         stale = Path(stale_key)
         if stale.parent != launcher_home or stale.name in published:
             continue
         backup_raw = receipt.setdefault("backups", {}).get(stale_key)
         if not _path_present(stale):
+            if stale_key not in previous_owned:
+                continue
             receipt.setdefault("owned_files", {}).pop(stale_key, None)
             if backup_raw:
                 _restore_receipt_collision_backup(
@@ -24885,15 +24890,50 @@ def _reclaim_foreign_launcher_names(
                 receipt.setdefault("backups", {}).pop(stale_key, None)
             continue
         identical = (
-            not stale.is_symlink()
+            stale_key in previous_owned
+            and not stale.is_symlink()
             and stale.is_file()
             and _sha256_path(stale) == previous_owned[stale_key]
         )
+        if stale_key in previous_links and stale.is_symlink():
+            identical = _symlink_target(stale) == Path(
+                previous_links[stale_key]
+            ).resolve(strict=False)
         ours_regardless = (
             stale.name.startswith(_RUNTIME_NAMESPACE_PREFIXES)
             or stale.name in _RUNTIME_NAMESPACE_NAMES
         )
         if not identical and not ours_regardless:
+            occupant = _runtime_owned_occupant_state(stale)
+            receipt.setdefault("owned_files", {}).pop(stale_key, None)
+            receipt.setdefault("owned_symlinks", {}).pop(stale_key, None)
+            receipt.setdefault("backups", {}).pop(stale_key, None)
+            if backup_raw:
+                history = receipt.setdefault("drift_backup_history", {}).setdefault(
+                    stale_key, []
+                )
+                if backup_raw not in history:
+                    history.append(backup_raw)
+            receipt.setdefault("ownership_reconciliation", []).append(
+                {
+                    "path": stale_key,
+                    "action": "release_retired_foreign_launcher",
+                    "disposition": "preserve",
+                    "reason": (
+                        "retired public tool has an unproven replacement; "
+                        "release ownership and automatic restore, preserving "
+                        "current bytes and backup history"
+                    ),
+                    "receipt_sha256": previous_owned.get(stale_key, ""),
+                    "receipt_target": previous_links.get(stale_key, ""),
+                    "released_collision_backup": backup_raw or "",
+                    **occupant,
+                }
+            )
+            continue
+        # Matching historical symlink claims retain their existing treatment;
+        # this migration only releases their unproven foreign replacements.
+        if stale_key not in previous_owned:
             continue
         if not identical:
             _backup_runtime_drift(stale, runtime_home=runtime_home, receipt=receipt)
