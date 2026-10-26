@@ -15,7 +15,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   task runtime rather than a conflicting implicit default.
 - Foundation installation refreshes executable lookup after npm and uses a
   writable per-user prefix when the ambient global installation is unavailable.
-
+- Runtime upgrades release obsolete ownership claims over independently updated
+  public tools, preserving their current bytes and historical collision backups.
 - App capture settlement waits out the transient install lease of a relaunched
   App instead of failing `install.sh` after a successful swap. `vc-app-update`
   retries only the canonical `runtime installation is in progress` refusal,
