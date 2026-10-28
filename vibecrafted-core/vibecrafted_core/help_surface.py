@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .package_resources import skills_path
+from .local_skills import LocalSkillError, resolve_execution_skill
 from .workflow import SUPPORTED_AGENTS
 from .workflows.registry import workflow_definition, workflow_manifest
 
@@ -436,8 +436,12 @@ def advertised_compact_verbs(version: str = "test") -> tuple[str, ...]:
 def _skill_version(topic: str) -> str:
     """Read the ``version:`` frontmatter field from the topic's SKILL.md, or "" if absent."""
     try:
-        path = skills_path() / f"vc-{topic}" / "SKILL.md"
+        path = resolve_execution_skill(f"vc-{topic}")
         lines = path.read_text(encoding="utf-8").splitlines()
+    except LocalSkillError as exc:
+        if exc.code == "not_found":
+            return ""
+        raise
     except (FileNotFoundError, OSError):
         return ""
     for line in lines[1:40]:

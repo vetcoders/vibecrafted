@@ -51,6 +51,7 @@ VIBECRAFTED_HOME_FOUNDER_DATA = frozenset(
         "loctree",
         "vibecrafted",
         "store",
+        "local-skills",
         ".git",
         ".loctree",
     }

@@ -53,8 +53,8 @@ from .execution_controls import (
     resolve_execution_controls,
 )
 from .failure_attribution import attribute_failure
+from .local_skills import LocalSkillError, resolve_execution_skill
 from .model_overrides import _with_model_override
-from .package_resources import skills_path
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -355,9 +355,12 @@ def canonical_skill_file(name: str) -> Path | None:
     token = str(name or "").strip().removeprefix("vc-")
     if not token or "/" in token or "\\" in token or ".." in token:
         return None
-    path = skills_path() / f"vc-{token}" / "SKILL.md"
     try:
-        return path if path.is_file() else None
+        return resolve_execution_skill(f"vc-{token}")
+    except LocalSkillError as exc:
+        if exc.code == "not_found":
+            return None
+        raise
     except OSError:
         return None
 
