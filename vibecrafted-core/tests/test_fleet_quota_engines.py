@@ -929,6 +929,7 @@ def test_empty_store_is_explicit_and_second_once_reuses_cache(
     assert payload["cache_semantics"] == "subset_of_input"
     assert payload["live_total"] == 0
     assert payload["archived_total"] == 0
+    assert "cost" not in payload
     assert (quota / "quota.json").is_file()
     assert not (quota.parent / "archive" / "codex.jsonl").exists()
 
@@ -1155,3 +1156,163 @@ def test_kimi_archive_keeps_rotated_wire_days(tmp_path: Path, monkeypatch) -> No
     assert gone["archived_total"] == 165
     assert archive.read_text(encoding="utf-8") == text
     assert os.environ["VIBECRAFTED_HOME"] == str(home)
+
+
+def test_codex_once_prices_turn_context_that_precedes_token_count(
+    tmp_path: Path, capsys
+) -> None:
+    engine = _engine()
+    store = tmp_path / "store"
+    quota = tmp_path / "quota"
+    path = store / "sessions" / "2026" / "10" / "28" / "terra.jsonl"
+    turn = {
+        "type": "event_msg",
+        "payload": {"type": "turn_context", "model": "gpt-6.1-terra"},
+    }
+    count = {
+        "type": "event_msg",
+        "timestamp": "2026-10-28T12:00:00Z",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 800,
+                    "output_tokens": 50,
+                    "reasoning_output_tokens": 20,
+                    "total_tokens": 1050,
+                }
+            },
+        },
+    }
+    _write(path, json.dumps(turn) + "\n" + json.dumps(count) + "\n")
+    code = engine.main(
+        "codex", ["once", "--store", str(store), "--quota-dir", str(quota)]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["last_session"]["model"] == "gpt-6.1-terra"
+    assert payload["cost"]["cost_usd"] == pytest.approx(0.00049)
+    assert payload["cost"]["cost_source"] == "price_table(openrouter@2026-10-28)"
+    assert payload["cost"]["cost_basis"] == "api-equiv"
+    assert payload["cost"]["components"]["reasoning_usd"] == pytest.approx(0.0001)
+    line = engine.render_statusline(payload)
+    assert "≈$0.000490 api-equiv price_table(openrouter@2026-10-28)" in line
+
+
+def test_codex_unmapped_model_prints_no_invented_dollars(
+    tmp_path: Path, capsys
+) -> None:
+    engine = _engine()
+    store = tmp_path / "store"
+    path = store / "sessions" / "rollout.jsonl"
+    turn = {
+        "type": "event_msg",
+        "payload": {"type": "turn_context", "model": "not-a-real-model"},
+    }
+    count = {
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 105,
+                }
+            },
+        },
+    }
+    _write(path, json.dumps(turn) + "\n" + json.dumps(count) + "\n")
+    code = engine.main(
+        "codex",
+        ["line", "--store", str(store), "--quota-dir", str(tmp_path / "quota")],
+    )
+    assert code == 0
+    line = capsys.readouterr().out
+    assert "≈$" not in line
+    saved = json.loads((tmp_path / "quota" / "quota.json").read_text(encoding="utf-8"))
+    assert saved["cost"]["cost_source"] == "unmapped"
+    assert saved["cost"]["cost_usd"] == "unknown"
+
+
+def test_grok_once_prices_primary_model_and_skips_the_day_row_fallback(
+    tmp_path: Path, capsys
+) -> None:
+    engine = _engine()
+    store = tmp_path / "store"
+    quota = tmp_path / "quota"
+    priced = store / "sessions" / "sess-priced" / "leaf" / "usage.json"
+    _write(
+        priced,
+        json.dumps(
+            {
+                "updatedAt": "2026-10-28T12:00:00Z",
+                "session": {
+                    "primaryModelId": "grok-4.7-build-fast",
+                    "inputTokens": 1000,
+                    "cachedReadTokens": 800,
+                    "cacheCreationTokens": 0,
+                    "outputTokens": 50,
+                    "reasoningTokens": 10,
+                    "totalTokens": 1050,
+                },
+            }
+        ),
+    )
+    code = engine.main(
+        "grok", ["once", "--store", str(store), "--quota-dir", str(quota)]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["last_session"]["model"] == "grok-4.7-build-fast"
+    # 200*2 + 800*0.5 + 50*6 = 0.0011. Reasoning is not added.
+    assert payload["cost"]["cost_usd"] == pytest.approx(0.0011)
+    assert payload["cost"]["cost_source"] == "price_table(openrouter@2026-10-28)"
+
+    bare = store / "sessions" / "sess-bare" / "leaf" / "usage.json"
+    _write(
+        bare,
+        json.dumps(
+            {
+                "updatedAt": "2026-10-28T13:00:00Z",
+                "session": {
+                    "inputTokens": 1000,
+                    "outputTokens": 50,
+                    "totalTokens": 1050,
+                },
+            }
+        ),
+    )
+    code = engine.main(
+        "grok", ["once", "--store", str(store), "--quota-dir", str(quota)]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["last_session"]["id"] == "sess-bare"
+    assert "model" not in payload["last_session"]
+    assert payload["cost"]["cost_usd"] == "unknown"
+    assert payload["cost"]["cost_source"] == "unknown"
+    assert "≈$" not in engine.render_statusline(payload)
+
+
+def test_cursor_line_does_not_invent_a_price(tmp_path: Path, capsys) -> None:
+    engine = _engine()
+    code = engine.main(
+        "cursor",
+        [
+            "line",
+            "--store",
+            str(tmp_path / ".cursor"),
+            "--quota-dir",
+            str(tmp_path / "quota"),
+        ],
+    )
+    assert code == 0
+    line = capsys.readouterr().out
+    assert "unavailable" in line
+    assert "0" not in line
+    assert "≈$" not in line
+    saved = json.loads((tmp_path / "quota" / "quota.json").read_text(encoding="utf-8"))
+    assert "cost" not in saved

@@ -486,7 +486,10 @@ def test_unpriced_model_is_explicit_and_no_partial_cost(tmp_path, monkeypatch):
         transcript=None,
     )
     assert row["unpricedModels"] == ["future-model"]
-    assert row["cost"]["source"] == "unknown"
+    assert row["cost"]["source"] == "unmapped"
+    assert row["cost"]["amount"]["reason"] == (
+        "no price table entry for model 'future-model'"
+    )
     assert row["usage"]["tokens_total"] == 110
 
 

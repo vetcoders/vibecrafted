@@ -18,6 +18,13 @@ def test_pyproject_publishes_vibecrafted_distribution_with_package_data() -> Non
     assert "vibecrafted_core/deck/vibecrafted" in artifacts
     assert "vibecrafted_core/schemas/**" in artifacts
     assert "vibecrafted_core/trust/**" in artifacts
+    assert "vibecrafted_core/data/**" in artifacts
+    assert (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted_core"
+        / "data"
+        / "openrouter_prices.json"
+    ).is_file()
     assert data["project"]["scripts"]["verify-vibecrafted-walkaround"] == (
         "vibecrafted_core.walkaround_runner:main"
     )

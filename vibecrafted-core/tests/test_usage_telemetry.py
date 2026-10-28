@@ -218,7 +218,8 @@ def test_cost_estimated_covers_the_current_codex_model() -> None:
         "gpt-6.1-sol", _known_usage(), reported_amount=None, reported_source=None
     )
     payload = cost.as_dict()
-    assert payload["source"] == "estimated:openai-api-2026-09-30"
+    assert payload["source"] == "price_table(openrouter@2026-10-28)"
+    assert payload["basis"] == "api-equiv"
     assert payload["amount"] == round((1200 * 2.0 + 200 * 0.1 + 300 * 10.0) / 1e6, 6)
 
 
@@ -231,7 +232,7 @@ def test_cost_estimated_covers_copilot_and_dated_openai_stamps() -> None:
         "gpt-6-sol", _known_usage(), reported_amount=None, reported_source=None
     )
     payload = cost.as_dict()
-    assert payload["source"] == "estimated:openai-api-2026-09-30"
+    assert payload["source"] == "price_table(openrouter@2026-10-28)"
     assert payload["amount"] == round((1200 * 2.0 + 200 * 0.2 + 300 * 10.0) / 1e6, 6)
 
     dated = telemetry.resolve_cost(
@@ -248,10 +249,24 @@ def test_cost_estimated_covers_copilot_and_dated_openai_stamps() -> None:
     assert telemetry.model_price("gpt-6-sol-extra") is None
 
 
+def test_named_miss_is_unmapped_not_a_guess() -> None:
+    cost = telemetry.resolve_cost(
+        "kimi-k2", _known_usage(), reported_amount=None, reported_source=None
+    )
+    payload = cost.as_dict()
+    assert payload["source"] == "unmapped"
+    assert payload["amount"] == {
+        "value": "unknown",
+        "reason": "no price table entry for model 'kimi-k2'",
+    }
+    assert "basis" not in payload
+    assert cost.flat() == {"cost_usd": "unknown", "cost_source": "unmapped"}
+    assert telemetry.model_price("kimi-k2") is None
+
+
 @pytest.mark.parametrize(
     "model,usage,reason",
     [
-        ("kimi-k2", "known", "no price table entry for model 'kimi-k2'"),
         ("", "known", "model unknown; no price table lookup"),
         (
             "gpt-5.5",
@@ -273,7 +288,6 @@ def test_cost_unknown_has_a_reason_and_no_default_price(
     assert payload["source"] == "unknown"
     assert payload["amount"] == {"value": "unknown", "reason": reason}
     assert cost.flat() == {"cost_usd": "unknown", "cost_source": "unknown"}
-    assert telemetry.model_price("kimi-k2") is None
 
 
 # --------------------------------------------------------------------------

@@ -172,6 +172,33 @@ def test_agent_stream_parser_maps_real_grok_end_telemetry() -> None:
     assert parser.cost_source == "estimated:xai-api-2026-07"
 
 
+def test_grok_records_primary_and_current_model_ids() -> None:
+    primary = AgentStreamParser("grok")
+    primary.feed_line(b'{"type":"session","primaryModelId":"grok-4.7"}\n')
+    assert primary.model_id == "grok-4.7"
+
+    current = AgentStreamParser("grok")
+    current.feed_line(
+        b'{"type":"model","message":{"current_model_id":"grok-4.7-build-fast"}}\n'
+    )
+    assert current.model_id == "grok-4.7-build-fast"
+
+
+def test_grok_default_model_reads_models_default(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "grok-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[models]\ndefault = "grok-4.7-build-fast"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GROK_MODEL", raising=False)
+    monkeypatch.delenv("VIBECRAFTED_PARENT_MODEL", raising=False)
+    assert (
+        resolve_default_model("grok", env={"GROK_HOME": str(home)})
+        == "grok-4.7-build-fast"
+    )
+
+
 def test_agent_stream_parser_renders_junie_steps_without_none_noise() -> None:
     parser = AgentStreamParser("junie")
 
@@ -330,7 +357,7 @@ def test_cost_estimates_lock_user_reported_grok_and_codex_regressions() -> None:
         tokens_input=20901518,
         tokens_cached_input=20536960,
         tokens_output=48906,
-    ) == (116.24325, "estimated:openai-api-2026-07")
+    ) == (92.798976, "price_table(openrouter@2026-10-28)")
 
 
 def test_grok_event_with_keyless_dict_message_does_not_recurse() -> None:
