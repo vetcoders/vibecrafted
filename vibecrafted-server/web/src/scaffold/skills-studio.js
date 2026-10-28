@@ -18,6 +18,7 @@
   var form = room.querySelector('form.editor-form');
   if (!form) return;
   var text = form.querySelector('textarea');
+  var version = form.querySelector('input[name=expected_sha256]');
   var rich = form.querySelector('.rich-pane');
   var edit = room.querySelector('[data-skill-edit]');
   var status = room.querySelector('[data-save-status]');
@@ -74,9 +75,20 @@
     saving = true;
     edit.disabled = true;
     status.textContent = 'Saving…';
-    fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)) })
-      .then(function (response) { if (!response.ok) throw new Error('save failed'); baseline = submitted; status.textContent = text.value === baseline ? 'Saved' : 'Unsaved changes'; if (text.value === baseline) setMode(false); })
-      .catch(function () { status.textContent = 'Save failed. Your edits are still here.'; })
+    fetch(form.action, { method: 'POST', headers: { 'Accept': 'application/json' }, body: new URLSearchParams(new FormData(form)) })
+      .then(function (response) {
+        if (response.status === 409) throw new Error('conflict');
+        if (!response.ok) throw new Error('save failed');
+        return response.json();
+      })
+      .then(function (result) {
+        if (!version || !result || !/^[0-9a-f]{64}$/.test(result.expected_sha256)) throw new Error('save failed');
+        version.value = result.expected_sha256;
+        baseline = submitted;
+        status.textContent = text.value === baseline ? 'Saved' : 'Unsaved changes';
+        if (text.value === baseline) setMode(false);
+      })
+      .catch(function (error) { status.textContent = error.message === 'conflict' ? 'This skill changed elsewhere. Your edits are still here; copy them before reloading.' : 'Save could not be confirmed. Your edits are still here.'; })
       .finally(function () { saving = false; edit.disabled = false; });
   });
   form.addEventListener('submit', function (event) { event.preventDefault(); if (edit) edit.click(); });

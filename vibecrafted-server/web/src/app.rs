@@ -3505,6 +3505,8 @@ struct SkillsSnapshot {
     read_ok: bool,
     #[serde(default)]
     writable: bool,
+    #[serde(default)]
+    expected_sha256: String,
 }
 
 impl SkillsSnapshot {
@@ -3516,6 +3518,7 @@ impl SkillsSnapshot {
             text: String::new(),
             read_ok: false,
             writable: false,
+            expected_sha256: String::new(),
         }
     }
 }
@@ -3614,25 +3617,45 @@ fn writable_skill_path(roots: &[std::path::PathBuf], file: &std::path::Path) -> 
 }
 
 #[cfg(feature = "ssr")]
-fn save_named_skill_in(roots: &[std::path::PathBuf], name: &str, text: &str) -> Result<(), ()> {
-    if !skill_dir_name_ok(name) {
-        return Err(());
-    }
-    let Some(file) = discover_skill_files(roots)
-        .into_iter()
-        .find(|file| file.name == name)
-    else {
-        return Err(());
-    };
-    let canonical = writable_skill_path(roots, &file.path).ok_or(())?;
-    // A failed read must never be represented by a blank editable document.
-    std::fs::read_to_string(&canonical).map_err(|_| ())?;
-    std::fs::write(&canonical, text).map_err(|_| ())
+fn skill_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(feature = "ssr")]
-fn save_named_skill(name: &str, text: &str) -> Result<(), ()> {
-    save_named_skill_in(&product_skill_roots(), name, text)
+#[derive(Debug, PartialEq, Eq)]
+enum SaveSkillError {
+    Invalid,
+    Conflict,
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill_in(
+    roots: &[std::path::PathBuf], name: &str, text: &str, expected_sha256: &str,
+) -> Result<String, SaveSkillError> {
+    if !skill_dir_name_ok(name)
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SaveSkillError::Invalid);
+    }
+    let file = discover_skill_files(roots).into_iter().find(|file| file.name == name)
+        .ok_or(SaveSkillError::Invalid)?;
+    let canonical = writable_skill_path(roots, &file.path).ok_or(SaveSkillError::Invalid)?;
+    // Failed reads, including invalid UTF-8, must never become blank saves.
+    let current = std::fs::read_to_string(&canonical).map_err(|_| SaveSkillError::Invalid)?;
+    if skill_sha256(current.as_bytes()) != expected_sha256 {
+        return Err(SaveSkillError::Conflict);
+    }
+    // This check guards cooperative writers, but is not atomic against writers
+    // that change the file between read and write.
+    std::fs::write(&canonical, text).map_err(|_| SaveSkillError::Invalid)?;
+    Ok(skill_sha256(text.as_bytes()))
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill(name: &str, text: &str, expected_sha256: &str) -> Result<String, SaveSkillError> {
+    save_named_skill_in(&product_skill_roots(), name, text, expected_sha256)
 }
 
 #[cfg(all(feature = "ssr", any(test, not(feature = "hydrate"))))]
@@ -3647,7 +3670,8 @@ fn build_skills_snapshot_in(roots: &[std::path::PathBuf], requested: Option<&str
     let content = selected.and_then(|file| std::fs::read_to_string(&file.path).ok());
     let read_ok = content.is_some();
     let writable = read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
-    SkillsSnapshot { names, open, text: content.unwrap_or_default(), read_ok, writable }
+    let expected_sha256 = content.as_ref().map(|text| skill_sha256(text.as_bytes())).unwrap_or_default();
+    SkillsSnapshot { names, open, text: content.unwrap_or_default(), read_ok, writable, expected_sha256 }
 }
 
 #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
@@ -3704,10 +3728,12 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
     let document = if let Some(name) = open.filter(|_| snapshot.read_ok) {
         let text = snapshot.text;
         let read_only = !snapshot.writable;
+        let expected_sha256 = snapshot.expected_sha256;
         view! {
             <article class="artifact-panel is-active" data-render-mode="rich" data-skills-body="editor">
                 <form class="editor-form" method="post" action="/api/skills/file">
                     <input type="hidden" name="name" value=name />
+                    <input type="hidden" name="expected_sha256" value=expected_sha256 />
                     <div class="editor-body">
                         <div class="rich-pane md-body">{text.clone()}</div>
                         <textarea class="raw-pane" name="text" hidden readonly=read_only>{text}</textarea>
@@ -3776,19 +3802,25 @@ pub fn SkillEditorPage() -> impl IntoView {
 struct SaveSkillForm {
     name: String,
     #[serde(default)]
+    expected_sha256: String,
+    #[serde(default)]
     text: String,
 }
 
 #[cfg(feature = "ssr")]
 async fn save_skill_form(
+    headers: axum::http::HeaderMap,
     axum::extract::Form(form): axum::extract::Form<SaveSkillForm>,
 ) -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
-
-    if save_named_skill(&form.name, &form.text).is_ok() && skill_dir_name_ok(&form.name) {
-        axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response()
-    } else {
-        (axum::http::StatusCode::BAD_REQUEST, "Skills").into_response()
+    match save_named_skill(&form.name, &form.text, &form.expected_sha256) {
+        Ok(expected_sha256) if headers.get(axum::http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok()) == Some("application/json") => {
+                axum::Json(serde_json::json!({ "expected_sha256": expected_sha256 })).into_response()
+            }
+        Ok(_) => axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response(),
+        Err(SaveSkillError::Conflict) => (axum::http::StatusCode::CONFLICT, "Skill changed since it was opened.").into_response(),
+        Err(SaveSkillError::Invalid) => (axum::http::StatusCode::BAD_REQUEST, "Skill could not be saved.").into_response(),
     }
 }
 
@@ -6443,26 +6475,34 @@ pub(crate) mod tests {
         assert!(!html.contains("/api/scaffold/status"));
         assert!(html.contains("beforeunload"));
         assert!(html.contains("popstate"));
-        assert!(html.contains("Save failed. Your edits are still here."));
+        assert!(html.contains("Save could not be confirmed. Your edits are still here."));
         assert!(html.contains("\\u003cscript>"));
         assert!(html.contains(r#"class="server-nav-link is-active" href="/skills""#));
         let empty_file = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
         assert!(empty_file.read_ok && empty_file.writable && empty_file.text.is_empty());
+        assert_eq!(super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).unwrap(), super::skill_sha256(b""));
         let managed_file = super::build_skills_snapshot_in(&roots, Some("vc-managed"));
         assert!(managed_file.read_ok && !managed_file.writable);
         let managed_html = render_skills(managed_file);
         assert!(managed_html.contains("Read-only"));
         assert!(!managed_html.contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#));
-        assert!(super::save_named_skill_in(&roots, "vc-managed", "no").is_err());
+        assert!(super::save_named_skill_in(&roots, "vc-managed", "no", &super::skill_sha256(b"managed")).is_err());
         fs::write(root.join("vc-beta/SKILL.md"), [0xff]).unwrap();
         let unreadable = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
         assert!(!unreadable.read_ok && !unreadable.writable);
         assert!(render_skills(unreadable).contains("Read failed"));
-        assert!(super::save_named_skill_in(&roots, "vc-beta", "").is_err());
+        assert!(super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).is_err());
         assert_eq!(fs::read(root.join("vc-beta/SKILL.md")).unwrap(), [0xff]);
-        assert!(super::save_named_skill_in(&roots, "../vc-alpha", "no").is_err());
-        assert!(super::save_named_skill_in(&roots, "vc-missing", "no").is_err());
-        super::save_named_skill_in(&roots, "vc-alpha", "updated").unwrap();
+        assert!(super::save_named_skill_in(&roots, "../vc-alpha", "no", &super::skill_sha256(b"")).is_err());
+        assert!(super::save_named_skill_in(&roots, "vc-missing", "no", &super::skill_sha256(b"")).is_err());
+        let old_hash = super::skill_sha256(b"# Alpha\n<script>alert(1)</script>");
+        assert!(html.contains(&format!(r#"name="expected_sha256" value="{}""#, old_hash)));
+        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "updated", ""), Err(super::SaveSkillError::Invalid));
+        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "updated", &super::skill_sha256(b"stale")), Err(super::SaveSkillError::Conflict));
+        assert_eq!(fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(), "# Alpha\n<script>alert(1)</script>");
+        let new_hash = super::save_named_skill_in(&roots, "vc-alpha", "updated", &old_hash).unwrap();
+        assert_eq!(new_hash, super::skill_sha256(b"updated"));
+        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "stale save", &old_hash), Err(super::SaveSkillError::Conflict));
         assert_eq!(fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(), "updated");
         assert_eq!(fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(), "shadow");
         let missing = super::build_skills_snapshot_in(&roots, Some("vc-missing"));
