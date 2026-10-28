@@ -3501,6 +3501,10 @@ struct SkillsSnapshot {
     open: Option<String>,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    read_ok: bool,
+    #[serde(default)]
+    writable: bool,
 }
 
 impl SkillsSnapshot {
@@ -3510,6 +3514,8 @@ impl SkillsSnapshot {
             names: Vec::new(),
             open: None,
             text: String::new(),
+            read_ok: false,
+            writable: false,
         }
     }
 }
@@ -3592,6 +3598,22 @@ fn discover_skill_files(roots: &[std::path::PathBuf]) -> Vec<SkillFile> {
 }
 
 #[cfg(feature = "ssr")]
+fn writable_skill_path(roots: &[std::path::PathBuf], file: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(file).ok()?;
+    let allowed = roots.iter().any(|root| {
+        std::fs::canonicalize(root).ok().is_some_and(|root| canonical.starts_with(root))
+    });
+    if !allowed || canonical.file_name().and_then(|part| part.to_str()) != Some("SKILL.md") {
+        return None;
+    }
+    if std::fs::metadata(&canonical).ok()?.permissions().readonly() {
+        return None;
+    }
+    std::fs::OpenOptions::new().write(true).open(&canonical).ok()?;
+    Some(canonical)
+}
+
+#[cfg(feature = "ssr")]
 fn save_named_skill_in(roots: &[std::path::PathBuf], name: &str, text: &str) -> Result<(), ()> {
     if !skill_dir_name_ok(name) {
         return Err(());
@@ -3602,15 +3624,9 @@ fn save_named_skill_in(roots: &[std::path::PathBuf], name: &str, text: &str) -> 
     else {
         return Err(());
     };
-    let canonical = std::fs::canonicalize(&file.path).map_err(|_| ())?;
-    let allowed = roots.iter().any(|root| {
-        std::fs::canonicalize(root)
-            .ok()
-            .is_some_and(|root| canonical.starts_with(&root))
-    });
-    if !allowed || canonical.file_name().and_then(|part| part.to_str()) != Some("SKILL.md") {
-        return Err(());
-    }
+    let canonical = writable_skill_path(roots, &file.path).ok_or(())?;
+    // A failed read must never be represented by a blank editable document.
+    std::fs::read_to_string(&canonical).map_err(|_| ())?;
     std::fs::write(&canonical, text).map_err(|_| ())
 }
 
@@ -3619,22 +3635,24 @@ fn save_named_skill(name: &str, text: &str) -> Result<(), ()> {
     save_named_skill_in(&product_skill_roots(), name, text)
 }
 
+#[cfg(all(feature = "ssr", any(test, not(feature = "hydrate"))))]
+fn build_skills_snapshot_in(roots: &[std::path::PathBuf], requested: Option<&str>) -> SkillsSnapshot {
+    let files = discover_skill_files(roots);
+    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
+    let selected = match requested {
+        Some(name) => files.iter().find(|file| file.name == name),
+        None => files.first(),
+    };
+    let open = selected.map(|file| file.name.clone());
+    let content = selected.and_then(|file| std::fs::read_to_string(&file.path).ok());
+    let read_ok = content.is_some();
+    let writable = read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
+    SkillsSnapshot { names, open, text: content.unwrap_or_default(), read_ok, writable }
+}
+
 #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
 fn build_skills_snapshot(open: Option<&str>) -> SkillsSnapshot {
-    let files = discover_skill_files(&product_skill_roots());
-    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
-    let open = open.and_then(|name| {
-        names
-            .iter()
-            .any(|known| known == name)
-            .then(|| name.to_string())
-    });
-    let text = open
-        .as_ref()
-        .and_then(|name| files.iter().find(|file| file.name == *name))
-        .and_then(|file| std::fs::read_to_string(&file.path).ok())
-        .unwrap_or_default();
-    SkillsSnapshot { names, open, text }
+    build_skills_snapshot_in(&product_skill_roots(), open)
 }
 
 #[cfg(feature = "hydrate")]
@@ -3670,63 +3688,73 @@ fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
 }
 
 fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
-    if let Some(name) = snapshot.open.clone() {
+    let open = snapshot.open.clone();
+    let tabs = snapshot.names.iter().map(|name| {
+        let href = format!("/skills/{name}");
+        let active = open.as_ref() == Some(name);
+        let class = if active { "tab is-active" } else { "tab" };
+        let current = if active { "page" } else { "false" };
+        view! { <a class=class href=href rel="external" data-skill-name=name.clone() aria-current=current><span>{name.clone()}</span><small>"SKILL.md"</small></a> }
+    }).collect_view();
+    let count = snapshot.names.len();
+    let state = if open.is_none() { "Select a skill" } else if !snapshot.read_ok { "Read failed" } else if snapshot.writable { "Writable" } else { "Read-only" };
+    let detail = if open.is_none() { "Choose a skill from the index." } else if !snapshot.read_ok { "This skill could not be read; editing is unavailable." } else if snapshot.writable { "This skill can be saved in its current location." } else { "The current location is outside the allowed writable roots or is not writable." };
+    let title = open.clone().unwrap_or_else(|| "Select a skill".to_string());
+    let edit_button = (snapshot.writable && snapshot.read_ok).then(|| view! { <button type="button" class="render-mode-btn" data-skill-edit>"Edit"</button> });
+    let document = if let Some(name) = open.filter(|_| snapshot.read_ok) {
         let text = snapshot.text;
+        let read_only = !snapshot.writable;
         view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <aside class="doc-pane" data-skills-body="editor" aria-label="Skills">
-                    <article class="doc-sheet">
-                        <form class="skills-editor" method="post" action="/api/skills/file">
-                            <input type="hidden" name="name" value=name.clone() />
-                            <textarea class="skills-document" name="text">{text}</textarea>
-                            <button type="submit">"Save"</button>
-                        </form>
-                    </article>
-                </aside>
-                <a class="skills-back" href="/skills" rel="external">"Skills"</a>
-            </main>
-        }
-        .into_any()
-    } else if snapshot.names.is_empty() {
-        view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <p class="skills-empty" data-skills-state="empty">"Skills"</p>
-            </main>
-        }
-        .into_any()
+            <article class="artifact-panel is-active" data-render-mode="rich" data-skills-body="editor">
+                <form class="editor-form" method="post" action="/api/skills/file">
+                    <input type="hidden" name="name" value=name />
+                    <div class="editor-body">
+                        <div class="rich-pane md-body">{text.clone()}</div>
+                        <textarea class="raw-pane" name="text" hidden readonly=read_only>{text}</textarea>
+                    </div>
+                </form>
+            </article>
+        }.into_any()
     } else {
-        let names = snapshot.names;
-        view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <ul class="skills-list" data-skills-body="list">
-                    {names
-                        .into_iter()
-                        .map(|name| {
-                            let href = format!("/skills/{name}");
-                            view! {
-                                <li><a href=href rel="external">{name}</a></li>
-                            }
-                        })
-                        .collect_view()}
-                </ul>
-            </main>
-        }
-        .into_any()
+        let empty_state = if count == 0 { "empty" } else { "unavailable" };
+        view! { <p class="skills-empty" data-skills-state=empty_state>{detail}</p> }.into_any()
+    };
+    view! {
+        <div class="server-route-document skills-studio" data-skills-room>
+            <div class="review-shell">
+                <nav class="review-sidebar" aria-label="Skill index">
+                    <div class="review-sidebar-head"><div class="brand">"Skill index"</div></div>
+                    <div class="summary"><strong>"Skills"</strong><span>{format!("{count} skills")}</span></div>
+                    <label class="plan-search">"Search"<input type="search" data-skill-search placeholder="Search skills" /></label>
+                    <div class="tabs">{tabs}</div>
+                </nav>
+                <div class="review-workspace">
+                    <header class="review-topbar" aria-label="Active skill strip">
+                        <div class="review-topbar-id"><span class="mono-cap">"Skill"</span><strong>{title}</strong><span class="path">"SKILL.md"</span></div>
+                        <div class="review-topbar-actions" id="skill-actions">{edit_button}<span class="checkpoint-state">{state}</span></div>
+                    </header>
+                    <section class="review-main" aria-label="Skill document">{document}</section>
+                    <footer class="review-statusbar" aria-label="Document statistics"><span><b data-skill-mode>"rich"</b>" view"</span><span data-skill-chars>"0 chars"</span><span data-skill-lines>"0 lines"</span></footer>
+                </div>
+                <aside class="review-inspector" aria-label="Skill status"><div class="inspector-head mono-cap">"Inspector"</div><div class="inspector-block"><h3>"Status"</h3><p class="inspector-pill">{state}</p><p class="inspector-hint">{detail}</p><p class="inspector-meta" data-save-status>{if snapshot.read_ok { "Loaded" } else { "Unavailable" }}</p></div></aside>
+            </div>
+        </div>
     }
 }
 
 fn skills_page(snapshot: SkillsSnapshot) -> impl IntoView {
     let embed = encode_skills_embed(&snapshot);
     let room = skills_room(snapshot);
+    let script = include_str!("scaffold/skills-studio.js").replace("/* SHARED_MARKDOWN */", include_str!("scaffold/markdown.js"));
     view! {
         <Title text="Skills" />
-        <Meta name="description" content="Skills" />
-        <ServerFrame active=ServerSection::Overview status="skills".to_string()>
+        <Meta name="description" content="Browse and edit skills." />
+        <ServerFrame active=ServerSection::Skills status="skills".to_string()>
+            <style inner_html=include_str!("scaffold/studio.css")></style>
+            <style>".skills-studio .tab[hidden]{display:none}.skills-studio .skills-empty{padding:22px;color:var(--muted)}"</style>
             {room}
             <script id="vc-skills-data" type="application/json" inner_html=embed></script>
+            <script inner_html=script></script>
         </ServerFrame>
     }
 }
@@ -6374,13 +6402,6 @@ pub(crate) mod tests {
         fs::remove_dir_all(home).ok();
     }
 
-    fn skills_room_html(html: &str) -> &str {
-        let marker_at = html.find("data-skills-room").expect("skills room");
-        let start = html[..marker_at].rfind("<main").expect("skills main");
-        let end = html[start..].find("</main>").expect("skills room end") + start + "</main>".len();
-        &html[start..end]
-    }
-
     fn render_skills(snapshot: super::SkillsSnapshot) -> String {
         let owner = Owner::new();
         owner.with(|| {
@@ -6394,97 +6415,59 @@ pub(crate) mod tests {
         let home = temp_home();
         let root = home.join("skills");
         let other = home.join("view");
-        fs::create_dir_all(root.join("vc-alpha")).expect("alpha dir");
-        fs::create_dir_all(root.join("vc-beta")).expect("beta dir");
-        fs::create_dir_all(root.join("not-a-skill")).expect("decoy dir");
-        fs::create_dir_all(root.join("plans")).expect("plans dir");
-        fs::create_dir_all(root.join("vc-gamma")).expect("gamma dir");
-        fs::create_dir_all(&other).expect("second root");
-        fs::write(root.join("vc-alpha/SKILL.md"), "alpha body").expect("alpha skill");
-        fs::write(root.join("vc-alpha/NOTES.md"), "leave this file").expect("notes");
-        fs::write(root.join("vc-beta/SKILL.md"), "beta body").expect("beta skill");
-        fs::write(root.join("not-a-skill/SKILL.md"), "not listed").expect("decoy skill");
-        fs::write(root.join("plans/plan.md"), "plan card").expect("plan file");
-        fs::write(root.join("vc-gamma/README.md"), "no skill file").expect("gamma readme");
-        std::os::unix::fs::symlink(root.join("vc-alpha"), other.join("vc-alpha")).expect("symlink");
-
-        let files = super::discover_skill_files(&[root.clone(), other.clone()]);
-        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
-        assert_eq!(names, ["vc-alpha", "vc-beta"]);
-
-        let list = render_skills(super::SkillsSnapshot {
-            names: files.iter().map(|file| file.name.clone()).collect(),
-            open: None,
-            text: String::new(),
-        });
-        let list_room = skills_room_html(&list);
-        assert_eq!(list.matches("<h1").count(), 1);
-        assert_eq!(list_room.matches("<h1").count(), 1);
-        assert!(list_room.contains(">Skills<"));
-        assert_eq!(list_room.matches("<ul").count(), 1);
-        assert!(list_room.contains("class=\"skills-list\""));
-        assert!(list_room.contains("href=\"/skills/vc-alpha\""));
-        assert!(list_room.contains("href=\"/skills/vc-beta\""));
-        assert!(!list_room.contains("<textarea"));
-        assert!(!list.contains("plan-card"));
-        assert!(!list.contains("data-ppm=\"plan\""));
-        assert!(!list_room.contains("not-a-skill"));
-        assert!(!list_room.contains("vc-gamma"));
-
-        let editor = render_skills(super::SkillsSnapshot {
-            names: vec!["vc-alpha".into(), "vc-beta".into()],
-            open: Some("vc-alpha".into()),
-            text: "alpha body".into(),
-        });
-        let editor_room = skills_room_html(&editor);
-        assert_eq!(editor.matches("<h1").count(), 1);
-        assert!(editor_room.contains(">Skills<"));
-        assert_eq!(editor_room.matches("<ul").count(), 0);
-        assert!(!editor_room.contains("skills-list"));
-        assert_eq!(editor_room.matches("<textarea").count(), 1);
-        assert!(editor_room.contains("alpha body"));
-        assert!(editor_room.contains("class=\"doc-pane\""));
-        assert!(editor_room.contains("action=\"/api/skills/file\""));
-        assert!(editor_room.contains("name=\"name\""));
-        assert!(editor_room.contains("value=\"vc-alpha\""));
-        assert!(editor_room.contains("name=\"text\""));
-        assert!(!editor.contains("plan-card"));
-        assert!(!editor_room.contains("vc-beta"));
-
-        let empty_root = home.join("empty-skills");
-        fs::create_dir_all(&empty_root).expect("empty skills dir");
-        assert!(super::discover_skill_files(&[empty_root]).is_empty());
-        let empty = render_skills(super::SkillsSnapshot::empty());
-        let empty_room = skills_room_html(&empty);
-        assert_eq!(empty.matches("<h1").count(), 1);
-        assert!(empty_room.contains(">Skills<"));
-        assert!(empty_room.contains("data-skills-state=\"empty\""));
-        assert_eq!(empty_room.matches("<ul").count(), 0);
-        assert!(!empty_room.contains("<textarea"));
-        assert!(!empty.contains("plan-card"));
-
-        super::save_named_skill_in(&[root.clone(), other], "vc-alpha", "rewritten skill")
-            .expect("save the open skill");
-        assert_eq!(
-            fs::read_to_string(root.join("vc-alpha/SKILL.md")).expect("reread alpha"),
-            "rewritten skill"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("vc-alpha/NOTES.md")).expect("notes stay"),
-            "leave this file"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("vc-beta/SKILL.md")).expect("beta stays"),
-            "beta body"
-        );
-        assert!(
-            super::save_named_skill_in(std::slice::from_ref(&root), "../vc-alpha", "nope").is_err()
-        );
-        assert!(
-            super::save_named_skill_in(std::slice::from_ref(&root), "vc-missing", "nope").is_err()
-        );
-        assert!(super::save_named_skill_in(&[root], "not-a-skill", "nope").is_err());
-
+        let managed = home.join("release/vc-managed");
+        for path in [root.join("vc-alpha"), root.join("vc-beta"), other.join("vc-alpha"), managed.clone()] {
+            fs::create_dir_all(path).expect("skill dir");
+        }
+        fs::write(root.join("vc-alpha/SKILL.md"), "# Alpha\n<script>alert(1)</script>").unwrap();
+        fs::write(other.join("vc-alpha/SKILL.md"), "shadow").unwrap();
+        fs::write(root.join("vc-beta/SKILL.md"), "").unwrap();
+        fs::write(managed.join("SKILL.md"), "managed").unwrap();
+        std::os::unix::fs::symlink(&managed, root.join("vc-managed")).unwrap();
+        let roots = [root.clone(), other.clone()];
+        let snapshot = super::build_skills_snapshot_in(&roots, None);
+        assert_eq!(snapshot.names, ["vc-alpha", "vc-beta", "vc-managed"]);
+        assert_eq!(snapshot.open.as_deref(), Some("vc-alpha"));
+        assert!(snapshot.read_ok && snapshot.writable);
+        let html = render_skills(snapshot);
+        assert!(html.contains("review-shell"));
+        assert!(html.contains("review-sidebar"));
+        assert!(html.contains("review-inspector"));
+        assert!(html.contains("review-statusbar"));
+        assert!(html.contains("data-skill-search"));
+        assert!(html.contains(r#"href="/skills/vc-beta""#));
+        assert_eq!(html.matches(r#"class="artifact-panel is-active""#).count(), 1);
+        assert!(html.contains("data-skill-edit"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("/api/scaffold/status"));
+        assert!(html.contains("beforeunload"));
+        assert!(html.contains("popstate"));
+        assert!(html.contains("Save failed. Your edits are still here."));
+        assert!(html.contains("\\u003cscript>"));
+        assert!(html.contains(r#"class="server-nav-link is-active" href="/skills""#));
+        let empty_file = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
+        assert!(empty_file.read_ok && empty_file.writable && empty_file.text.is_empty());
+        let managed_file = super::build_skills_snapshot_in(&roots, Some("vc-managed"));
+        assert!(managed_file.read_ok && !managed_file.writable);
+        let managed_html = render_skills(managed_file);
+        assert!(managed_html.contains("Read-only"));
+        assert!(!managed_html.contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#));
+        assert!(super::save_named_skill_in(&roots, "vc-managed", "no").is_err());
+        fs::write(root.join("vc-beta/SKILL.md"), [0xff]).unwrap();
+        let unreadable = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
+        assert!(!unreadable.read_ok && !unreadable.writable);
+        assert!(render_skills(unreadable).contains("Read failed"));
+        assert!(super::save_named_skill_in(&roots, "vc-beta", "").is_err());
+        assert_eq!(fs::read(root.join("vc-beta/SKILL.md")).unwrap(), [0xff]);
+        assert!(super::save_named_skill_in(&roots, "../vc-alpha", "no").is_err());
+        assert!(super::save_named_skill_in(&roots, "vc-missing", "no").is_err());
+        super::save_named_skill_in(&roots, "vc-alpha", "updated").unwrap();
+        assert_eq!(fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(), "updated");
+        assert_eq!(fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(), "shadow");
+        let missing = super::build_skills_snapshot_in(&roots, Some("vc-missing"));
+        assert!(missing.open.is_none());
+        assert!(render_skills(super::SkillsSnapshot::empty()).contains(r#"data-skills-state="empty""#));
         fs::remove_dir_all(home).ok();
     }
 
