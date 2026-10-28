@@ -3601,10 +3601,15 @@ fn discover_skill_files(roots: &[std::path::PathBuf]) -> Vec<SkillFile> {
 }
 
 #[cfg(feature = "ssr")]
-fn writable_skill_path(roots: &[std::path::PathBuf], file: &std::path::Path) -> Option<std::path::PathBuf> {
+fn writable_skill_path(
+    roots: &[std::path::PathBuf],
+    file: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     let canonical = std::fs::canonicalize(file).ok()?;
     let allowed = roots.iter().any(|root| {
-        std::fs::canonicalize(root).ok().is_some_and(|root| canonical.starts_with(root))
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|root| canonical.starts_with(root))
     });
     if !allowed || canonical.file_name().and_then(|part| part.to_str()) != Some("SKILL.md") {
         return None;
@@ -3612,7 +3617,10 @@ fn writable_skill_path(roots: &[std::path::PathBuf], file: &std::path::Path) -> 
     if std::fs::metadata(&canonical).ok()?.permissions().readonly() {
         return None;
     }
-    std::fs::OpenOptions::new().write(true).open(&canonical).ok()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&canonical)
+        .ok()?;
     Some(canonical)
 }
 
@@ -3631,15 +3639,22 @@ enum SaveSkillError {
 
 #[cfg(feature = "ssr")]
 fn save_named_skill_in(
-    roots: &[std::path::PathBuf], name: &str, text: &str, expected_sha256: &str,
+    roots: &[std::path::PathBuf],
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
 ) -> Result<String, SaveSkillError> {
     if !skill_dir_name_ok(name)
         || expected_sha256.len() != 64
-        || !expected_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(SaveSkillError::Invalid);
     }
-    let file = discover_skill_files(roots).into_iter().find(|file| file.name == name)
+    let file = discover_skill_files(roots)
+        .into_iter()
+        .find(|file| file.name == name)
         .ok_or(SaveSkillError::Invalid)?;
     let canonical = writable_skill_path(roots, &file.path).ok_or(SaveSkillError::Invalid)?;
     // Failed reads, including invalid UTF-8, must never become blank saves.
@@ -3654,12 +3669,19 @@ fn save_named_skill_in(
 }
 
 #[cfg(feature = "ssr")]
-fn save_named_skill(name: &str, text: &str, expected_sha256: &str) -> Result<String, SaveSkillError> {
+fn save_named_skill(
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
+) -> Result<String, SaveSkillError> {
     save_named_skill_in(&product_skill_roots(), name, text, expected_sha256)
 }
 
 #[cfg(all(feature = "ssr", any(test, not(feature = "hydrate"))))]
-fn build_skills_snapshot_in(roots: &[std::path::PathBuf], requested: Option<&str>) -> SkillsSnapshot {
+fn build_skills_snapshot_in(
+    roots: &[std::path::PathBuf],
+    requested: Option<&str>,
+) -> SkillsSnapshot {
     let files = discover_skill_files(roots);
     let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
     let selected = match requested {
@@ -3669,9 +3691,20 @@ fn build_skills_snapshot_in(roots: &[std::path::PathBuf], requested: Option<&str
     let open = selected.map(|file| file.name.clone());
     let content = selected.and_then(|file| std::fs::read_to_string(&file.path).ok());
     let read_ok = content.is_some();
-    let writable = read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
-    let expected_sha256 = content.as_ref().map(|text| skill_sha256(text.as_bytes())).unwrap_or_default();
-    SkillsSnapshot { names, open, text: content.unwrap_or_default(), read_ok, writable, expected_sha256 }
+    let writable =
+        read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
+    let expected_sha256 = content
+        .as_ref()
+        .map(|text| skill_sha256(text.as_bytes()))
+        .unwrap_or_default();
+    SkillsSnapshot {
+        names,
+        open,
+        text: content.unwrap_or_default(),
+        read_ok,
+        writable,
+        expected_sha256,
+    }
 }
 
 #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
@@ -3721,10 +3754,28 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
         view! { <a class=class href=href rel="external" data-skill-name=name.clone() aria-current=current><span>{name.clone()}</span><small>"SKILL.md"</small></a> }
     }).collect_view();
     let count = snapshot.names.len();
-    let state = if open.is_none() { "Select a skill" } else if !snapshot.read_ok { "Read failed" } else if snapshot.writable { "Writable" } else { "Read-only" };
-    let detail = if open.is_none() { "Choose a skill from the index." } else if !snapshot.read_ok { "This skill could not be read; editing is unavailable." } else if snapshot.writable { "This skill can be saved in its current location." } else { "The current location is outside the allowed writable roots or is not writable." };
+    let state = if open.is_none() {
+        "Select a skill"
+    } else if !snapshot.read_ok {
+        "Read failed"
+    } else if snapshot.writable {
+        "Writable"
+    } else {
+        "Read-only"
+    };
+    let detail = if open.is_none() {
+        "Choose a skill from the index."
+    } else if !snapshot.read_ok {
+        "This skill could not be read; editing is unavailable."
+    } else if snapshot.writable {
+        "This skill can be saved in its current location."
+    } else {
+        "The current location is outside the allowed writable roots or is not writable."
+    };
     let title = open.clone().unwrap_or_else(|| "Select a skill".to_string());
-    let edit_button = (snapshot.writable && snapshot.read_ok).then(|| view! { <button type="button" class="render-mode-btn" data-skill-edit>"Edit"</button> });
+    let edit_button = (snapshot.writable && snapshot.read_ok).then(
+        || view! { <button type="button" class="render-mode-btn" data-skill-edit>"Edit"</button> },
+    );
     let document = if let Some(name) = open.filter(|_| snapshot.read_ok) {
         let text = snapshot.text;
         let read_only = !snapshot.writable;
@@ -3771,7 +3822,10 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
 fn skills_page(snapshot: SkillsSnapshot) -> impl IntoView {
     let embed = encode_skills_embed(&snapshot);
     let room = skills_room(snapshot);
-    let script = include_str!("scaffold/skills-studio.js").replace("/* SHARED_MARKDOWN */", include_str!("scaffold/markdown.js"));
+    let script = include_str!("scaffold/skills-studio.js").replace(
+        "/* SHARED_MARKDOWN */",
+        include_str!("scaffold/markdown.js"),
+    );
     view! {
         <Title text="Skills" />
         <Meta name="description" content="Browse and edit skills." />
@@ -3814,13 +3868,25 @@ async fn save_skill_form(
 ) -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
     match save_named_skill(&form.name, &form.text, &form.expected_sha256) {
-        Ok(expected_sha256) if headers.get(axum::http::header::ACCEPT)
-            .and_then(|value| value.to_str().ok()) == Some("application/json") => {
-                axum::Json(serde_json::json!({ "expected_sha256": expected_sha256 })).into_response()
-            }
+        Ok(expected_sha256)
+            if headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|value| value.to_str().ok())
+                == Some("application/json") =>
+        {
+            axum::Json(serde_json::json!({ "expected_sha256": expected_sha256 })).into_response()
+        }
         Ok(_) => axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response(),
-        Err(SaveSkillError::Conflict) => (axum::http::StatusCode::CONFLICT, "Skill changed since it was opened.").into_response(),
-        Err(SaveSkillError::Invalid) => (axum::http::StatusCode::BAD_REQUEST, "Skill could not be saved.").into_response(),
+        Err(SaveSkillError::Conflict) => (
+            axum::http::StatusCode::CONFLICT,
+            "Skill changed since it was opened.",
+        )
+            .into_response(),
+        Err(SaveSkillError::Invalid) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Skill could not be saved.",
+        )
+            .into_response(),
     }
 }
 
@@ -6448,10 +6514,19 @@ pub(crate) mod tests {
         let root = home.join("skills");
         let other = home.join("view");
         let managed = home.join("release/vc-managed");
-        for path in [root.join("vc-alpha"), root.join("vc-beta"), other.join("vc-alpha"), managed.clone()] {
+        for path in [
+            root.join("vc-alpha"),
+            root.join("vc-beta"),
+            other.join("vc-alpha"),
+            managed.clone(),
+        ] {
             fs::create_dir_all(path).expect("skill dir");
         }
-        fs::write(root.join("vc-alpha/SKILL.md"), "# Alpha\n<script>alert(1)</script>").unwrap();
+        fs::write(
+            root.join("vc-alpha/SKILL.md"),
+            "# Alpha\n<script>alert(1)</script>",
+        )
+        .unwrap();
         fs::write(other.join("vc-alpha/SKILL.md"), "shadow").unwrap();
         fs::write(root.join("vc-beta/SKILL.md"), "").unwrap();
         fs::write(managed.join("SKILL.md"), "managed").unwrap();
@@ -6468,7 +6543,10 @@ pub(crate) mod tests {
         assert!(html.contains("review-statusbar"));
         assert!(html.contains("data-skill-search"));
         assert!(html.contains(r#"href="/skills/vc-beta""#));
-        assert_eq!(html.matches(r#"class="artifact-panel is-active""#).count(), 1);
+        assert_eq!(
+            html.matches(r#"class="artifact-panel is-active""#).count(),
+            1
+        );
         assert!(html.contains("data-skill-edit"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));
@@ -6480,34 +6558,82 @@ pub(crate) mod tests {
         assert!(html.contains(r#"class="server-nav-link is-active" href="/skills""#));
         let empty_file = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
         assert!(empty_file.read_ok && empty_file.writable && empty_file.text.is_empty());
-        assert_eq!(super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).unwrap(), super::skill_sha256(b""));
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).unwrap(),
+            super::skill_sha256(b"")
+        );
         let managed_file = super::build_skills_snapshot_in(&roots, Some("vc-managed"));
         assert!(managed_file.read_ok && !managed_file.writable);
         let managed_html = render_skills(managed_file);
         assert!(managed_html.contains("Read-only"));
-        assert!(!managed_html.contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#));
-        assert!(super::save_named_skill_in(&roots, "vc-managed", "no", &super::skill_sha256(b"managed")).is_err());
+        assert!(
+            !managed_html
+                .contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#)
+        );
+        assert!(
+            super::save_named_skill_in(
+                &roots,
+                "vc-managed",
+                "no",
+                &super::skill_sha256(b"managed")
+            )
+            .is_err()
+        );
         fs::write(root.join("vc-beta/SKILL.md"), [0xff]).unwrap();
         let unreadable = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
         assert!(!unreadable.read_ok && !unreadable.writable);
         assert!(render_skills(unreadable).contains("Read failed"));
-        assert!(super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).is_err());
+        assert!(
+            super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).is_err()
+        );
         assert_eq!(fs::read(root.join("vc-beta/SKILL.md")).unwrap(), [0xff]);
-        assert!(super::save_named_skill_in(&roots, "../vc-alpha", "no", &super::skill_sha256(b"")).is_err());
-        assert!(super::save_named_skill_in(&roots, "vc-missing", "no", &super::skill_sha256(b"")).is_err());
+        assert!(
+            super::save_named_skill_in(&roots, "../vc-alpha", "no", &super::skill_sha256(b""))
+                .is_err()
+        );
+        assert!(
+            super::save_named_skill_in(&roots, "vc-missing", "no", &super::skill_sha256(b""))
+                .is_err()
+        );
         let old_hash = super::skill_sha256(b"# Alpha\n<script>alert(1)</script>");
         assert!(html.contains(&format!(r#"name="expected_sha256" value="{}""#, old_hash)));
-        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "updated", ""), Err(super::SaveSkillError::Invalid));
-        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "updated", &super::skill_sha256(b"stale")), Err(super::SaveSkillError::Conflict));
-        assert_eq!(fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(), "# Alpha\n<script>alert(1)</script>");
-        let new_hash = super::save_named_skill_in(&roots, "vc-alpha", "updated", &old_hash).unwrap();
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-alpha", "updated", ""),
+            Err(super::SaveSkillError::Invalid)
+        );
+        assert_eq!(
+            super::save_named_skill_in(
+                &roots,
+                "vc-alpha",
+                "updated",
+                &super::skill_sha256(b"stale")
+            ),
+            Err(super::SaveSkillError::Conflict)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(),
+            "# Alpha\n<script>alert(1)</script>"
+        );
+        let new_hash =
+            super::save_named_skill_in(&roots, "vc-alpha", "updated", &old_hash).unwrap();
         assert_eq!(new_hash, super::skill_sha256(b"updated"));
-        assert_eq!(super::save_named_skill_in(&roots, "vc-alpha", "stale save", &old_hash), Err(super::SaveSkillError::Conflict));
-        assert_eq!(fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(), "updated");
-        assert_eq!(fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(), "shadow");
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-alpha", "stale save", &old_hash),
+            Err(super::SaveSkillError::Conflict)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(),
+            "updated"
+        );
+        assert_eq!(
+            fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(),
+            "shadow"
+        );
         let missing = super::build_skills_snapshot_in(&roots, Some("vc-missing"));
         assert!(missing.open.is_none());
-        assert!(render_skills(super::SkillsSnapshot::empty()).contains(r#"data-skills-state="empty""#));
+        assert!(
+            render_skills(super::SkillsSnapshot::empty()).contains(r#"data-skills-state="empty""#)
+        );
         fs::remove_dir_all(home).ok();
     }
 
