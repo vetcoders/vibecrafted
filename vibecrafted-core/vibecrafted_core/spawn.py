@@ -5777,7 +5777,7 @@ def _extract_model_from_text(text: str) -> str:
         if model:
             return model
     json_models = re.findall(
-        r'"(?:model|model_id|modelId|model_name|modelName)"\s*:\s*"([^"]+)"',
+        r'"(?:model|model_id|modelId|model_name|modelName|primaryModelId|current_model_id)"\s*:\s*"([^"]+)"',
         clean,
     )
     for match in json_models:

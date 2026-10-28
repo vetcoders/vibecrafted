@@ -327,6 +327,21 @@ def _codex_config_model(env: Mapping[str, str]) -> str:
     return ""
 
 
+def _grok_config_model(env: Mapping[str, str]) -> str:
+    """Read ``models.default`` from ``$GROK_HOME/config.toml``; "" if unset."""
+    grok_home = Path(env.get("GROK_HOME") or Path.home() / ".grok")
+    config = grok_home / "config.toml"
+    try:
+        with config.open("rb") as handle:
+            loaded = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    models = loaded.get("models") if isinstance(loaded, dict) else None
+    if isinstance(models, dict):
+        return _clean_model(models.get("default"))
+    return ""
+
+
 def resolve_default_model(
     agent: str,
     *,
@@ -351,6 +366,8 @@ def resolve_default_model(
             return model
     if agent == "codex":
         return _codex_config_model(source_env)
+    if agent == "grok":
+        return _grok_config_model(source_env)
     return ""
 
 
@@ -489,14 +506,30 @@ class AgentStreamParser:
         """
         if self.model_id:
             return
-        for key in ("model", "model_id", "modelId", "model_name", "modelName"):
+        for key in (
+            "model",
+            "model_id",
+            "modelId",
+            "model_name",
+            "modelName",
+            "primaryModelId",
+            "current_model_id",
+        ):
             value = event.get(key)
             if isinstance(value, str) and value.strip():
                 self.model_id = value.strip()
                 return
         message = event.get("message")
         if isinstance(message, dict):
-            for key in ("model", "model_id", "modelId", "model_name", "modelName"):
+            for key in (
+                "model",
+                "model_id",
+                "modelId",
+                "model_name",
+                "modelName",
+                "primaryModelId",
+                "current_model_id",
+            ):
                 value = message.get(key)
                 if isinstance(value, str) and value.strip():
                     self.model_id = value.strip()

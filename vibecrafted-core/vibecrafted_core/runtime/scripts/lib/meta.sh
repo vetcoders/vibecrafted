@@ -227,7 +227,33 @@ spawn_detect_model_identity() {
     claude) printf 'claude-cli-default\n' ;;
     codex) printf 'codex-cli-default\n' ;;
     agy) printf 'gemini-cli-default\n' ;;
-    grok) printf 'grok-cli-default\n' ;;
+    grok)
+      grok_home="${GROK_HOME:-$HOME/.grok}"
+      grok_model="$(
+        "$(spawn_python_bin)" - "$grok_home/config.toml" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    with path.open("rb") as handle:
+        loaded = tomllib.load(handle)
+except (OSError, tomllib.TOMLDecodeError):
+    raise SystemExit(0)
+models = loaded.get("models") if isinstance(loaded, dict) else None
+value = models.get("default") if isinstance(models, dict) else ""
+if isinstance(value, str) and value.strip():
+    print(value.strip(), end="")
+PY
+      )"
+      grok_model="$(spawn_clean_model "$grok_model")"
+      if [[ -n "$grok_model" ]]; then
+        printf '%s\n' "$grok_model"
+        return 0
+      fi
+      printf 'grok-cli-default\n'
+      ;;
     junie) printf 'junie-cli-default\n' ;;
     *) printf '%s-cli-default\n' "${agent:-agent}" ;;
   esac

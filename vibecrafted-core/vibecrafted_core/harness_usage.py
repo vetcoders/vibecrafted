@@ -277,9 +277,20 @@ def _event_usage(
         )
         if cached > inp:
             raise ValueError("cache exceeds prompt")
+        meta = row.get("_meta") if isinstance(row.get("_meta"), dict) else {}
+        name = (
+            usage.get("model")
+            or usage.get("current_model_id")
+            or usage.get("primaryModelId")
+            or row.get("model")
+            or row.get("current_model_id")
+            or row.get("primaryModelId")
+            or meta.get("modelId")
+            or model
+        )
         return [
             (
-                str(usage.get("model") or model),
+                str(name or ""),
                 _key(row),
                 (inp - cached, cached, 0, out, reasoning),
             )
