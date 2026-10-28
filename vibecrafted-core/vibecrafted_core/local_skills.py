@@ -290,6 +290,14 @@ def _check_pending() -> None:
         raise LocalSkillError("unsafe", "Runtime publication is pending")
 
 
+def _receipt_present(runtime: Path) -> bool:
+    try:
+        (runtime / "install-receipt.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 @contextmanager
 def _read_lease(lease_held: bool):
     # Only the installer transaction may pass True, while it owns the exclusive
@@ -305,13 +313,15 @@ def _read_lease(lease_held: bool):
     try:
         before = lock_path.lstat()
     except FileNotFoundError:
-        # Older installs can have a valid receipt without a lock. They may
-        # read bundled bytes only while there is genuinely no local store.
-        # A publisher creates the canonical lock before touching a selector;
-        # recheck both facts around the read so an overlapping publication
-        # cannot be mistaken for a stable no-override state.
+        # Older installs can have a valid receipt without a lock, while a
+        # standalone package can have a store without an install receipt.
+        # A receipted installation with a store requires its canonical lock.
+        # Recheck the three facts around the read to catch publication starting
+        # or a standalone store appearing while bundled bytes are being read.
+        receipt_before = _receipt_present(runtime)
         _check_pending()
-        if _check_store():
+        store_before = _check_store()
+        if receipt_before and store_before:
             raise LocalSkillError("unsafe", "Runtime publication lease is unavailable")
         yield
         try:
@@ -321,8 +331,11 @@ def _read_lease(lease_held: bool):
         else:
             raise LocalSkillError("unsafe", "Runtime publication began during read")
         _check_pending()
-        if _check_store():
-            raise LocalSkillError("unsafe", "Local skill store appeared during read")
+        if (
+            _check_store() != store_before
+            or _receipt_present(runtime) != receipt_before
+        ):
+            raise LocalSkillError("unsafe", "Runtime state changed during read")
         return
     if not stat.S_ISREG(before.st_mode):
         raise LocalSkillError("unsafe", "Runtime publication lease is unsafe")

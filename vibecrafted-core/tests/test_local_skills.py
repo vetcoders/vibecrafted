@@ -242,6 +242,11 @@ def test_missing_lock_never_bypasses_pending_or_invalid_receipt(
 @pytest.mark.parametrize("shape", ["directory", "file", "link", "dangling"])
 def test_missing_lock_refuses_any_existing_or_aliased_store(store, tmp_path, shape):
     home, _ = store
+    runtime = tmp_path / "runtime-home"
+    runtime.mkdir()
+    (runtime / "install-receipt.json").write_text(
+        json.dumps({"schema": "vibecrafted.runtime-install.v1"})
+    )
     home.mkdir()
     root = home / "local-skills"
     if shape == "directory":
