@@ -143,8 +143,13 @@ def _store() -> Path:
 
 
 def _check_store() -> bool:
+    home = _home()
+    if (home.exists() or home.is_symlink()) and not _real_dir(home):
+        raise LocalSkillError("unsafe", "Local state home is unsafe")
     store = _store()
-    if not store.exists() and not store.is_symlink():
+    try:
+        store.lstat()
+    except FileNotFoundError:
         return False
     if not _real_dir(store) or _json(store / "owner.json") != {"schema": _OWNER}:
         raise LocalSkillError("unsafe", "Local skill store is not recognized")
@@ -300,9 +305,24 @@ def _read_lease(lease_held: bool):
     try:
         before = lock_path.lstat()
     except FileNotFoundError:
-        if (runtime / "install-receipt.json").exists():
+        # Older installs can have a valid receipt without a lock. They may
+        # read bundled bytes only while there is genuinely no local store.
+        # A publisher creates the canonical lock before touching a selector;
+        # recheck both facts around the read so an overlapping publication
+        # cannot be mistaken for a stable no-override state.
+        _check_pending()
+        if _check_store():
             raise LocalSkillError("unsafe", "Runtime publication lease is unavailable")
         yield
+        try:
+            lock_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise LocalSkillError("unsafe", "Runtime publication began during read")
+        _check_pending()
+        if _check_store():
+            raise LocalSkillError("unsafe", "Local skill store appeared during read")
         return
     if not stat.S_ISREG(before.st_mode):
         raise LocalSkillError("unsafe", "Runtime publication lease is unsafe")

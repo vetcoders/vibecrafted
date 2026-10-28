@@ -203,3 +203,94 @@ def test_selection_symlink_is_refused(store, tmp_path):
         local_skills.read_skill("vc-demo")
     assert exc.value.code == "unsafe"
     assert foreign.is_file()
+
+
+def test_legacy_receipt_without_lock_reads_bundled_skill(store, tmp_path):
+    runtime = tmp_path / "runtime-home"
+    runtime.mkdir()
+    (runtime / "install-receipt.json").write_text(
+        json.dumps({"schema": "vibecrafted.runtime-install.v1"})
+    )
+    assert local_skills.read_skill("vc-demo")["text"] == "original\n"
+    assert local_skills.validated_local_skill("vc-demo") is None
+    assert local_skills.resolve_execution_skill("vc-demo").read_text() == "original\n"
+    assert not (runtime / "tools/.vibecrafted-install.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"schema": "vibecrafted.runtime-install.v1", "install_pending": True},
+        {"schema": "vibecrafted.runtime-install.v1", "config_transaction": {}},
+        {"schema": "vibecrafted.runtime-install.v1", "config_pending": {"x": {}}},
+        {"schema": "vibecrafted.runtime-install.v1", "uninstall_pending": True},
+        {"schema": "vibecrafted.runtime-install.v1", "rescue_pending": True},
+        {"schema": "wrong"},
+    ],
+)
+def test_missing_lock_never_bypasses_pending_or_invalid_receipt(
+    store, tmp_path, receipt
+):
+    runtime = tmp_path / "runtime-home"
+    runtime.mkdir()
+    (runtime / "install-receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(local_skills.LocalSkillError) as exc:
+        local_skills.read_skill("vc-demo")
+    assert exc.value.code == "unsafe"
+
+
+@pytest.mark.parametrize("shape", ["directory", "file", "link", "dangling"])
+def test_missing_lock_refuses_any_existing_or_aliased_store(store, tmp_path, shape):
+    home, _ = store
+    home.mkdir()
+    root = home / "local-skills"
+    if shape == "directory":
+        root.mkdir()
+        (root / "owner.json").write_text('{"schema":"vibecrafted.local-skills.v1"}')
+    elif shape == "file":
+        root.write_text("user data")
+    else:
+        target = tmp_path / "target"
+        if shape == "link":
+            target.mkdir()
+        root.symlink_to(target, target_is_directory=True)
+    with pytest.raises(local_skills.LocalSkillError) as exc:
+        local_skills.read_skill("vc-demo")
+    assert exc.value.code == "unsafe"
+    assert root.is_symlink() if shape in ("link", "dangling") else root.exists()
+
+
+@pytest.mark.parametrize("arrival", ["lock", "store"])
+def test_missing_lock_rechecks_for_publication_during_bundled_read(
+    store, tmp_path, monkeypatch, arrival
+):
+    home, package = store
+    runtime = tmp_path / "runtime-home"
+    runtime.mkdir()
+    (runtime / "install-receipt.json").write_text(
+        json.dumps({"schema": "vibecrafted.runtime-install.v1"})
+    )
+    original_read = local_skills._read_regular
+    appeared = False
+
+    def read_and_publish(path: Path) -> bytes:
+        nonlocal appeared
+        data = original_read(path)
+        if not appeared and path == package / "skills/vc-demo/SKILL.md":
+            appeared = True
+            if arrival == "lock":
+                lock = runtime / "tools/.vibecrafted-install.lock"
+                lock.parent.mkdir()
+                lock.write_text("lease")
+            else:
+                root = home / "local-skills"
+                root.mkdir(parents=True)
+                (root / "owner.json").write_text(
+                    '{"schema":"vibecrafted.local-skills.v1"}'
+                )
+        return data
+
+    monkeypatch.setattr(local_skills, "_read_regular", read_and_publish)
+    with pytest.raises(local_skills.LocalSkillError) as exc:
+        local_skills.read_skill("vc-demo")
+    assert exc.value.code == "unsafe"
