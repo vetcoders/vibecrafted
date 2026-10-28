@@ -6574,7 +6574,25 @@ pub(crate) mod tests {
         assert!(html.contains("popstate"));
         assert!(html.contains("Save could not be confirmed. Your edits are still here."));
         assert!(html.contains("\\u003cscript>"));
-        assert!(html.contains(r#"class="server-nav-link is-active" href="/skills""#));
+        let skill_nav: Vec<&str> = html
+            .split("<a ")
+            .filter_map(|fragment| fragment.split('>').next())
+            .filter(|tag| tag.contains(r#"href="/skills""#))
+            .collect();
+        assert_eq!(skill_nav.len(), 2); // desktop sidebar and mobile navigation
+        assert!(
+            skill_nav
+                .iter()
+                .all(|tag| tag.contains(r#"class="server-nav-link is-active""#))
+        );
+        let overview_nav: Vec<&str> = html
+            .split("<a ")
+            .filter_map(|fragment| fragment.split('>').next())
+            .filter(|tag| tag.contains(r#"href="/""#))
+            .filter(|tag| tag.contains("server-nav-link"))
+            .collect();
+        assert_eq!(overview_nav.len(), 2);
+        assert!(overview_nav.iter().all(|tag| !tag.contains("is-active")));
         let empty_file = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
         assert!(empty_file.read_ok && empty_file.writable && empty_file.text.is_empty());
         assert_eq!(
