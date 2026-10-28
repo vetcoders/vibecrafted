@@ -1,0 +1,239 @@
+{
+  "source": "openrouter",
+  "source_url": "https://openrouter.ai/api/v1/models",
+  "fetched_at": "2026-10-28T22:45:00Z",
+  "note": "Standard-tier per-token prices converted to USD per million. Batch and pro variants are not included. Long-context overrides are not modeled. Amounts priced from this table are API equivalents, not subscription invoices.",
+  "models": {
+    "anthropic/claude-fable-5": {
+      "canonical": "anthropic/claude-5-fable-20260609",
+      "input_per_million": 10.0,
+      "cached_input_per_million": 1.0,
+      "output_per_million": 50.0,
+      "cache_creation_per_million": 12.5
+    },
+    "anthropic/claude-fable-5.1": {
+      "canonical": "anthropic/claude-fable-5.1-20260831",
+      "input_per_million": 10.0,
+      "cached_input_per_million": 0.25,
+      "output_per_million": 50.0,
+      "cache_creation_per_million": 12.5
+    },
+    "anthropic/claude-haiku-4.5": {
+      "canonical": "anthropic/claude-4.5-haiku-20251001",
+      "input_per_million": 1.0,
+      "cached_input_per_million": 0.1,
+      "output_per_million": 5.0,
+      "cache_creation_per_million": 1.25
+    },
+    "anthropic/claude-haiku-5.5": {
+      "canonical": "anthropic/claude-haiku-5.5-20261007",
+      "input_per_million": 0.1,
+      "cached_input_per_million": 0.01,
+      "output_per_million": 0.5,
+      "cache_creation_per_million": 0.125
+    },
+    "anthropic/claude-opus-4.5": {
+      "canonical": "anthropic/claude-4.5-opus-20251124",
+      "input_per_million": 5.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 25.0,
+      "cache_creation_per_million": 6.25
+    },
+    "anthropic/claude-opus-4.6": {
+      "canonical": "anthropic/claude-4.6-opus-20260205",
+      "input_per_million": 5.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 25.0,
+      "cache_creation_per_million": 6.25
+    },
+    "anthropic/claude-opus-4.7": {
+      "canonical": "anthropic/claude-4.7-opus-20260416",
+      "input_per_million": 5.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 25.0,
+      "cache_creation_per_million": 6.25
+    },
+    "anthropic/claude-opus-4.8": {
+      "canonical": "anthropic/claude-4.8-opus-20260528",
+      "input_per_million": 5.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 25.0,
+      "cache_creation_per_million": 6.25
+    },
+    "anthropic/claude-opus-5": {
+      "canonical": "anthropic/claude-opus-5-20260723",
+      "input_per_million": 5.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 25.0,
+      "cache_creation_per_million": 6.25
+    },
+    "anthropic/claude-opus-5.5": {
+      "canonical": "anthropic/claude-opus-5.5-20260921",
+      "input_per_million": 4.0,
+      "cached_input_per_million": 0.2,
+      "output_per_million": 20.0,
+      "cache_creation_per_million": 5.0
+    },
+    "anthropic/claude-sonnet-4.5": {
+      "canonical": "anthropic/claude-4.5-sonnet-20250929",
+      "input_per_million": 3.0,
+      "cached_input_per_million": 0.3,
+      "output_per_million": 15.0,
+      "cache_creation_per_million": 3.75
+    },
+    "anthropic/claude-sonnet-4.6": {
+      "canonical": "anthropic/claude-4.6-sonnet-20260217",
+      "input_per_million": 3.0,
+      "cached_input_per_million": 0.3,
+      "output_per_million": 15.0,
+      "cache_creation_per_million": 3.75
+    },
+    "anthropic/claude-sonnet-5": {
+      "canonical": "anthropic/claude-sonnet-5-20260630",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.2,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 2.5
+    },
+    "anthropic/claude-sonnet-5.5": {
+      "canonical": "anthropic/claude-sonnet-5.5-20260928",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.1,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 2.5
+    },
+    "google/gemini-2.5-flash": {
+      "canonical": "google/gemini-2.5-flash",
+      "input_per_million": 0.3,
+      "cached_input_per_million": 0.03,
+      "output_per_million": 2.5,
+      "cache_creation_per_million": 0.083333
+    },
+    "google/gemini-2.5-pro": {
+      "canonical": "google/gemini-2.5-pro",
+      "input_per_million": 1.25,
+      "cached_input_per_million": 0.125,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 0.375
+    },
+    "google/gemini-3.5-flash": {
+      "canonical": "google/gemini-3.5-flash-20260519",
+      "input_per_million": 1.5,
+      "cached_input_per_million": 0.15,
+      "output_per_million": 9.0,
+      "cache_creation_per_million": 0.083333
+    },
+    "google/gemini-3.6-flash": {
+      "canonical": "google/gemini-3.6-flash-20260721",
+      "input_per_million": 0.75,
+      "cached_input_per_million": 0.075,
+      "output_per_million": 3.75,
+      "cache_creation_per_million": 0.041667
+    },
+    "google/gemini-3.7-flash": {
+      "canonical": "google/gemini-3.7-flash-20260813",
+      "input_per_million": 0.75,
+      "cached_input_per_million": 0.075,
+      "output_per_million": 3.75,
+      "cache_creation_per_million": 0.041667
+    },
+    "google/gemini-3.8-flash": {
+      "canonical": "google/gemini-3.8-flash-20260902",
+      "input_per_million": 0.825,
+      "cached_input_per_million": 0.0825,
+      "output_per_million": 4.125,
+      "cache_creation_per_million": 0.041667
+    },
+    "google/gemini-4-argon": {
+      "canonical": "google/gemini-4-argon-20261013",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.1,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 0.1875
+    },
+    "moonshotai/kimi-k3": {
+      "canonical": "moonshotai/kimi-k3-20260715",
+      "input_per_million": 0.192,
+      "cached_input_per_million": 0.182,
+      "output_per_million": 20.0,
+      "cache_creation_per_million": null
+    },
+    "openai/gpt-5.6-luna": {
+      "canonical": "openai/gpt-5.6-luna-20260709",
+      "input_per_million": 0.2,
+      "cached_input_per_million": 0.02,
+      "output_per_million": 1.2,
+      "cache_creation_per_million": 0.25
+    },
+    "openai/gpt-5.6-sol": {
+      "canonical": "openai/gpt-5.6-sol-20260709",
+      "input_per_million": 4.0,
+      "cached_input_per_million": 0.4,
+      "output_per_million": 20.0,
+      "cache_creation_per_million": 5.0
+    },
+    "openai/gpt-5.6-terra": {
+      "canonical": "openai/gpt-5.6-terra-20260709",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.2,
+      "output_per_million": 12.0,
+      "cache_creation_per_million": 2.5
+    },
+    "openai/gpt-6-astra": {
+      "canonical": "openai/gpt-6-astra-20260903",
+      "input_per_million": 10.0,
+      "cached_input_per_million": 1.0,
+      "output_per_million": 50.0,
+      "cache_creation_per_million": 12.5
+    },
+    "openai/gpt-6-luna": {
+      "canonical": "openai/gpt-6-luna-20260922",
+      "input_per_million": 0.1,
+      "cached_input_per_million": 0.01,
+      "output_per_million": 0.5,
+      "cache_creation_per_million": 0.125
+    },
+    "openai/gpt-6-sol": {
+      "canonical": "openai/gpt-6-sol-20260922",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.2,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 2.5
+    },
+    "openai/gpt-6.1-sol": {
+      "canonical": "openai/gpt-6.1-sol-20260929",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.1,
+      "output_per_million": 10.0,
+      "cache_creation_per_million": 2.5
+    },
+    "openai/gpt-6.1-terra": {
+      "canonical": "openai/gpt-6.1-terra-20261026",
+      "input_per_million": 1.0,
+      "cached_input_per_million": 0.05,
+      "output_per_million": 5.0,
+      "cache_creation_per_million": 1.25
+    },
+    "x-ai/grok-4.5": {
+      "canonical": "x-ai/grok-4.5-20260708",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.3,
+      "output_per_million": 6.0,
+      "cache_creation_per_million": null
+    },
+    "x-ai/grok-4.6": {
+      "canonical": "x-ai/grok-4.6-20260810",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 6.0,
+      "cache_creation_per_million": null
+    },
+    "x-ai/grok-4.7": {
+      "canonical": "x-ai/grok-4.7-20260916",
+      "input_per_million": 2.0,
+      "cached_input_per_million": 0.5,
+      "output_per_million": 6.0,
+      "cache_creation_per_million": null
+    }
+  }
+}

@@ -2,7 +2,9 @@
 
 Zero is a measurement, never a default. A value the provider did not report is
 ``Unknown`` with a reason; a cost is ``provider_reported``,
-``estimated:<price-table-id>`` or ``unknown`` — never a fictional ``0``.
+``price_table(<source>@<date>)``, ``estimated:<price-table-id>``,
+``unmapped``, or ``unknown`` — never a fictional ``0``. Catalog amounts are
+API equivalents (``api-equiv``), not subscription invoices.
 Currencies and units are kept apart; nothing here converts credits to dollars.
 
 This module sits on every pane's stream path (``agent_stream`` imports it), so
@@ -113,8 +115,34 @@ _PRICES: tuple[tuple[tuple[str, ...], ModelPrice], ...] = (
 )
 
 
+def _cost_label(price: ModelPrice) -> str:
+    """Catalog rows already carry ``price_table(...)``; hand pins stay estimated."""
+    if price.source.startswith("price_table("):
+        return price.source
+    return f"estimated:{price.source}"
+
+
+def _catalog_price(model: str) -> ModelPrice | None:
+    """OpenRouter snapshot or cache. None means the hand pin may still apply."""
+    from .price_catalog import lookup_rate
+
+    rate = lookup_rate(model)
+    if rate is None:
+        return None
+    return ModelPrice(
+        rate.input_per_million,
+        rate.cached_input_per_million,
+        rate.output_per_million,
+        rate.source,
+        rate.cache_creation_per_million,
+    )
+
+
 def model_price(model: str) -> ModelPrice | None:
     """Exact model/version aliases only; unknown variants never inherit a rate."""
+    catalog = _catalog_price(model)
+    if catalog is not None:
+        return catalog
     normalized = (
         (model or "")
         .strip()
@@ -152,9 +180,9 @@ def estimate_cost_usd(
     price = model_price(model)
     if price is None or not (tokens_input or tokens_cached_input or tokens_output):
         return None, None
-    return _priced(price, tokens_input, tokens_cached_input, tokens_output), (
-        f"estimated:{price.source}"
-    )
+    return _priced(
+        price, tokens_input, tokens_cached_input, tokens_output
+    ), _cost_label(price)
 
 
 def _priced(price: ModelPrice, tokens_input: int, cached: int, output: int) -> float:
@@ -355,15 +383,20 @@ def usage_record(
 class CostRecord:
     """Cost of one run in exactly one of three forms.
 
-    ``source`` is ``provider_reported``, ``estimated:<price-table-id>`` or
-    ``unknown``. Money carries ``currency``; a non-monetary provider unit
-    (credits) carries ``unit`` instead and is never folded into dollars.
+    ``source`` is ``provider_reported``, ``price_table(<source>@<date>)``,
+    ``estimated:<price-table-id>``, ``unmapped``, or ``unknown``. Money carries
+    ``currency``; a non-monetary provider unit (credits) carries ``unit``
+    instead and is never folded into dollars. ``basis`` ``api-equiv`` means the
+    amount is an API equivalent, not a subscription invoice.
     """
 
     amount: float | Unknown
     source: str
     currency: str = "USD"
     unit: str = ""
+    basis: str = ""
+    components: dict[str, float] | None = None
+    cache_accounting: str = ""
 
     def as_dict(self) -> dict[str, object]:
         """Structured ``cost`` block for meta.json."""
@@ -373,6 +406,13 @@ class CostRecord:
         else:
             payload["currency"] = self.currency
         payload["source"] = self.source
+        if self.basis:
+            payload["basis"] = self.basis
+        if self.components:
+            payload["components"] = dict(self.components)
+            payload["reasoning_billing"] = "subset_of_output"
+        if self.cache_accounting:
+            payload["cache_accounting"] = self.cache_accounting
         return payload
 
     def flat(self) -> dict[str, object]:
@@ -382,7 +422,163 @@ class CostRecord:
             if not self.unit and self.currency == "USD" and not is_unknown(self.amount)
             else "unknown"
         )
-        return {"cost_usd": usd, "cost_source": self.source}
+        payload: dict[str, object] = {"cost_usd": usd, "cost_source": self.source}
+        if self.basis:
+            payload["cost_basis"] = self.basis
+        return payload
+
+
+_UNUSABLE_MODELS = frozenset({"", "none", "null", "unknown", "pending"})
+
+
+def _usable_model(model: object) -> str:
+    """Real model id. Placeholders and ``*-cli-default`` are not price keys."""
+    clean = str(model or "").strip()
+    if clean.lower() in _UNUSABLE_MODELS or clean.lower().endswith("-cli-default"):
+        return ""
+    return clean
+
+
+def _recover_model(agent: str, model: object) -> str:
+    """Fill a missing grok id from its config. Pytest stays on the explicit id.
+
+    Host ``~/.grok`` is not read under pytest unless ``GROK_HOME`` is set, so
+    a developer config cannot change fixture prices.
+    """
+    clean = _usable_model(model)
+    if clean:
+        return clean
+    if str(agent or "").strip().lower() != "grok":
+        return ""
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("GROK_HOME"):
+        return ""
+    from .agent_stream import resolve_default_model
+
+    return _usable_model(resolve_default_model("grok"))
+
+
+def _as_catalog_rate(price: ModelPrice):
+    """Adapt a hand pin or catalog row to the shared component calculator."""
+    from .price_catalog import CatalogRate
+
+    return CatalogRate(
+        price.input_per_million,
+        price.cached_input_per_million,
+        price.output_per_million,
+        price.source,
+        price.cache_creation_per_million,
+    )
+
+
+def _retarget_empty_model(usage: UsageRecord, model: str) -> UsageRecord:
+    """Move a single unusable ``model_usage`` key onto a recovered model id."""
+    clean = _usable_model(model)
+    buckets = usage.model_usage
+    if not clean or not buckets or len(buckets) != 1:
+        return usage
+    only = next(iter(buckets))
+    if _usable_model(only):
+        return usage
+    return replace(usage, model_usage={clean: dict(buckets[only])})
+
+
+def _estimate_cost(model: str, usage: UsageRecord) -> CostRecord:
+    """Price observed usage. A named miss is ``unmapped``; an empty id is not."""
+    from .price_catalog import component_amounts
+
+    if usage.model_usage is not None:
+        total = 0.0
+        merged = {
+            "input_usd": 0.0,
+            "cached_input_usd": 0.0,
+            "cache_write_usd": 0.0,
+            "output_usd": 0.0,
+            "reasoning_usd": 0.0,
+        }
+        sources: set[str] = set()
+        single = len(usage.model_usage) == 1
+        for name, buckets in usage.model_usage.items():
+            if not _usable_model(name):
+                return CostRecord(
+                    amount=Unknown(reason=NO_MODEL_REASON), source="unknown"
+                )
+            price = model_price(name)
+            if price is None:
+                return CostRecord(
+                    amount=Unknown(reason=f"no price table entry for model {name!r}"),
+                    source="unmapped",
+                )
+            created = int(buckets.get("cache_creation") or 0)
+            if created and price.cache_creation_per_million is None:
+                return CostRecord(
+                    amount=Unknown(reason=f"no cache creation rate for model {name!r}"),
+                    source="unknown",
+                )
+            if isinstance(buckets.get("reasoning"), int):
+                reasoning = int(buckets["reasoning"])
+            elif single and isinstance(usage.tokens_reasoning, int):
+                reasoning = usage.tokens_reasoning
+            else:
+                reasoning = 0
+            amount, parts = component_amounts(
+                _as_catalog_rate(price),
+                fresh=int(buckets.get("fresh_input") or 0),
+                cached=int(buckets.get("cache_read") or 0),
+                created=created,
+                output=int(buckets.get("output") or 0),
+                reasoning=reasoning,
+            )
+            total += amount
+            for key, value in merged.items():
+                merged[key] = round(value + float(parts[key]), 6)
+            sources.add(_cost_label(price))
+        if not sources:
+            return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
+        source = next(iter(sources)) if len(sources) == 1 else "+".join(sorted(sources))
+        return CostRecord(
+            amount=round(total, 6),
+            source=source,
+            basis="api-equiv",
+            components=merged,
+            cache_accounting="disjoint_buckets",
+        )
+
+    clean = _usable_model(model)
+    if not clean:
+        return CostRecord(amount=Unknown(reason=NO_MODEL_REASON), source="unknown")
+    price = model_price(clean)
+    if price is None:
+        return CostRecord(
+            amount=Unknown(reason=f"no price table entry for model {clean!r}"),
+            source="unmapped",
+        )
+    tokens_in, cached, out = (
+        usage.tokens_input,
+        usage.tokens_cached_input,
+        usage.tokens_output,
+    )
+    if (
+        isinstance(tokens_in, Unknown)
+        or isinstance(cached, Unknown)
+        or isinstance(out, Unknown)
+    ):
+        return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
+    reasoning = usage.tokens_reasoning if isinstance(usage.tokens_reasoning, int) else 0
+    amount, components = component_amounts(
+        _as_catalog_rate(price),
+        fresh=int(tokens_in),
+        cached=int(cached),
+        created=0,
+        output=int(out),
+        reasoning=reasoning,
+    )
+    return CostRecord(
+        amount=amount,
+        source=_cost_label(price),
+        basis="api-equiv",
+        components=components,
+        cache_accounting="flat_input_plus_cached",
+    )
 
 
 def resolve_cost(
@@ -394,66 +590,19 @@ def resolve_cost(
 ) -> CostRecord:
     """Pick the one honest cost form for a run.
 
-    A provider-reported amount wins. Otherwise a known model with a price
-    table entry and observed usage is estimated from that table. Anything
-    else is ``unknown`` with the reason — there is no default price.
+    A provider-reported amount wins. Otherwise a listed model is priced from
+    the catalog or a hand pin. A named model with no rate is ``unmapped``.
+    An empty model stays ``unknown``. Nothing here invents a rate or a zero.
     """
     source = str(reported_source or "").strip()
     if reported_amount is not None:
         amount = round(float(reported_amount), 6)
-        if source.startswith("estimated:"):
+        if source.startswith(("estimated:", "price_table(")):
             return CostRecord(amount=amount, source=source)
         return CostRecord(amount=amount, source="provider_reported")
     if not usage.known:
         return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
-    if usage.model_usage is not None:
-        amount = 0.0
-        sources: set[str] = set()
-        for name, buckets in usage.model_usage.items():
-            price = model_price(name)
-            if price is None:
-                return CostRecord(
-                    amount=Unknown(reason=f"no price table entry for model {name!r}"),
-                    source="unknown",
-                )
-            write_rate = price.cache_creation_per_million
-            if buckets["cache_creation"] and write_rate is None:
-                return CostRecord(
-                    amount=Unknown(reason=f"no cache creation rate for model {name!r}"),
-                    source="unknown",
-                )
-            amount += (
-                buckets["fresh_input"] * price.input_per_million
-                + buckets["cache_read"] * price.cached_input_per_million
-                + buckets["cache_creation"] * (write_rate or 0)
-                + buckets["output"] * price.output_per_million
-            ) / 1_000_000
-            sources.add(price.source)
-        return CostRecord(
-            amount=round(amount, 6), source="estimated:" + "+".join(sorted(sources))
-        )
-    clean_model = str(model or "").strip()
-    if not clean_model:
-        return CostRecord(amount=Unknown(reason=NO_MODEL_REASON), source="unknown")
-    price = model_price(clean_model)
-    if price is None:
-        return CostRecord(
-            amount=Unknown(reason=f"no price table entry for model {clean_model!r}"),
-            source="unknown",
-        )
-    counts = (usage.tokens_input, usage.tokens_cached_input, usage.tokens_output)
-    tokens_in, cached, out = counts
-    if (
-        isinstance(tokens_in, Unknown)
-        or isinstance(cached, Unknown)
-        or isinstance(out, Unknown)
-    ):
-        return CostRecord(amount=Unknown(reason=NO_COST_REASON), source="unknown")
-    tokens_in, cached, out = int(tokens_in), int(cached), int(out)
-    return CostRecord(
-        amount=_priced(price, tokens_in, cached, out),
-        source=f"estimated:{price.source}",
-    )
+    return _estimate_cost(model, usage)
 
 
 def cost_from_dict(payload: Mapping[str, Any]) -> CostRecord:
@@ -464,11 +613,15 @@ def cost_from_dict(payload: Mapping[str, Any]) -> CostRecord:
         amount = float(amount_value)
     else:
         amount = Unknown(reason=unknown_reason(amount_value) or "cost not recorded")
+    components = payload.get("components")
     return CostRecord(
         amount=amount,
         source=str(payload.get("source") or "unknown"),
         currency=str(payload.get("currency") or "USD"),
         unit=str(payload.get("unit") or ""),
+        basis=str(payload.get("basis") or ""),
+        components=dict(components) if isinstance(components, dict) else None,
+        cache_accounting=str(payload.get("cache_accounting") or ""),
     )
 
 
@@ -658,6 +811,8 @@ class RunTelemetry:
             "cost_usd": str(self.cost.flat()["cost_usd"]),
             "cost_source": self.cost.source,
         }
+        if self.cost.basis:
+            fields["cost_basis"] = self.cost.basis
         if not self.usage.known:
             fields["usage_reason"] = NO_USAGE_EVENTS_REASON
         if isinstance(self.cost.amount, Unknown):
@@ -687,6 +842,7 @@ def build_run_telemetry(
     provider_session_id, provider_session_source = resolve_provider_session_id(
         session_candidate, source=session_source, parents=parents
     )
+    model = _recover_model(agent, model) or str(model or "")
     if not usage.known and isinstance(provider_session_id, str):
         usage = (
             harness_usage_record(
@@ -694,13 +850,15 @@ def build_run_telemetry(
             )
             or usage
         )
+    pricing = _stream_pricing_usage(_retarget_empty_model(usage, model), agent, model)
+    reported = str(reported_cost_source or "")
     return RunTelemetry(
         usage=usage,
         cost=resolve_cost(
             model,
-            _stream_pricing_usage(usage, agent, model),
+            pricing,
             reported_amount=None
-            if str(reported_cost_source).startswith("estimated:")
+            if reported.startswith(("estimated:", "price_table("))
             else reported_cost,
             reported_source=reported_cost_source,
         ),
@@ -718,6 +876,8 @@ def _stream_pricing_usage(usage: UsageRecord, agent: str, model: str) -> UsageRe
         or usage.model_usage is not None
         or agent not in {"codex", "grok", "cursor", "claude", "junie"}
     ):
+        return usage
+    if not _usable_model(model):
         return usage
     inp, cached, out = (
         int(usage.tokens_input),
@@ -824,9 +984,10 @@ def run_telemetry_from_meta(
             for line in handle:
                 parser.feed_line(line)
 
-    model_value = str(
+    raw_model = str(
         meta.get("agent_model") or meta.get("model") or parser.model_id or ""
     ).strip()
+    model_value = _recover_model(agent, raw_model) or raw_model
     model: str | dict[str, str] = (
         model_value or Unknown(reason=NO_MODEL_REPORTED_REASON).as_dict()
     )
@@ -859,7 +1020,9 @@ def run_telemetry_from_meta(
         usage_block = usage.as_dict()
         cost_block = resolve_cost(
             model_value,
-            usage,
+            _stream_pricing_usage(
+                _retarget_empty_model(usage, model_value), agent, model_value
+            ),
             reported_amount=parser.cost_usd,
             reported_source=parser.cost_source,
         ).as_dict()
@@ -929,8 +1092,9 @@ def run_telemetry_from_meta(
                 events=usage_block["events"],
                 model_usage=usage_block.get("model_usage"),
             )
+            measured = _retarget_empty_model(measured, model_value)
             cost_block = resolve_cost(
-                str(model) if isinstance(model, str) else "",
+                model_value,
                 _stream_pricing_usage(measured, agent, model_value),
                 reported_amount=None,
                 reported_source=None,

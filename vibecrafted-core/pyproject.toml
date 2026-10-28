@@ -65,6 +65,7 @@ artifacts = [
     "vibecrafted_core/deck/vibecrafted",
     "vibecrafted_core/schemas/**",
     "vibecrafted_core/trust/**",
+    "vibecrafted_core/data/**",
     "vibecrafted_core/config/vc-frame/**",
 ]
 
