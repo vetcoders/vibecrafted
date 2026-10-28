@@ -2016,19 +2016,24 @@ class Workshop:
             self.error = str(exc)
             self.notice = ""
             return
+        # Refresh the active marker without jumping the list back to the top.
+        # The catalogue can reorder while the policy is written, so keep the
+        # selected family by identity, not by its previous numerical index.
+        previous_scroll = self.onboarding_font_scroll
         self._sync_onboarding_typography()
+        self.onboarding_font_idx = next(
+            (
+                idx
+                for idx, variant in enumerate(self.onboarding_variants)
+                if variant.family == chosen.family
+            ),
+            self.onboarding_font_idx,
+        )
+        self.onboarding_font_scroll = previous_scroll
+        self._onboarding_font_viewport()
         self.configured_font_family = chosen.family
         self.error = ""
-        self.notice = f"Terminal font set to {chosen.family}"
-        if self.font_only:
-            raise SystemExit(0)
-        try:
-            st = command_bridge_onboarding.status(self.onboarding_home)
-            if st.state == "in_progress":
-                command_bridge_onboarding.cancel(home=self.onboarding_home)
-        except (OSError, ValueError, command_bridge_onboarding.OnboardingError):
-            pass
-        self.onboarding_active = False
+        self.notice = f"Saved terminal font {chosen.family}. Choose another or close."
 
     def draw_onboarding(self) -> None:
         height, width = self.window.getmaxyx()
