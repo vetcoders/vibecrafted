@@ -33,6 +33,18 @@ Both engines are **local-only**. They do not send usage to a Vibecrafted backend
 Shadow prices are labeled `api-equiv` so they cannot be mistaken for a
 subscription charge.
 
+`telemetry <agent> once` and `line` add that quote on the snapshot. Each
+session record carries `cost.cost_usd`, `cost.cost_source`, and
+`cost.cost_basis` (`api-equiv`). `once` puts the newest session's quote at
+the top level. `sessions` sums the session quotes and refuses a partial sum
+when any session is `unmapped` or otherwise not a number. The source is
+`price_table(<source>@<YYYY-MM-DD>)` from the OpenRouter snapshot (cache
+`~/.vibecrafted/telemetry/prices.json`, refreshed at most daily, pinned
+fallback in the package). A named model with no row is `unmapped`. An empty
+model id stays `unknown`. The statusline prints `≈$<amount> api-equiv` only
+when `cost_usd` is a number. Codex subscription usage is an API equivalent,
+not an invoice. Nothing is shipped to a Vibecrafted backend.
+
 ## Command surface
 
 ```text

@@ -3,6 +3,9 @@
 Read-only scanners for host session stores. The only write is the engine
 projection under ``$VIBECRAFTED_HOME/telemetry/<agent>/`` (``quota.json`` plus
 the mtime sidecar ``scan-cache.json``). Nothing is sent off the machine.
+``once`` and ``line`` attach an API-equivalent USD quote (``api-equiv``) when
+the session names a model the price table lists. A missing rate is
+``unmapped``. The amount is not a subscription invoice.
 
 ``cache_semantics`` is declared per agent so consumers do not guess:
 
@@ -415,9 +418,9 @@ def _walk_codex_tail(
 ) -> tuple[dict[str, int] | None, str | None, str | None]:
     """Newest cumulative usage within ``cap`` bytes of EOF. Read-only.
 
-    The walk stops at the first (newest) ``token_count``. A model seen closer
-    to EOF is kept; the walk does not continue toward the start of a 47 GB
-    rollout just to find an older ``turn_context``.
+    The newest ``token_count`` wins. The walk keeps going backward inside
+    ``cap`` until it also sees a ``turn_context`` model. It does not read
+    past the cap, so a model older than that window stays unknown.
     """
 
     try:
@@ -429,7 +432,19 @@ def _walk_codex_tail(
     remaining = min(size, cap)
     offset = size
     carry = b""
+    found_native: dict[str, int] | None = None
+    found_iso: str | None = None
     found_model: str | None = None
+
+    def take(native: dict[str, int] | None, iso: str | None, model: str | None) -> bool:
+        nonlocal found_native, found_iso, found_model
+        if model and found_model is None:
+            found_model = model
+        if native is not None and found_native is None:
+            found_native = native
+            found_iso = iso
+        return found_native is not None and found_model is not None
+
     with path.open("rb") as handle:
         while remaining > 0:
             step = min(chunk, remaining)
@@ -447,18 +462,11 @@ def _walk_codex_tail(
             else:
                 carry = b""
             for line in reversed(block.splitlines()):
-                native, iso, model = _codex_meta_from_line(line)
-                if model and found_model is None:
-                    found_model = model
-                if native is not None:
-                    return native, iso, found_model
-    if carry:
-        native, iso, model = _codex_meta_from_line(carry)
-        if model and found_model is None:
-            found_model = model
-        if native is not None:
-            return native, iso, found_model
-    return None, None, found_model
+                if take(*_codex_meta_from_line(line)):
+                    return found_native, found_iso, found_model
+    if carry and take(*_codex_meta_from_line(carry)):
+        return found_native, found_iso, found_model
+    return found_native, found_iso, found_model
 
 
 def last_codex_native(
@@ -1164,6 +1172,162 @@ def build_snapshot(
     return snapshot
 
 
+def _price_api():
+    """Import the catalog. Path-loaded engines do not see the package root."""
+    try:
+        from vibecrafted_core.price_catalog import (
+            quote_usage,
+            refresh_prices,
+            sum_quotes,
+        )
+    except ImportError:
+        root = str(Path(__file__).resolve().parents[3])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from vibecrafted_core.price_catalog import (
+            quote_usage,
+            refresh_prices,
+            sum_quotes,
+        )
+    return quote_usage, sum_quotes, refresh_prices
+
+
+def _maybe_refresh_prices(refresh_prices) -> None:
+    """At most one OpenRouter fetch per day, and never from a test or offline."""
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("VIBECRAFTED_PRICE_OFFLINE") == "1"
+    ):
+        return
+    refresh_prices()
+
+
+def _counter_buckets(agent: str, native: dict) -> tuple[int, int, int, int, int]:
+    """Fresh input, cache read, cache write, output, reasoning."""
+    if agent == "codex":
+        inp = _as_int(native.get("input_tokens"))
+        cached = _as_int(native.get("cached_input_tokens"))
+        created = _as_int(native.get("cache_write_input_tokens"))
+        return (
+            inp - cached - created,
+            cached,
+            created,
+            _as_int(native.get("output_tokens")),
+            _as_int(native.get("reasoning_output_tokens")),
+        )
+    if agent == "grok":
+        inp = _as_int(native.get("inputTokens"))
+        cached = _as_int(native.get("cachedReadTokens"))
+        created = _as_int(native.get("cacheCreationTokens"))
+        return (
+            inp - cached - created,
+            cached,
+            created,
+            _as_int(native.get("outputTokens")),
+            _as_int(native.get("reasoningTokens")),
+        )
+    if agent == "copilot":
+        inp = _as_int(native.get("inputTokens"))
+        cached = _as_int(native.get("cacheReadTokens"))
+        created = _as_int(native.get("cacheWriteTokens"))
+        return (
+            inp - cached - created,
+            cached,
+            created,
+            _as_int(native.get("outputTokens")),
+            0,
+        )
+    if agent == "claude":
+        return (
+            _as_int(native.get("input_tokens")),
+            _as_int(native.get("cache_read_input_tokens")),
+            _as_int(native.get("cache_creation_input_tokens")),
+            _as_int(native.get("output_tokens")),
+            0,
+        )
+    if agent == "junie":
+        return (
+            _as_int(native.get("inputTokens")),
+            _as_int(native.get("cacheInputTokens"))
+            + _as_int(native.get("cacheReadTokens")),
+            _as_int(native.get("cacheCreateTokens")),
+            _as_int(native.get("outputTokens")),
+            0,
+        )
+    if agent == "omp":
+        return (
+            _as_int(native.get("input")),
+            _as_int(native.get("cacheRead")),
+            _as_int(native.get("cacheWrite")),
+            _as_int(native.get("output")),
+            0,
+        )
+    return (0, 0, 0, 0, 0)
+
+
+def _quote_record(agent: str, record: dict, semantics: str, quote_usage) -> dict:
+    native = record.get("native") if isinstance(record.get("native"), dict) else {}
+    fresh, cached, created, output, reasoning = _counter_buckets(agent, native)
+    model = record.get("model")
+    if not isinstance(model, str):
+        model = ""
+    return quote_usage(
+        model,
+        fresh_input=fresh,
+        cache_read=cached,
+        cache_write=created,
+        output=output,
+        reasoning=reasoning,
+        cache_accounting=semantics,
+    )
+
+
+def attach_prices(
+    agent: str, snapshot: dict, records: list[dict], *, mode: str
+) -> None:
+    """Attach API-equivalent USD. A missing rate stays ``unmapped``, never $0."""
+    if agent == "cursor" or snapshot.get("status") != "ok" or not records:
+        return
+    semantics = cache_semantics(agent)
+    if semantics is None:
+        return
+    quote_usage, sum_quotes, refresh_prices = _price_api()
+    _maybe_refresh_prices(refresh_prices)
+    quotes: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        quote = _quote_record(agent, record, semantics, quote_usage)
+        record["cost"] = quote
+        quotes.append(quote)
+    if not quotes:
+        return
+    if mode in {"sessions", "archive"}:
+        snapshot["cost"] = sum_quotes(quotes)
+        return
+    newest = max(
+        (item for item in records if isinstance(item, dict)),
+        key=lambda item: float(item.get("mtime") or 0),
+    )
+    cost = newest.get("cost")
+    if isinstance(cost, dict):
+        snapshot["cost"] = cost
+
+
+def _money_suffix(cost: object) -> str:
+    """Dollar text only when the quote is a real number."""
+    if not isinstance(cost, dict):
+        return ""
+    amount = cost.get("cost_usd")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return ""
+    source = str(cost.get("cost_source") or "").strip()
+    tail = f"≈${amount:.6f} api-equiv"
+    if source:
+        tail = f"{tail} {source}"
+    return tail
+
+
 def render_statusline(snapshot: dict) -> str:
     agent = str(snapshot.get("agent") or "agent")
     status = snapshot.get("status")
@@ -1180,6 +1344,9 @@ def render_statusline(snapshot: dict) -> str:
     fleet = (snapshot.get("metrics") or {}).get("fleet_processed_total")
     if isinstance(fleet, int):
         parts.append(f"fleet {fmt_tokens(fleet)}")
+    money = _money_suffix(snapshot.get("cost")) or _money_suffix(last.get("cost"))
+    if money:
+        parts.append(money)
     return "  ·  ".join(parts)
 
 
@@ -1195,7 +1362,11 @@ def render_sessions(agent: str, records: list[dict], snapshot: dict) -> str:
         stamp = datetime.fromtimestamp(float(record.get("mtime") or 0), tz=UTC)
         when = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
         processed = fmt_tokens(_as_int(record.get("processed_total")))
-        lines.append(f"{when:<20} {processed:>14}  {record.get('id')}")
+        line = f"{when:<20} {processed:>14}  {record.get('id')}"
+        money = _money_suffix(record.get("cost"))
+        if money:
+            line = f"{line}  {money}"
+        lines.append(line)
     metrics = snapshot.get("metrics") or {}
     lines.append(f"sessions {len(records)}")
     lines.append(f"processed_total {_as_int(metrics.get('fleet_processed_total'))}")
@@ -1203,6 +1374,11 @@ def render_sessions(agent: str, records: list[dict], snapshot: dict) -> str:
     lines.append(f"live_total {_as_int(snapshot.get('live_total'))}")
     lines.append(f"archived_total {_as_int(snapshot.get('archived_total'))}")
     lines.append(f"agent {agent}")
+    total = snapshot.get("cost")
+    if _money_suffix(total):
+        lines.append(f"cost_usd {total.get('cost_usd')}")
+        lines.append(f"cost_source {total.get('cost_source')}")
+        lines.append("cost_basis api-equiv")
     return "\n".join(lines)
 
 
@@ -1642,6 +1818,7 @@ def run(
         snapshot = annotate_archive(
             agent, snapshot, records, cache, quota_root, mode=mode
         )
+        attach_prices(agent, snapshot, records, mode=mode)
         _write_cache(agent, quota_root, cache)
         atomic_write_json(_quota_path(quota_root), snapshot)
         if mode == "archive":
@@ -1658,6 +1835,7 @@ def run(
 
     snapshot, records, cache = snapshot_for(agent, store, mode="once", cache=cache)
     snapshot = annotate_archive(agent, snapshot, records, cache, quota_root, mode=mode)
+    attach_prices(agent, snapshot, records, mode="once")
     _write_cache(agent, quota_root, cache)
     atomic_write_json(_quota_path(quota_root), snapshot)
     if mode == "line":
@@ -1686,6 +1864,7 @@ def _daemon(agent: str, store: Path, quota_root: Path, interval: int) -> int:
         snapshot = annotate_archive(
             agent, snapshot, records, cache, quota_root, mode="daemon"
         )
+        attach_prices(agent, snapshot, records, mode="once")
         _write_cache(agent, quota_root, cache)
         atomic_write_json(_quota_path(quota_root), snapshot)
         print(
