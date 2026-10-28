@@ -15,6 +15,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Local USD quotes for telemetry `once`/`line` and run receipts. Rates come
+  from the OpenRouter model list (pinned 2026-10-28, cached at most daily).
+  `cost_source` is `price_table(openrouter@<date>)` or `unmapped`. Amounts
+  are API equivalents (`cost_basis: api-equiv`), not subscription invoices.
+
 - OMP provider support with headless dispatch, native resume, and durable
   inbox/checkpoint messaging (not live RPC steering). Auto uses native write
   permissions, read-only uses a tool whitelist, and explicit bypass uses yolo;
@@ -22,6 +27,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Codex fleet scans keep the newest `token_count` and still read an earlier
+  `turn_context` model inside the 32MB tail, so `gpt-6.1-terra` is no longer
+  priced against an empty model id. Grok recovers `models.default`,
+  `primaryModelId`, and `current_model_id` before falling back to
+  `grok-cli-default`.
 - OMP usage counts finalized assistant messages once, including tool turns and
   errors, and the existing server collector includes its local sessions.
 - OMP telemetry follows native profiles and agent-directory overrides, retains

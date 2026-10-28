@@ -58,10 +58,25 @@ unmeasured formats are expected reasons for residual unknowns, not zeros.
 
 ## Prices
 
-Prices are API-equivalent estimates, not subscription invoices. Rates are USD
-per million tokens. `_PRICES` entries carry a dated source label. Unrecognized
-models appear in `unpricedModels`; a mixed-model run with an unpriced model
-has unknown cost rather than a misleading partial dollar sum.
+Prices are API-equivalent estimates, not subscription invoices. The field
+`cost_basis: api-equiv` says that in the receipt. Rates are USD per million
+tokens. The live table is the OpenRouter public model list
+(`https://openrouter.ai/api/v1/models`), snapshotted 2026-10-28 and cached at
+`$VIBECRAFTED_HOME/telemetry/prices.json` (refresh at most once a day). A hit
+is `cost_source: price_table(openrouter@YYYY-MM-DD)`. Offline runs use that
+cache, then the pinned snapshot in the package. They do not invent a rate.
+
+A named model with no row is `cost_source: unmapped` and `cost_usd: unknown`.
+An empty model id stays `unknown` (`model unknown; no price table lookup`).
+Unrecognized models appear in `unpricedModels`; a mixed-model run with an
+unpriced model has unknown cost rather than a misleading partial dollar sum.
+Cached input is a subset of input for Codex and Grok. Reasoning is a subset
+of output and is not added again.
+
+`_PRICES` is the hand-pin fallback for ids the snapshot does not list. Those
+rows keep `estimated:<dated-source>`. The list below is that fallback, not
+the live catalog. Where both exist, the OpenRouter snapshot wins, including
+when the number differs from the older pin.
 
 Sources checked 2026-09-28:
 
