@@ -3744,6 +3744,18 @@ fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
     SkillsSnapshot::empty()
 }
 
+// Leptos treats textarea children as raw text during SSR. Encode the body
+// explicitly so a skill containing `</textarea>` cannot escape the control.
+// Character references also preserve a leading newline, which the HTML parser
+// otherwise strips immediately after the opening textarea tag.
+fn encode_skill_textarea(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
+}
+
 fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
     let open = snapshot.open.clone();
     let tabs = snapshot.names.iter().map(|name| {
@@ -3778,6 +3790,7 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
     );
     let document = if let Some(name) = open.filter(|_| snapshot.read_ok) {
         let text = snapshot.text;
+        let textarea_body = encode_skill_textarea(&text);
         let read_only = !snapshot.writable;
         let expected_sha256 = snapshot.expected_sha256;
         view! {
@@ -3787,7 +3800,7 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
                     <input type="hidden" name="expected_sha256" value=expected_sha256 />
                     <div class="editor-body">
                         <div class="rich-pane md-body">{text.clone()}</div>
-                        <textarea class="raw-pane" name="text" hidden readonly=read_only>{text}</textarea>
+                        <textarea class="raw-pane" name="text" hidden readonly=read_only inner_html=textarea_body></textarea>
                     </div>
                 </form>
             </article>
@@ -6524,7 +6537,7 @@ pub(crate) mod tests {
         }
         fs::write(
             root.join("vc-alpha/SKILL.md"),
-            "# Alpha\n<script>alert(1)</script>",
+            "# Alpha\n</textarea><script>alert(1)</script>",
         )
         .unwrap();
         fs::write(other.join("vc-alpha/SKILL.md"), "shadow").unwrap();
@@ -6549,6 +6562,12 @@ pub(crate) mod tests {
         );
         assert!(html.contains("data-skill-edit"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;/textarea&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("</textarea><script>alert(1)</script>"));
+        assert_eq!(
+            super::encode_skill_textarea("\n<&>\r"),
+            "&#10;&lt;&amp;&gt;&#13;"
+        );
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("/api/scaffold/status"));
         assert!(html.contains("beforeunload"));
@@ -6595,7 +6614,7 @@ pub(crate) mod tests {
             super::save_named_skill_in(&roots, "vc-missing", "no", &super::skill_sha256(b""))
                 .is_err()
         );
-        let old_hash = super::skill_sha256(b"# Alpha\n<script>alert(1)</script>");
+        let old_hash = super::skill_sha256(b"# Alpha\n</textarea><script>alert(1)</script>");
         assert!(html.contains(&format!(r#"name="expected_sha256" value="{}""#, old_hash)));
         assert_eq!(
             super::save_named_skill_in(&roots, "vc-alpha", "updated", ""),
@@ -6612,7 +6631,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(),
-            "# Alpha\n<script>alert(1)</script>"
+            "# Alpha\n</textarea><script>alert(1)</script>"
         );
         let new_hash =
             super::save_named_skill_in(&roots, "vc-alpha", "updated", &old_hash).unwrap();
