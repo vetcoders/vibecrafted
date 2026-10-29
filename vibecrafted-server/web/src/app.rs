@@ -3595,6 +3595,17 @@ fn current_skill_profile() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(feature = "ssr")]
+fn expand_skill_home(
+    path: std::path::PathBuf,
+    profile: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    match (path.strip_prefix("~"), profile) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path,
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn current_skill_runtime_home() -> Option<std::path::PathBuf> {
     let path = |key| {
         std::env::var_os(key)
@@ -3603,10 +3614,7 @@ fn current_skill_runtime_home() -> Option<std::path::PathBuf> {
     };
     let profile = current_skill_profile();
     let expand = |value: Option<std::path::PathBuf>| {
-        value.map(|value| match (value.strip_prefix("~"), profile.as_ref()) {
-            (Ok(rest), Some(home)) => home.join(rest),
-            _ => value,
-        })
+        value.map(|value| expand_skill_home(value, profile.as_deref()))
     };
     skill_runtime_home(
         expand(path("VIBECRAFTED_RUNTIME_HOME")),
@@ -3619,8 +3627,14 @@ fn current_skill_runtime_home() -> Option<std::path::PathBuf> {
 
 #[cfg(feature = "ssr")]
 fn current_local_skills_home() -> Option<std::path::PathBuf> {
-    if std::env::var_os("VIBECRAFTED_HOME").is_some_and(|value| !value.is_empty()) {
-        return Some(control_core::vibecrafted_home().join("local-skills"));
+    if let Some(value) = std::env::var_os("VIBECRAFTED_HOME").filter(|value| !value.is_empty()) {
+        return Some(
+            expand_skill_home(
+                std::path::PathBuf::from(value),
+                current_skill_profile().as_deref(),
+            )
+            .join("local-skills"),
+        );
     }
     if cfg!(windows) {
         let local = std::env::var_os("LOCALAPPDATA")
@@ -6733,6 +6747,11 @@ pub(crate) mod tests {
             super::skill_profile_home(Some(home.clone()), Some(profile.clone()), true),
             Some(profile.clone())
         );
+        assert_eq!(
+            super::expand_skill_home(std::path::PathBuf::from("~/custom"), Some(&profile)),
+            profile.join("custom")
+        );
+
         assert_eq!(
             super::skill_profile_home(Some(home.clone()), Some(profile.clone()), false),
             Some(home.clone())
