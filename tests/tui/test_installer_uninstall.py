@@ -1501,6 +1501,7 @@ def test_local_skill_publication_receipts_views_and_preserves_conflict(
         LocalSkillProjection=Proof,
         LocalSkillError=OwnerError,
         prepare_skill=prepare,
+        validated_local_skill=lambda *args, **kwargs: None,
         read_skill=lambda *args, **kwargs: {"revision": "0" * 64},
         validate_candidate=lambda proof: proof,
         local_skill_selector_path=lambda name: selector,

@@ -13576,9 +13576,12 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
         ]
     findings: list[DoctorFinding] = []
     local_views = receipt.get("local_skill_projections", {})
-    if local_views:
+    local_selections = receipt.get("local_skill_selections", {})
+    if local_views or local_selections:
         try:
             owner = _load_local_skill_owner()
+            for name, value in local_selections.items():
+                _check_recorded_local_skill_selection(name, value, paths, owner)
             for raw, value in local_views.items():
                 path = Path(raw)
                 proof = _validate_local_skill_receipt(path, value, paths, owner)
@@ -19093,6 +19096,12 @@ def _load_runtime_install_receipt(
         raise RuntimeInstallRefusal("invalid local skill projection receipt")
     if set(local_views) & set(receipt.get("owned_symlinks", {})):
         raise RuntimeInstallRefusal("overlapping runtime projection ownership")
+    local_selections = receipt.get("local_skill_selections", {})
+    if not isinstance(local_selections, dict) or any(
+        not isinstance(key, str) or not isinstance(value, dict)
+        for key, value in local_selections.items()
+    ):
+        raise RuntimeInstallRefusal("invalid local skill selection receipt")
     for receipt_field in (
         "config_defaults",
         "roots_created",
@@ -22574,8 +22583,27 @@ def _runtime_rescue_ownership_inventory(
     for raw, target in receipt.get("owned_symlinks", {}).items():
         items.append(_classify_runtime_owned_symlink(Path(raw), str(target), paths))
     local_views = receipt.get("local_skill_projections", {})
-    if local_views:
+    local_selections = receipt.get("local_skill_selections", {})
+    if local_views or local_selections:
         owner = _load_local_skill_owner()
+        for name, value in local_selections.items():
+            try:
+                _check_recorded_local_skill_selection(name, value, paths, owner)
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                items.append(
+                    {
+                        "path": str(
+                            paths["crafted_home"]
+                            / "local-skills"
+                            / name
+                            / "selected.json"
+                        ),
+                        "kind": "file",
+                        "class": "unsafe",
+                        "reason": str(exc),
+                        "disposition": "preserve",
+                    }
+                )
         for raw, value in local_views.items():
             try:
                 proof = _validate_local_skill_receipt(Path(raw), value, paths, owner)
@@ -23541,7 +23569,12 @@ def _runtime_rescue_verify_destination(
             except OSError:
                 errors.append(f"owned symlink is dangling: {path.name}")
         local_views = receipt.get("local_skill_projections", {})
-        local_owner = _load_local_skill_owner() if local_views else None
+        local_selections = receipt.get("local_skill_selections", {})
+        local_owner = (
+            _load_local_skill_owner() if local_views or local_selections else None
+        )
+        for name, value in local_selections.items():
+            _check_recorded_local_skill_selection(name, value, paths, local_owner)
         for raw, value in local_views.items():
             path = Path(raw)
             proof = _validate_local_skill_receipt(path, value, paths, local_owner)
@@ -24802,8 +24835,15 @@ def _local_skill_receipt(proof: Any) -> dict[str, str]:
     }
 
 
-def _validate_local_skill_receipt(
-    path: Path, value: Any, paths: Mapping[str, Path], owner: Any
+def _local_skill_selection_receipt(proof: Any) -> dict[str, str]:
+    return {
+        **_local_skill_receipt(proof),
+        "schema": "vibecrafted.local-skill-selection-proof.v1",
+    }
+
+
+def _validate_local_skill_proof(
+    value: Any, paths: Mapping[str, Path], owner: Any, *, schema: str
 ) -> Any:
     if (
         not isinstance(value, dict)
@@ -24831,18 +24871,15 @@ def _validate_local_skill_receipt(
         / name
     )
     if (
-        value["schema"] != "vibecrafted.local-skill-projection.v1"
+        value["schema"] != schema
         or len(name) > 128
         or not re.fullmatch(r"(?:vc|vetcoders)-[A-Za-z0-9_-]+", name)
         or not re.fullmatch(r"[0-9a-f]{32}", version)
         or not re.fullmatch(r"[0-9a-f]{64}", value["content_sha256"])
         or not re.fullmatch(r"[0-9a-f]{64}", value["tree_sha256"])
         or Path(value["directory"]) != expected
-        or path.name != name
-        or not _local_skill_view_is_allowed(path)
     ):
         raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
-    _assert_runtime_physical_path(path, leaf_symlink=True)
     _assert_runtime_physical_path(expected)
     proof = owner.LocalSkillProjection(
         name, expected, version, value["content_sha256"], value["tree_sha256"]
@@ -24851,6 +24888,103 @@ def _validate_local_skill_receipt(
         return owner.validate_candidate(proof)
     except owner.LocalSkillError as exc:
         raise RuntimeInstallRefusal("local skill projection proof is invalid") from exc
+
+
+def _validate_local_skill_receipt(
+    path: Path, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    if not _local_skill_view_is_allowed(path):
+        raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
+    _assert_runtime_physical_path(path, leaf_symlink=True)
+    proof = _validate_local_skill_proof(
+        value, paths, owner, schema="vibecrafted.local-skill-projection.v1"
+    )
+    if path.name != proof.name:
+        raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
+    return proof
+
+
+def _validate_local_skill_selection_receipt(
+    name: str, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    proof = _validate_local_skill_proof(
+        value, paths, owner, schema="vibecrafted.local-skill-selection-proof.v1"
+    )
+    if proof.name != name:
+        raise RuntimeInstallRefusal("local skill selection receipt name disagrees")
+    return proof
+
+
+def _check_recorded_local_skill_selection(
+    name: str, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    proof = _validate_local_skill_selection_receipt(name, value, paths, owner)
+    selector = owner.local_skill_selector_path(name)
+    if not _local_skill_selector_is_allowed(selector, paths):
+        raise RuntimeInstallRefusal("local skill selector is outside its owner")
+    _assert_runtime_physical_path(selector)
+    try:
+        raw = _capture_runtime_bound_file(selector, max_bytes=65536)
+        expected = owner.selected_bytes(proof)
+    except (OSError, owner.LocalSkillError) as exc:
+        raise RuntimeInstallRefusal("local skill selection is unavailable") from exc
+    if raw != expected:
+        raise RuntimeInstallRefusal("local skill selection disagrees with its receipt")
+    return proof
+
+
+def _prove_current_local_skill_selection(
+    name: str,
+    selected: Any,
+    previous: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    owner: Any,
+) -> tuple[dict[str, str] | None, tuple[Path, Any] | None]:
+    """Bind the selector to a transaction receipt or a proven legacy view."""
+    records = previous.get("local_skill_selections", {})
+    if name in records:
+        recorded = _validate_local_skill_selection_receipt(
+            name, records[name], paths, owner
+        )
+        if selected != recorded:
+            raise RuntimeInstallRefusal(
+                "local skill selection disagrees with its receipt"
+            )
+        return dict(records[name]), None
+    related: list[tuple[Path, Any]] = []
+    for raw, value in previous.get("local_skill_projections", {}).items():
+        path = Path(raw)
+        if path.name != name:
+            continue
+        proof = _validate_local_skill_receipt(path, value, paths, owner)
+        related.append((path, proof))
+    if selected is None:
+        if related:
+            raise RuntimeInstallRefusal(
+                "local skill selection is missing for receipted views"
+            )
+        return None, None
+    # An older receipt has no independent selector proof. Do not infer one
+    # from a pathname or from a stale/conflicting view: one exact live
+    # receipted pointer must agree with this immutable version.
+    live = [
+        (path, proof)
+        for path, proof in related
+        if _is_owned_pointer(path) and _symlink_target(path) == proof.directory
+    ]
+    if not live or any(proof != selected for _, proof in live):
+        raise RuntimeInstallRefusal(
+            "local skill selection has no unambiguous live receipt proof"
+        )
+    path, proof = live[0]
+    before = _runtime_config_digest(path)
+    if (
+        before is None
+        or not _is_owned_pointer(path)
+        or _symlink_target(path) != proof.directory
+    ):
+        raise RuntimeInstallRefusal("local skill selection witness changed")
+    return _local_skill_selection_receipt(selected), (path, proof)
 
 
 def _replace_runtime_transaction_entry(
@@ -25164,22 +25298,33 @@ def publish_local_skill(name: str, text: str, revision: str) -> dict[str, Any]:
                 "selected runtime identity or receipt is inconsistent"
             )
         owner = _load_local_skill_owner()
-        if (
-            name not in {skill.name for skill in discover_skills(generation)}
-            and owner.validated_local_skill(name, lease_held=True) is None
-        ):
-            raise RuntimeInstallRefusal("skill has no bundled or local version")
         selector = owner.local_skill_selector_path(name)
         if not _local_skill_selector_is_allowed(selector, paths):
             raise RuntimeInstallRefusal("local skill selector is outside its owner")
         _assert_runtime_physical_path(selector, leaf_symlink=True)
         selector_before = _runtime_config_digest(selector)
+        selected = owner.validated_local_skill(name, lease_held=True)
+        _, migration_witness = _prove_current_local_skill_selection(
+            name, selected, previous, paths, owner
+        )
+        if (
+            name not in {skill.name for skill in discover_skills(generation)}
+            and selected is None
+        ):
+            raise RuntimeInstallRefusal("skill has no bundled or local version")
         proof = owner.prepare_skill(name, text, revision, lease_held=True)
-        if owner.read_skill(name, lease_held=True)["revision"] != revision:
+        if (
+            owner.read_skill(name, lease_held=True)["revision"] != revision
+            or owner.validated_local_skill(name, lease_held=True) != selected
+            or _runtime_config_digest(selector) != selector_before
+        ):
             raise RuntimeInstallRefusal("skill changed before publication")
         owner.validate_candidate(proof)
         receipt = json.loads(json.dumps(previous))
         local_views = receipt.setdefault("local_skill_projections", {})
+        receipt.setdefault("local_skill_selections", {})[name] = (
+            _local_skill_selection_receipt(proof)
+        )
         backup_root = runtime_home / ".installer-backups"
         backup_root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix="publication-", dir=backup_root))
@@ -25267,6 +25412,21 @@ def publish_local_skill(name: str, text: str, revision: str) -> dict[str, Any]:
             statuses[runtime] = "published"
         # Selector is last; readers hold the same lease and reject a pending
         # transaction, while recovery restores all preimages after a crash.
+        if migration_witness is not None and migration_witness[0] not in expected:
+            raise RuntimeInstallRefusal(
+                "local skill selection witness is not publishable"
+            )
+
+        def validate_local_publication() -> None:
+            owner.validate_candidate(proof)
+            if migration_witness is not None:
+                witness, old_proof = migration_witness
+                if not _is_owned_pointer(witness) or _symlink_target(witness) not in {
+                    old_proof.directory,
+                    proof.directory,
+                }:
+                    raise RuntimeInstallRefusal("local skill selection witness changed")
+
         replacements.append((selector, staged_selector))
         _publish_runtime_config_transaction(
             paths,
@@ -25276,7 +25436,7 @@ def publish_local_skill(name: str, text: str, revision: str) -> dict[str, Any]:
             staging,
             None,
             expected_preimages=expected,
-            validate_publication=lambda: owner.validate_candidate(proof),
+            validate_publication=validate_local_publication,
         )
         receipt.pop("install_phase", None)
         _checkpoint_runtime_install_receipt(runtime_home, receipt)
@@ -28017,25 +28177,42 @@ def _install_runtime_pack(
         )
     local_owner = None
     local_selected: dict[str, Any] = {}
+    selection_receipts = dict(previous.get("local_skill_selections", {}))
+    selection_witnesses: list[tuple[Path, Any]] = []
     local_store = paths["crafted_home"] / "local-skills"
     resume_proof = None
-    if _path_present(local_store) or previous.get("local_skill_projections"):
+    if (
+        _path_present(local_store)
+        or previous.get("local_skill_projections")
+        or selection_receipts
+    ):
         resume_proof = (
             _verify_local_skill_install_resume(paths, previous)
             if previous.get("install_pending")
             else None
         )
         local_owner = _load_local_skill_owner()
+        names = {skill.name for skill in discover_skills(payload_root)}
+        names.update(selection_receipts)
         for raw, value in previous.get("local_skill_projections", {}).items():
-            _validate_local_skill_receipt(Path(raw), value, paths, local_owner)
-        for skill in discover_skills(payload_root):
-            proof = (
-                local_owner._selected_local_skill_after_install_recovery(skill.name)
-                if resume_proof is not None
-                else local_owner.validated_local_skill(skill.name, lease_held=True)
+            names.add(
+                _validate_local_skill_receipt(Path(raw), value, paths, local_owner).name
             )
+        for name in sorted(names):
+            proof = (
+                local_owner._selected_local_skill_after_install_recovery(name)
+                if resume_proof is not None
+                else local_owner.validated_local_skill(name, lease_held=True)
+            )
+            selection_receipt, witness = _prove_current_local_skill_selection(
+                name, proof, previous, paths, local_owner
+            )
+            if selection_receipt is not None:
+                selection_receipts[name] = selection_receipt
+            if witness is not None:
+                selection_witnesses.append(witness)
             if proof is not None:
-                local_selected[skill.name] = proof
+                local_selected[name] = proof
         if resume_proof is not None and (
             _capture_runtime_bound_file(
                 receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
@@ -28073,6 +28250,7 @@ def _install_runtime_pack(
         "local_skill_projections": json.loads(
             json.dumps(previous.get("local_skill_projections", {}))
         ),
+        "local_skill_selections": json.loads(json.dumps(selection_receipts)),
         "owned_dirs": list(previous.get("owned_dirs", [])),
         "owned_empty_dirs": list(previous.get("owned_empty_dirs", [])),
         "backups": dict(previous.get("backups", {})),
@@ -28456,6 +28634,12 @@ def _install_runtime_pack(
                 raise RuntimeInstallRefusal(
                     "local skill selection changed during install"
                 )
+        for witness, proof in selection_witnesses:
+            if (
+                not _is_owned_pointer(witness)
+                or _symlink_target(witness) != proof.directory
+            ):
+                raise RuntimeInstallRefusal("local skill selection witness changed")
 
     _publish_runtime_config_transaction(
         paths,
@@ -28956,7 +29140,10 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
     owned_files = receipt.get("owned_files", {})
     owned_symlinks = receipt.get("owned_symlinks", {})
     local_views = receipt.get("local_skill_projections", {})
-    local_owner = _load_local_skill_owner() if local_views else None
+    local_selections = receipt.get("local_skill_selections", {})
+    local_owner = _load_local_skill_owner() if local_views or local_selections else None
+    for name, value in local_selections.items():
+        _validate_local_skill_selection_receipt(name, value, paths, local_owner)
     local_targets = {
         raw: _validate_local_skill_receipt(
             Path(raw), value, paths, local_owner
