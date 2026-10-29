@@ -42,6 +42,36 @@ def _python_script(path: Path, body: str) -> None:
     _write_executable(path, f"#!{sys.executable}\n" + body)
 
 
+def _write_carrier_python(runtime: Path) -> None:
+    """Use the actual launcher producer; double only native host compilation."""
+    spec = importlib.util.spec_from_file_location(
+        "cold_python_renderer", ROOT / "scripts/render-python-entrypoint-launchers.py"
+    )
+    renderer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(renderer)
+    manifest = runtime.parent / "cold-python-entrypoints.toml"
+    manifest.write_text(
+        '[project.scripts]\nvc-server-supervisor = "vibecrafted_core.cli:main"\n'
+    )
+
+    def native_host(destination, _target, _library, *, python_only=False):
+        if python_only:
+            _write_executable(
+                destination,
+                '#!/bin/bash\necho carrier-python >> "$EVENTS"\nexec '
+                + shlex.quote(sys.executable)
+                + ' -B "$@"\n',
+            )
+        else:
+            _write_executable(destination, "#!/bin/sh\nexit 0\n")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(renderer, "render_native_host", native_host)
+        renderer.render_launchers(
+            manifest, runtime / "bin", native_library="libpython3.14.dylib"
+        )
+
+
 def _cold_fixture(tmp_path: Path, *, damage="none"):
     home, server, tools = (tmp_path / name for name in ("home", "server", "tools"))
     for directory in (home, server, tools):
@@ -62,13 +92,14 @@ def _cold_fixture(tmp_path: Path, *, damage="none"):
             / name,
         ):
             _write_executable(path, "#!/bin/sh\nexit 0\n")
-    # Interpreter delegation is the portable-carrier double, never a PATH Python.
-    _write_executable(
-        runtime / "bin/python3",
-        '#!/bin/bash\necho carrier-python >> "$EVENTS"\nexec '
-        + shlex.quote(sys.executable)
-        + ' "$@"\n',
-    )
+    # Match the signed product: bin/python3 is a generated Bash wrapper;
+    # bin/vc-python owns the native interpreter. Delegation remains a double.
+    _write_carrier_python(runtime)
+    if damage == "python-missing":
+        (runtime / "bin/vc-python").unlink()
+    elif damage == "python-symlink":
+        (runtime / "bin/vc-python").unlink()
+        (runtime / "bin/vc-python").symlink_to("python3")
     package = runtime / "vibecrafted-core/vibecrafted_core"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("")
@@ -203,7 +234,19 @@ with open(os.environ['EVENTS'], 'a') as log:
         '#!/bin/bash\necho forbidden-host-python >> "$EVENTS"\nexit 99\n',
     )
     _write_executable(
-        tools / "file", '#!/bin/sh\necho "Mach-O 64-bit executable arm64"\n'
+        tools / "file",
+        """#!/bin/bash
+case "${!#}" in
+  */bin/python3) echo "Bourne-Again shell script text executable, ASCII text" ;;
+  */bin/vc-python)
+    case "$DAMAGE" in
+      python-foreign) echo "Mach-O 64-bit executable x86_64" ;;
+      python-script) echo "Bourne-Again shell script text executable, ASCII text" ;;
+      *) echo "Mach-O 64-bit executable arm64" ;;
+    esac ;;
+  *) echo "Mach-O 64-bit executable arm64" ;;
+esac
+""",
     )
     for name in ("swift", "xcrun", "xcode-select", "make", "cargo", "brew"):
         _write_executable(
@@ -230,7 +273,7 @@ if '--display' in sys.argv:
 from pathlib import Path
 if sys.argv[1] == 'attach':
     mount=Path(sys.argv[sys.argv.index('-mountpoint')+1])
-    shutil.copytree(os.environ['DMG_APP'], mount/'Vibecrafted.app')
+    shutil.copytree(os.environ['DMG_APP'], mount/'Vibecrafted.app', symlinks=True)
 """,
     )
     # Linux can execute the same bootstrap test through a strict native-reader
@@ -352,7 +395,11 @@ def test_cold_channel_runs_real_runtime_pack_publication_and_settlement(
     tools = Path(env["PATH"].split(":")[0])
     payload = private_runtime_pack_seed(
         destination / "Contents/MacOS/vc-terminal", fixture_root=tmp_path
-    )(tmp_path / "payload", version="9.9.9+cold")
+    )(
+        tmp_path / "payload",
+        version="9.9.9+cold",
+        before_source_seal=_write_carrier_python,
+    )
     _seal_runtime_pack_for_admission(payload)
     pack_name = "Vibecrafted_RuntimePack_rescue-fixture-darwin-arm64.tar.gz"
     pack_provenance = payload / "runtime-pack-provenance.json"
@@ -563,6 +610,22 @@ def test_failed_trust_or_ambiguous_owner_preserves_prior(
     assert "runtime-published" not in events
     if damage in ("trust", "foreign"):
         assert "carrier-python" not in events
+
+
+@pytest.mark.parametrize(
+    "damage", ["python-foreign", "python-script", "python-missing", "python-symlink"]
+)
+def test_cold_channel_refuses_invalid_native_interpreter_before_execution(
+    tmp_path: Path, damage: str
+) -> None:
+    install, destination, env = _cold_fixture(tmp_path, damage=damage)
+    result = _run_cold(install, env)
+    assert result.returncode != 0
+    assert "Authenticated App interpreter" in result.stderr
+    assert not destination.exists()
+    events = Path(env["EVENTS"]).read_text()
+    assert "carrier-python" not in events and "runtime-published" not in events
+    assert "forbidden" not in events
 
 
 def test_app_owned_updater_without_bootstrap_env_resumes_and_restores(

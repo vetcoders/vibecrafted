@@ -1418,7 +1418,12 @@ if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; then
   prompt_attended_consent
   bootstrap_consent_obtained=1
   stage_channel_app
-  bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/python3"
+  # bin/python3 is the generated shell door. Admit and execute its native owner
+  # directly: vc-python binds CPython to its physical, authenticated generation
+  # and disables bytecode writes. Inspect the exact executable we will run.
+  bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/vc-python"
+  [[ -f "$bootstrap_python" && -x "$bootstrap_python" && ! -L "$bootstrap_python" ]] \
+    || die "Authenticated App interpreter is missing or unsafe"
   bootstrap_python_type="$(file -Lb "$bootstrap_python")" || die "Cannot inspect the authenticated App interpreter"
   case "$early_arch:$bootstrap_python_type" in
     arm64:*Mach-O*arm64*|x64:*Mach-O*x86_64*) ;;
