@@ -27870,6 +27870,67 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             return _install_runtime_pack(args)
 
 
+def _verify_local_skill_install_resume(
+    paths: Mapping[str, Path], previous: Mapping[str, Any]
+) -> tuple[bytes, str | None, str | None]:
+    """Prove a sealed publication under the installer's exclusive recovery lease."""
+    if (
+        previous.get("schema") != RUNTIME_INSTALL_SCHEMA
+        or previous.get("roots") != {key: str(value) for key, value in paths.items()}
+        or previous.get("install_pending") is not True
+        or previous.get("install_phase") != "ancillary"
+        or "config_transaction" in previous
+        or "preparing_previous_receipt" in previous
+        or any(
+            previous.get(key)
+            for key in (
+                "config_pending",
+                "config_conflicts",
+                "uninstall_pending",
+                "rescue_pending",
+            )
+        )
+    ):
+        raise RuntimeInstallRefusal(
+            "local skill install recovery is not in a sealed ancillary phase"
+        )
+    descriptor = _require_inherited_tools_install_lease(paths["crafted_home"])
+    runtime_home = paths["runtime_home"]
+    current = runtime_home / "tools/vibecrafted-current"
+    _validate_tools_lease_descriptor(descriptor, _tools_install_lease_path(current))
+    active = runtime_home / "active.json"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    _assert_runtime_physical_path(active)
+    current_digest = _runtime_config_digest(current)
+    active_digest = _runtime_config_digest(active)
+    if not _previous_runtime_is_available(runtime_home, previous):
+        raise RuntimeInstallRefusal("local skill install recovery selectors disagree")
+    generation = current.resolve(strict=True)
+    if (
+        generation.parent != runtime_home / "releases"
+        or previous.get("owned_files", {}).get(str(active)) != _sha256_path(active)
+        or _runtime_generation_payload_errors(generation)
+    ):
+        raise RuntimeInstallRefusal(
+            "local skill install recovery generation is not usable"
+        )
+    raw = _capture_runtime_bound_file(
+        _runtime_receipt_path(runtime_home),
+        max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES,
+    )
+    if (
+        _load_runtime_install_receipt(_runtime_receipt_path(runtime_home), raw=raw)
+        != previous
+    ):
+        raise RuntimeInstallRefusal("local skill install recovery receipt changed")
+    if (
+        _runtime_config_digest(current) != current_digest
+        or _runtime_config_digest(active) != active_digest
+    ):
+        raise RuntimeInstallRefusal("local skill install recovery selectors changed")
+    return raw, current_digest, active_digest
+
+
 def _install_runtime_pack(
     args: argparse.Namespace,
     *,
@@ -27957,14 +28018,36 @@ def _install_runtime_pack(
     local_owner = None
     local_selected: dict[str, Any] = {}
     local_store = paths["crafted_home"] / "local-skills"
+    resume_proof = None
     if _path_present(local_store) or previous.get("local_skill_projections"):
+        resume_proof = (
+            _verify_local_skill_install_resume(paths, previous)
+            if previous.get("install_pending")
+            else None
+        )
         local_owner = _load_local_skill_owner()
         for raw, value in previous.get("local_skill_projections", {}).items():
             _validate_local_skill_receipt(Path(raw), value, paths, local_owner)
         for skill in discover_skills(payload_root):
-            proof = local_owner.validated_local_skill(skill.name, lease_held=True)
+            proof = (
+                local_owner._selected_local_skill_after_install_recovery(skill.name)
+                if resume_proof is not None
+                else local_owner.validated_local_skill(skill.name, lease_held=True)
+            )
             if proof is not None:
                 local_selected[skill.name] = proof
+        if resume_proof is not None and (
+            _capture_runtime_bound_file(
+                receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
+            )
+            != resume_proof[0]
+            or _runtime_config_digest(runtime_home / "tools/vibecrafted-current")
+            != resume_proof[1]
+            or _runtime_config_digest(runtime_home / "active.json") != resume_proof[2]
+        ):
+            raise RuntimeInstallRefusal(
+                "local skill install recovery receipt or selectors changed"
+            )
     previous_healthy = False
     if previous and previous.get("version") != version and not rescue_record:
         previous_healthy, _ = _runtime_rescue_verify_destination(paths)
@@ -28163,6 +28246,9 @@ def _install_runtime_pack(
     current_link = runtime_home / "tools/vibecrafted-current"
     replacements: dict[Path, Path] = {product_config: staged_config}
     projection_preimages: dict[Path, str | None] = {}
+    if resume_proof is not None:
+        projection_preimages[current_link] = resume_proof[1]
+        projection_preimages[runtime_home / "active.json"] = resume_proof[2]
     projection_conflicts: list[str] = []
 
     def stage_launcher(destination: Path, body: str, *, mode: int = 0o755) -> None:

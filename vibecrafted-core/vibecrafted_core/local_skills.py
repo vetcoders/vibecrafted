@@ -427,9 +427,17 @@ def selected_bytes(proof: LocalSkillProjection) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _selected_local_skill(name: str) -> LocalSkillProjection | None:
+def _selected_local_skill_after_install_recovery(
+    name: str,
+) -> LocalSkillProjection | None:
+    """Read a selection after the installer proves its exclusive recovery state.
+
+    This private entrypoint does not inspect publication state. Only the
+    installer recovery owner may call it after verifying the canonical lease,
+    the exact pending receipt, and the already-published runtime selectors.
+    Ordinary readers and saves must use ``validated_local_skill``.
+    """
     _name(name)
-    _check_pending()
     if not _check_store():
         return None
     root = _skill_root(name)
@@ -450,6 +458,11 @@ def _selected_local_skill(name: str) -> LocalSkillProjection | None:
             "unsafe", "Local skill selection does not match its version"
         )
     return proof
+
+
+def _selected_local_skill(name: str) -> LocalSkillProjection | None:
+    _check_pending()
+    return _selected_local_skill_after_install_recovery(name)
 
 
 def validated_local_skill(
