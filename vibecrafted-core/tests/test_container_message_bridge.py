@@ -213,7 +213,10 @@ def test_relay_failure_is_visible_and_stop_is_idempotent(
         return real_exec(script, *args, data=data)
 
     monkeypatch.setattr(relay, "_exec", failing_exec)
-    relay.start()
+    with pytest.raises(
+        message_control.MessageControlError, match="bridge_roundtrip_failed"
+    ):
+        relay.start()
     deadline = time.monotonic() + 3
     while not relay.failure and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -223,3 +226,194 @@ def test_relay_failure_is_visible_and_stop_is_idempotent(
     assert not Path(relay.guest_path).exists()
     with pytest.raises(message_control.MessageControlError, match="already_started"):
         relay.start()
+
+
+def _guest_connection(root: Path, run_id: str, *, age: float = 0) -> Path:
+    from vibecrafted_core.container_message_transport import _CONNECTION_SCHEMA
+
+    channel = root / run_id / ("message-" + os.urandom(24).hex())
+    channel.mkdir(parents=True)
+    (channel / "connection.json").write_text(
+        json.dumps(
+            {
+                "schema": _CONNECTION_SCHEMA,
+                "run_id": run_id,
+                "container_id": "c",
+                "channel": str(channel),
+                "updated_at": time.time() - age,
+            }
+        )
+    )
+    return channel
+
+
+def test_legacy_cli_discovers_host_connection_without_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, guest, staging = (tmp_path / name for name in ("host", "guest", "stage"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(host))
+    _create_run(host, "run-legacy")
+    message = message_control.send_message(
+        run_id="run-legacy", text="host-only payload"
+    )
+    docker = tmp_path / "docker"
+    _fake_docker(docker)
+    relay = ContainerMessageRelay(
+        cli=str(docker),
+        container_id="c",
+        run_id="run-legacy",
+        env=os.environ,
+        staging_root=str(staging / "run-legacy"),
+    )
+    (staging / "run-legacy").mkdir(parents=True, exist_ok=True)
+    (staging / "run-legacy" / "provider.identity").write_text("existing-provider")
+    relay.start()
+    env = {
+        **os.environ,
+        "VIBECRAFTED_HOME": str(guest),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+    }
+    env.pop(BRIDGE_ENV, None)
+    env.pop("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED", None)
+
+    def cli(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from vibecrafted_core import dev_container; dev_container.RUN_STAGING_ROOT=sys.argv.pop(1); from vibecrafted_core.cli import main; raise SystemExit(main())",
+                str(staging),
+                "message",
+                *args,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+
+    try:
+        received = cli("--run-id", "run-legacy", "--receive")
+        assert received.returncode == 0, received.stderr
+        assert json.loads(received.stdout)[0]["message_id"] == message["message_id"]
+        inspected = cli("--run-id", "run-legacy", "--inspect", message["message_id"])
+        assert (
+            inspected.returncode == 0
+            and json.loads(inspected.stdout)["text"] == "host-only payload"
+        )
+        refused = cli("--run-id", "foreign-run", "--receive")
+        assert (
+            refused.returncode == 2 and "run_not_resolved:foreign-run" in refused.stderr
+        )
+        acknowledged = cli("--run-id", "run-legacy", "--ack", message["message_id"])
+        assert acknowledged.returncode == 0, acknowledged.stderr
+        assert (
+            message_control.inspect_message(message["message_id"])["delivery_state"]
+            == "agent_acknowledged"
+        )
+        assert not (guest / "control_plane" / "messages").exists()
+    finally:
+        relay.close()
+    disconnected = cli("--run-id", "run-legacy", "--receive")
+    assert disconnected.returncode == 2 and "bridge_unavailable" in disconnected.stderr
+    assert disconnected.stdout == ""
+
+
+@pytest.mark.parametrize("change", ["stale", "foreign", "symlink", "ambiguous"])
+def test_legacy_discovery_refuses_stale_foreign_and_ambiguous_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from vibecrafted_core import dev_container
+    from vibecrafted_core.container_message_bridge import guest_channel
+
+    monkeypatch.delenv(BRIDGE_ENV, raising=False)
+    monkeypatch.setattr(dev_container, "RUN_STAGING_ROOT", str(tmp_path))
+    channel = _guest_connection(tmp_path, "run-1", age=120 if change == "stale" else 0)
+    descriptor = channel / "connection.json"
+    if change == "foreign":
+        data = json.loads(descriptor.read_text())
+        data["run_id"] = "run-2"
+        descriptor.write_text(json.dumps(data))
+    elif change == "symlink":
+        backup = tmp_path / "descriptor"
+        descriptor.rename(backup)
+        descriptor.symlink_to(backup)
+    elif change == "ambiguous":
+        _guest_connection(tmp_path, "run-1")
+    with pytest.raises(message_control.MessageControlError, match="bridge_"):
+        guest_channel("run-1")
+
+
+def test_second_live_connection_does_not_announce_connected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "host"))
+    _create_run(tmp_path / "host", "run-1")
+    docker = tmp_path / "docker"
+    _fake_docker(docker)
+    kwargs = {
+        "cli": str(docker),
+        "container_id": "c",
+        "run_id": "run-1",
+        "env": os.environ,
+        "staging_root": str(tmp_path / "stage" / "run-1"),
+    }
+    first = ContainerMessageRelay(**kwargs)
+    second = ContainerMessageRelay(**kwargs)
+    first.start()
+    try:
+        with pytest.raises(
+            message_control.MessageControlError, match="bridge_roundtrip_failed"
+        ):
+            second.start()
+        assert not Path(second.guest_path).exists()
+        assert not first.failure
+    finally:
+        first.close()
+        second.close()
+
+
+def test_implicit_bridge_selection_requires_this_staged_run(tmp_path, monkeypatch):
+    from vibecrafted_core import dev_container
+    from vibecrafted_core.container_message_bridge import guest_bridge_selected
+
+    monkeypatch.delenv(BRIDGE_ENV, raising=False)
+    monkeypatch.delenv("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED", raising=False)
+    monkeypatch.setattr(dev_container, "RUN_STAGING_ROOT", str(tmp_path))
+    stage = tmp_path / "run-owned"
+    stage.mkdir()
+    (stage / "provider.identity").write_text("existing-provider")
+    assert guest_bridge_selected("run-owned")
+    assert not guest_bridge_selected("run-unrelated")
+    assert not guest_bridge_selected("")
+
+
+def test_roundtrip_uses_discovery_and_preserves_old_undiscoverable_channel(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "host"))
+    _create_run(tmp_path / "host", "run-1")
+    stage = tmp_path / "stage" / "run-1"
+    old = stage / ("message-" + "a" * 48)
+    old.mkdir(parents=True)
+    (old / "unrelated").write_text("preserve")
+    docker = tmp_path / "docker"
+    _fake_docker(docker)
+    relay = ContainerMessageRelay(
+        cli=str(docker),
+        container_id="c",
+        run_id="run-1",
+        env=os.environ,
+        staging_root=str(stage),
+    )
+    try:
+        relay.start()
+        assert not relay.failure
+    finally:
+        relay.close()
+    assert (old / "unrelated").read_text() == "preserve"

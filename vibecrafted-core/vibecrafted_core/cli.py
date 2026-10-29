@@ -682,6 +682,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     message.add_argument("--run-id", default="")
     message.add_argument(
+        "--connect-container",
+        action="store_true",
+        help="host recovery: reconnect an existing live container run; serve its inbox until interrupted or the owner exits",
+    )
+    message.add_argument(
         "--session", default="", help="exact recorded runtime or provider session ID"
     )
     message.add_argument("--file", default="", help="UTF-8 message body file")
@@ -2726,7 +2731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # In a container run the host remains the only owner. Never fall back
         # to a guest-local outbox if the relay is unavailable or an unsupported
         # action was requested.
-        from .container_message_bridge import BRIDGE_ENV
+        from .container_message_bridge import guest_bridge_selected
         from .message_control import (
             MessageControlError,
             acknowledge_message,
@@ -2736,10 +2741,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             send_message,
         )
 
-        guest_bridge = bool(
-            os.environ.get(BRIDGE_ENV)
-            or os.environ.get("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED") == "1"
-        )
+        guest_bridge = guest_bridge_selected(args.run_id or "")
+        if args.connect_container:
+            if (
+                guest_bridge
+                or not args.run_id
+                or any(
+                    (
+                        args.session,
+                        args.file,
+                        args.receive,
+                        args.ack,
+                        args.inspect,
+                        args.retry,
+                        args.mark_context_injected,
+                        args.nonce,
+                        args.idempotency_key,
+                    )
+                )
+            ):
+                print(
+                    "error: connect_container_requires_host_run_id_only",
+                    file=sys.stderr,
+                )
+                return 2
+            from .container_connection import connect_container
+
+            try:
+                connect_container(
+                    args.run_id,
+                    ready=lambda status: print(json.dumps(status), flush=True),
+                )
+            except KeyboardInterrupt:
+                return 0
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            return 0
         if guest_bridge and not (args.receive or args.ack or args.inspect):
             print("error: bridge_action_unsupported", file=sys.stderr)
             return 2

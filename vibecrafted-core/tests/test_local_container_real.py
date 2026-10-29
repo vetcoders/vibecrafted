@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core import dev_container, message_control, package_resources, spawn
+from vibecrafted_core.container_connection import _PROVIDER
 
 
 @pytest.mark.skipif(
@@ -104,7 +105,12 @@ def test_local_container_preparation_end_to_end(
             quota_policy=spawn.resolve_quota_policy("unmetered", runtime="local-vm"),
             usage_capability=spawn.container_usage_capability("claude"),
         )
-        script = """set -eu
+        probe = dev_container.stage_text(
+            target, run_id, "provider-probe.py", _PROVIDER, env=env
+        )
+        script = f"""set -eu
+python3 {probe} {dev_container._run_dir(run_id)} {run_id} >/dev/null
+if python3 {probe} {dev_container._run_dir(run_id)} foreign-run 2>/dev/null; then exit 1; fi
 vibecrafted capabilities --json >/dev/null
 vibecrafted message --help >/dev/null
 vibecrafted init --help >/dev/null
@@ -177,6 +183,15 @@ printf 'synthetic-receive-ack-ok\\n'
         message = message_control.send_message(
             run_id=run_id, text="synthetic container proof"
         )
+        # Simulate a provider process launched before the bridge existed:
+        # its future CLI children have no per-run connection environment.
+        for name in (
+            "VIBECRAFTED_MESSAGE_BRIDGE=",
+            "VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED=",
+        ):
+            index = next(i for i, value in enumerate(argv) if value.startswith(name))
+            assert argv[index - 1] == "-e"
+            del argv[index - 1 : index + 1]
         argv[argv.index("-it")] = "-i"
         proof = subprocess.run(
             argv, env=env, text=True, capture_output=True, timeout=90, check=False

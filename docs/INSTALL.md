@@ -322,6 +322,22 @@ docker run --rm -it -v "$PWD:/workspace" vetcoders/vibecrafted:local version
 See [Docker Runtime](DOCKER.md) for the full topology, volume layout and
 control-plane wiring.
 
+Local-container agents use their host run's inbox; installing a CLI inside the
+container does not copy or replace that control plane. New launches connect
+automatically. To reconnect an already running session created by an older
+launcher, run this on its host:
+
+```bash
+vibecrafted message --run-id <run-id> --connect-container
+```
+
+Keep this foreground connection open while the legacy session needs its inbox.
+It verifies the recorded host and container process identities before reporting
+`connected`, and closes when those identities end or change. The guest's usual
+`message --run-id <run-id> --receive`, `--ack`, and `--inspect` commands then use
+the same host owner, including when the agent predates the connection. No host
+home or control-plane mount is required. Use the updated CLI in both places.
+
 ---
 
 ## Build from source (power users)

@@ -8,18 +8,18 @@ prevents accidental cross-run access, not inspection by a hostile guest root.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import subprocess
 import threading
-import time
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import container_message_transport as transport
 from .message_control import (
     MessageControlError,
     acknowledge_message,
@@ -29,17 +29,35 @@ from .message_control import (
 )
 
 BRIDGE_ENV = "VIBECRAFTED_MESSAGE_BRIDGE"
-_MAX_REQUEST = 8192
-_MAX_RESPONSE = 8 * 1024 * 1024
+_MAX_REQUEST = transport._MAX_REQUEST
+_MAX_RESPONSE = transport._MAX_RESPONSE
 _ID = re.compile(r"^[0-9a-f]{32}$")
 
 # These programs execute inside the container. Their argv are literal arguments,
 # never shell-interpolated. The scan only reads regular, non-symlink requests.
-_INIT = """import os,sys
-os.makedirs(sys.argv[1],mode=0o700,exist_ok=False)
+_INIT = """import json,os,sys,time
+root,run_id,container_id=sys.argv[1:]
+client=sys.stdin.buffer.read(65537)
+if len(client)>65536: raise SystemExit(2)
+os.makedirs(root,mode=0o700,exist_ok=False)
+fd=os.open(os.path.join(root,"client.py"),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,"wb") as out: out.write(client)
+payload={"schema":"vibecrafted.container-message-connection.v1",
+ "run_id":run_id,"container_id":container_id,"channel":root,"updated_at":time.time()}
+fd=os.open(os.path.join(root,"connection.json"),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,"w") as out: json.dump(payload,out)
 """
-_SCAN = """import json,os,re,stat,sys
+_SCAN = """import json,os,re,stat,sys,time
 root=sys.argv[1]; rows=[]
+connection=os.path.join(root,"connection.json")
+if os.path.isfile(connection):
+ fd=os.open(connection,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+ with os.fdopen(fd) as inp: payload=json.load(inp)
+ payload["updated_at"]=time.time()
+ tmp=connection+".tmp"
+ fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+ with os.fdopen(fd,"w") as out: json.dump(payload,out)
+ os.replace(tmp,connection)
 for entry in sorted(os.scandir(root), key=lambda e:e.name):
  if len(rows)>=64: break
  if not re.fullmatch(r"[0-9a-f]{32}\\.request",entry.name): continue
@@ -65,7 +83,7 @@ os.replace(tmp,os.path.join(root,name+".reply"))
 _CLEAN = """import os,re,sys
 root=sys.argv[1]
 for entry in os.scandir(root):
- if re.fullmatch(r"[0-9a-f]{32}\\.(?:tmp|request|reply|reply\\.tmp)",entry.name):
+ if entry.name in {"connection.json","connection.json.tmp","client.py"} or re.fullmatch(r"[0-9a-f]{32}\\.(?:tmp|request|reply|reply\\.tmp)",entry.name):
   try: os.unlink(entry.path)
   except OSError: pass
 try: os.rmdir(root)
@@ -87,7 +105,10 @@ def _handle_request(bound_run: str, request: Any) -> dict[str, Any]:
             raise MessageControlError("bridge_run_mismatch")
         if not all(isinstance(request[key], str) for key in request):
             raise MessageControlError("bridge_invalid_request")
-        if request["action"] == "receive" and not request["message_id"]:
+        if request["action"] == "ping" and not request["message_id"]:
+            resolve_message_run(run_id=bound_run, session=request["session"])
+            result = {"run_id": bound_run}
+        elif request["action"] == "receive" and not request["message_id"]:
             result = receive_messages(run_id=bound_run, session=request["session"])
         elif request["action"] == "ack" and request["message_id"]:
             result = acknowledge_message(
@@ -108,6 +129,41 @@ def _handle_request(bound_run: str, request: Any) -> dict[str, Any]:
         return response
     except MessageControlError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def guest_bridge_selected(run_id: str) -> bool:
+    """A staged guest run requires its host owner, even without launch-time env."""
+    if (
+        os.environ.get(BRIDGE_ENV)
+        or os.environ.get("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED") == "1"
+    ):
+        return True
+    if not run_id:
+        return False
+    from .dev_container import _run_dir
+
+    try:
+        root = Path(_run_dir(run_id))
+    except RuntimeError:
+        return False
+    return (root / "provider.identity").is_file() or (root / "prompt.md").is_file()
+
+
+def guest_channel(run_id: str) -> str:
+    """Discover a live transport in this run's existing staging directory."""
+    explicit = os.environ.get(BRIDGE_ENV, "")
+    if explicit:
+        if not os.path.isabs(explicit):
+            raise MessageControlError("bridge_unavailable")
+        return explicit
+    if not run_id:
+        raise MessageControlError("bridge_run_id_required")
+    from .dev_container import _run_dir
+
+    try:
+        return transport.discover_channel(Path(_run_dir(run_id)), run_id)
+    except (RuntimeError, transport.BridgeTransportError) as exc:
+        raise MessageControlError(str(exc)) from exc
 
 
 class ContainerMessageRelay:
@@ -146,7 +202,10 @@ class ContainerMessageRelay:
             raise MessageControlError("bridge_already_started_or_closed")
         resolve_message_run(run_id=self.run_id)
         try:
-            result = self._exec(_INIT, self.guest_path)
+            client = Path(transport.__file__).read_bytes()
+            result = self._exec(
+                _INIT, self.guest_path, self.run_id, self.container_id, data=client
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             raise MessageControlError(
                 f"bridge_start_failed:{type(exc).__name__}"
@@ -157,6 +216,16 @@ class ContainerMessageRelay:
             target=self._serve, name="vc-container-message", daemon=True
         )
         self._thread.start()
+        try:
+            # Prove a guest -> host -> guest request before calling it connected.
+            result = self._exec(
+                _PROBE, self.guest_path, self.run_id, hashlib.sha256(client).hexdigest()
+            )
+            if result.returncode:
+                raise MessageControlError("bridge_roundtrip_failed")
+        except (OSError, subprocess.SubprocessError, MessageControlError):
+            self.close()
+            raise
 
     def _serve(self) -> None:
         try:
@@ -221,59 +290,28 @@ def guest_request(
     *, action: str, run_id: str, session: str, message_id: str, timeout: float = 20
 ) -> Any:
     """Request host operation, fail closed on timeout or invalid response."""
-    channel = os.environ.get(BRIDGE_ENV, "")
-    if not channel or not os.path.isabs(channel):
-        raise MessageControlError("bridge_unavailable")
-    payload = json.dumps(
-        {
-            "action": action,
-            "run_id": run_id,
-            "session": session,
-            "message_id": message_id,
-        }
-    ).encode()
-    if len(payload) > _MAX_REQUEST:
-        raise MessageControlError("bridge_request_too_large")
-    request_id = uuid.uuid4().hex
-    root = Path(channel)
-    temporary, request, response = (
-        root / f"{request_id}.{suffix}" for suffix in ("tmp", "request", "reply")
-    )
     try:
-        fd = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+        return transport.request(
+            channel=guest_channel(run_id),
+            action=action,
+            run_id=run_id,
+            session=session,
+            message_id=message_id,
+            timeout=timeout,
         )
-        with os.fdopen(fd, "wb") as out:
-            out.write(payload)
-        os.replace(temporary, request)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                fd = os.open(response, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            except FileNotFoundError:
-                time.sleep(0.05)
-                continue
-            with os.fdopen(fd, "rb") as inp:
-                raw = inp.read(_MAX_RESPONSE + 1)
-            response.unlink(missing_ok=True)
-            if len(raw) > _MAX_RESPONSE:
-                raise MessageControlError("bridge_response_too_large")
-            data = json.loads(raw)
-            if not isinstance(data, dict) or not isinstance(data.get("ok"), bool):
-                raise MessageControlError("bridge_invalid_response")
-            if not data["ok"]:
-                raise MessageControlError(str(data.get("error") or "bridge_failed"))
-            return data.get("result")
-        raise MessageControlError("bridge_timeout")
-    except (OSError, ValueError) as exc:
-        if isinstance(exc, MessageControlError):
-            raise
-        raise MessageControlError(f"bridge_unavailable:{type(exc).__name__}") from exc
-    finally:
-        for path in (temporary, request, response):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    except transport.BridgeTransportError as exc:
+        raise MessageControlError(str(exc)) from exc
+
+
+_PROBE = """import hashlib,importlib.util,json,sys
+from pathlib import Path
+sys.dont_write_bytecode=True
+root,run_id,digest=sys.argv[1:]; client=Path(root)/"client.py"
+if hashlib.sha256(client.read_bytes()).hexdigest()!=digest: raise SystemExit(2)
+spec=importlib.util.spec_from_file_location("vc_container_client",client)
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+channel=module.discover_channel(Path(root).parent,run_id)
+if channel!=root: raise SystemExit(2)
+result=module.request(channel=channel,action="ping",run_id=run_id,session="",message_id="",timeout=8)
+if result!={"run_id":run_id}: raise SystemExit(2)
+"""
