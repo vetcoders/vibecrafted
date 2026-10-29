@@ -3507,6 +3507,12 @@ struct SkillsSnapshot {
     writable: bool,
     #[serde(default)]
     expected_sha256: String,
+    #[serde(default)]
+    managed: bool,
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
+    read_error: String,
 }
 
 impl SkillsSnapshot {
@@ -3519,6 +3525,9 @@ impl SkillsSnapshot {
             read_ok: false,
             writable: false,
             expected_sha256: String::new(),
+            managed: false,
+            origin: String::new(),
+            read_error: String::new(),
         }
     }
 }
@@ -3546,6 +3555,85 @@ struct SkillFile {
 }
 
 #[cfg(feature = "ssr")]
+fn skill_profile_home(
+    home: Option<std::path::PathBuf>,
+    profile: Option<std::path::PathBuf>,
+    windows: bool,
+) -> Option<std::path::PathBuf> {
+    if windows { profile.or(home) } else { home }
+}
+
+#[cfg(feature = "ssr")]
+fn skill_runtime_home(
+    override_root: Option<std::path::PathBuf>,
+    data: Option<std::path::PathBuf>,
+    profile: Option<std::path::PathBuf>,
+    local_app_data: Option<std::path::PathBuf>,
+    windows: bool,
+) -> Option<std::path::PathBuf> {
+    override_root
+        .or_else(|| data.map(|data| data.join("vibecrafted")))
+        .or_else(|| {
+            if windows {
+                local_app_data
+                    .or_else(|| profile.map(|home| home.join("AppData/Local")))
+                    .map(|data| data.join("Vibecrafted"))
+            } else {
+                profile.map(|home| home.join(".local/share/vibecrafted"))
+            }
+        })
+}
+
+#[cfg(feature = "ssr")]
+fn current_skill_profile() -> Option<std::path::PathBuf> {
+    let path = |key| {
+        std::env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    skill_profile_home(path("HOME"), path("USERPROFILE"), cfg!(windows))
+}
+
+#[cfg(feature = "ssr")]
+fn current_skill_runtime_home() -> Option<std::path::PathBuf> {
+    let path = |key| {
+        std::env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let profile = current_skill_profile();
+    let expand = |value: Option<std::path::PathBuf>| {
+        value.map(|value| match (value.strip_prefix("~"), profile.as_ref()) {
+            (Ok(rest), Some(home)) => home.join(rest),
+            _ => value,
+        })
+    };
+    skill_runtime_home(
+        expand(path("VIBECRAFTED_RUNTIME_HOME")),
+        expand(path("XDG_DATA_HOME")),
+        profile.clone(),
+        expand(path("LOCALAPPDATA")),
+        cfg!(windows),
+    )
+}
+
+#[cfg(feature = "ssr")]
+fn current_local_skills_home() -> Option<std::path::PathBuf> {
+    if std::env::var_os("VIBECRAFTED_HOME").is_some_and(|value| !value.is_empty()) {
+        return Some(control_core::vibecrafted_home().join("local-skills"));
+    }
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| current_skill_profile().map(|home| home.join("AppData/Local")))?;
+        Some(local.join("Vibecrafted/home/local-skills"))
+    } else {
+        current_skill_profile().map(|home| home.join(".vibecrafted/local-skills"))
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn product_skill_roots() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -3553,13 +3641,17 @@ fn product_skill_roots() -> Vec<std::path::PathBuf> {
     // each runtime view, then `$VIBECRAFTED_HOME/skills`. No `env!("CARGO_MANIFEST_DIR")`
     // root: it bakes the build checkout into the signed binary.
     let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = current_skill_profile() {
         roots.push(home.join(".agents/skills"));
         for runtime in ["claude", "codex", "agy", "junie", "grok", "cursor"] {
             roots.push(home.join(format!(".{runtime}/skills")));
         }
     }
-    roots.push(control_core::vibecrafted_home().join("skills"));
+    if let Some(local_home) =
+        current_local_skills_home().and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    {
+        roots.push(local_home.join("skills"));
+    }
     let mut unique = Vec::new();
     for root in roots {
         if !unique.iter().any(|seen: &PathBuf| seen == &root) {
@@ -3625,6 +3717,23 @@ fn writable_skill_path(
 }
 
 #[cfg(feature = "ssr")]
+fn is_managed_skill_path(path: &std::path::Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let under = |root: std::path::PathBuf| {
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|root| path.starts_with(root))
+    };
+    current_skill_runtime_home().is_some_and(|root| under(root.join("releases")))
+        || std::env::var_os("VIBECRAFTED_RUNTIME_ROOT")
+            .filter(|root| !root.is_empty())
+            .is_some_and(|root| under(std::path::PathBuf::from(root)))
+        || current_local_skills_home().is_some_and(under)
+}
+
+#[cfg(feature = "ssr")]
 fn skill_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
@@ -3669,12 +3778,40 @@ fn save_named_skill_in(
 }
 
 #[cfg(feature = "ssr")]
+fn save_named_skill_for(
+    roots: &[std::path::PathBuf],
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
+) -> Result<serde_json::Value, crate::skills_bridge::BridgeError> {
+    use crate::skills_bridge::BridgeError;
+    let file = discover_skill_files(roots)
+        .into_iter()
+        .find(|file| file.name == name)
+        .ok_or(BridgeError::Invalid)?;
+    if is_managed_skill_path(&file.path) {
+        let saved = crate::skills_bridge::publish(name, text, expected_sha256)?;
+        Ok(
+            serde_json::json!({ "expected_sha256": saved.revision, "origin": saved.origin, "activation": saved.activation, "views": saved.views }),
+        )
+    } else {
+        match save_named_skill_in(roots, name, text, expected_sha256) {
+            Ok(revision) => {
+                Ok(serde_json::json!({ "expected_sha256": revision, "origin": "user" }))
+            }
+            Err(SaveSkillError::Invalid) => Err(BridgeError::Invalid),
+            Err(SaveSkillError::Conflict) => Err(BridgeError::Conflict),
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn save_named_skill(
     name: &str,
     text: &str,
     expected_sha256: &str,
-) -> Result<String, SaveSkillError> {
-    save_named_skill_in(&product_skill_roots(), name, text, expected_sha256)
+) -> Result<serde_json::Value, crate::skills_bridge::BridgeError> {
+    save_named_skill_for(&product_skill_roots(), name, text, expected_sha256)
 }
 
 #[cfg(all(feature = "ssr", any(test, not(feature = "hydrate"))))]
@@ -3689,7 +3826,13 @@ fn build_skills_snapshot_in(
         None => files.first(),
     };
     let open = selected.map(|file| file.name.clone());
-    let content = selected.and_then(|file| std::fs::read_to_string(&file.path).ok());
+    let managed = selected.is_some_and(|file| is_managed_skill_path(&file.path));
+    // Managed documents must be read through their selected owner, not a view.
+    let content = if managed {
+        None
+    } else {
+        selected.and_then(|file| std::fs::read_to_string(&file.path).ok())
+    };
     let read_ok = content.is_some();
     let writable =
         read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
@@ -3704,12 +3847,37 @@ fn build_skills_snapshot_in(
         read_ok,
         writable,
         expected_sha256,
+        managed,
+        origin: String::new(),
+        read_error: String::new(),
     }
 }
 
 #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
 fn build_skills_snapshot(open: Option<&str>) -> SkillsSnapshot {
-    build_skills_snapshot_in(&product_skill_roots(), open)
+    let roots = product_skill_roots();
+    let mut snapshot = build_skills_snapshot_in(&roots, open);
+    if snapshot.managed {
+        match crate::skills_bridge::read(snapshot.open.as_deref().unwrap_or_default()) {
+            Ok(data) => {
+                snapshot.text = data.text;
+                snapshot.expected_sha256 = data.revision;
+                snapshot.read_ok = true;
+                snapshot.writable = data.writable;
+                snapshot.origin = data.origin;
+            }
+            Err(_) => {
+                snapshot.text.clear();
+                snapshot.expected_sha256.clear();
+                snapshot.read_ok = false;
+                snapshot.writable = false;
+                snapshot.read_error =
+                    "The local skill owner is unavailable or its state needs attention."
+                        .to_string();
+            }
+        }
+    }
+    snapshot
 }
 
 #[cfg(feature = "hydrate")]
@@ -3770,6 +3938,10 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
         "Select a skill"
     } else if !snapshot.read_ok {
         "Read failed"
+    } else if snapshot.managed && snapshot.origin == "local" {
+        "Local version"
+    } else if snapshot.managed {
+        "Packaged original"
     } else if snapshot.writable {
         "Writable"
     } else {
@@ -3777,13 +3949,20 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
     };
     let detail = if open.is_none() {
         "Choose a skill from the index."
+    } else if !snapshot.read_ok && !snapshot.read_error.is_empty() {
+        snapshot.read_error.as_str()
     } else if !snapshot.read_ok {
         "This skill could not be read; editing is unavailable."
+    } else if snapshot.managed && snapshot.writable {
+        "Save creates a local version. Agent views are checked when it is published."
+    } else if snapshot.managed {
+        "The local version publisher is unavailable in this generation."
     } else if snapshot.writable {
         "This skill can be saved in its current location."
     } else {
         "The current location is outside the allowed writable roots or is not writable."
-    };
+    }
+    .to_string();
     let title = open.clone().unwrap_or_else(|| "Select a skill".to_string());
     let edit_button = (snapshot.writable && snapshot.read_ok).then(
         || view! { <button type="button" class="render-mode-btn" data-skill-edit>"Edit"</button> },
@@ -3807,7 +3986,8 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
         }.into_any()
     } else {
         let empty_state = if count == 0 { "empty" } else { "unavailable" };
-        view! { <p class="skills-empty" data-skills-state=empty_state>{detail}</p> }.into_any()
+        let message = detail.clone();
+        view! { <p class="skills-empty" data-skills-state=empty_state>{message}</p> }.into_any()
     };
     view! {
         <div class="server-route-document skills-studio" data-skills-room>
@@ -3821,12 +4001,12 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
                 <div class="review-workspace">
                     <header class="review-topbar" aria-label="Active skill strip">
                         <div class="review-topbar-id"><span class="mono-cap">"Skill"</span><strong>{title}</strong><span class="path">"SKILL.md"</span></div>
-                        <div class="review-topbar-actions" id="skill-actions">{edit_button}<span class="checkpoint-state">{state}</span></div>
+                        <div class="review-topbar-actions" id="skill-actions">{edit_button}<span class="checkpoint-state" data-skill-state>{state}</span></div>
                     </header>
                     <section class="review-main" aria-label="Skill document">{document}</section>
                     <footer class="review-statusbar" aria-label="Document statistics"><span><b data-skill-mode>"rich"</b>" view"</span><span data-skill-chars>"0 chars"</span><span data-skill-lines>"0 lines"</span></footer>
                 </div>
-                <aside class="review-inspector" aria-label="Skill status"><div class="inspector-head mono-cap">"Inspector"</div><div class="inspector-block"><h3>"Status"</h3><p class="inspector-pill">{state}</p><p class="inspector-hint">{detail}</p><p class="inspector-meta" data-save-status>{if snapshot.read_ok { "Loaded" } else { "Unavailable" }}</p></div></aside>
+                <aside class="review-inspector" aria-label="Skill status"><div class="inspector-head mono-cap">"Inspector"</div><div class="inspector-block"><h3>"Status"</h3><p class="inspector-pill" data-skill-state>{state}</p><p class="inspector-hint">{detail}</p><p class="inspector-meta" data-activation>{if snapshot.managed { "Agent views: not checked" } else { "" }}</p><p class="inspector-meta" data-save-status>{if snapshot.read_ok { "Loaded" } else { "Unavailable" }}</p></div></aside>
             </div>
         </div>
     }
@@ -3835,10 +4015,15 @@ fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
 fn skills_page(snapshot: SkillsSnapshot) -> impl IntoView {
     let embed = encode_skills_embed(&snapshot);
     let room = skills_room(snapshot);
-    let script = include_str!("scaffold/skills-studio.js").replace(
-        "/* SHARED_MARKDOWN */",
-        include_str!("scaffold/markdown.js"),
-    );
+    let script = include_str!("scaffold/skills-studio.js")
+        .replace(
+            "/* SHARED_MARKDOWN */",
+            include_str!("scaffold/markdown.js"),
+        )
+        .replace(
+            "/* SKILL_TEXT_BUFFER */",
+            include_str!("scaffold/skills-text.js"),
+        );
     view! {
         <Title text="Skills" />
         <Meta name="description" content="Browse and edit skills." />
@@ -3870,7 +4055,6 @@ struct SaveSkillForm {
     name: String,
     #[serde(default)]
     expected_sha256: String,
-    #[serde(default)]
     text: String,
 }
 
@@ -3879,25 +4063,43 @@ async fn save_skill_form(
     headers: axum::http::HeaderMap,
     axum::extract::Form(form): axum::extract::Form<SaveSkillForm>,
 ) -> impl axum::response::IntoResponse {
+    use crate::skills_bridge::BridgeError;
     use axum::response::IntoResponse;
-    match save_named_skill(&form.name, &form.text, &form.expected_sha256) {
-        Ok(expected_sha256)
+    let redirect_name = form.name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        save_named_skill(&form.name, &form.text, &form.expected_sha256)
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt))
             if headers
                 .get(axum::http::header::ACCEPT)
                 .and_then(|value| value.to_str().ok())
                 == Some("application/json") =>
         {
-            axum::Json(serde_json::json!({ "expected_sha256": expected_sha256 })).into_response()
+            axum::Json(receipt).into_response()
         }
-        Ok(_) => axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response(),
-        Err(SaveSkillError::Conflict) => (
+        Ok(Ok(_)) => {
+            axum::response::Redirect::to(&format!("/skills/{redirect_name}")).into_response()
+        }
+        Ok(Err(BridgeError::Conflict)) => (
             axum::http::StatusCode::CONFLICT,
             "Skill changed since it was opened.",
         )
             .into_response(),
-        Err(SaveSkillError::Invalid) => (
+        Ok(Err(BridgeError::Invalid)) => (
             axum::http::StatusCode::BAD_REQUEST,
             "Skill could not be saved.",
+        )
+            .into_response(),
+        Ok(Err(BridgeError::Unavailable)) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Local skill owner unavailable.",
+        )
+            .into_response(),
+        Ok(Err(BridgeError::UnknownOutcome)) | Err(_) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            "Save could not be confirmed; inspect the current version before retrying.",
         )
             .into_response(),
     }
@@ -6522,6 +6724,70 @@ pub(crate) mod tests {
         })
     }
 
+    #[test]
+    fn skills_home_resolution_matches_selected_platform_defaults() {
+        let home = std::path::PathBuf::from("/users/home");
+        let profile = std::path::PathBuf::from("/users/profile");
+        let local = std::path::PathBuf::from("/users/local");
+        assert_eq!(
+            super::skill_profile_home(Some(home.clone()), Some(profile.clone()), true),
+            Some(profile.clone())
+        );
+        assert_eq!(
+            super::skill_profile_home(Some(home.clone()), Some(profile.clone()), false),
+            Some(home.clone())
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, None, Some(profile.clone()), Some(local.clone()), true),
+            Some(local.join("Vibecrafted"))
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, None, Some(home.clone()), None, false),
+            Some(home.join(".local/share/vibecrafted"))
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, Some(local.clone()), Some(profile), None, true),
+            Some(local.join("vibecrafted"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_skill_shadowing_a_packaged_name_stays_user_owned() {
+        use std::os::unix::fs::symlink;
+        let home = temp_home();
+        let user = home.join("user");
+        let views = home.join("views");
+        let packaged = home.join("release/vc-alpha");
+        fs::create_dir_all(user.join("vc-alpha")).unwrap();
+        fs::create_dir_all(&views).unwrap();
+        fs::create_dir_all(&packaged).unwrap();
+        fs::write(user.join("vc-alpha/SKILL.md"), "my skill").unwrap();
+        fs::write(packaged.join("SKILL.md"), "packaged original").unwrap();
+        symlink(&packaged, views.join("vc-alpha")).unwrap();
+        let roots = [user.clone(), views];
+        let snapshot = super::build_skills_snapshot_in(&roots, Some("vc-alpha"));
+        assert!(!snapshot.managed && snapshot.writable);
+        assert_eq!(snapshot.text, "my skill");
+        let receipt = super::save_named_skill_for(
+            &roots,
+            "vc-alpha",
+            "my updated skill",
+            &snapshot.expected_sha256,
+        )
+        .unwrap();
+        assert_eq!(receipt["origin"], "user");
+        assert_eq!(
+            fs::read_to_string(user.join("vc-alpha/SKILL.md")).unwrap(),
+            "my updated skill"
+        );
+        assert_eq!(
+            fs::read_to_string(packaged.join("SKILL.md")).unwrap(),
+            "packaged original"
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
     pub(crate) fn skills_one_list_then_one_editor() {
         let home = temp_home();
         let root = home.join("skills");
@@ -6665,6 +6931,33 @@ pub(crate) mod tests {
         assert_eq!(
             fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(),
             "shadow"
+        );
+        let managed_snapshot = super::SkillsSnapshot {
+            names: vec!["vc-alpha".into()],
+            open: Some("vc-alpha".into()),
+            text: "local document".into(),
+            read_ok: true,
+            writable: true,
+            expected_sha256: super::skill_sha256(b"local document"),
+            managed: true,
+            origin: "local".into(),
+            read_error: String::new(),
+        };
+        let managed_html = render_skills(managed_snapshot.clone());
+        assert!(managed_html.contains("Local version"));
+        assert!(managed_html.contains("Agent views: not checked"));
+        assert!(managed_html.contains("data-skill-edit"));
+        let failed_html = render_skills(super::SkillsSnapshot {
+            read_ok: false,
+            writable: false,
+            text: String::new(),
+            read_error: "The local skill owner is unavailable or its state needs attention.".into(),
+            ..managed_snapshot
+        });
+        assert!(failed_html.contains("local skill owner is unavailable"));
+        assert!(
+            !failed_html
+                .contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#)
         );
         let missing = super::build_skills_snapshot_in(&roots, Some("vc-missing"));
         assert!(missing.open.is_none());
