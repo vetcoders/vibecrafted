@@ -19019,21 +19019,45 @@ def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
     machine (observed 2026-10-10: a 70 MiB document refused each install).
     Configuration transactions also carried a full previous receipt. Their
     rollback uses the same live-layer ledger, so normalize that duplicate
-    through the canonical recovery snapshot. Ownership and retirement proof
-    fields survive; the live-layer ledger stays untouched.
+    through the canonical recovery snapshot. Retirement inventories likewise
+    stay only in the live layer: restore carries them forward with the backup
+    history, rather than multiplying every per-file inventory at each phase.
     """
+    # Producers materialize these live maps before creating recovery snapshots.
+    # An absent live map is not evidence that a historical copy is disposable.
+    # Refuse before compaction rather than silently dropping its only proof.
+    snapshots = [receipt]
+    seen: set[int] = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or id(snapshot) in seen:
+            continue
+        seen.add(id(snapshot))
+        for key in (
+            "retirement_generations",
+            "retirement_copies",
+            "retirement_pending",
+        ):
+            if key not in receipt and snapshot.get(key):
+                raise RuntimeInstallRefusal(
+                    f"runtime retirement ledger {key} exists only in a recovery "
+                    "snapshot; explicit receipt recovery required"
+                )
+        snapshots.append(snapshot.get("preparing_previous_receipt"))
+        transaction = snapshot.get("config_transaction")
+        if isinstance(transaction, dict):
+            snapshots.append(transaction.get("previous_receipt"))
+        rollback = snapshot.get("retirement_rollback")
+        if isinstance(rollback, dict):
+            snapshots.append(rollback.get("receipt"))
     for holder in (receipt, receipt.get("preparing_previous_receipt")):
         if not isinstance(holder, dict):
             continue
         rollback = holder.get("retirement_rollback")
         if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
-            rollback["receipt"].pop("drift_backup_history", None)
-            rollback["receipt"].pop("preparing_previous_receipt", None)
+            rollback["receipt"] = _rollback_receipt_snapshot(rollback["receipt"])
     saved = receipt.get("preparing_previous_receipt")
-    if isinstance(saved, dict):
-        if saved.get("drift_backup_history"):
-            saved["drift_backup_history"] = {}
-        saved.pop("preparing_previous_receipt", None)
+    if isinstance(saved, dict) and saved:
+        receipt["preparing_previous_receipt"] = _recovery_receipt_snapshot(saved)
     transaction = receipt.get("config_transaction")
     if isinstance(transaction, dict):
         previous = transaction.get("previous_receipt")
@@ -21030,15 +21054,18 @@ def _recovery_receipt_snapshot(previous: Mapping[str, Any]) -> dict[str, Any]:
     (`owned_dirs`, `generation`, `publication`). Embedding the full per-file
     backup ledger here put one 75k-entry map into the receipt four times and
     breached the 128 MiB checkpoint limit (fail-ledger 2026-10-04/05):
-    recovery needs identity and ownership, never the backup history.
+    recovery needs identity and ownership, never duplicate bulk ledgers.
+    Retirement inventories are also carried forward from the live layer by
+    that owner; retain their rollback identity, not their per-file maps.
     """
     snapshot = json.loads(json.dumps(previous))
     snapshot["drift_backup_history"] = {}
     snapshot.pop("preparing_previous_receipt", None)
+    for key in ("retirement_generations", "retirement_copies", "retirement_pending"):
+        snapshot.pop(key, None)
     rollback = snapshot.get("retirement_rollback")
     if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
-        rollback["receipt"].pop("drift_backup_history", None)
-        rollback["receipt"].pop("preparing_previous_receipt", None)
+        rollback["receipt"] = _rollback_receipt_snapshot(rollback["receipt"])
     return snapshot
 
 
@@ -25086,6 +25113,8 @@ def _restore_runtime_publication_receipt(
     # Keep all newly captured user snapshots and staged-generation ownership.
     for key in ("backups", "drift_backups", "drift_backup_history"):
         restored[key] = receipt.get(key, {})
+    for key in ("retirement_generations", "retirement_copies", "retirement_pending"):
+        restored[key] = receipt.get(key, restored.get(key, {}))
     restored["owned_dirs"] = sorted(
         set(restored.get("owned_dirs", []))
         | {
