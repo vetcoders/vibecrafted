@@ -90,8 +90,9 @@ def test_recovery_refuses_changed_container_identity(tmp_path, monkeypatch, drif
     assert env["DOCKER_CONTEXT"] == "chosen-context" and "DOCKER_HOST" not in env
 
 
+@pytest.mark.parametrize("change_at", [2, 3])
 def test_recovery_closes_connection_when_original_provider_changes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, change_at
 ):
     meta = _meta(tmp_path)
     target = dev_container.ContainerTarget(
@@ -117,7 +118,7 @@ def test_recovery_closes_connection_when_original_provider_changes(
             events.append("provider")
             identity = (
                 ["123", "start:old", "boot:original"]
-                if events.count("provider") == 1
+                if events.count("provider") < change_at
                 else ["123", "start:reused", "boot:original"]
             )
             return subprocess.CompletedProcess(
@@ -135,7 +136,17 @@ def test_recovery_closes_connection_when_original_provider_changes(
         connection.connect_container(
             "run-1", ready=lambda status: events.append(status["status"])
         )
-    assert events == ["provider", "roundtrip", "connected", "provider", "closed"]
+    if change_at == 2:
+        assert events == ["provider", "roundtrip", "provider", "closed"]
+    else:
+        assert events == [
+            "provider",
+            "roundtrip",
+            "provider",
+            "connected",
+            "provider",
+            "closed",
+        ]
 
 
 def test_connect_flag_does_not_accept_guest_or_message_mutations(

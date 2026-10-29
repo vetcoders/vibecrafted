@@ -132,7 +132,21 @@ def connect_container(
         if provider.returncode:
             raise MessageControlError("container_connection_provider_unproven")
         identity = json.loads(provider.stdout)
+
+        def prove_current_ownership() -> None:
+            current = _live_meta(run_id)
+            if any(
+                current.get(key) != meta.get(key)
+                for key in ("container", "owner_identity", "worker_identity")
+            ):
+                raise MessageControlError("container_connection_ownership_changed")
+            check = relay._exec(_PROVIDER, dev_container._run_dir(run_id), run_id)
+            if check.returncode or json.loads(check.stdout) != identity:
+                raise MessageControlError("container_connection_provider_changed")
+
         relay.start()
+        # The provider may have ended while the guest handshake was in flight.
+        prove_current_ownership()
         ready(
             {
                 "run_id": run_id,
@@ -147,15 +161,7 @@ def connect_container(
                 raise MessageControlError(
                     "container_connection_relay_failed:" + relay.failure
                 )
-            current = _live_meta(run_id)
-            if any(
-                current.get(key) != meta.get(key)
-                for key in ("container", "owner_identity", "worker_identity")
-            ):
-                raise MessageControlError("container_connection_ownership_changed")
-            check = relay._exec(_PROVIDER, dev_container._run_dir(run_id), run_id)
-            if check.returncode or json.loads(check.stdout) != identity:
-                raise MessageControlError("container_connection_provider_changed")
+            prove_current_ownership()
             time.sleep(1)
     finally:
         relay.close()

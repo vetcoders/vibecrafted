@@ -40,7 +40,8 @@ def _fake_docker(path: Path) -> None:
         "assert a.pop(0)=='exec'\n"
         "if a[0]=='-i': a.pop(0)\n"
         "a.pop(0)\n"
-        "os.execvp(a[0],a)\n"
+        "assert a.pop(0)=='python3'\n"
+        "os.execv(sys.executable,[sys.executable,*a])\n"
     )
     path.chmod(0o755)
 
