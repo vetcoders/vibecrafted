@@ -241,20 +241,23 @@ was byte-identical to the one at tag `v4.1.0`.
 
 This tree's `install.sh` accepts a channel only when:
 
-- `channel/main.json` binds top-level `archive_url` and `runtime_pack_url`;
-  otherwise it stops with
-  `Channel manifest must bind archive_url and runtime_pack_url`;
+- `channel/main.json` binds top-level `archive_url`, and each supported host
+  binds `platforms.<os>-<architecture>.runtime_pack_url` to its real pack;
+  e.g. `platforms.linux-arm64.runtime_pack_url`. A source-only platform entry
+  does not advertise a prebuilt runtime;
 - the archive at `archive_url` carries a closed `source-provenance.json`
   (the portable tarball, or `scripts/distribution_manifest.py archive`
   output); a plain `tar` of a checkout is refused;
-- `runtime_pack_url` has adjacent `.sha256` and `.sig` files;
+- every selected `runtime_pack_url` has adjacent `.sha256` and `.sig` files;
 - `SHA256SUMS` and `vibecrafted-signing.pub` sit beside `archive_url`.
   Without them the archive's checksum and signature checks are skipped with a
   warning.
 
-The bootstrap reads one `runtime_pack_url` for every host; it does not select a
-per-platform pack. Bind only a pack that installs on every platform the channel
-advertises, or leave the website on its previous coherent channel.
+The bootstrap selects the host entry first. A legacy top-level URL is accepted
+only when its canonical carrier filename identifies the same host. Unsupported
+hosts stop before fetching a foreign pack. The website publisher must publish
+real, signed platform-specific packs and their sidecars before advertising them;
+a portable source archive alone is not a Runtime Pack.
 
 As measured on 2026-10-14, the site publisher meets none of the first two
 conditions: `scripts/sync_site_release_assets.py` writes no `runtime_pack_url`,

@@ -46,21 +46,25 @@ vibecrafted-mcp --help
 
 ## Tools
 
-| Tool                               | Purpose                                                                                                      | Mutates? |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------- |
-| `vc_repo_full(project=".")`        | Full git ground truth (branch, ahead/behind, dirt, recent commits, worktrees, remotes).                      | No       |
-| `vc_doctor(project=None)`          | Vibecrafted runtime health summary (ok / warnings / failures).                                               | No       |
-| `vc_board_status(home=None)`       | Operator control-plane snapshot (active runs, recent runs, event tail, warnings).                            | No       |
-| `vc_init(project=".", slim=True)`  | Cold-start synthesis: composes the three senses + insight stubs. Slim default keeps the response under ~5KB. | No       |
-| `vc_launch(...)`                   | Launch a workflow through the Vibecrafted core runtime. Spawns an agent and writes control-plane artifacts.  | Yes      |
-| `vc_run_launch(...)`               | Lifecycle-name alias of `vc_launch`. Spawns an agent and writes control-plane artifacts.                     | Yes      |
-| `vc_run_status(run_id, home=None)` | Lookup one run from the synced control-plane projection.                                                     | No       |
-| `vc_await_run(...)`                | Bounded wait for a run to reach terminal state. This is not a transcript transport.                          | No       |
-| `vc_run_observe(...)`              | Cursor-pull run events and transcript deltas. Transcript text is capped to 64 KiB per response.              | No       |
-| `vc_run_stop(...)`                 | Request graceful stop of an active run and write an audit event.                                             | Yes      |
-| `vc_run_retry(...)`                | Retry a run from stored launch metadata and write retry control-plane artifacts.                             | Yes      |
-| `vc_run_blocked(...)`              | Mark an active run blocked/needs-intervention and write an audit event.                                      | Yes      |
-| `vc_loct_capabilities(...)`        | Probe installed Loctree/AICX foundation capabilities.                                                        | No       |
+| Tool                                     | Purpose                                                                                                      | Mutates? |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------- |
+| `vc_repo_full(project=".")`              | Full git ground truth (branch, ahead/behind, dirt, recent commits, worktrees, remotes).                      | No       |
+| `vc_worktrees(project=".", target=None)` | Read-only worktree inventory, canonical owner receipts and conservative reception triage.                    | No       |
+| `vc_doctor(project=None)`                | Vibecrafted runtime health summary (ok / warnings / failures).                                               | No       |
+| `vc_board_status(home=None)`             | Operator control-plane snapshot (active runs, recent runs, event tail, warnings).                            | No       |
+| `vc_init(project=".", slim=True)`        | Cold-start synthesis: composes the three senses + insight stubs. Slim default keeps the response under ~5KB. | No       |
+| `vc_launch(...)`                         | Launch a workflow through the Vibecrafted core runtime. Spawns an agent and writes control-plane artifacts.  | Yes      |
+| `vc_run_launch(...)`                     | Lifecycle-name alias of `vc_launch`. Spawns an agent and writes control-plane artifacts.                     | Yes      |
+| `vc_run_status(run_id, home=None)`       | Lookup one run from the synced control-plane projection.                                                     | No       |
+| `vc_await_run(...)`                      | Bounded wait for a run to reach terminal state. This is not a transcript transport.                          | No       |
+| `vc_run_observe(...)`                    | Cursor-pull run events and transcript deltas. Transcript text is capped to 64 KiB per response.              | No       |
+| `vc_run_stop(...)`                       | Request graceful stop of an active run and write an audit event.                                             | Yes      |
+| `vc_run_retry(...)`                      | Retry a run from stored launch metadata and write retry control-plane artifacts.                             | Yes      |
+| `vc_run_blocked(...)`                    | Mark an active run blocked/needs-intervention and write an audit event.                                      | Yes      |
+| `vc_loct_capabilities(...)`              | Probe installed Loctree/AICX foundation capabilities.                                                        | No       |
+
+`vc_worktrees` delegates to the same core inventory as `vc-git worktrees list|triage`.
+Cleanup, pruning, merge preparation and apply endpoints are deferred and unavailable.
 
 MCP launch is experimental but real. The lifecycle tools are mutating:
 they can spawn agents, stop or retry runs, and write control-plane

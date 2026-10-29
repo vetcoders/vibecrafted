@@ -370,7 +370,6 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     text = INSTALL_SH.read_text(encoding="utf-8")
 
     assert 'channel_url="https://vibecrafted.io/channel/${ref}.json"' in text
-    assert "p.get('runtime_pack_url','')" in text
     assert "must bind archive_url and runtime_pack_url" in text
     assert "refusing the untrusted raw GitHub fallback" in text
     assert "W4 release authentication blocker" in text
@@ -382,7 +381,10 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     capture = tmp_path / "curl-args.txt"
     fake_bin.mkdir()
     home.mkdir()
-    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
+    _write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -m) echo aarch64 ;; *) echo Linux ;; esac\n',
+    )
     _write_executable(
         fake_bin / "curl",
         "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -506,13 +508,17 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     }[sums_shape]
     (server / "SHA256SUMS").write_text(sums, encoding="utf-8")
     (server / "vibecrafted-signing.pub").write_text("fixture key\n", encoding="utf-8")
-    for name in ("pack.tar.gz", "pack.tar.gz.sha256", "pack.tar.gz.sig"):
+    _write_host_pack_double(server / "pack.tar.gz", "linux-arm64", "arm64")
+    for name in ("pack.tar.gz.sha256", "pack.tar.gz.sig"):
         (server / name).write_text(f"fixture {name}\n", encoding="utf-8")
     (server / "main.json").write_text(
         json.dumps(
             {
                 "archive_url": f"{RELEASE_BASE}/{RELEASE_ARCHIVE}",
                 "runtime_pack_url": f"{RELEASE_BASE}/pack.tar.gz",
+                "platforms": {
+                    "linux-arm64": {"runtime_pack_url": f"{RELEASE_BASE}/pack.tar.gz"}
+                },
             }
         ),
         encoding="utf-8",
@@ -524,7 +530,10 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     fake_bin.mkdir()
     home.mkdir()
     _write_fake_release_curl(fake_bin)
-    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
+    _write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -m) echo aarch64 ;; *) echo Linux ;; esac\n',
+    )
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -645,7 +654,10 @@ def _run_portable_install(
     make_capture = tmp_path / "make-args.txt"
     fake_bin.mkdir(exist_ok=True)
     home.mkdir(exist_ok=True)
-    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
+    _write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -m) echo aarch64 ;; *) echo Linux ;; esac\n',
+    )
     _write_executable(
         fake_bin / "curl",
         "#!/usr/bin/env bash\n"
@@ -1557,6 +1569,21 @@ def test_fixture_required_files_track_canonical_bootstrap_manifest() -> None:
     )
 
 
+def _write_host_pack_double(path: Path, platform: str, architecture: str) -> None:
+    provenance = json.dumps(
+        {"platform": platform, "architecture": architecture}
+    ).encode()
+    python = b"#!/bin/sh\nexit 0\n"
+    with tarfile.open(path, "w:gz") as archive:
+        for name, data in (
+            ("runtime-pack-provenance.json", provenance),
+            ("bin/python3", python),
+        ):
+            info = tarfile.TarInfo("VibecraftedRuntime/" + name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+
 def _supplied_pack_fixture(tmp_path: Path) -> dict[str, Path]:
     source_dir = tmp_path / "source"
     (source_dir / "scripts" / "installer").mkdir(parents=True)
@@ -1565,7 +1592,12 @@ def _supplied_pack_fixture(tmp_path: Path) -> dict[str, Path]:
     archive = tmp_path / "vibecrafted-bootstrap.tar.gz"
     _write_v2_archive(source_dir, archive, "vibecrafted-main")
     pack = tmp_path / "Pack.tar.gz"
-    for name in ("", ".sha256", ".sig"):
+    import platform as host_platform
+
+    architecture = "arm64" if host_platform.machine() in {"arm64", "aarch64"} else "x64"
+    os_name = "darwin" if sys.platform == "darwin" else "linux"
+    _write_host_pack_double(pack, f"{os_name}-{architecture}", architecture)
+    for name in (".sha256", ".sig"):
         Path(f"{pack}{name}").write_text("fixture pack\n", encoding="utf-8")
     fake_bin = tmp_path / "bin"
     home = tmp_path / "home"
@@ -1791,3 +1823,86 @@ def test_install_sh_gui_hands_the_chosen_pack_to_the_gui_installer(
         argv[argv.index("--expected-source-revision") + 1]
         == "0123456789abcdef0123456789abcdef01234567"
     )
+
+
+@pytest.mark.parametrize("matching", [False, True, "legacy"])
+def test_channel_routes_only_host_runtime_pack(
+    tmp_path: Path, matching: bool | str
+) -> None:
+    server = tmp_path / "server"
+    server.mkdir()
+    darwin_url = f"{RELEASE_BASE}/Vibecrafted_RuntimePack_fixture-darwin-arm64.tar.gz"
+    linux_url = f"{RELEASE_BASE}/Vibecrafted_RuntimePack_fixture-linux-arm64.tar.gz"
+    channel = {
+        "archive_url": f"{RELEASE_BASE}/{RELEASE_ARCHIVE}",
+        "runtime_pack_url": darwin_url,
+        "platforms": {"linux-arm64": {"archive_url": "source.tar.gz"}},
+    }
+    if matching == "legacy":
+        channel["runtime_pack_url"] = linux_url
+    elif matching:
+        channel["platforms"]["linux-arm64"]["runtime_pack_url"] = linux_url
+    (server / "main.json").write_text(json.dumps(channel), encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_release_curl(fake_bin)
+    _write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo aarch64 ;; *) echo Linux ;; esac\n',
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    capture = tmp_path / "curl.txt"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "CURL_CAPTURE": str(capture),
+        "FAKE_RELEASE_ROOT": str(server),
+    }
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--yes"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    fetched = capture.read_text(encoding="utf-8").splitlines()
+    assert darwin_url not in fetched
+    if matching:
+        assert linux_url in fetched
+    else:
+        assert result.returncode != 0
+        assert "linux-arm64" in result.stderr
+        assert "no prebuilt runtime pack available" in result.stderr.lower()
+
+
+def test_explicit_foreign_pack_is_refused_before_old_candidate_runs(
+    tmp_path: Path,
+) -> None:
+    fixture = _supplied_pack_fixture(tmp_path)
+    env = _supplied_pack_env(tmp_path, fixture)
+    foreign = "linux-arm64" if sys.platform == "darwin" else "darwin-arm64"
+    _write_host_pack_double(fixture["pack"], foreign, "arm64")
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--yes",
+            "--archive-file",
+            str(fixture["archive"]),
+            "--runtime-pack-file",
+            str(fixture["pack"]),
+            "install",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "incompatible with host" in result.stderr
+    assert not (tmp_path / "pack-installer-args.txt").exists()

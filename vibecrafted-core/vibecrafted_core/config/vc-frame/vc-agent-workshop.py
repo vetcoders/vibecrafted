@@ -2727,19 +2727,55 @@ class Workshop:
         focused = self.row == 1
         path_col = _paint_row_focus(self.window, path_row, left, focused)
         prefix = "Project  "
-        badge = " [editing]" if focused else ""
-        available_text_cells = max(
-            4, inner - len(prefix) - (len(badge) if focused and inner >= 28 else 0)
-        )
+        field_cells = max(0, min(inner, width - path_col) - len(prefix))
+        badge = " [editing]" if focused and inner >= 28 else ""
+        widths = [_char_cells(char) for char in self._path]
+        path_cells = sum(widths)
+        # Do not let the decorative badge hide a path which fits the field.
+        # At the end, reserve a cell for the insertion caret when possible.
+        if (
+            self._path
+            and path_cells <= field_cells
+            and (path_cells + 1 > field_cells - len(badge))
+        ):
+            badge = ""
+        available_text_cells = max(0, field_cells - len(badge))
+        cur = max(0, min(self.path_cursor, len(self._path)))
         if self._path:
-            cur = max(0, min(self.path_cursor, len(self._path)))
-            if cur < self.path_scroll:
-                self.path_scroll = cur
-            elif cur >= self.path_scroll + available_text_cells:
-                self.path_scroll = max(0, cur - available_text_cells + 1)
-            visible_segment = self._path[
-                self.path_scroll : self.path_scroll + available_text_cells
-            ]
+            if path_cells <= available_text_cells:
+                self.path_scroll = 0
+            else:
+                # Reclaim blank space on resize or after deletion: the start of
+                # the last full page is the furthest useful scroll position.
+                last_page = len(self._path)
+                tail_cells = 0
+                while (
+                    last_page
+                    and tail_cells + widths[last_page - 1] <= available_text_cells
+                ):
+                    last_page -= 1
+                    tail_cells += widths[last_page]
+                self.path_scroll = min(max(0, self.path_scroll), last_page)
+                if focused:
+                    self.path_scroll = min(self.path_scroll, cur)
+                    caret_cells = max(1, widths[cur] if cur < len(widths) else 1)
+                    before_caret = sum(widths[self.path_scroll : cur])
+                    while (
+                        self.path_scroll < cur
+                        and before_caret + caret_cells > available_text_cells
+                    ):
+                        before_caret -= widths[self.path_scroll]
+                        self.path_scroll += 1
+            visible: list[str] = []
+            used = 0
+            for char, cells in zip(
+                self._path[self.path_scroll :], widths[self.path_scroll :]
+            ):
+                if used + cells > available_text_cells:
+                    break
+                visible.append(char)
+                used += cells
+            visible_segment = "".join(visible)
             line = f"{prefix}{visible_segment}"
             _safe_addstr(self.window, path_row, path_col, _clip(line, inner), 0)
         else:
@@ -2748,13 +2784,17 @@ class Workshop:
             _safe_addstr(self.window, path_row, path_col, _clip(line, inner), 0)
 
         if focused:
-            cur = max(0, min(self.path_cursor, len(self._path)))
-            rel_cursor = max(0, min(cur - self.path_scroll, available_text_cells - 1))
+            rel_cursor = _cell_width(self._path[self.path_scroll : cur])
             caret_col = path_col + len(prefix) + rel_cursor
             caret_char = (
                 self._path[cur] if self._path and cur < len(self._path) else " "
             )
-            if caret_col < width:
+            # If the row reaches the terminal edge, keep the entire fitting
+            # path visible and mark its final glyph for the end position.
+            if caret_col >= width and cur == len(self._path) and self._path:
+                caret_char = self._path[-1]
+                caret_col = max(path_col, width - max(1, _char_cells(caret_char)))
+            if available_text_cells and caret_col < width:
                 _safe_addstr(
                     self.window,
                     path_row,
@@ -2762,7 +2802,7 @@ class Workshop:
                     caret_char,
                     curses.A_REVERSE | curses.A_BOLD,
                 )
-            if inner >= 28:
+            if badge:
                 badge_col = min(width - len(badge), path_col + inner - len(badge))
                 if badge_col > path_col + len(prefix):
                     _safe_addstr(
@@ -3024,7 +3064,8 @@ class Workshop:
         for offset, result in enumerate(self.launch_results):
             if result.get("status") == "pending":
                 continue
-            label = f"{offset + 1} {result.get('provider', '')}: {result['status']}"
+            status = "tab created" if result["status"] == "opened" else result["status"]
+            label = f"{offset + 1} {result.get('provider', '')}: {status}"
             if result["reason"]:
                 reason = public_reason(result["reason"]) or result["reason"]
                 label += f" · {reason.splitlines()[0]}"

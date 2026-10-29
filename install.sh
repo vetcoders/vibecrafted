@@ -1399,12 +1399,31 @@ if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; then
   channel_manifest="$(curl -fsSL "$channel_url")" \
     || die "Could not fetch the channel manifest $channel_url"
   printf '%s' "$channel_manifest" >"$tmpdir/channel.json"
+  case "$(uname -m)" in
+    arm64|aarch64) early_arch=arm64 ;;
+    x86_64|amd64) early_arch=x64 ;;
+    *) die "No prebuilt Runtime Pack available for architecture $(uname -m)" ;;
+  esac
+  early_platform="darwin-$early_arch"
+  early_pack="$(plutil -extract "platforms.$early_platform.runtime_pack_url" raw -expect string -o - "$tmpdir/channel.json" 2>/dev/null || true)"
+  if [[ -z "$early_pack" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+    early_pack="$(plutil -extract runtime_pack_url raw -expect string -o - "$tmpdir/channel.json" 2>/dev/null || true)"
+    case "${early_pack%%\?*}" in
+      */Vibecrafted_RuntimePack_*"-$early_platform.tar.gz") ;;
+      *) die "No prebuilt Runtime Pack available for $early_platform on channel $ref" ;;
+    esac
+  fi
   channel_dmg_url="$(plutil -extract dmg_url raw -expect string -o - "$tmpdir/channel.json")" \
     || die "Channel manifest must bind dmg_url for macOS cold installation"
   prompt_attended_consent
   bootstrap_consent_obtained=1
   stage_channel_app
   bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/python3"
+  bootstrap_python_type="$(file -Lb "$bootstrap_python")" || die "Cannot inspect the authenticated App interpreter"
+  case "$early_arch:$bootstrap_python_type" in
+    arm64:*Mach-O*arm64*|x64:*Mach-O*x86_64*) ;;
+    *) die "Authenticated App interpreter is incompatible with host $early_platform" ;;
+  esac
 else
   bootstrap_python="$(command -v python3)"
   # A present Apple shim is not a usable interpreter. Skip without executing it
@@ -1544,34 +1563,57 @@ if [[ "$channel_mode" == "1" ]]; then
   if [[ -z "$channel_manifest" ]] && ! channel_manifest="$(curl -fsSL "$channel_url")"; then
     die "Could not fetch the channel manifest $channel_url (network, proxy, or unknown --ref '$ref')"
   fi
+  case "$(uname -m)" in
+    arm64|aarch64) channel_arch=arm64 ;;
+    x86_64|amd64) channel_arch=x64 ;;
+    *) die "No prebuilt Runtime Pack available for architecture $(uname -m)" ;;
+  esac
+  case "$PLATFORM_OS" in
+    macos) channel_platform="darwin-$channel_arch" ;;
+    linux|wsl) channel_platform="linux-$channel_arch" ;;
+    *) die "No prebuilt Runtime Pack available for $PLATFORM_OS-$channel_arch" ;;
+  esac
   channel_fields=""
-  if ! channel_fields="$(printf '%s' "$channel_manifest" | "$bootstrap_python" -I -S -c "
+  if ! channel_fields="$(printf '%s' "$channel_manifest" | "$bootstrap_python" -I -S -c '
 import json, sys
+from urllib.parse import urlsplit
 p = json.load(sys.stdin)
-fields = (p.get('archive_url',''), p.get('runtime_pack_url',''))
-if not all(isinstance(field, str) and field.isprintable() for field in fields):
+if not isinstance(p, dict):
     raise SystemExit(3)
-print(fields[0])
-print(fields[1])
-" 2>/dev/null)"; then
-    die "Channel manifest $channel_url is not a JSON object with string archive_url/runtime_pack_url fields; refusing to guess a release"
+archive = p.get("archive_url", "")
+legacy = p.get("runtime_pack_url", "")
+platforms = p.get("platforms", {})
+if not isinstance(platforms, dict):
+    raise SystemExit(3)
+entry = platforms.get(sys.argv[1], {})
+if not isinstance(entry, dict):
+    raise SystemExit(3)
+pack = entry.get("runtime_pack_url", "")
+if not all(isinstance(v, str) and (not v or v.isprintable()) for v in (archive, legacy, pack)):
+    raise SystemExit(3)
+# Legacy channels have no platform field. Only the canonical carrier filename
+# identifies their target; an opaque URL is not evidence of compatibility.
+if not pack and legacy:
+    basename = urlsplit(legacy).path.rsplit("/", 1)[-1]
+    if basename.startswith("Vibecrafted_RuntimePack_") and basename.endswith("-" + sys.argv[1] + ".tar.gz"):
+        pack = legacy
+print(archive)
+print(pack)
+' "$channel_platform" 2>/dev/null)"; then
+    die "Channel manifest $channel_url is malformed; refusing to guess a release"
   fi
   resolved_url="${channel_fields%%$'\n'*}"
   resolved_pack_url=""
   if [[ "$channel_fields" == *$'\n'* ]]; then
     resolved_pack_url="${channel_fields#*$'\n'}"
   fi
-  if [[ -n "$resolved_url" && -n "$resolved_pack_url" ]]; then
-    archive_url="$resolved_url"
+  [[ -n "$resolved_url" ]] || die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker)"
+  if [[ -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+    [[ -n "$resolved_pack_url" ]] || die "No prebuilt Runtime Pack available for $channel_platform on channel $ref; use a matching published Runtime Pack or a verified source carrier"
     runtime_pack_url="$resolved_pack_url"
-    vinfo "Resolved from channel ($ref): $archive_url"
-  else
-    # Raw GitHub source archives do not carry the writer-bound v2 distribution
-    # tree receipt.  Minting one after download would let candidate bytes attest
-    # to themselves, so this legacy path is deliberately closed.  Release
-    # authentication remains a named W4 blocker while signature fetch is soft.
-    die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker; $channel_url has archive_url=${resolved_url:-<missing>} runtime_pack_url=${resolved_pack_url:-<missing>})"
   fi
+  archive_url="$resolved_url"
+  vinfo "Resolved from channel ($ref): $archive_url"
 
   # macOS pairing: the channel also binds the notarized App DMG. Extract it
   # here, next to the other channel fields, so the App-pairing step can fall
@@ -1623,6 +1665,55 @@ if [[ -n "$runtime_pack_url" ]]; then
 fi
 if [[ -z "$selected_runtime_pack" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
   die "No Runtime Pack is bound to this public source candidate"
+fi
+
+# The authenticated source carrier may contain an older pack wrapper. Refuse
+# foreign native bytes here as well, before handing control to that wrapper.
+# This is a rejection-only probe: signature and closed inventory remain the
+# pack owner's responsibility and are never established by this inspection.
+if [[ -n "$selected_runtime_pack" ]]; then
+  case "$(uname -m)" in
+    arm64|aarch64) probe_arch=arm64 ;;
+    x86_64|amd64) probe_arch=x64 ;;
+    *) die "Unsupported Runtime Pack host architecture: $(uname -m)" ;;
+  esac
+  case "$PLATFORM_OS" in
+    macos) probe_platform="darwin-$probe_arch" ;;
+    linux|wsl) probe_platform="linux-$probe_arch" ;;
+    *) die "Unsupported Runtime Pack host: $PLATFORM_OS" ;;
+  esac
+  probe_python="$tmpdir/runtime-python-probe"
+  if ! "$bootstrap_python" -I -S - "$selected_runtime_pack" "$probe_platform" "$probe_arch" "$probe_python" <<'PY_PACK_HOST'
+import json, shutil, sys, tarfile
+pack, platform, arch, destination = sys.argv[1:]
+try:
+    with tarfile.open(pack, "r:gz") as archive:
+        members = archive.getmembers()
+        manifests = [m for m in members if m.name.endswith("/runtime-pack-provenance.json") and m.name.count("/") == 1]
+        if len(manifests) != 1 or not manifests[0].isfile() or manifests[0].size > 2_000_000:
+            raise ValueError("missing or ambiguous Runtime Pack provenance")
+        manifest = json.load(archive.extractfile(manifests[0]))
+        if manifest.get("platform") != platform or manifest.get("architecture") != arch:
+            raise ValueError("Runtime Pack provenance does not match host")
+        root = manifests[0].name.split("/", 1)[0]
+        interpreters = [m for m in members if m.name == root + "/bin/python3"]
+        if len(interpreters) != 1 or not interpreters[0].isfile() or not 0 < interpreters[0].size <= 512_000_000:
+            raise ValueError("missing or ambiguous Runtime Pack Python")
+        with archive.extractfile(interpreters[0]) as source, open(destination, "wb") as output:
+            shutil.copyfileobj(source, output)
+except (OSError, ValueError, TypeError, AttributeError, tarfile.TarError) as exc:
+    print("Runtime Pack host inspection failed: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY_PACK_HOST
+  then
+    die "Runtime Pack is unavailable or incompatible with host $probe_platform"
+  fi
+  probe_type="$(file -Lb "$probe_python")" || die "Cannot inspect Runtime Pack Python"
+  case "$probe_platform:$probe_type" in
+    darwin-arm64:*Mach-O*arm64*|darwin-x64:*Mach-O*x86_64*|linux-arm64:*ELF*ARM\ aarch64*|linux-x64:*ELF*x86-64*|*:*script*) ;;
+    *) die "Runtime Pack Python is incompatible with host $probe_platform: $probe_type" ;;
+  esac
+  rm -f "$probe_python"
 fi
 
 # Candidate commands must return through this shell so the EXIT trap can remove

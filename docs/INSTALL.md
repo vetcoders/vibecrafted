@@ -338,6 +338,29 @@ make install
 
 To install an existing carrier without rebuilding, pass
 `RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz` to `make install`.
+Before compiling, `python3 scripts/build-source-runtime-pack.py --check` shows
+the selected immutable revision and the available donor checkout HEAD for each
+component. A different HEAD is informational: it never changes the selection.
+Edit `config/source-components.json` deliberately to change the pin.
+
+If installation reports a preference conflict, the JSON envelope contains the
+exact file path and the current and incoming SHA-256 hashes. A retry of the
+same completed carrier can pass the explicit choice to the existing installer:
+
+```bash
+make install RUNTIME_PACK=/absolute/path/to/completed-RuntimePack.tar.gz \
+  RUNTIME_PACK_RESOLVE_PREFERENCE=keep-current \
+  RUNTIME_PACK_PREFERENCE_PATH=/absolute/path/from/conflict \
+  RUNTIME_PACK_PREFERENCE_CURRENT_SHA256="CURRENT_SHA256_FROM_CONFLICT" \
+  RUNTIME_PACK_PREFERENCE_INCOMING_SHA256="INCOMING_SHA256_FROM_CONFLICT"
+```
+
+Use the exact carrier from `build/runtime-pack-selection.json` and retain its
+checksum and signature sidecars. `keep-current` preserves the whole KDL file,
+including nested edits, rather than merging in changed defaults. Review those
+defaults separately. A retry refuses changed current or incoming bytes; an
+already-applied choice can be repeated only for its receipted exact postimage.
+The normal structural-conflict refusal is unchanged.
 
 Source: `Makefile` → `runtime-pack`, `install`, `install-source`.
 The Linux local build lane requires a clean tracked tree and the product release

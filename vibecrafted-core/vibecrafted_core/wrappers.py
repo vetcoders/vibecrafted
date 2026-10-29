@@ -350,8 +350,9 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
 
 
 def agents_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted agents`."""
-    return supervised_skill_main("agents", argv)
+    """Use the command deck's agent guidance, the owner of `agents`."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    return subprocess.call([str(deck_path()), "agents", *args])
 
 
 def followup_main(argv: Sequence[str] | None = None) -> int:

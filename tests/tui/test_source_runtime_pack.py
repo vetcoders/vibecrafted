@@ -15,6 +15,93 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/build-source-runtime-pack.py"
 
 
+def test_source_check_reports_selected_and_available_head(tmp_path: Path) -> None:
+    from _source_component_fixture import source_fixture
+
+    checkout, pins, repos = source_fixture(tmp_path)
+    frame = repos["vc-frame"]
+    (frame / "later.txt").write_text("later\n")
+    subprocess.run(["git", "-C", str(frame), "add", "later.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(frame),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "later",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(frame), "rev-parse", "HEAD"], text=True
+    ).strip()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(checkout / "scripts/build-source-runtime-pack.py"),
+            "--check",
+        ],
+        env={
+            **os.environ,
+            "VIBECRAFTED_FRAME_REPO": str(frame),
+            "VIBECRAFTED_TERMINAL_REPO": str(repos["vc-terminal"]),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        f"selected: 4.3.1 {pins['components']['vc-frame']['revision']}" in result.stdout
+    )
+    assert f"available HEAD: {head}" in result.stdout
+
+
+def test_make_install_forwards_bound_preference_retry() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "install",
+            "RUNTIME_PACK=/candidate.tar.gz",
+            "RUNTIME_PACK_RESOLVE_PREFERENCE=keep-current",
+            "RUNTIME_PACK_PREFERENCE_CURRENT_SHA256=" + "a" * 64,
+            "RUNTIME_PACK_PREFERENCE_INCOMING_SHA256=" + "b" * 64,
+            "RUNTIME_PACK_PREFERENCE_PATH=/config/config.kdl",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '--resolve-preference "keep-current"' in result.stdout
+    assert '--preference-current-sha256 "' + "a" * 64 + '"' in result.stdout
+    assert '--preference-incoming-sha256 "' + "b" * 64 + '"' in result.stdout
+    assert '--preference-path "/config/config.kdl"' in result.stdout
+
+
+def test_nested_kdl_conflict_and_explicit_keep_current() -> None:
+    from scripts.vetcoders_install import _merge_runtime_preferences
+
+    previous = "themes {\n}\nmouse_mode true\n"
+    current = "themes {\n    copy_on_select true\n}\nmouse_mode true\n"
+    incoming = "themes {\n}\nmouse_mode false\n"
+    with pytest.raises(ValueError, match="nested or structural"):
+        _merge_runtime_preferences(previous, current, incoming, kdl=True)
+    assert (
+        _merge_runtime_preferences(
+            previous, current, incoming, kdl=True, choice="keep-current"
+        )
+        == current
+    )
+
+
 @pytest.fixture
 def inherited_git_location(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reproduce repository-location variables inherited from a foreign hook."""

@@ -2723,6 +2723,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(line)
         return 0
     if args.command == "message":
+        # In a container run the host remains the only owner. Never fall back
+        # to a guest-local outbox if the relay is unavailable or an unsupported
+        # action was requested.
+        from .container_message_bridge import BRIDGE_ENV
         from .message_control import (
             MessageControlError,
             acknowledge_message,
@@ -2732,9 +2736,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             send_message,
         )
 
+        guest_bridge = bool(
+            os.environ.get(BRIDGE_ENV)
+            or os.environ.get("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED") == "1"
+        )
+        if guest_bridge and not (args.receive or args.ack or args.inspect):
+            print("error: bridge_action_unsupported", file=sys.stderr)
+            return 2
+
         if args.inspect:
             try:
-                result = inspect_message(args.inspect)
+                if guest_bridge:
+                    from .container_message_bridge import guest_request
+
+                    result = guest_request(
+                        action="inspect",
+                        run_id=args.run_id or "",
+                        session=args.session or "",
+                        message_id=args.inspect,
+                    )
+                else:
+                    result = inspect_message(args.inspect)
             except MessageControlError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
@@ -2763,13 +2785,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise MessageControlError(
                         "inbox_action_conflicts_with_send_or_inspect"
                     )
-                result = (
-                    receive_messages(run_id=args.run_id, session=args.session)
-                    if args.receive
-                    else acknowledge_message(
-                        args.ack, run_id=args.run_id, session=args.session
+                if guest_bridge:
+                    from .container_message_bridge import guest_request
+
+                    result = guest_request(
+                        action="receive" if args.receive else "ack",
+                        run_id=args.run_id or "",
+                        session=args.session or "",
+                        message_id=args.ack or "",
                     )
-                )
+                else:
+                    result = (
+                        receive_messages(run_id=args.run_id, session=args.session)
+                        if args.receive
+                        else acknowledge_message(
+                            args.ack, run_id=args.run_id, session=args.session
+                        )
+                    )
             except MessageControlError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2

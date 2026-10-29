@@ -600,6 +600,19 @@ def build_server() -> Any:
         return _git.repo_full(project)
 
     @mcp.tool(annotations={"readOnlyHint": True})
+    def vc_worktrees(project: str = ".", target: str | None = None) -> dict[str, Any]:
+        """Read-only worktree inventory and reception triage against a local branch.
+
+        Uses the same core evidence as ``vc-git worktrees list|triage``. With no
+        target, compares against the invoking checkout's HEAD. Classification
+        does not authorize removal. Cleanup, pruning and merge preparation are
+        unavailable in this bounded surface.
+        """
+        from vibecrafted_core.git_worktrees import worktree_inventory
+
+        return worktree_inventory(project, target=target)
+
+    @mcp.tool(annotations={"readOnlyHint": True})
     def vc_doctor(project: str | None = None) -> dict[str, Any]:
         """Runtime health summary from the vibecrafted installer doctor.
 

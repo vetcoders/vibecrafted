@@ -80,8 +80,10 @@ def _cold_fixture(tmp_path: Path, *, damage="none"):
     )
     pack_dir = app / "Contents/Resources/runtime-pack"
     pack_dir.mkdir()
-    pack = server / "Vibecrafted_RuntimePack_fixture.tar.gz"
-    pack.write_bytes(b"opaque pack publication double\n")
+    pack = server / "Vibecrafted_RuntimePack_fixture-darwin-arm64.tar.gz"
+    from tests.tui.test_install_bootstrap import _write_host_pack_double
+
+    _write_host_pack_double(pack, "darwin-arm64", "arm64")
     bundled = pack_dir / pack.name
     shutil.copy2(pack, bundled)
     if damage == "mismatch":
@@ -199,6 +201,9 @@ with open(os.environ['EVENTS'], 'a') as log:
     _write_executable(
         tools / "python3",
         '#!/bin/bash\necho forbidden-host-python >> "$EVENTS"\nexit 99\n',
+    )
+    _write_executable(
+        tools / "file", '#!/bin/sh\necho "Mach-O 64-bit executable arm64"\n'
     )
     for name in ("swift", "xcrun", "xcode-select", "make", "cargo", "brew"):
         _write_executable(
@@ -349,7 +354,13 @@ def test_cold_channel_runs_real_runtime_pack_publication_and_settlement(
         destination / "Contents/MacOS/vc-terminal", fixture_root=tmp_path
     )(tmp_path / "payload", version="9.9.9+cold")
     _seal_runtime_pack_for_admission(payload)
-    pack_name = "Vibecrafted_RuntimePack_rescue-fixture.tar.gz"
+    pack_name = "Vibecrafted_RuntimePack_rescue-fixture-darwin-arm64.tar.gz"
+    pack_provenance = payload / "runtime-pack-provenance.json"
+    pack_record = json.loads(pack_provenance.read_text())
+    pack_record["carrier_basename"] = pack_name
+    pack_provenance.write_text(
+        json.dumps(pack_record, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+    )
     pack = server / pack_name
     with tarfile.open(pack, "w:gz") as archive:
         archive.add(payload, arcname="VibecraftedRuntime")
@@ -751,3 +762,22 @@ def test_native_main_probe_can_observe_absent_destination(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+def test_intel_host_refuses_arm_only_channel_before_dmg_or_carrier_python(
+    tmp_path: Path,
+) -> None:
+    install, _, env = _cold_fixture(tmp_path)
+    tools = Path(env["PATH"].split(":")[0])
+    _write_executable(
+        tools / "uname",
+        '#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo x86_64; fi\n',
+    )
+    result = _run_cold(install, env)
+    assert result.returncode != 0
+    assert "darwin-x64" in result.stderr
+    assert "app.dmg" not in Path(env["CURL_CAPTURE"]).read_text()
+    assert (
+        not Path(env["EVENTS"]).exists()
+        or "carrier-python" not in Path(env["EVENTS"]).read_text()
+    )

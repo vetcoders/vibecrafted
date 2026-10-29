@@ -635,7 +635,7 @@ def test_launch_stage_progress_and_enter_mouse_parity(
     form.draw_launcher()
     drawn_texts = [text for _, _, text, _ in window.drawn]
     assert any("[Opening claude tab]" in t for t in drawn_texts)
-    assert any("1 codex: opened" in t for t in drawn_texts)
+    assert any("1 codex: tab created" in t for t in drawn_texts)
     assert any("2 claude: failed" in t for t in drawn_texts)
 
 

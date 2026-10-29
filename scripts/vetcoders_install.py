@@ -20801,12 +20801,42 @@ def _reconcile_runtime_preference(
                 "legacy partial configuration publication requires explicit "
                 "backup recovery; per-file markers cannot prove a complete install"
             )
+        resolution = old.get("resolution")
+        replay = bool(
+            isinstance(resolution, dict)
+            and choice in PREFERENCE_CHOICES
+            and previous.get("version") == generation.name
+            and prior_generation == str(generation)
+            and old.get("generation") == str(generation)
+            and old.get("sha256") == outcome["incoming_sha256"]
+            and resolution.get("choice") == choice
+            and resolution.get("current_sha256") == expected_current_sha256
+            and resolution.get("incoming_sha256") == expected_incoming_sha256
+            and resolution.get("postimage_sha256") == outcome["current_sha256"]
+        )
+        if choice:
+            if choice not in PREFERENCE_CHOICES:
+                raise ValueError("unsupported preference choice")
+            if not expected_current_sha256 or not expected_incoming_sha256:
+                raise ValueError(
+                    "preference choice requires bound current and incoming hashes"
+                )
+            if outcome["incoming_sha256"] != expected_incoming_sha256:
+                raise ValueError(
+                    "incoming defaults changed during retry; concurrent edit refused"
+                )
+            if current_raw is None or (
+                outcome["current_sha256"] != expected_current_sha256 and not replay
+            ):
+                raise ValueError(
+                    "preference changed during retry; concurrent edit refused"
+                )
         old_generation = old.get("generation", prior_generation)
         # A missing product preference has no user bytes to reconcile.  Seed
         # the already-validated incoming default without requiring a legacy
         # generation to prove a three-way baseline it will never consume.
         # Present preferences keep the strict lineage and digest checks below.
-        if old_generation and current_raw is not None:
+        if old_generation and current_raw is not None and not replay:
             old_root = Path(old_generation)
             if (
                 not old_root.is_absolute()
@@ -20830,17 +20860,6 @@ def _reconcile_runtime_preference(
                     baseline = incoming
                 elif choice not in PREFERENCE_CHOICES:
                     raise ValueError("previous shipped defaults are missing")
-                # A deliberate choice consumes no historical bytes, but its
-                # bindings must hold even when automatic merging would succeed.
-                if choice:
-                    if outcome["current_sha256"] != expected_current_sha256:
-                        raise ValueError(
-                            "preference changed during retry; concurrent edit refused"
-                        )
-                    if outcome["incoming_sha256"] != expected_incoming_sha256:
-                        raise ValueError(
-                            "incoming defaults changed during retry; concurrent edit refused"
-                        )
             else:
                 manifest, manifest_error = _load_runtime_generation_manifest(old_root)
                 if manifest is None:
@@ -20876,15 +20895,12 @@ def _reconcile_runtime_preference(
                     )
                 else:
                     raise ValueError("previous shipped defaults are unavailable")
-        if choice:
-            if choice not in PREFERENCE_CHOICES:
-                raise ValueError("unsupported preference choice")
-            if not expected_current_sha256 or not expected_incoming_sha256:
-                raise ValueError(
-                    "preference choice requires bound current and incoming hashes"
-                )
         current = current_raw.decode("utf-8") if current_raw is not None else None
-        if destination.name == "terminal-policy.toml" and current is not None:
+        if (
+            destination.name == "terminal-policy.toml"
+            and current is not None
+            and not replay
+        ):
             import tomllib
 
             current_shell = _toml_flatten(tomllib.loads(current)).get("terminal.shell")
@@ -20917,60 +20933,17 @@ def _reconcile_runtime_preference(
                 )
             )
 
-        current_matches = (
-            not outcome["current_sha256"]
-            or outcome["current_sha256"] == expected_current_sha256
-        )
-        incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
-        if choice == "keep-current":
-            if current is None:
-                raise ValueError("keep-current requires an existing preference file")
-            if not incoming_matches:
-                raise ValueError(
-                    "incoming defaults changed during retry; concurrent edit refused"
-                )
-            if current_matches:
-                # Bound keep-current must merge on the current canvas even when
-                # auto-merge would succeed. merge(None) overlays onto incoming
-                # and rewrites operator spelling after a successful result.
-                body = merge(choice)
-            else:
-                # Idempotent retry: the first apply already rewrote bound keys
-                # (padding upgrade), so the pre-merge snapshot no longer
-                # matches. Accept only when replaying keep-current is a no-op
-                # on the live bytes; a concurrent edit still changes the tree.
-                try:
-                    replay = merge(choice)
-                except ValueError as exc:
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    ) from exc
-                if replay != current:
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    )
-                body = replay
+        if replay:
+            body = current
+            outcome["user_override_keys"] = sorted(prior_terminal_overrides)
+        elif choice == "keep-current":
+            # Keep the user's canvas, including its spelling and comments.
+            body = merge(choice)
         else:
             try:
-                # A later retry of an already-applied choice must not fail merely
-                # because the bound current hash is the pre-merge snapshot.
                 body = merge(None)
             except ValueError:
                 if not choice:
-                    raise
-                if current_matches and not incoming_matches:
-                    raise ValueError(
-                        "incoming defaults changed during retry; concurrent edit refused"
-                    ) from None
-                if (
-                    incoming_matches
-                    and outcome["current_sha256"]
-                    and not current_matches
-                ):
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    ) from None
-                if not (current_matches and incoming_matches):
                     raise
                 body = merge(choice)
         if not body.strip() or "\0" in body:
@@ -21013,6 +20986,22 @@ def _reconcile_runtime_preference(
         "generation": str(generation),
         "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
     }
+    if choice:
+        outcome["defaults"]["resolution"] = {
+            "choice": choice,
+            "current_sha256": expected_current_sha256,
+            "incoming_sha256": expected_incoming_sha256,
+            "postimage_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }
+    elif (
+        isinstance(resolution, dict)
+        and old.get("generation") == str(generation)
+        and old.get("sha256") == outcome["incoming_sha256"]
+        and resolution.get("postimage_sha256") == outcome["current_sha256"]
+        and hashlib.sha256(body.encode("utf-8")).hexdigest()
+        == outcome["current_sha256"]
+    ):
+        outcome["defaults"]["resolution"] = resolution
     return outcome
 
 

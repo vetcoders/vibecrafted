@@ -1,0 +1,79 @@
+[project]
+name = "vibecrafted"
+version = "4.5.1"
+description = "Core Python library for Vibecrafted runtime and synthesis surfaces."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=4.23,<5",
+    "PyYAML>=6.0,<7",
+    "websockets>=15,<18",
+]
+
+[project.scripts]
+vibecrafted = "vibecrafted_core.cli:main"
+vc-agents = "vibecrafted_core.wrappers:agents_main"
+vc-audit = "vibecrafted_core.wrappers:audit_main"
+vc-dou = "vibecrafted_core.wrappers:dou_main"
+vc-decorate = "vibecrafted_core.wrappers:decorate_main"
+vc-delegate = "vibecrafted_core.wrappers:delegate_main"
+vc-followup = "vibecrafted_core.wrappers:followup_main"
+vc-guard = "vibecrafted_core.wrappers:guard_main"
+vc-git = "vibecrafted_core.git:main"
+vc-hydrate = "vibecrafted_core.wrappers:hydrate_main"
+vc-implement = "vibecrafted_core.wrappers:implement_main"
+vc-intents = "vibecrafted_core.wrappers:intents_main"
+vc-marbles = "vibecrafted_core.wrappers:marbles_main"
+vc-ownership = "vibecrafted_core.wrappers:ownership_main"
+vc-partner = "vibecrafted_core.wrappers:partner_main"
+vc-paste = "vibecrafted_core.paste:paste_main"
+vc-polarize = "vibecrafted_core.wrappers:polarize_main"
+vc-prune = "vibecrafted_core.wrappers:prune_main"
+vc-research = "vibecrafted_core.wrappers:research_main"
+vc-research-await = "vibecrafted_core.wrappers:research_await_main"
+vc-research-synthesize = "vibecrafted_core.wrappers:research_synthesize_main"
+vc-review = "vibecrafted_core.wrappers:review_main"
+vc-release = "vibecrafted_core.wrappers:release_main"
+vc-sandbox = "vibecrafted_core.wrappers:sandbox_main"
+vc-scaffold = "vibecrafted_core.wrappers:scaffold_main"
+vc-server-supervisor = "vibecrafted_core.server_supervisor:main"
+vc-trust = "vibecrafted_core.wrappers:trust_main"
+vc-workflow = "vibecrafted_core.wrappers:workflow_main"
+vc-cron = "vibecrafted_core.cron:main"
+vc-guardian = "vibecrafted_core.guardian:main"
+vc-loop = "vibecrafted_core.loop:main"
+vc-ship = "vibecrafted_core.ship:main"
+vibecrafted-resume = "vibecrafted_core.wrappers:resume_main"
+vibecrafted-compact-hook = "vibecrafted_core.compact_hooks:main"
+verify-vibecrafted-walkaround = "vibecrafted_core.walkaround_runner:main"
+
+[project.optional-dependencies]
+sandbox = ["aiohttp >= 3.9"]
+# macOS-only iTerm2 / locterm AutoLaunch plugin.
+# Not in the default install — opt-in via `pip install '.[iterm2]'`.
+iterm2 = ["iterm2 >= 2.7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+artifacts = [
+    "vibecrafted_core/VERSION",
+    "vibecrafted_core/runtime/**",
+    "vibecrafted_core/skills/**",
+    "vibecrafted_core/deck/vibecrafted",
+    "vibecrafted_core/schemas/**",
+    "vibecrafted_core/trust/**",
+    "vibecrafted_core/config/vc-frame/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["vibecrafted_core"]
+# Package data is physically owned under vibecrafted_core; builds never follow
+# source-tree aliases.
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e_delivery: full config delivery channel matrix (wheel/dev × shell)",
+]
