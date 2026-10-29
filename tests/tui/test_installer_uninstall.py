@@ -28,6 +28,30 @@ _MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
 
 
 @pytest.fixture(autouse=True)
+def _isolate_skill_test_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy writer tests must never inherit host runtime or XDG roots."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData/Local"))
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_INSTALL_LEASE_FD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _paired_host_fixture(monkeypatch, tmp_path):
     fixed_terminal_fixture(monkeypatch, tmp_path)
 
@@ -368,8 +392,17 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
         frame_helper=str(frame_helper),
     )
 
-    assert installer.cmd_runtime_install(install_args) == 0
+    original_skill_bytes = operator_skill.read_bytes()
+    assert installer.cmd_runtime_install(install_args) == 1
     installed = json.loads(capsys.readouterr().out)
+    assert installed["skill_projection_status"] == "partial"
+    assert installed["skill_projection_conflicts"] == [str(operator_skill)]
+    assert installed["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        installed["attempted_runtime_views"].split(",")
+        == installer.STANDARD_VIEW_RUNTIMES
+    )
+    assert operator_skill.read_bytes() == original_skill_bytes
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
     assert Path(installed["frame"]) == generation / "libexec/vc-frame"
@@ -430,6 +463,10 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"
+            if view == operator_skill:
+                assert view.is_file() and not view.is_symlink()
+                assert view.read_bytes() == original_skill_bytes
+                continue
             assert view.is_symlink()
             assert view.resolve() == (
                 generation / "vibecrafted-core/vibecrafted_core/skills" / skill_name
@@ -449,8 +486,16 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
 
     # An explicit repeated install must retain first-install ownership so
     # a later uninstall restores the original collisions and keeps recovery.
-    assert installer.cmd_runtime_install(install_args) == 0
-    capsys.readouterr()
+    assert installer.cmd_runtime_install(install_args) == 1
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["skill_projection_status"] == "partial"
+    assert repeated["skill_projection_conflicts"] == [str(operator_skill)]
+    assert repeated["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        repeated["attempted_runtime_views"].split(",")
+        == installer.STANDARD_VIEW_RUNTIMES
+    )
+    assert operator_skill.read_bytes() == original_skill_bytes
 
     (crafted_home / "runtime-created-state").write_text("owned\n", encoding="utf-8")
     assert (
@@ -473,7 +518,8 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert original_launcher.read_text(encoding="utf-8") == "operator-owned\n"
     assert original_screenscribe.is_symlink()
     assert original_screenscribe.readlink() == original_screenscribe_target
-    assert operator_skill.read_text(encoding="utf-8") == "operator-owned skill\n"
+    assert operator_skill.is_file() and not operator_skill.is_symlink()
+    assert operator_skill.read_bytes() == original_skill_bytes
     assert unrelated_skill.read_text(encoding="utf-8") == "preserve me\n"
     assert not (home / ".agents").exists()
     assert not (home / ".claude").exists()
@@ -1388,6 +1434,10 @@ def test_runtime_pack_install_preserves_foreign_skill_view(
     result = json.loads(capsys.readouterr().out)
     assert result["skill_projection_status"] == "partial"
     assert str(projection) in result["skill_projection_conflicts"]
+    assert result["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        result["attempted_runtime_views"].split(",") == installer.STANDARD_VIEW_RUNTIMES
+    )
     assert (projection / "SKILL.md").read_text(encoding="utf-8") == "foreign"
     receipt = json.loads(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")

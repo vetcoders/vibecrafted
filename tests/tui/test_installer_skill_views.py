@@ -3,7 +3,33 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
+
 from scripts import vetcoders_install as installer
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_test_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy writer tests must never inherit host runtime or XDG roots."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData/Local"))
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_INSTALL_LEASE_FD",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_canonical_store_is_the_package_owned_generation_path(
@@ -900,7 +926,9 @@ def test_a_real_file_under_a_skill_name_survives_an_install_pass(
     assert note.is_file()
     assert not note.is_symlink()
     assert note.read_text(encoding="utf-8") == "my own notes on research\n"
-    assert "Keeping real file" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "grok skill root" in output
+    assert "shadows there are not inspected and nothing is removed" in output
     assert (home / ".agents" / "skills" / "vc-research").is_symlink()
 
 
@@ -1046,6 +1074,69 @@ def test_legacy_view_writer_reconciles_receipted_release_pointer(
     assert view.resolve() == new
     updated = json.loads((runtime / installer.RUNTIME_INSTALL_RECEIPT).read_text())
     assert updated["owned_symlinks"][str(view)] == str(new)
+
+
+@pytest.mark.parametrize("restore_original", [False, True])
+def test_receipted_release_pointer_retargeted_during_digest_is_preserved(
+    tmp_path: Path, monkeypatch, restore_original: bool
+) -> None:
+    home, crafted = tmp_path / "home", tmp_path / "crafted"
+    _pin_home(monkeypatch, home, crafted)
+    paths = installer._runtime_install_paths()
+    runtime = paths["runtime_home"]
+    old = runtime / "releases/old/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    new = runtime / "releases/new/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    foreign = home / "foreign-skill"
+    for path in (old, new, foreign):
+        path.mkdir(parents=True)
+    view = home / ".claude/skills/vc-x"
+    view.parent.mkdir(parents=True)
+    view.symlink_to(old)
+    current = runtime / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.symlink_to(runtime / "releases/new")
+    (runtime / ".installer-backups").mkdir()
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "version": "new",
+        "owned_symlinks": {str(view): str(old), str(current): str(current.resolve())},
+    }
+    installer._checkpoint_runtime_install_receipt(runtime, previous)
+    receipt_path = runtime / installer.RUNTIME_INSTALL_RECEIPT
+    before = receipt_path.read_bytes()
+    monkeypatch.setattr(installer, "_runtime_generation_payload_errors", lambda _: [])
+    digest = installer._runtime_config_digest
+    injected = False
+
+    def retarget_after_digest(path: Path) -> str | None:
+        nonlocal injected
+        if path == view and not injected:
+            injected = True
+            if restore_original:
+                # ABA: capture a foreign digest, then restore the old pointer.
+                view.unlink()
+                view.symlink_to(foreign)
+                result = digest(path)
+                view.unlink()
+                view.symlink_to(old)
+                return result
+            result = digest(path)
+            view.unlink()
+            view.symlink_to(foreign)
+            return result
+        return digest(path)
+
+    monkeypatch.setattr(installer, "_runtime_config_digest", retarget_after_digest)
+    monkeypatch.setattr(
+        installer,
+        "_publish_runtime_config_transaction",
+        lambda *args, **kwargs: pytest.fail("foreign view reached transaction"),
+    )
+    assert not installer._reconcile_receipted_release_skill_view(view, new)
+    assert injected and view.is_symlink()
+    assert view.resolve() == (old if restore_original else foreign)
+    assert receipt_path.read_bytes() == before
 
 
 def test_legacy_view_writer_does_not_write_through_foreign_root(

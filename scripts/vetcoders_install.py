@@ -11405,6 +11405,24 @@ def _reconcile_receipted_release_skill_view(link: Path, target: Path) -> bool:
         _assert_runtime_physical_path(link, leaf_symlink=True)
         _validate_runtime_backup_receipts(previous, paths)
         before = _runtime_config_digest(link)
+        # Bind the captured preimage to the same receipt-owned pointer checked
+        # above. A foreign retarget during digest capture must not become the
+        # preimage that authorizes the transaction to replace it.
+        try:
+            raw_pointer = os.readlink(link)
+            pointer_digest = hashlib.sha256(
+                json.dumps({".": ["symlink", raw_pointer]}, sort_keys=True).encode()
+            ).hexdigest()
+            latest = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+            if (
+                before != pointer_digest
+                or not _is_owned_pointer(link)
+                or _symlink_target(link) != old_path
+                or latest != previous
+            ):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
         receipt = json.loads(json.dumps(previous))
         staging = Path(
             tempfile.mkdtemp(
@@ -28409,7 +28427,17 @@ def _install_runtime_pack(
     result["foundation_service_actions"] = foundation_service_actions
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
-    result["runtime_views"] = ",".join(runtime_views)
+    conflicts = set(projection_conflicts)
+    complete_views = [
+        runtime
+        for runtime in runtime_views
+        if all(
+            str(runtime_skills_dir(runtime) / name) not in conflicts
+            for name in skill_names
+        )
+    ]
+    result["runtime_views"] = ",".join(complete_views)
+    result["attempted_runtime_views"] = ",".join(runtime_views)
     result["skill_projection_conflicts"] = projection_conflicts
     result["skill_projection_status"] = (
         "partial" if projection_conflicts else "published"
