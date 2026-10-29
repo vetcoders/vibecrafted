@@ -8,7 +8,7 @@
 # Plan 03 (META_22) hardens this image as the CI Linux smoke target.
 # See docs/INSTALL.md for the per-platform install matrix.
 
-FROM node:22-bookworm-slim
+FROM node:22.23.4-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
 ARG INSTALL_AGENT_CLIS=false
 ARG INSTALL_FOUNDATIONS=false

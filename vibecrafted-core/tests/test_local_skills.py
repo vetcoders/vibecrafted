@@ -299,3 +299,30 @@ def test_missing_lock_rechecks_for_publication_during_bundled_read(
     with pytest.raises(local_skills.LocalSkillError) as exc:
         local_skills.read_skill("vc-demo")
     assert exc.value.code == "unsafe"
+
+
+@pytest.mark.parametrize("inside_package", [False, True])
+def test_module_loader_refuses_other_source_files(
+    tmp_path, monkeypatch, inside_package
+):
+    package = tmp_path / "package"
+    package.mkdir()
+    monkeypatch.setattr(local_skills, "__file__", str(package / "local_skills.py"))
+    parent = package if inside_package else tmp_path
+    payload = parent / "unselected.py"
+    payload.write_text("EXECUTED = True\n")
+    with pytest.raises(local_skills.LocalSkillError, match="package module"):
+        local_skills._load_module(payload, "fixture")
+
+
+@pytest.mark.parametrize("filename", ["runtime_paths.py", "portable_lock.py"])
+def test_package_module_loader_never_creates_bytecode(tmp_path, monkeypatch, filename):
+    package = tmp_path / "package"
+    package.mkdir()
+    monkeypatch.setattr(local_skills, "__file__", str(package / "local_skills.py"))
+    source = package / filename
+    source.write_text("VALUE = 7\n")
+    module = local_skills._load_module(source, "fixture")
+    assert module.VALUE == 7
+    assert module.__file__ == str(source)
+    assert not (package / "__pycache__").exists()

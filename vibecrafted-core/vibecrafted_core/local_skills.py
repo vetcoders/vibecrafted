@@ -112,10 +112,17 @@ def _read_regular(path: Path) -> bytes:
 
 
 def _load_module(path: Path, name: str):
+    package = Path(__file__).parent
+    if path not in {package / "runtime_paths.py", package / "portable_lock.py"}:
+        raise LocalSkillError("unsafe", "Expected a selected package module")
     # importlib's source loader can create __pycache__ in a signed generation.
-    # Execute the selected package's regular file directly without bytecode.
+    # Only these two package-owned helpers reach this loader; neither skill
+    # content nor user-selected paths are executable. _read_regular rejects
+    # symlinks and file replacement. Preserve the signed generation by executing
+    # its regular source without generating bytecode, just as an import would.
     module = types.ModuleType(name)
     module.__file__ = str(path)
+    # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
     exec(compile(_read_regular(path), str(path), "exec"), module.__dict__)  # noqa: S102
     return module
 

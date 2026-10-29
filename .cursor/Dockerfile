@@ -49,7 +49,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin s
 # Node.js 22 (official static build) + corepack. Node powers the agent CLIs and
 # corepack provides the repo-pinned pnpm@10 (package.json packageManager) used by
 # the website build. Pinned for reproducibility.
-ENV NODE_VERSION=22.14.0
+ENV NODE_VERSION=22.23.4
 RUN arch="$(dpkg --print-architecture)" \
   && case "$arch" in \
        amd64) node_arch=x64 ;; \
