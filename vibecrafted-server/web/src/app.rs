@@ -1073,6 +1073,33 @@ fn quota_dashboard_script() -> &'static str {
   const unmeasured = document.getElementById('quota-unmeasured');
   const status = document.getElementById('quota-status');
   if (!root || !host || !status) return;
+  const retainedCards = new Map();
+  const text = (node, value) => { const next = String(value); if (node && node.textContent !== next) node.textContent = next; };
+  // Morph only changed fields of this small card tree. Source disclosures and
+  // focused summaries belong to the person, not to the next monitor snapshot.
+  const patch = (current, next) => {
+    if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) { current.replaceWith(next); return; }
+    if (current.nodeType === 3) { if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue; return; }
+    for (const attr of [...current.attributes]) {
+      if (current.tagName === 'DETAILS' && attr.name === 'open') continue;
+      if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+    }
+    for (const attr of [...next.attributes]) {
+      if (current.tagName === 'DETAILS' && attr.name === 'open') continue;
+      if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+    }
+    const old = [...current.childNodes], fresh = [...next.childNodes];
+    fresh.forEach((node, index) => { if (old[index]) patch(old[index], node); else current.append(node); });
+    for (const node of old.slice(fresh.length)) node.remove();
+  };
+  const synchronize = (parent, nodes) => {
+    if (!parent) return;
+    const focused = document.activeElement;
+    let cursor = parent.firstElementChild;
+    for (const node of nodes) { if (node === cursor) cursor = cursor.nextElementSibling; else parent.insertBefore(node, cursor); }
+    while (cursor) { const next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
+    if (focused && focused !== document.activeElement && parent.contains(focused)) focused.focus({ preventScroll: true });
+  };
   const ageText = (seconds) => {
     if (seconds === null || seconds === undefined) return '';
     if (seconds < 60) return seconds + 's ago';
@@ -1100,9 +1127,8 @@ fn quota_dashboard_script() -> &'static str {
     const detail = document.createElement('p');
     detail.className = 'quota-detail';
     detail.textContent = agent.detail || '';
-    article.append(head);
-    if (!compact) article.append(headline);
-    article.append(detail);
+    headline.hidden = compact;
+    article.append(head, headline, detail);
     const bars = document.createElement('div');
     bars.className = 'quota-bars';
     for (const bar of agent.bars || []) {
@@ -1122,14 +1148,16 @@ fn quota_dashboard_script() -> &'static str {
       text.textContent = (bar.text || '') + (bar.stale ? ' · stale' : '');
       row.append(label, track, text);
       bars.append(row);
-      if (bar.resets_at) {
+      {
         const reset = document.createElement('small');
         reset.className = 'quota-reset';
-        reset.textContent = 'Resets ' + new Date(bar.resets_at * 1000).toLocaleString();
+        reset.hidden = !bar.resets_at;
+        reset.textContent = bar.resets_at ? 'Resets ' + new Date(bar.resets_at * 1000).toLocaleString() : '';
         bars.append(reset);
       }
     }
-    if (!compact && (agent.bars || []).length) article.append(bars);
+    bars.hidden = compact || !(agent.bars || []).length;
+    article.append(bars);
     const meta = document.createElement('p');
     meta.className = 'quota-meta';
     const scope = agent.scope || {};
@@ -1155,26 +1183,43 @@ fn quota_dashboard_script() -> &'static str {
     return 'refresh: ' + bits.join(' · ');
   };
   const render = (payload) => {
-    host.replaceChildren();
-    if (unmeasured) unmeasured.replaceChildren();
+    const focused = document.activeElement;
+    const measuredCards = [], missingCards = [], seen = new Set();
     let measured = 0, missing = 0, stale = 0;
     for (const agent of payload.agents || []) {
       // Native token counters are usage. A remaining limit needs an actual
       // window ratio, or an authoritative fresh exhausted observation.
       const window = (agent.bars || []).some((bar) => Number.isFinite(bar.ratio));
       const available = !agent.stale && ['ok', 'low', 'exhausted'].includes(agent.state) && (window || agent.state === 'exhausted');
-      if (available) { host.append(card(agent)); measured++; }
-      else { if (unmeasured) unmeasured.append(card(agent, true)); missing++; if (agent.stale) stale++; }
+      const key = agent.id;
+      seen.add(key);
+      let article = retainedCards.get(key);
+      const next = card(agent, !available);
+      if (!article) { article = next; retainedCards.set(key, article); }
+      else patch(article, next);
+      if (available) { measuredCards.push(article); measured++; }
+      else {
+        // Keep an explicitly opened source visible when its provider moves
+        // from measured to stale/unavailable; later manual closing is kept.
+        if (article.parentElement === host && article.querySelector('details[open]') && unmeasured) {
+          const group = unmeasured.closest('details'); if (group) group.open = true;
+        }
+        missingCards.push(article); missing++; if (agent.stale) stale++;
+      }
     }
+    synchronize(host, measuredCards); synchronize(unmeasured, missingCards);
+    if (focused && focused !== document.activeElement && root.contains(focused)) focused.focus({ preventScroll: true });
+    for (const key of retainedCards.keys()) if (!seen.has(key)) retainedCards.delete(key);
     const empty = document.getElementById('quota-empty');
     if (empty) empty.hidden = measured !== 0;
     host.hidden = measured === 0;
     const summary = document.getElementById('quota-unavailable-summary');
-    if (summary) summary.textContent = missing + ' source(s) without fresh quota windows' + (stale ? ' · ' + stale + ' stale' : '');
+    text(summary, missing + ' source(s) without fresh quota windows' + (stale ? ' · ' + stale + ' stale' : ''));
     const stamp = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
-    status.textContent = [measured + ' measured window source(s)', stamp, refreshText(payload.refresh)].filter(Boolean).join(' · ');
+    text(status, [measured + ' measured window source(s)', stamp, refreshText(payload.refresh)].filter(Boolean).join(' · '));
   };
   const load = async () => {
+    if (document.hidden) return;
     try {
       const response = await fetch('/api/usage/quota', { credentials: 'same-origin', cache: 'no-store' });
       const payload = await response.json();
@@ -1198,6 +1243,7 @@ fn quota_dashboard_script() -> &'static str {
     }
   });
   load();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
   // Local file read only; the network is never touched by this timer.
   setInterval(load, 15000);
 })();"#
@@ -1215,7 +1261,8 @@ fn usage_dashboard_script() -> &'static str {
     const row = event.target.closest('tr[data-run-id]');
     if (!row || event.target.closest('a, button')) return;
     selectedRunId = row.getAttribute('data-run-id') || '';
-    body.querySelectorAll('tr.is-selected').forEach((item) => item.classList.remove('is-selected'));
+    body.querySelectorAll('tr.is-selected').forEach((item) => { if (item !== row) item.classList.remove('is-selected'); });
+    row.classList.add('is-selected');
   });
   const empty = document.getElementById('usage-empty');
   const byId = (id) => document.getElementById(id);
@@ -1249,8 +1296,28 @@ fn usage_dashboard_script() -> &'static str {
     if (unknown === runs) return 'missing';
     return number.format(totals.tokens_total_known);
   };
-  const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
-  const renderLocalSources = (sources) => {
+  const text = (node, value) => { const next = String(value); if (node && node.textContent !== next) node.textContent = next; };
+  const set = (id, value) => text(byId(id), value);
+  const attribute = (node, key, value) => {
+    if (value === null || value === undefined || value === '') { if (node.hasAttribute(key)) node.removeAttribute(key); }
+    else if (node.getAttribute(key) !== String(value)) node.setAttribute(key, String(value));
+  };
+  // Retain attached nodes when the order is unchanged; moving/replacing an
+  // entire collection loses focus, selection and pointer/disclosure state.
+  const synchronize = (parent, nodes) => {
+    const focused = document.activeElement;
+    let cursor = parent.firstElementChild;
+    for (const node of nodes) {
+      if (node === cursor) cursor = cursor.nextElementSibling;
+      else parent.insertBefore(node, cursor);
+    }
+    while (cursor) { const next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
+    if (focused && focused !== document.activeElement && parent.contains(focused)) focused.focus({ preventScroll: true });
+  };
+  const dimensionRows = new Map(), retainedRows = new Map(), pickerStates = new Map();
+  const chartStates = new Map();
+  let lastChartReport = null, availableSnapshot = null;
+  const renderLocalSources = (sources, failureReasons) => {
     const bits = (sources || []).map((item) => {
       const detail = item.source === 'scan_cache' || item.source === 'archive'
         ? item.counted + ' local' + (item.matched_vc ? ' · ' + item.matched_vc + ' already in VC runs' : '') + (item.withheld_days ? ' · ' + item.withheld_days + ' day(s) withheld' : '')
@@ -1258,28 +1325,29 @@ fn usage_dashboard_script() -> &'static str {
       const state = (item.refreshing ? ' · updating' : '') + (item.stale ? ' · previous measurements' : '') + (item.error ? ' · ' + item.error : '');
       return item.agent + ': ' + detail + state;
     });
+    const failures = Object.entries(failureReasons || {}).map(([code, count]) => count + ' ' + code).join(' · ');
+    if (failures) bits.push('Transcript recovery: ' + failures);
     set('usage-local-sources', bits.length ? 'Local collection — ' + bits.join(' · ') : '');
   };
   const renderDimensions = (id, values) => {
     const target = byId(id);
-    target.replaceChildren();
-    if (!values || !values.length) {
-      const p = document.createElement('p'); p.className = 'control-empty'; p.textContent = 'No measured runs.'; target.append(p); return;
+    let state = dimensionRows.get(id);
+    if (!state) { state = { rows: new Map(), empty: document.createElement('p') }; state.empty.className = 'control-empty'; state.empty.textContent = 'No measured runs.'; dimensionRows.set(id, state); }
+    const nodes = [], seen = new Set();
+    for (const item of values || []) {
+      seen.add(item.name);
+      let row = state.rows.get(item.name);
+      if (!row) { row = document.createElement('div'); row.className = 'usage-dimension-row'; for (const tag of ['strong','span','span','span','span','span']) row.append(document.createElement(tag)); state.rows.set(item.name, row); }
+      const failed = item.runs_failed || 0, tokenUnknown = item.runs_tokens_unknown || 0, costUnknown = item.runs_cost_unknown || 0;
+      const cells = row.children;
+      const next = [item.name, number.format(item.runs || 0), number.format(failed), tokensKnownText(item), number.format(tokenUnknown + costUnknown), costsText(item.cost_by_unit)];
+      next.forEach((value, index) => text(cells[index], value));
+      row.classList.toggle('needs-attention', Boolean(failed || tokenUnknown || costUnknown));
+      cells[2].classList.toggle('is-signal', Boolean(failed)); cells[4].classList.toggle('is-signal', Boolean(tokenUnknown || costUnknown));
+      nodes.push(row);
     }
-    for (const item of values) {
-      const row = document.createElement('div'); row.className = 'usage-dimension-row';
-      const failed = item.runs_failed || 0;
-      const tokenUnknown = item.runs_tokens_unknown || 0;
-      const costUnknown = item.runs_cost_unknown || 0;
-      if (failed || tokenUnknown || costUnknown) row.classList.add('needs-attention');
-      const name = document.createElement('strong'); name.textContent = item.name;
-      const runs = document.createElement('span'); runs.textContent = number.format(item.runs || 0);
-      const fail = document.createElement('span'); fail.textContent = number.format(failed); if (failed) fail.className = 'is-signal';
-      const tokens = document.createElement('span'); tokens.textContent = tokensKnownText(item);
-      const unk = document.createElement('span'); unk.textContent = number.format(tokenUnknown + costUnknown); if (tokenUnknown || costUnknown) unk.className = 'is-signal';
-      const cost = document.createElement('span'); cost.textContent = costsText(item.cost_by_unit);
-      row.append(name, runs, fail, tokens, unk, cost); target.append(row);
-    }
+    for (const name of state.rows.keys()) if (!seen.has(name)) state.rows.delete(name);
+    synchronize(target, nodes.length ? nodes : [state.empty]);
   };
   const showDimension = (name) => {
     for (const key of ['providers', 'agents', 'models']) {
@@ -1300,36 +1368,81 @@ fn usage_dashboard_script() -> &'static str {
   // A picker lists the names the API itself reports (unknown included) plus
   // the seeded options; the current selection survives even when the window
   // has no row for it, so a filter always round-trips.
-  const populatePicker = (key, models) => {
+  const populatePicker = (key, models, defer = true) => {
     const select = byId('usage-' + key);
     if (!select) return;
+    let state = pickerStates.get(key);
+    if (!state) {
+      state = { key: null, pending: null };
+      pickerStates.set(key, state);
+      select.addEventListener('blur', () => { if (state.pending) { const pending = state.pending; state.pending = null; populatePicker(key, pending, false); } });
+    }
     const current = select.value || '';
-    const seen = new Set();
-    select.replaceChildren();
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'all';
-    select.appendChild(defaultOpt);
-    for (const item of models || []) {
-      const name = item.name;
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        if (current === name) opt.selected = true;
-        select.appendChild(opt);
-      }
-    }
-    if (current && !seen.has(current)) {
-      const opt = document.createElement('option');
-      opt.value = current;
-      opt.textContent = current;
-      opt.selected = true;
-      select.appendChild(opt);
-    }
+    const names = [...new Set((models || []).map((item) => item.name).filter(Boolean))];
+    if (current && !names.includes(current)) names.push(current);
+    const signature = JSON.stringify(names);
+    if (state.key === signature) { state.pending = null; return; }
+    // Updating choices while a native picker is open can dismiss it even
+    // when the select itself survives. Apply changed choices after blur.
+    if (defer && document.activeElement === select) { state.pending = models || []; return; }
+    const existing = new Map([...select.options].map((option) => [option.value, option]));
+    const options = ['', ...names].map((name) => {
+      const option = existing.get(name) || document.createElement('option');
+      option.value = name; text(option, name || 'all'); return option;
+    });
+    synchronize(select, options); select.value = current; state.key = signature; state.pending = null;
   };
-  const render = (report) => {
+  const renderRows = (report) => {
+    const nodes = [], seen = new Set();
+    for (const run of report.runs || []) {
+      const previousFields = (report.recovery && report.recovery.stale_fields && report.recovery.stale_fields[run.run_id]) || [];
+      const inspectId = (run.vc_run_ids || [])[0] || (run.origin === 'local' ? '' : run.run_id);
+      const signature = JSON.stringify([inspectId, run.run_id, run.recorded_at, run.origin, run.provider, run.agent, run.model, run.tokens && run.tokens.tokens_total, run.cost, run.status, run.failure_kind, run.failure, previousFields]);
+      let item = retainedRows.get(run.run_id);
+      if (!item) {
+        const node = document.createElement('tr');
+        for (let index = 0; index < 6; index++) node.append(document.createElement('td'));
+        item = { node, signature: null }; retainedRows.set(run.run_id, item);
+      }
+      seen.add(run.run_id); nodes.push(item.node);
+      if (item.signature === signature) continue;
+      const tr = item.node, [runCell, identity, model, tokens, cost, state] = tr.children;
+      attribute(tr, 'data-row-key', run.run_id);
+      attribute(tr, 'data-run-id', inspectId); attribute(tr, 'data-href', inspectId ? '/run/' + encodeURIComponent(inspectId) : null);
+      attribute(tr, 'data-transcript-url', inspectId ? '/api/control/runs/' + encodeURIComponent(inspectId) + '/transcript' : null);
+      attribute(tr, 'data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
+      let link = runCell.firstElementChild;
+      if (!link || link.tagName.toLowerCase() !== (inspectId ? 'a' : 'span')) {
+        const next = document.createElement(inspectId ? 'a' : 'span'); next.className = 'control-run-open';
+        if (link) link.replaceWith(next); else runCell.append(next); link = next;
+      }
+      attribute(link, 'href', inspectId ? '/run/' + encodeURIComponent(inspectId) : null); text(link, run.run_id);
+      let stamp = runCell.querySelector('small'); if (!stamp) { stamp = document.createElement('small'); runCell.append(stamp); } text(stamp, run.recorded_at || '');
+      text(identity, label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : ''));
+      text(model, label(run.model)); attribute(model, 'title', reason(run.model));
+      text(tokens, label(run.tokens && run.tokens.tokens_total)); attribute(tokens, 'title', run.tokens && reason(run.tokens.tokens_total));
+      text(cost, costText(run.cost)); attribute(cost, 'title', run.cost && reason(run.cost.amount));
+      attribute(tokens, 'data-stale', previousFields.includes('usage') ? 'true' : null); attribute(cost, 'data-stale', previousFields.includes('cost') ? 'true' : null);
+      if (previousFields.includes('usage')) attribute(tokens, 'title', 'Previous measured tokens; current transcript evidence is incomplete or updating');
+      if (previousFields.includes('cost')) attribute(cost, 'title', 'Previous measured cost; current transcript evidence is incomplete or updating');
+      text(state, run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status); attribute(state, 'title', run.failure);
+      tr.classList.toggle('is-attention', Boolean(run.failure_kind || (run.status && !['completed','ok','observed'].includes(run.status))));
+      tr.classList.toggle('is-unknown', Boolean(unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))));
+      item.signature = signature;
+    }
+    for (const id of retainedRows.keys()) if (!seen.has(id)) retainedRows.delete(id);
+    synchronize(body, nodes);
+  };
+  const render = (incoming, queryKey) => {
+    const loading = (incoming.local_sources || []).some((source) => source.source === 'loading' && source.refreshing);
+    if (availableSnapshot && availableSnapshot.queryKey !== queryKey) availableSnapshot = null;
+    const retained = loading && availableSnapshot !== null;
+    // Keep a coherent previous response, not old local rows mixed with new
+    // recorded twins. Unknown values stay unknown. A non-loading replacement
+    // (including genuine deletions) and a changed filter are always accepted.
+    const report = retained ? availableSnapshot.report : incoming;
+    if (!loading) availableSnapshot = { queryKey, report: incoming };
+    attribute(root, 'data-measurements', retained ? 'previous' : loading ? 'partial' : 'available');
     const totals = report.totals || {};
     set('usage-total-runs', number.format(totals.runs || 0));
     set('usage-total-failed', number.format(totals.runs_failed || 0));
@@ -1346,39 +1459,14 @@ fn usage_dashboard_script() -> &'static str {
     populatePicker('provider', [...providerNames.map((name) => ({name})), ...(pickers.providers || [])]);
     populatePicker('agent', [...agentNames.map((name) => ({name})), ...(pickers.agents || [])]);
     populatePicker('model', pickers.models);
-    renderLocalSources(report.local_sources);
-    body.replaceChildren();
+    renderLocalSources(incoming.local_sources, incoming.recovery && incoming.recovery.failure_reasons);
     const runs = report.runs || [];
-    for (const run of runs) {
-      const tr = document.createElement('tr');
-      const inspectId = (run.vc_run_ids || [])[0] || (run.origin === 'local' ? '' : run.run_id);
-      if (inspectId) {
-        tr.setAttribute('data-run-id', inspectId);
-        tr.setAttribute('data-href', '/run/' + encodeURIComponent(inspectId));
-        tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(inspectId) + '/transcript');
-      }
-      tr.setAttribute('data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
-      const runCell = document.createElement('td');
-      const link = document.createElement(inspectId ? 'a' : 'span'); if (inspectId) link.href = '/run/' + encodeURIComponent(inspectId); link.textContent = run.run_id; link.className = 'control-run-open';
-      const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
-      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : '');
-      const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
-      const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
-      const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
-      const previousFields = (report.recovery && report.recovery.stale_fields && report.recovery.stale_fields[run.run_id]) || [];
-      if (previousFields.includes('usage')) { tokens.title = 'Previous measured tokens; current transcript evidence is incomplete or updating'; tokens.dataset.stale = 'true'; }
-      if (previousFields.includes('cost')) { cost.title = 'Previous measured cost; current transcript evidence is incomplete or updating'; cost.dataset.stale = 'true'; }
-      const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
-      if (run.failure) state.title = run.failure;
-      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok' && run.status !== 'observed')) tr.className = 'is-attention';
-      if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
-      tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
-    }
+    renderRows(report);
     empty.hidden = runs.length !== 0;
     set('usage-run-count', String(runs.length));
     const first = body.querySelector('tr[data-run-id]');
     const selected = [...body.querySelectorAll('tr[data-run-id]')].find((row) => row.getAttribute('data-run-id') === selectedRunId);
-    if (selected) selected.classList.add('is-selected');
+    if (selected) { if (!selected.classList.contains('is-selected')) selected.classList.add('is-selected'); }
     else if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     else {
       selectedRunId = '';
@@ -1386,21 +1474,18 @@ fn usage_dashboard_script() -> &'static str {
       if (inspector) inspector.hidden = true;
     }
     set('usage-schema', report.schema || 'unknown schema');
-    set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
-    status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
-    const recovery = report.recovery || {};
-    const localSources = report.local_sources || [];
-    if (localSources.some((source) => source.refreshing)) status.textContent += ' · local provider measurements updating';
-    if (localSources.some((source) => source.stale)) status.textContent += ' · previous local measurements retained';
-    if (recovery.pending_runs) status.textContent += ' · ' + recovery.pending_runs + ' transcript(s) updating';
-    if (recovery.stale_runs) status.textContent += ' · ' + recovery.stale_runs + ' previous transcript measurement(s) retained';
-    if (recovery.unavailable_runs) status.textContent += ' · ' + recovery.unavailable_runs + ' transcript source(s) unavailable';
-    if (recovery.last_error) status.textContent += ' · ' + recovery.last_error;
-    const failures = Object.entries(recovery.failure_reasons || {}).map(([code, count]) => count + ' ' + code).join(' · ');
-    if (failures) {
-      const sources = byId('usage-local-sources');
-      if (sources) sources.textContent += ' · Transcript recovery: ' + failures;
-    }
+    set('usage-generated', retained ? 'Measurements as of ' + report.generated_at + ' · checked ' + incoming.generated_at : report.generated_at ? 'Generated ' + report.generated_at : '');
+    const bits = [retained ? 'Previous available measurements · ' + runs.length + ' matching run(s)' : runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window'];
+    const recovery = incoming.recovery || {}, localSources = incoming.local_sources || [];
+    if (retained) bits.push('recorded and local rows retained together while the local projection updates');
+    if (localSources.some((source) => source.refreshing)) bits.push('local provider measurements updating');
+    if (localSources.some((source) => source.stale)) bits.push('previous local measurements retained');
+    if (recovery.pending_runs) bits.push(recovery.pending_runs + ' transcript(s) updating');
+    if (recovery.stale_runs) bits.push(recovery.stale_runs + ' previous transcript measurement(s) retained');
+    if (recovery.unavailable_runs) bits.push(recovery.unavailable_runs + ' transcript source(s) unavailable');
+    if (recovery.last_error) bits.push(recovery.last_error);
+    text(status, bits.join(' · '));
+    lastChartReport = report;
     drawCharts(report);
   };
   const knownAmount = (cost) => {
@@ -1460,15 +1545,17 @@ fn usage_dashboard_script() -> &'static str {
   const paintChart = (plotId, titleId, caption, built, color) => {
     const host = byId(plotId);
     const title = byId(titleId);
-    if (title) title.textContent = caption;
+    text(title, caption);
     if (!host) return;
-    host.replaceChildren();
+    const key = JSON.stringify([caption, built, color]);
+    if (chartStates.get(plotId) === key) return;
+    chartStates.set(plotId, key);
     const measured = built ? built.buckets.filter((bucket) => bucket.measured) : [];
     if (!built || !measured.length) {
       const note = document.createElement('p');
       note.className = 'usage-chart-empty';
       note.textContent = 'No measured points in this window.';
-      host.append(note);
+      host.replaceChildren(note);
       return;
     }
     const w = 640;
@@ -1488,26 +1575,24 @@ fn usage_dashboard_script() -> &'static str {
       lastMeasured = i;
       coords.push(xAt(i).toFixed(1) + ',' + yAt(bucket.value).toFixed(1));
     });
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    let svg = host.querySelector('svg');
+    if (!svg) { svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); host.replaceChildren(svg); }
+    attribute(svg, 'viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('role', 'img');
-    const area = document.createElementNS(svg.namespaceURI, 'polygon');
+    let area = svg.querySelector('polygon'); if (!area) { area = document.createElementNS(svg.namespaceURI, 'polygon'); svg.append(area); }
     area.setAttribute('points', xAt(firstMeasured).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(lastMeasured).toFixed(1) + ',' + (h - pad));
     area.setAttribute('fill', color);
     area.setAttribute('fill-opacity', '0.16');
-    const line = document.createElementNS(svg.namespaceURI, 'polyline');
+    let line = svg.querySelector('polyline'); if (!line) { line = document.createElementNS(svg.namespaceURI, 'polyline'); svg.append(line); }
     line.setAttribute('points', coords.join(' '));
     line.setAttribute('fill', 'none');
     line.setAttribute('stroke', color);
     line.setAttribute('stroke-width', '1.5');
-    svg.append(area, line);
-    host.append(svg);
-    const axis = document.createElement('p');
-    axis.className = 'usage-chart-axis';
+    let axis = host.querySelector('.usage-chart-axis');
+    if (!axis) { axis = document.createElement('p'); axis.className = 'usage-chart-axis'; host.append(axis); }
     const first = built.buckets[0];
     const last = built.buckets[built.buckets.length - 1];
-    axis.textContent = axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain);
-    host.append(axis);
+    text(axis, axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain));
   };
   const dayStart = (ms) => {
     const date = new Date(ms);
@@ -1534,9 +1619,8 @@ fn usage_dashboard_script() -> &'static str {
     const host = byId('usage-chart-heat-plot');
     const title = byId('usage-chart-heat-title');
     const windowName = since || 'window';
-    if (title) title.textContent = 'Days · ' + windowName;
+    text(title, 'Days · ' + windowName);
     if (!host) return;
-    host.replaceChildren();
     const days = windowDays(since, generated, rows);
     const counts = new Map(days.map((day) => [day, 0]));
     for (const run of rows) {
@@ -1548,6 +1632,9 @@ fn usage_dashboard_script() -> &'static str {
     const light = document.documentElement.dataset.theme === 'light';
     const emptyFill = light ? '#d5d5d5' : '#242424';
     const active = light ? '#2f6b32' : '#90a959';
+    const key = JSON.stringify([light, since, days, [...counts.values()]]);
+    if (chartStates.get('heat') === key) return;
+    chartStates.set('heat', key);
     const max = Math.max(1, ...counts.values());
     const cell = 11;
     const gap = 3;
@@ -1562,7 +1649,10 @@ fn usage_dashboard_script() -> &'static str {
     if (column.length) cols.push(column);
     const w = Math.max(cols.length, 1) * (cell + gap);
     const h = labelH + 7 * (cell + gap);
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    let svg = host.querySelector('svg');
+    if (!svg) { svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); host.replaceChildren(svg); }
+    const retained = new Map([...svg.children].map((node) => [node.getAttribute('data-key'), node]));
+    const nodes = [];
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('role', 'img');
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1571,34 +1661,38 @@ fn usage_dashboard_script() -> &'static str {
       const first = new Date(week[0]);
       if (first.getUTCDate() <= 7 && first.getUTCMonth() !== lastMonth) {
         lastMonth = first.getUTCMonth();
-        const label = document.createElementNS(svg.namespaceURI, 'text');
+        const id = 'month-' + week[0];
+        const label = retained.get(id) || document.createElementNS(svg.namespaceURI, 'text');
+        attribute(label, 'data-key', id);
         label.setAttribute('x', String(col * (cell + gap)));
         label.setAttribute('y', '9');
         label.setAttribute('fill', light ? '#6b6b6b' : '#6b6b6b');
         label.setAttribute('font-size', '9');
         label.textContent = months[lastMonth];
-        svg.append(label);
+        nodes.push(label);
       }
       week.forEach((day) => {
         const count = counts.get(day) || 0;
-        const rect = document.createElementNS(svg.namespaceURI, 'rect');
+        const id = 'day-' + day;
+        const rect = retained.get(id) || document.createElementNS(svg.namespaceURI, 'rect');
+        attribute(rect, 'data-key', id);
         const row = new Date(day).getUTCDay();
         rect.setAttribute('x', String(col * (cell + gap)));
         rect.setAttribute('y', String(labelH + row * (cell + gap)));
         rect.setAttribute('width', String(cell));
         rect.setAttribute('height', String(cell));
         rect.setAttribute('rx', '2');
-        if (count === 0) rect.setAttribute('fill', emptyFill);
+        if (count === 0) { attribute(rect, 'fill', emptyFill); attribute(rect, 'fill-opacity', null); }
         else {
           rect.setAttribute('fill', active);
           rect.setAttribute('fill-opacity', String(0.35 + 0.65 * (count / max)));
         }
         const stamp = new Date(day).toISOString().slice(0, 10);
         rect.setAttribute('title', stamp + ' · ' + count);
-        svg.append(rect);
+        nodes.push(rect);
       });
     });
-    host.append(svg);
+    synchronize(svg, nodes);
   };
   const drawCharts = (report) => {
     const rows = report.runs || [];
@@ -1638,36 +1732,54 @@ fn usage_dashboard_script() -> &'static str {
       '#6a9fb5'
     );
   };
-  let activeRequest = null, requestVersion = 0, recoveryTimer = null, hasMeasurements = false;
-  const load = async () => {
+  new MutationObserver(() => { if (lastChartReport) drawCharts(lastChartReport); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  let activeRequest = null, activeExplicit = false, requestVersion = 0, recoveryTimer = null, recoveryPolls = 0, hasMeasurements = false, appliedQuery = null;
+  const load = async (explicit = false) => {
     if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
-    if (activeRequest) activeRequest.abort();
+    if (!explicit && document.hidden) return;
+    if (activeRequest) { if (!explicit) return; activeRequest.abort(); }
+    if (explicit) recoveryPolls = 0;
     const controller = new AbortController();
-    activeRequest = controller;
+    activeRequest = controller; activeExplicit = explicit;
     const version = ++requestVersion;
     const timeout = setTimeout(() => controller.abort(), 6000);
-    status.textContent = hasMeasurements ? 'Refreshing measured usage…' : 'Loading recorded telemetry…';
-    const query = new URLSearchParams(new FormData(form));
+    if (!hasMeasurements) text(status, 'Loading recorded telemetry…');
+    else if (explicit) text(status, 'Applying selected filters…');
+    const query = !explicit && appliedQuery !== null ? new URLSearchParams(appliedQuery) : new URLSearchParams(new FormData(form));
     for (const [key, value] of [...query.entries()]) if (!String(value).trim()) query.delete(key);
     try {
       const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
       const payload = await response.json();
       if (version !== requestVersion) return;
       if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
-      history.replaceState(null, '', '/usage?' + query.toString());
-      render(payload);
+      appliedQuery = query.toString();
+      if (location.search !== '?' + appliedQuery) history.replaceState(null, '', '/usage?' + appliedQuery);
+      render(payload, query.toString());
       hasMeasurements = true;
-      if ((payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) || (payload.local_sources || []).some((source) => source.refreshing)) recoveryTimer = setTimeout(load, 1500);
+      const pending = (payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) || (payload.local_sources || []).some((source) => source.refreshing);
+      if (pending && !document.hidden) {
+        // All recorded can be a multi-megabyte response. A brief recovery
+        // burst converges quickly, then returns to the ordinary15s cadence.
+        recoveryPolls++;
+        const delay = recoveryPolls <= 4 ? 1500 : recoveryPolls <= 8 ? 5000 : 15000;
+        recoveryTimer = setTimeout(() => load(), delay);
+      } else if (!pending) recoveryPolls = 0;
     } catch (error) {
       if (version !== requestVersion) return;
-      status.textContent = 'Usage telemetry unavailable: ' + error.message + (hasMeasurements ? ' · showing previous measurements' : '');
+      text(status, 'Usage telemetry unavailable: ' + error.message + (hasMeasurements ? ' · showing previous measurements' : ''));
       if (!hasMeasurements) { empty.hidden = false; empty.textContent = 'The usage projection could not be read. Retry with Apply.'; }
     } finally {
       clearTimeout(timeout);
-      if (version === requestVersion) activeRequest = null;
+      if (version === requestVersion) { activeRequest = null; activeExplicit = false; }
     }
   };
-  form.addEventListener('submit', (event) => { event.preventDefault(); load(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+      if (activeRequest && !activeExplicit) { activeRequest.abort(); activeRequest = null; requestVersion++; }
+    } else if (!activeRequest) load();
+  });
+  form.addEventListener('submit', (event) => { event.preventDefault(); load(true); });
   load();
   setInterval(() => { if (!document.hidden && !activeRequest && !recoveryTimer) load(); }, 15000);
 })();"#

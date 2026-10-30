@@ -179,3 +179,8 @@ watch-additional-files = ["public", "styles"]
 name = "usage_large_cache_http"
 path = "tests/usage_large_cache_http.rs"
 required-features = ["ssr"]
+
+[[test]]
+name = "usage_refresh_dom"
+path = "tests/usage_refresh_dom.rs"
+required-features = ["ssr"]
