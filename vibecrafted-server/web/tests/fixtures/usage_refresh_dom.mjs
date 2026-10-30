@@ -458,8 +458,12 @@ try {
         : "Baseline unexpectedly retained all refresh state",
     );
   const tick = () =>
-    evaluate(
-      "(async()=>{const t=[...__usageDom.timers.values()].find(i=>[1500,5000,15000].includes(i.delay));if(!t)throw Error('no recovery timer');clearTimeout(t.id);await t.fn()})()",
+    until(
+      () =>
+        evaluate(
+          "(async()=>{const t=[...__usageDom.timers.values()].find(i=>[1500,5000,15000].includes(i.delay));if(!t)return false;clearTimeout(t.id);await t.fn();return true})()",
+        ),
+      "recovery read finishes before advancing its next timer",
     );
   const timerDelay = () =>
     evaluate(
