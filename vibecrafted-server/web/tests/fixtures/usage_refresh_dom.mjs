@@ -376,7 +376,7 @@ try {
   check(
     "first_full_rows",
     await evaluate(
-      "document.querySelectorAll('#usage-runs-body tr').length===17223",
+      "document.querySelectorAll('#usage-runs-body tr').length===17223&&[...document.querySelectorAll('#usage-runs-body tr td:first-child > .control-run-open')].some(cell=>cell.textContent==='fixture-02000')",
     ),
   );
   await evaluate(
@@ -534,7 +534,7 @@ try {
   check(
     "replacement_accepts_new_vc_twin_without_double_counting",
     await evaluate(
-      "document.getElementById('usage-run-count').textContent==='17226'&&document.querySelector('[data-run-id=\"new-vc-twin\"]')&&!document.querySelector('[data-row-key=\"fixture-02000\"]')",
+      "document.getElementById('usage-run-count').textContent==='17226'&&document.querySelector('[data-run-id=\"new-vc-twin\"]')&&![...document.querySelectorAll('#usage-runs-body tr td:first-child > .control-run-open')].some(cell=>cell.textContent==='fixture-02000')",
     ),
   );
   state.phase = "deleted";
