@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,27 @@ ULIMIT_HELPER = (
     / "lib"
     / "ulimits.sh"
 )
+
+
+def test_wheel_deck_uses_its_own_packaged_ulimits(tmp_path: Path) -> None:
+    package = tmp_path / "site-packages" / "vibecrafted_core"
+    deck = package / "deck" / "vibecrafted"
+    helper = package / "runtime" / "scripts" / "lib" / "ulimits.sh"
+    deck.parent.mkdir(parents=True)
+    helper.parent.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "vibecrafted", deck)
+    shutil.copy2(ULIMIT_HELPER, helper)
+
+    result = subprocess.run(
+        ["bash", str(deck), "init", "--help"],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "selected launcher limit helper missing" not in result.stderr
+    assert "vibecrafted init" in result.stdout
 
 
 def test_launcher_ulimit_helper_raises_fsize_and_best_effort_nofile() -> None:

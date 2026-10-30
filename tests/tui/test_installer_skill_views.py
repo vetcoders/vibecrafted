@@ -3,7 +3,33 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
+
 from scripts import vetcoders_install as installer
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_test_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy writer tests must never inherit host runtime or XDG roots."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData/Local"))
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_INSTALL_LEASE_FD",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_canonical_store_is_the_package_owned_generation_path(
@@ -57,7 +83,7 @@ def test_standard_views_cover_runtimes_that_read_their_own_dirs() -> None:
     assert installer.STANDARD_VIEW_RUNTIMES == ["agents", "claude", "codex"]
 
 
-def test_prune_shadowed_skill_views_removes_managed_runtime_links(
+def test_prune_shadowed_skill_views_preserves_unproven_runtime_links(
     tmp_path: Path, monkeypatch
 ) -> None:
     home = tmp_path / "home"
@@ -79,10 +105,10 @@ def test_prune_shadowed_skill_views_removes_managed_runtime_links(
 
     removed = installer.prune_shadowed_skill_views(store, ["vc-scaffold"], ["agents"])
 
-    assert removed == [claude, codex]
+    assert removed == []
     assert canonical.is_symlink()
-    assert not claude.is_symlink()
-    assert not codex.is_symlink()
+    assert claude.is_symlink()
+    assert codex.is_symlink()
 
 
 def test_prune_shadowed_skill_views_preserves_explicit_runtime(
@@ -900,7 +926,9 @@ def test_a_real_file_under_a_skill_name_survives_an_install_pass(
     assert note.is_file()
     assert not note.is_symlink()
     assert note.read_text(encoding="utf-8") == "my own notes on research\n"
-    assert "Keeping real file" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "grok skill root" in output
+    assert "shadows there are not inspected and nothing is removed" in output
     assert (home / ".agents" / "skills" / "vc-research").is_symlink()
 
 
@@ -930,12 +958,8 @@ def test_a_proven_copy_in_an_active_runtime_is_quarantined_then_linked(
     )
 
 
-def test_a_stale_junction_view_is_replaced_without_rmtree(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A junction is `is_dir()` and not `is_symlink()`, so a stale one landed in
-    the writer's `shutil.rmtree` branch — which raises on a junction on Windows
-    and takes the install down with it."""
+def test_an_unproven_junction_view_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    """A junction is a pointer, not proof the legacy writer owns it."""
     home = tmp_path / "home"
     crafted_home = tmp_path / "crafted"
     store = tmp_path / "store"
@@ -964,17 +988,13 @@ def test_a_stale_junction_view_is_replaced_without_rmtree(
 
     installer.create_skill_view_symlink(store / "vc-x", stale)
 
-    assert stale.is_symlink()
-    assert stale.resolve() == (store / "vc-x").resolve()
+    assert not stale.is_symlink()
+    assert installer._is_owned_pointer(stale)
     assert (store / "vc-x" / "SKILL.md").is_file()
 
 
-def test_a_dangling_junction_is_removed_instead_of_crashing_the_writer(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """`exists()` follows a pointer, so one aimed at something gone reads as
-    absent — and `symlink_to` then raises FileExistsError on the entry that is
-    still very much there. A junction outliving its generation is the case."""
+def test_a_dangling_unproven_junction_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    """A dangling junction remains an entry and cannot be safely adopted."""
     home = tmp_path / "home"
     crafted_home = tmp_path / "crafted"
     store = tmp_path / "store"
@@ -999,8 +1019,147 @@ def test_a_dangling_junction_is_removed_instead_of_crashing_the_writer(
 
     installer.create_skill_view_symlink(store / "vc-x", stale)
 
-    assert stale.is_symlink()
-    assert stale.resolve() == (store / "vc-x").resolve()
+    assert not stale.is_symlink()
+    assert installer._is_owned_pointer(stale)
+
+
+def test_legacy_view_writer_preserves_foreign_symlink(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    _pin_home(monkeypatch, home, tmp_path / "crafted")
+    _store_skill(store, "vc-x", "canonical body\n")
+    view = home / ".claude/skills/vc-x"
+    view.parent.mkdir(parents=True)
+    foreign = tmp_path / "foreign-skill"
+    foreign.mkdir()
+    view.symlink_to(foreign)
+
+    installer.create_skill_view_symlink(store / "vc-x", view)
+
+    assert view.readlink() == foreign
+    assert "Keeping unproven skill view" in capsys.readouterr().out
+
+
+def test_legacy_view_writer_reconciles_receipted_release_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home, crafted = tmp_path / "home", tmp_path / "crafted"
+    _pin_home(monkeypatch, home, crafted)
+    paths = installer._runtime_install_paths()
+    runtime = paths["runtime_home"]
+    old = runtime / "releases/old/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    new = runtime / "releases/new/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    view = home / ".claude/skills/vc-x"
+    view.parent.mkdir(parents=True)
+    view.symlink_to(old)
+    current = runtime / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.symlink_to(runtime / "releases/new")
+    (runtime / ".installer-backups").mkdir()
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "version": "new",
+        "owned_symlinks": {str(view): str(old), str(current): str(current.resolve())},
+    }
+    installer._checkpoint_runtime_install_receipt(runtime, previous)
+    monkeypatch.setattr(installer, "_runtime_generation_payload_errors", lambda _: [])
+
+    installer.create_skill_view_symlink(new, view)
+
+    assert view.resolve() == new
+    updated = json.loads((runtime / installer.RUNTIME_INSTALL_RECEIPT).read_text())
+    assert updated["owned_symlinks"][str(view)] == str(new)
+
+
+@pytest.mark.parametrize("restore_original", [False, True])
+def test_receipted_release_pointer_retargeted_during_digest_is_preserved(
+    tmp_path: Path, monkeypatch, restore_original: bool
+) -> None:
+    home, crafted = tmp_path / "home", tmp_path / "crafted"
+    _pin_home(monkeypatch, home, crafted)
+    paths = installer._runtime_install_paths()
+    runtime = paths["runtime_home"]
+    old = runtime / "releases/old/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    new = runtime / "releases/new/vibecrafted-core/vibecrafted_core/skills/vc-x"
+    foreign = home / "foreign-skill"
+    for path in (old, new, foreign):
+        path.mkdir(parents=True)
+    view = home / ".claude/skills/vc-x"
+    view.parent.mkdir(parents=True)
+    view.symlink_to(old)
+    current = runtime / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.symlink_to(runtime / "releases/new")
+    (runtime / ".installer-backups").mkdir()
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "version": "new",
+        "owned_symlinks": {str(view): str(old), str(current): str(current.resolve())},
+    }
+    installer._checkpoint_runtime_install_receipt(runtime, previous)
+    receipt_path = runtime / installer.RUNTIME_INSTALL_RECEIPT
+    before = receipt_path.read_bytes()
+    monkeypatch.setattr(installer, "_runtime_generation_payload_errors", lambda _: [])
+    digest = installer._runtime_config_digest
+    injected = False
+
+    def retarget_after_digest(path: Path) -> str | None:
+        nonlocal injected
+        if path == view and not injected:
+            injected = True
+            if restore_original:
+                # ABA: capture a foreign digest, then restore the old pointer.
+                view.unlink()
+                view.symlink_to(foreign)
+                result = digest(path)
+                view.unlink()
+                view.symlink_to(old)
+                return result
+            result = digest(path)
+            view.unlink()
+            view.symlink_to(foreign)
+            return result
+        return digest(path)
+
+    monkeypatch.setattr(installer, "_runtime_config_digest", retarget_after_digest)
+    monkeypatch.setattr(
+        installer,
+        "_publish_runtime_config_transaction",
+        lambda *args, **kwargs: pytest.fail("foreign view reached transaction"),
+    )
+    assert not installer._reconcile_receipted_release_skill_view(view, new)
+    assert injected and view.is_symlink()
+    assert view.resolve() == (old if restore_original else foreign)
+    assert receipt_path.read_bytes() == before
+
+
+def test_legacy_view_writer_does_not_write_through_foreign_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home, crafted, store = tmp_path / "home", tmp_path / "crafted", tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted)
+    _store_skill(store, "vc-x", "shipped\n")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "VERIFICATION_RULE.md").write_text("shipped rule\n")
+    foreign = tmp_path / "notes"
+    foreign.mkdir()
+    (foreign / "VERIFICATION_RULE.md").write_text("private rule\n")
+    root = home / ".grok/skills"
+    root.parent.mkdir(parents=True)
+    root.symlink_to(foreign)
+
+    installer._write_skill_views(["grok"], store, source, ["vc-x"])
+
+    assert (foreign / "VERIFICATION_RULE.md").read_text() == "private rule\n"
+    assert not (foreign / "vc-x").exists()
+    assert "nothing is removed" in capsys.readouterr().out
 
 
 def test_a_real_file_under_a_skill_name_is_reported_not_ignored(
@@ -1194,10 +1353,8 @@ def test_a_proven_retired_copy_is_quarantined_then_removed(
     )
 
 
-def test_an_orphan_symlink_is_still_removed_as_a_pointer(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A view we wrote is ours to remove, and nothing is quarantined for it."""
+def test_an_unproven_orphan_symlink_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    """A target under the store alone does not prove who wrote the view."""
     home = tmp_path / "home"
     crafted_home = tmp_path / "crafted"
     store = tmp_path / "store"
@@ -1218,10 +1375,76 @@ def test_an_orphan_symlink_is_still_removed_as_a_pointer(
         interactive=False,
     )
 
-    assert removed == 1
-    assert not view.is_symlink()
+    assert removed == 0
+    assert view.is_symlink()
     assert (gone / "SKILL.md").is_file(), "the target is not ours to delete here"
     assert _quarantine_dirs(crafted_home) == []
+
+
+def test_orphan_prune_preserves_unproven_entries_and_local_pointer(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home, crafted, store = tmp_path / "home", tmp_path / "crafted", tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted)
+    _store_skill(store, "vc-x", "canonical body\n")
+    skills = home / ".junie/skills"
+    skills.mkdir(parents=True)
+    directory, file = skills / "vc-mine", skills / "vc-note"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("mine")
+    file.write_text("my notes")
+    foreign, local, junction = (
+        skills / "vc-link",
+        skills / "vc-local",
+        skills / "vc-junction",
+    )
+    foreign.symlink_to(tmp_path / "foreign-target")
+    local_target = crafted / "local-skills/vc-local/versions/one/tree/skills/vc-local"
+    local_target.mkdir(parents=True)
+    local.symlink_to(local_target)
+    junction.mkdir()
+    real_is_junction = getattr(Path, "is_junction", None)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: (
+            self == junction or bool(real_is_junction and real_is_junction(self))
+        ),
+        raising=False,
+    )
+    entries = [("junie", p) for p in (directory, file, foreign, local, junction)]
+    assert (
+        installer.prune_orphaned_skills(
+            store, ["junie"], {"vc-x"}, orphaned_entries=entries, interactive=False
+        )
+        == 0
+    )
+    assert (directory / "SKILL.md").read_text() == "mine"
+    assert file.read_text() == "my notes"
+    assert foreign.is_symlink() and local.is_symlink() and junction.is_dir()
+    assert "Keeping junie/" in capsys.readouterr().out
+
+
+def test_legacy_prune_preserves_unproven_skill_entries(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home, crafted, store = tmp_path / "home", tmp_path / "crafted", tmp_path / "store"
+    _pin_home(monkeypatch, home, crafted)
+    skills = home / ".junie/skills"
+    skills.mkdir(parents=True)
+    directory, file, view = (
+        skills / "vetcoders-mine",
+        skills / "vetcoders-note",
+        skills / "vetcoders-link",
+    )
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("mine")
+    file.write_text("notes")
+    view.symlink_to(tmp_path / "foreign")
+    assert installer.prune_legacy_skills(store, ["junie"], interactive=False) == 0
+    assert (directory / "SKILL.md").read_text() == "mine"
+    assert file.read_text() == "notes" and view.is_symlink()
+    assert "Keeping junie/" in capsys.readouterr().out
 
 
 def test_an_orphan_reached_through_a_symlink_is_refused(

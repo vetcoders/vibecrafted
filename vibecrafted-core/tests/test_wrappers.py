@@ -16,6 +16,15 @@ def test_deck_path_resolves_packaged_command_deck() -> None:
     assert deck.is_file()
 
 
+def test_agents_entrypoint_uses_the_agents_deck_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "call", lambda argv: calls.append(argv) or 0)
+    assert wrappers.agents_main(["--help"]) == 0
+    assert calls == [[str(wrappers.deck_path()), "agents", "--help"]]
+
+
 def test_run_env_uses_current_interpreter_and_packaged_runtime() -> None:
     env = wrappers._env_for_run("impl-test", "impl")
 

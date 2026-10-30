@@ -987,6 +987,8 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
             )
         if relative.startswith("bin/") or relative == "scripts/vibecrafted":
             path.chmod(0o755)
+    if hasattr(os, "setxattr"):
+        os.setxattr(runtime / "bin/vibecrafted", "user.fixture", b"metadata")
     (runtime / ".DS_Store").write_bytes(b"mutable Finder metadata")
     (runtime / "python/.DS_Store").parent.mkdir(parents=True)
     (runtime / "python/.DS_Store").write_bytes(b"nested Finder metadata")
@@ -1031,7 +1033,12 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     with tarfile.open(output, "r:gz") as archive:
-        names = {member.name for member in archive.getmembers()}
+        members = archive.getmembers()
+        assert all(
+            not any("xattr" in key.lower() for key in member.pax_headers)
+            for member in members
+        )
+        names = {member.name for member in members}
         assert all(
             name == "VibecraftedRuntime" or name.startswith("VibecraftedRuntime/")
             for name in names
@@ -1427,7 +1434,7 @@ def test_signed_carrier_rejects_selected_platform_mismatch_before_installer(
     )
 
     assert result.returncode != 0
-    assert "internal provenance verification failed" in result.stderr
+    assert "incompatible with host" in result.stderr
     assert not capture.exists()
 
 
@@ -1451,7 +1458,7 @@ def test_signed_carrier_rejects_selected_architecture_mismatch_before_installer(
     )
 
     assert result.returncode != 0
-    assert "internal provenance verification failed" in result.stderr
+    assert "incompatible with host" in result.stderr
     assert not capture.exists()
 
 
@@ -2330,3 +2337,82 @@ def test_builder_repo_producers_isolate_hostile_git_routing(
         VERSION if producer == "preflight" else "4.3.1"
     )
     assert not (repo / "foreign-dirty").exists()
+
+
+def test_signed_foreign_pack_is_rejected_before_its_python(tmp_path: Path) -> None:
+    payload = tmp_path / "source/VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    archive, public_key = _sealed_archive(tmp_path, payload)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text(
+        '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo aarch64 ;; esac\n',
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(INSTALLER), "--pack", str(archive)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+    assert result.returncode != 0
+    assert "incompatible with host linux-arm64" in result.stderr
+    assert not capture.exists()
+
+
+def test_gnu_tar_pax_diagnostics_keep_archive_errors(tmp_path: Path) -> None:
+    gtar = shutil.which("gtar") or shutil.which("tar")
+    assert gtar is not None
+    version = subprocess.run(
+        [gtar, "--version"], text=True, capture_output=True, check=False
+    )
+    if "GNU tar" not in version.stdout:
+        pytest.skip("GNU tar is not installed")
+    fixture = tmp_path / "fixture.tar.gz"
+    with tarfile.open(fixture, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+        info = tarfile.TarInfo("root/file")
+        info.size = 3
+        info.pax_headers = {"LIBARCHIVE.xattr.com.apple.provenance": "fixture"}
+        import io
+
+        archive.addfile(info, io.BytesIO(b"abc"))
+    broken = tmp_path / "broken.tar.gz"
+    broken.write_bytes(b"not gzip")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "tar").symlink_to(gtar)
+    source = INSTALLER.read_text(encoding="utf-8")
+    start = source.index("runtime_pack_tar() {")
+    end = source.index("\n}", start) + 2
+    script = (
+        source[start:end]
+        + """
+set -e
+runtime_pack_tar -tzf "$1" >/dev/null
+runtime_pack_tar -tzf "$1" >/dev/null
+runtime_pack_tar -tvzf "$1" >/dev/null
+runtime_pack_tar -xpzf "$1" -C "$3"
+if runtime_pack_tar -tzf "$2" >/dev/null; then exit 2; fi
+"""
+    )
+    result = subprocess.run(
+        ["bash", "-c", script, "witness", str(fixture), str(broken), str(tmp_path)],
+        env={**os.environ, "PATH": f"{bindir}:/usr/bin:/bin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "unknown extended header" not in result.stderr.lower()
+    assert "error" in result.stderr.lower()
+    assert (tmp_path / "root/file").read_bytes() == b"abc"

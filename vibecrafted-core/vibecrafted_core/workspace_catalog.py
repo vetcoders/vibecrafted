@@ -1078,6 +1078,7 @@ def resolve_project_destination(
     occupied = set(occupied_names) | live | {"vc-host"}
     owned: dict[str, WorkspaceSessionRecord] = {}
     incarnation_bound: set[str] = set()
+    owned_attachments: set[str] = set()
     unowned: set[str] = set()
     for name in sorted(live):
         if name == "vc-host":
@@ -1093,6 +1094,7 @@ def resolve_project_destination(
             == resolved
         ):
             owned[name] = seat[0]
+            owned_attachments.add(seat[2].attachment_id)
             if seat[2].session_incarnation is not None:
                 incarnation_bound.add(name)
     current = str(
@@ -1131,6 +1133,32 @@ def resolve_project_destination(
         and session.session_id == environ.get(ENV_VIBECRAFTED_SESSION_ID)
         and session.workspace_instance_id == environ.get(ENV_WORKSPACE_INSTANCE_ID)
     ]
+    # A second live seat with unavailable incarnation metadata may be a
+    # renamed project seat. Never call it absent merely because another seat
+    # has already been verified.
+    if owned:
+        workspace_id = next(iter(owned.values())).workspace_id
+        historical = _workspace_return_candidates(workspace_id)
+        remaining = [
+            attachment
+            for _, attachment in historical
+            if attachment.socket_dir == socket_dir
+            and attachment.attachment_id not in owned_attachments
+        ]
+        if remaining and unowned:
+            observed = [
+                _frame_session_incarnation(name, socket_dir) for name in sorted(unowned)
+            ]
+            saved = [attachment.session_incarnation for attachment in remaining]
+            if (
+                None in observed
+                or None in saved
+                or len(set(observed)) != len(observed)
+                or bool(set(observed) & set(saved))
+            ):
+                raise WorkspaceCatalogError(
+                    "Saved Frame bindings have unknown availability; open the existing session on the Frame rail."
+                )
     if len(preferred) > 1:
         raise WorkspaceCatalogError(
             "multiple live Frame destinations belong to this project"
@@ -1153,11 +1181,33 @@ def resolve_project_destination(
         ]
         if len(records) > 1:
             raise WorkspaceCatalogError("multiple active workspaces share this root")
-        recent = (
-            workspace_return_attachment(records[0].workspace_id, env=environ)
-            if records
-            else None
+        candidates = (
+            _workspace_return_candidates(records[0].workspace_id) if records else []
         )
+        for _, attachment in candidates:
+            if attachment.socket_dir != socket_dir:
+                raise WorkspaceCatalogError(
+                    "project Frame destination belongs to another socket namespace"
+                )
+        if len(candidates) > 1:
+            # Every live unowned seat must be distinguishable from every saved
+            # incarnation before historical ambiguity can be treated as absence.
+            observed = [
+                _frame_session_incarnation(name, socket_dir) for name in sorted(unowned)
+            ]
+            saved = [attachment.session_incarnation for _, attachment in candidates]
+            if unowned and (
+                None in observed
+                or None in saved
+                or len(set(observed)) != len(observed)
+                or bool(set(observed) & set(saved))
+            ):
+                raise WorkspaceCatalogError(
+                    "Saved Frame bindings have unknown availability; open the existing session on the Frame rail."
+                )
+            recent = None
+        else:
+            recent = candidates[0][1] if candidates else None
         if records and recent is None and requested in unowned:
             # An occupied requested name may be this registered project's
             # original unbound seat. A hash suffix would silently duplicate
@@ -1954,21 +2004,15 @@ def runtime_session_owner_root(
     return next(iter(owners), None)
 
 
-def workspace_return_attachment(
-    workspace_id: str, *, env: Mapping[str, str] | None = None
-) -> RuntimeSessionAttachment | None:
-    """Read the exact WES seat for a project without materializing new identity.
-
-    A hosting instance is preferred only with its complete identity binding.
-    Ambiguous physical seats require an explicit choice on the Frame rail.
-    This is attachment evidence; callers still probe the physical runtime.
-    """
+def _workspace_return_candidates(
+    workspace_id: str,
+) -> list[tuple[WorkspaceInstance, RuntimeSessionAttachment]]:
+    """Read eligible historical bindings without choosing a physical seat."""
     record = show_workspace(workspace_id)
     if record.status != WORKSPACE_STATUS_ACTIVE:
         raise WorkspaceCatalogError(
             "Project is buried — recover it explicitly before returning"
         )
-    environ = os.environ if env is None else env
     candidates: list[tuple[WorkspaceInstance, RuntimeSessionAttachment]] = []
     for instance in list_instances(workspace_id=record.workspace_id):
         if (
@@ -2004,6 +2048,21 @@ def workspace_return_attachment(
         ):
             raise WorkspaceCatalogError("Workspace session ownership is inconsistent")
         candidates.extend((instance, attachment) for attachment in attachments)
+    return candidates
+
+
+def workspace_return_attachment(
+    workspace_id: str, *, env: Mapping[str, str] | None = None
+) -> RuntimeSessionAttachment | None:
+    """Read the exact WES seat for a project without materializing new identity.
+
+    A hosting instance is preferred only with its complete identity binding.
+    Ambiguous physical seats require an explicit choice on the Frame rail.
+    This is attachment evidence; callers still probe the physical runtime.
+    """
+    environ = os.environ if env is None else env
+    record = show_workspace(workspace_id)
+    candidates = _workspace_return_candidates(workspace_id)
     preferred = [
         attachment
         for instance, attachment in candidates

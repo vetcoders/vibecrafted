@@ -696,10 +696,16 @@ class DeckScene:
             / "operator.kdl",
             "layout {\n}\n",
         )
+        shutil.copyfile(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl",
+            self.home / ".config/vibecrafted/vc-frame/config.kdl",
+        )
         self.owner = _root_aware_owner_cli(tmp_path / "owner-cli")
         self.frame_log = tmp_path / "frame.log"
         self.live_file = tmp_path / "live-sessions.txt"
-        self.live_file.write_text("".join(f"{n}\n" for n in live), encoding="utf-8")
+        self.live_file.write_text(
+            "".join(f"{n}\n" for n in ["vc-host", *live]), encoding="utf-8"
+        )
         self.clients_file: Path | None = None
         if clients is not None:
             self.clients_file = tmp_path / "attached-clients.txt"
@@ -1090,9 +1096,8 @@ def test_fork_still_refuses_what_it_does_not_support(
     """No silent acceptance, before any admission or terminal: a trailing bare
     `--`; a prompt riding into the interactive fork (591b6dde: input selects the
     headless task fork, an incompatible presentation refuses); and a worktree
-    on the living-tree bare fork. 36614036 made `--worktree [true|false]` a
-    declared fork execution selector, so the old "fork has no --worktree" is
-    gone -- the launch-spec owner (5b25a6cd) refuses the conflict instead."""
+    explicitly paired with the contradictory living-tree execution selector.
+    An unqualified --worktree is a valid isolation request."""
     scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
     context = {**STALE, **CURRENT_CONTEXT}
     dashdash = scene.fork("codex", "--session", "current", "--", extra_env=context)
@@ -1107,7 +1112,13 @@ def test_fork_still_refuses_what_it_does_not_support(
         extra_env=context,
     )
     worktree = scene.fork(
-        "codex", "--session", "current", "--worktree", extra_env=context
+        "codex",
+        "--session",
+        "current",
+        "--execution-runtime",
+        "living-tree",
+        "--worktree",
+        extra_env=context,
     )
 
     assert dashdash.returncode == 2 and "Unknown fork argument: --" in dashdash.stderr

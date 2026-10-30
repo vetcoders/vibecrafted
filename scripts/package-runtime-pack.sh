@@ -179,7 +179,7 @@ PYTHONPATH="$root/vibecrafted-core" "$root/bin/python3" \
 
 mkdir -p "$(dirname "$output")"
 candidate="$work/$(basename "$output")"
-COPYFILE_DISABLE=1 tar \
+COPYFILE_DISABLE=1 tar --no-xattrs \
   --exclude='.DS_Store' --exclude='*/.DS_Store' \
   -czf "$candidate" -C "$work" VibecraftedRuntime
 mv "$candidate" "$output"

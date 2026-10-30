@@ -8,6 +8,12 @@ _vc_source_launcher_ulimits() {
   local owner_root candidate
   owner_root="$(_script_owner_root)" || return $?
   candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"
+  # A wheel's deck is directly under the installed package, without the
+  # source carrier's vibecrafted-core directory. Select only this deck's own
+  # sibling resource, never an inherited or unrelated runtime root.
+  if [[ "${BASH_SOURCE[0]}" -ef "$owner_root/deck/vibecrafted" ]]; then
+    candidate="$owner_root/runtime/scripts/lib/ulimits.sh"
+  fi
   if [[ ! -f "$candidate" || ! -r "$candidate" || -L "$candidate" ]]; then
     printf 'vibecrafted: selected launcher limit helper missing: %s\n' "$candidate" >&2
     return 1
@@ -7082,7 +7088,7 @@ main() {
     telemetry) cmd_telemetry "$@" ;;
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
-    claims|message|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
+    claims|message|pr-closure|relocate|resume-session|usage) cmd_core_cli "$cmd" "$@" ;;
     reinstall) cmd_core_cli reinstall "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;

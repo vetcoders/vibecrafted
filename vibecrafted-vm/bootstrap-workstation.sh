@@ -95,15 +95,45 @@ else
 fi
 
 # ── Stage 3: Node 22 (official static) + corepack ───────────────────────────
+# Security floors from nodejs.org/en/blog/vulnerability/october-2026-security-releases.
+# A newer major alone does not prove that CVE-2026-111497 is fixed.
+node_security_fixed() {
+  local version="${1#v}" major minor patch floor_minor floor_patch
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  major=$((10#${BASH_REMATCH[1]}))
+  minor=$((10#${BASH_REMATCH[2]}))
+  patch=$((10#${BASH_REMATCH[3]}))
+  case "$major" in
+    22) floor_minor=23; floor_patch=4 ;;
+    24) floor_minor=22; floor_patch=1 ;;
+    26) floor_minor=12; floor_patch=1 ;;
+    *) return 1 ;;
+  esac
+  (( minor > floor_minor || (minor == floor_minor && patch >= floor_patch) ))
+}
+
 log "Stage 3/8: Node.js 22"
-if command -v node >/dev/null 2>&1 && node --version | grep -qE '^v(2[2-9]|[3-9][0-9])'; then
+if command -v node >/dev/null 2>&1 && node_security_fixed "$(node --version)"; then
   ok "node present: $(node --version)"
 else
-  NODE_VERSION="${NODE_VERSION:-22.19.0}"
+  NODE_VERSION="${NODE_VERSION:-22.23.4}"
+  if ! node_security_fixed "$NODE_VERSION"; then
+    err "NODE_VERSION must select a supported release containing the October 2026 security fixes (22.23.4, 24.22.1, 26.12.1 or later in that line)"
+    exit 1
+  fi
   arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
   case "$arch" in amd64|x86_64) na=x64 ;; arm64|aarch64) na=arm64 ;; *) na="" ;; esac
   if [ -n "$na" ] && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${na}.tar.xz" -o /tmp/node.tar.xz 2>/dev/null; then
-    $SUDO tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm -f /tmp/node.tar.xz
+    if ! $SUDO tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; then
+      err "node extraction failed"
+      exit 1
+    fi
+    rm -f /tmp/node.tar.xz
+    hash -r
+    if ! node_security_fixed "$(node --version 2>/dev/null)"; then
+      err "node on PATH is still below the security floor; remove the older shadowing installation and retry"
+      exit 1
+    fi
     ok "node installed: $(node --version 2>&1)"
   else warn "node download failed for arch=$arch"; fi
 fi

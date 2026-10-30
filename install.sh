@@ -20,6 +20,9 @@ the bootstrap installs that local copy under the same carrier preflight as
 `--archive-file`, without a channel lookup; `--ref`, `--archive-url` or
 `--archive-file` select another source explicitly.
 Non-interactive runs without `--gui` bypass the browser and call the compact installer directly.
+CLI installs show progress and a final result. Detailed diagnostics append to
+${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/install.log (private, credentials redacted).
+Use VERBOSE=1 for additional diagnostics on the terminal.
 
 Examples:
   curl -fsSL https://vibecrafted.io/install.sh | bash
@@ -34,20 +37,364 @@ Examples:
 EOF_USAGE
 }
 
-# Every refusal must reach the operator. `set -euo pipefail` alone turned a
-# failed lookup into a bare RC=1 after "Fetching vibecrafted…" (Linux container
-# test, 2026-09-29). Error text goes to stderr and — unless both streams are the
-# same terminal — to stdout as well, so `curl | bash > log` and wrappers that
-# eat stderr (HAK-28/HAK-72 class) still carry the reason.
+# Every refusal must name its cause. The CLI view emits it once on stderr and
+# points to the private durable log; redirected stdout remains readable progress.
 bootstrap_error_reported=0
 bootstrap_handoff=0
+bootstrap_python_usable=0
 tmpdir=""
+installer_output=0
+installer_log=""
+installer_log_ready=0
+installer_stderr_reader=""
+installer_phase="preparing the installation"
+installer_failure=""
+installer_attempt=""
+installer_output_dir=""
+installer_capture_index=0
+installer_stdout_fd=""
+installer_stderr_fd=""
+installer_log_fd=""
+installer_phase_number=""
+installer_phase_settled=0
+installer_progress_pid=""
+installer_progress_fd=""
+installer_progress_sequence=0
+installer_progress_owner_depth="${BASH_SUBSHELL:-0}"
+
+# The public bootstrap runs before a trusted Python exists on cold macOS.
+# Keep its diagnostic boundary self-contained; never put credentials in the
+# durable log or echo an unfiltered child diagnostic onto the terminal.
+installer_redact() {
+  awk -v prefix="${installer_attempt:-}" -v display="${1:-log}" \
+    -v console="/dev/fd/${installer_stdout_fd:-1}" '
+  function literal(s, needle, replacement, p, out) {
+    if (needle == "") return s
+    out = ""
+    while ((p = index(s, needle)) > 0) {
+      out = out substr(s, 1, p - 1) replacement
+      s = substr(s, p + length(needle))
+    }
+    return out s
+  }
+  function values(s, p, n, tail, out, replacement, q) {
+    out = ""
+    while (match(tolower(s), /([a-z_][a-z0-9_-]*)?(token|secret|password|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key)[a-z0-9_-]*[\\"]*[ \t]*[:=][ \t]*/)) {
+      p = RSTART + RLENGTH - 1
+      tail = substr(s, p + 1)
+      q = substr(tail, 1, 1)
+      if (q == "\"" && match(tail, /^"([^"\\]|\\.)*"/)) n = RLENGTH
+      else if (match(tolower(tail), /^(bearer|basic)[ \t]+[^[:space:],;}]+/)) n = RLENGTH
+      else if (match(tail, /^[^[:space:],;}]+/)) n = RLENGTH
+      else n = 0
+      replacement = (q == "\"" || substr(s, p, 1) == ":") ? "\"[redacted]\"" : "[redacted]"
+      out = out substr(s, 1, p) replacement
+      s = substr(tail, n + 1)
+      if (n == 0) return out s
+    }
+    return out s
+  }
+  function urls(s, out, before, scheme) {
+    out = ""
+    while (match(s, /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/[:space:]@]+@/)) {
+      before = substr(s, RSTART, RLENGTH)
+      scheme = substr(before, 1, index(before, "://") + 2)
+      out = out substr(s, 1, RSTART - 1) scheme "[redacted]@"
+      s = substr(s, RSTART + RLENGTH)
+    }
+    return out s
+  }
+  function flags(s, out, p, tail, n) {
+    out = ""
+    while (match(tolower(s), /--(token|secret|password|api[_-]?key|authorization|credential)[ \t]+/)) {
+      p = RSTART + RLENGTH - 1
+      tail = substr(s, p + 1)
+      if (substr(tail, 1, 1) == "\"" && match(tail, /^"([^"\\]|\\.)*"/)) n = RLENGTH
+      else if (match(tail, /^[^[:space:]]+/)) n = RLENGTH
+      else n = 0
+      out = out substr(s, 1, p) "[redacted]"
+      s = substr(tail, n + 1)
+      if (n == 0) return out s
+    }
+    return out s
+  }
+  BEGIN {
+    esc = sprintf("%c", 27)
+    for (name in ENVIRON)
+      if (tolower(name) ~ /(^|[_-])(token|secret|password|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key)([_-]|$)/ && ENVIRON[name] != "")
+        secrets[++count] = ENVIRON[name]
+  }
+  {
+    line = $0
+    gsub(esc "\\[[0-?]*[ -/]*[@-~]", "", line)
+    gsub(/[[:cntrl:]]/, "", line)
+    for (i = 1; i <= count; i++) line = literal(line, secrets[i], "[redacted]")
+    if (line ~ /-----BEGIN.*PRIVATE KEY-----/) private_key = 1
+    if (private_key) {
+      if (line ~ /-----END.*PRIVATE KEY-----/) private_key = 0
+      line = "[redacted private key]"
+    }
+    line = urls(line)
+    line = flags(values(line))
+    if (display == "display") print line
+    else {
+      print "[" prefix "] " line
+      if (display == "verbose") print line > console
+    }
+    fflush()
+  }'
+}
+
+installer_log_line() {
+  [[ "$installer_log_ready" == "1" ]] || return 0
+  if [[ -e "/dev/fd/$installer_log_fd" ]]; then
+    printf '%s\n' "$*" | installer_redact >&"$installer_log_fd" || true
+  else
+    # Captured shell functions run with saved console/log descriptors closed,
+    # just like external children. Their diagnostics use the capture stream.
+    printf '%s\n' "$*"
+  fi
+}
+
+installer_line() {
+  local resume=0
+  if [[ -n "$installer_progress_pid" && "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" ]]; then
+    installer_progress_stop "·"
+    resume=1
+  fi
+  printf '%s\n' "$*" | installer_redact display
+  [[ ! -e "/dev/fd/$installer_log_fd" ]] || installer_log_line "$*"
+  if [[ "$resume" == "1" ]]; then installer_progress_start || true; fi
+}
+
+# Both ends open before the presenter forks; only descriptors survive unlink.
+# shellcheck disable=SC2094
+installer_progress_start() {
+  local pipe reader
+  [[ "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" \
+     && "$installer_output" == "1" && "${VERBOSE:-0}" != "1" \
+     && -n "$installer_phase_number" && "$installer_phase_number" != "3" \
+     && -t "$installer_stdout_fd" ]] || return 1
+  command -v mkfifo >/dev/null 2>&1 || return 1
+  installer_progress_sequence=$((installer_progress_sequence + 1))
+  pipe="$installer_output_dir/progress-$installer_progress_sequence.pipe"
+  installer_progress_fd="$(installer_free_fd)" || return 1
+  if ! mkfifo "$pipe"; then installer_progress_fd=""; return 1; fi
+  if ! eval "exec $installer_progress_fd<>\"\$pipe\""; then
+    rm -f "$pipe"
+    installer_progress_fd=""
+    return 1
+  fi
+  # Open the reader while our RW descriptor is still held. Opening it only
+  # after fork can block forever if an immediate stop closes the writer first.
+  reader="$(installer_free_fd)" || reader=""
+  if [[ -z "$reader" ]] || ! eval "exec $reader<\"\$pipe\""; then
+    eval "exec $installer_progress_fd>&-"
+    rm -f "$pipe"
+    installer_progress_fd=""
+    return 1
+  fi
+  (
+    # The reader never retains its writer. Stop/EOF needs no filesystem write
+    # or signal; the script stdin stays free for curl|bash and consent.
+    eval "exec $installer_progress_fd>&- $reader<&-"
+    frames=(⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ ⠋)
+    index=0
+    while kill -0 "$$" 2>/dev/null; do
+      message=waiting
+      if IFS= read -r -t 1 message; then break; else read_status=$?; fi
+      # Bash 3.2 returns1 on timeout without assigning; EOF clears the value.
+      # Newer Bash returns>128 on timeout. Both stop promptly on EOF.
+      [[ "$read_status" -gt 128 || "$message" == "waiting" ]] || break
+      printf '\r  %s [%s/3] %s…' "${frames[index]}" "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || break
+      index=$(((index + 1) % ${#frames[@]}))
+    done
+  ) <&"$reader" &
+  installer_progress_pid="$!"
+  eval "exec $reader<&-"
+  rm -f "$pipe"
+  printf '\r  ⠋ [%s/3] %s…' "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || true
+}
+
+installer_progress_stop() {
+  [[ "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" \
+     && -n "$installer_progress_pid" ]] || return 0
+  printf '\n' >&"$installer_progress_fd" || true
+  eval "exec $installer_progress_fd>&-"
+  wait "$installer_progress_pid" || true
+  installer_progress_pid=""
+  installer_progress_fd=""
+  printf '\r  %s [%s/3] %s  \n' "$1" "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || true
+}
+
+installer_phase_finish() {
+  [[ -n "$installer_phase_number" && "$installer_phase_settled" == "0" ]] || return 0
+  if [[ -n "$installer_progress_pid" ]]; then
+    installer_progress_stop "$1"
+  else
+    installer_line "  $1 [$installer_phase_number/3] $installer_phase"
+  fi
+  installer_phase_settled=1
+  installer_log_line "phase $installer_phase_number $1: $installer_phase"
+}
+
+installer_stage() {
+  [[ "$installer_phase" != "$2" ]] || return 0
+  installer_phase_finish "✓"
+  installer_phase_number="$1"
+  installer_phase_settled=0
+  installer_phase="$2"
+  if [[ "$1" == "3" ]]; then
+    installer_phase_finish "✓"
+  elif installer_progress_start; then
+    installer_log_line "  [$1/3] $2…"
+  else
+    installer_line "  · [$1/3] $2…"
+  fi
+}
+
+installer_free_fd() {
+  local fd
+  for ((fd=20; fd<256; fd++)); do
+    if [[ ! -e "/dev/fd/$fd" ]]; then printf '%s\n' "$fd"; return 0; fi
+  done
+  return 1
+}
+
+installer_collect() {
+  local reader="$1" size
+  size="$(stat -Lc %s "/dev/fd/$reader" 2>/dev/null || stat -Lf %z "/dev/fd/$reader")" || return 1
+  [[ "$size" != "0" ]] || return 0
+  # A snapshot bound prevents a detached writer from extending this read forever.
+  head -c "$size" <&"$reader" | installer_redact "${2:-log}" >&"$installer_log_fd"
+}
+
+installer_capture() {
+  local status=0 mode="log" spool writer reader
+  if [[ "$installer_output" != "1" ]]; then
+    "$@"
+    return $?
+  fi
+  [[ "${VERBOSE:-0}" != "1" ]] || mode="verbose"
+  installer_capture_index=$((installer_capture_index + 1))
+  spool="$installer_output_dir/command-$installer_capture_index"
+  (umask 077; : >"$spool") || die "Cannot prepare private installer diagnostics"
+  writer="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  # Only internally selected numeric descriptors enter eval; paths/argv remain
+  # quoted variable expansions. Bash 3.2 has no exec {fd} allocation syntax.
+  eval "exec $writer>>\"\$spool\""
+  reader="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $reader<\"\$spool\""
+  rm -f "$spool"
+  # Permanent exec redirections in this child shell avoid Bash 3.2 saving
+  # temporary function descriptors that descendants could inherit.
+  (
+    exec 1>&"$writer" 2>&1
+    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&- $installer_stderr_reader>&- $writer>&- $reader>&- ${installer_progress_fd:+$installer_progress_fd>&-}"
+    "$@"
+  ) || status=$?
+  eval "exec $writer>&-"
+  if ! installer_collect "$reader" "$mode"; then
+    installer_failure="Cannot preserve installer diagnostics; completed steps may remain"
+    [[ "$status" != "0" ]] || status=1
+  fi
+  eval "exec $reader<&-"
+  return "$status"
+}
+
+installer_output_start() {
+  local log_home="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}" links tool
+  # Interactive GUI/TUI and explicit diagnostic make targets retain their own
+  # transport. The common public Mac/non-TTY install gets this presentation.
+  [[ "$use_gui" != "1" ]] || return 0
+  case "$target" in vibecrafted|install|install-auto|install-source) ;; *) return 0 ;; esac
+  if [[ "$target" == "vibecrafted" ]] && is_interactive_session \
+      && [[ "$PLATFORM_OS" != "macos" || "$channel_mode" != "1" ]]; then return 0; fi
+  for tool in awk mkdir stat chmod mktemp head date rm; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      printf 'Installer details unavailable: missing %s; prerequisite checks will continue.\n' "$tool" >&2
+      return 0
+    fi
+  done
+  [[ ! -L "$log_home" ]] || die "Installer log directory is a symlink: $log_home"
+  (umask 077; mkdir -p "$log_home") || die "Cannot create installer log directory: $log_home"
+  [[ -d "$log_home" && -O "$log_home" ]] || die "Installer log directory is not owned by this user: $log_home"
+  installer_log="$log_home/install.log"
+  if [[ ! -e "$installer_log" && ! -L "$installer_log" ]]; then
+    (umask 077; set -C; : > "$installer_log") || die "Cannot create private installer log: $installer_log"
+  fi
+  [[ -f "$installer_log" && ! -L "$installer_log" && -O "$installer_log" ]] \
+    || die "Installer log is not an owned regular file: $installer_log"
+  links="$(stat -c %h "$installer_log" 2>/dev/null || stat -f %l "$installer_log")"
+  [[ "$links" == "1" ]] || die "Installer log has multiple hard links: $installer_log"
+  chmod 600 "$installer_log" || die "Cannot make installer log private: $installer_log"
+  installer_stdout_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stdout_fd>&1"
+  installer_stderr_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stderr_fd>&2"
+  installer_log_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_log_fd>>\"\$installer_log\""
+  installer_output_dir="$(umask 077; mktemp -d "$log_home/.install-output.XXXXXX")" \
+    || die "Cannot prepare private installer diagnostics"
+  (umask 077; : >"$installer_output_dir/stderr") || die "Cannot prepare private installer diagnostics"
+  installer_stderr_reader="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stderr_reader<\"\$installer_output_dir/stderr\""
+  installer_log_ready=1
+  installer_output=1
+  installer_attempt="install-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  export VIBECRAFTED_INSTALL_LOG_CAPTURED=1
+  installer_log_line "begin · $(uname -s) $(uname -m)"
+  # Capture bootstrap stderr too: App mounting happens before candidate handoff.
+  exec 2>>"$installer_output_dir/stderr"
+  rm -f "$installer_output_dir/stderr"
+  installer_line "Vibecrafted installer"
+  installer_line "  Platform: $(uname -s) $(uname -m)"
+  installer_line "  Details: $installer_log"
+  installer_stage 1 "Download and verify the release"
+}
+
+# Called by the EXIT trap through on_bootstrap_exit.
+# shellcheck disable=SC2317,SC2329
+installer_last_diagnostic() {
+  # A refusal can occur before the interpreter is admitted. Diagnostic output
+  # must never execute bytes rejected by the canonical bootstrap checks.
+  [[ "$bootstrap_python_usable" == "1" ]] || return 0
+  "$bootstrap_python" -I -S - "$installer_log" "$installer_attempt" <<'PY_INSTALL_DIAGNOSTIC'
+import json
+import re
+import sys
+
+prefix = "[" + sys.argv[2] + "] "
+last = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        if not line.startswith(prefix):
+            continue
+        text = line[len(prefix):].strip()
+        if text.startswith("{"):
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and str(record.get("schema", "")).startswith("vibecrafted."):
+                reason = record.get("reason")
+                if isinstance(reason, str) and reason:
+                    last = reason
+        elif re.search(r"error|fail|refus|missing|cannot|permission|mismatch|invalid|unsafe|integrity|unavailable|denied|corrupt|ambiguous", text, re.I):
+            last = text
+if last:
+    print(last[:300])
+PY_INSTALL_DIAGNOSTIC
+}
 
 report_error() {
-  printf '%s\n' "$@" >&2
-  if ! [[ -t 1 && -t 2 ]]; then
-    printf '%s\n' "$@"
+  installer_failure="$*"
+  if [[ "$installer_output" == "1" ]]; then
+    installer_log_line "$*"
+    bootstrap_error_reported=1
+    return 0
   fi
+  printf '%s\n' "$@" >&2
   bootstrap_error_reported=1
 }
 
@@ -63,28 +410,90 @@ die() {
 # shellcheck disable=SC2317,SC2329
 on_bootstrap_exit() {
   local status=$?
+  local detail="" cause=""
+  if [[ "$installer_output" != "1" && -n "$tmpdir" ]]; then
+    rm -rf -- "$tmpdir" || true
+  fi
+  if [[ "$installer_output" == "1" ]]; then
+    exec 2>&"$installer_stderr_fd"
+    if ! installer_collect "$installer_stderr_reader"; then
+      installer_failure="Cannot preserve installer diagnostics; completed steps may remain"
+      [[ "$status" != "0" ]] || status=1
+    fi
+    eval "exec $installer_stderr_reader<&-"
+    if [[ "$status" != "0" ]]; then
+      installer_phase_finish "✗"
+    elif [[ "$bootstrap_handoff" != "1" ]]; then
+      installer_progress_stop "·"
+    fi
+    if [[ "$status" == "0" && "$bootstrap_handoff" == "1" ]]; then
+      installer_stage 3 "Complete"
+      installer_line "  ✓ Installed Vibecrafted ${_installed_version:-release}"
+      installer_line "    Start: vibecrafted"
+    elif [[ "$status" != "0" ]]; then
+      detail="$installer_failure"
+      cause="$(installer_last_diagnostic)" || cause=""
+      if [[ -z "$detail" ]]; then detail="$cause"; cause=""; fi
+      [[ "$cause" != "$detail" ]] || cause=""
+      {
+        printf '\n✗ Installation stopped at: %s (exit %s).\n' "$installer_phase" "$status"
+        [[ -z "$detail" ]] || printf '  %s\n' "$detail"
+        [[ -z "$cause" ]] || printf '  Cause: %s\n' "$cause"
+        if [[ "$status" == "130" || "$status" == "143" ]]; then
+          printf '  Next: rerun the installer when ready; completed steps may remain.\n'
+        else
+          printf '  Next: correct the reported issue, then retry the same installer.\n'
+        fi
+        printf '  Details: %s\n' "$installer_log"
+      } | installer_redact display >&"$installer_stderr_fd"
+      installer_log_line "stopped · phase=$installer_phase · exit=$status"
+    fi
+    # Cold macOS uses Python from the authenticated staged App. Keep it alive
+    # through diagnostic extraction, then release the private candidate.
+    if [[ -n "$tmpdir" ]]; then
+      rm -rf -- "$tmpdir" 2>&1 | installer_redact >&"$installer_log_fd" || true
+    fi
+    installer_log_line "end · exit=$status"
+    rm -rf -- "$installer_output_dir" || true
+    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&-"
+    trap - EXIT
+    exit "$status"
+  fi
   if [[ "$status" != "0" && "$bootstrap_error_reported" == "0" \
         && "$bootstrap_handoff" == "0" ]]; then
     if [[ "$status" == "130" ]]; then
-      report_error "Interrupted; nothing was published."
+      report_error "Interrupted; completed steps may remain. Rerun the installer when ready."
     else
       report_error "Error: the bootstrap stopped unexpectedly (exit $status) before naming the failure; rerun with VERBOSE=1 and report the last lines above."
     fi
   fi
-  if [[ -n "$tmpdir" ]]; then
-    rm -rf -- "$tmpdir"
-  fi
 }
 trap on_bootstrap_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 info() {
+  if [[ "$installer_output" == "1" ]]; then
+    if [[ "${VERBOSE:-0}" == "1" ]]; then installer_line "$*"
+    else
+      case "$*" in
+        *'[warn]'*) installer_line "  ! $*" ;;
+        *) installer_log_line "$*" ;;
+      esac
+    fi
+    return 0
+  fi
   printf '%s\n' "$*"
 }
 
-# Output discipline: the default view is calm storytelling (≤10 lines total,
-# ≤2 per install section). Detail lines are gated — VERBOSE=1 restores the
-# full bazaar, nothing is lost.
+# Default CLI output is bounded progress. Detail lines go to the private log;
+# VERBOSE=1 also shows them on the terminal after credential redaction.
 vinfo() {
+  if [[ "$installer_output" == "1" ]]; then
+    if [[ "${VERBOSE:-0}" == "1" ]]; then installer_line "$*"
+    else installer_log_line "$*"; fi
+    return 0
+  fi
   if [[ "${VERBOSE:-0}" == "1" ]]; then
     printf '%s\n' "$*"
   fi
@@ -1083,6 +1492,7 @@ prompt_attended_consent() {
 
   [[ "$auto_yes" == "1" ]] && return 0
   has_attended_tty || return 0
+  installer_progress_stop "·"
 
   if [[ -n "$archive_file" ]]; then
     source_description="unpack"
@@ -1109,6 +1519,7 @@ prompt_attended_consent() {
     case "$response" in
       [yY]|[yY][eE][sS])
         printf '\n' > /dev/tty
+        installer_progress_start || true
         return 0
         ;;
       ""|[nN]|[nN][oO])
@@ -1253,8 +1664,13 @@ detect_local_carrier() {
 }
 detect_local_carrier
 
+channel_mode=0
+if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
+  channel_mode=1
+fi
 detect_platform
 detect_linux_distro
+installer_output_start
 platform_banner
 
 if [[ "$PLATFORM_OS" == "unsupported" ]]; then
@@ -1308,10 +1724,6 @@ preflight_require_all() {
 # and bootstrap Python; the channel always binds a Runtime Pack. A local
 # source-only carrier (--archive-file, portable copy) still needs make, but the
 # production channel never gains a compiler toolchain fallback.
-channel_mode=0
-if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
-  channel_mode=1
-fi
 # A supplied pack installs through install_selected_runtime_pack (below), which
 # never runs make. Only routes that still hand off to the candidate Makefile
 # need it: no supplied pack (source carrier), the attended TUI (its manifest
@@ -1367,6 +1779,19 @@ verify_channel_app() {
   spctl --assess --type execute "$app" >/dev/null 2>&1
 }
 
+# Capability is selected before the single mount attempt. A mount refusal must
+# propagate; retrying it through another tool would hide the real failure.
+readonly_dmg_attach() {
+  local help=""
+  if command -v diskutil >/dev/null 2>&1 \
+      && help="$(diskutil image attach --help 2>&1)" \
+      && [[ "$help" == *--readOnly* && "$help" == *--nobrowse* && "$help" == *--mountPoint* ]]; then
+    diskutil image attach --readOnly --nobrowse --mountPoint "$2" "$1"
+  else
+    hdiutil attach -readonly -nobrowse -mountpoint "$2" "$1"
+  fi
+}
+
 stage_channel_app() {
   [[ -n "$staged_channel_app" ]] && return 0
   [[ "$channel_dmg_url" == https://* ]] \
@@ -1375,7 +1800,7 @@ stage_channel_app() {
   curl -fsSL "$channel_dmg_url" -o "$dmg" \
     || die "Could not download the Vibecrafted App DMG $channel_dmg_url"
   mkdir -p "$mount"
-  hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null \
+  readonly_dmg_attach "$dmg" "$mount" >/dev/null \
     || die "Could not mount the downloaded DMG"
   if ! verify_channel_app "$mount/Vibecrafted.app"; then
     hdiutil detach "$mount" >/dev/null 2>&1 || true
@@ -1399,12 +1824,36 @@ if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" ]]; then
   channel_manifest="$(curl -fsSL "$channel_url")" \
     || die "Could not fetch the channel manifest $channel_url"
   printf '%s' "$channel_manifest" >"$tmpdir/channel.json"
+  case "$(uname -m)" in
+    arm64|aarch64) early_arch=arm64 ;;
+    x86_64|amd64) early_arch=x64 ;;
+    *) die "No prebuilt Runtime Pack available for architecture $(uname -m)" ;;
+  esac
+  early_platform="darwin-$early_arch"
+  early_pack="$(plutil -extract "platforms.$early_platform.runtime_pack_url" raw -expect string -o - "$tmpdir/channel.json" 2>/dev/null || true)"
+  if [[ -z "$early_pack" && -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+    early_pack="$(plutil -extract runtime_pack_url raw -expect string -o - "$tmpdir/channel.json" 2>/dev/null || true)"
+    case "${early_pack%%\?*}" in
+      */Vibecrafted_RuntimePack_*"-$early_platform.tar.gz") ;;
+      *) die "No prebuilt Runtime Pack available for $early_platform on channel $ref" ;;
+    esac
+  fi
   channel_dmg_url="$(plutil -extract dmg_url raw -expect string -o - "$tmpdir/channel.json")" \
     || die "Channel manifest must bind dmg_url for macOS cold installation"
   prompt_attended_consent
   bootstrap_consent_obtained=1
   stage_channel_app
-  bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/python3"
+  # bin/python3 is the generated shell door. Admit and execute its native owner
+  # directly: vc-python binds CPython to its physical, authenticated generation
+  # and disables bytecode writes. Inspect the exact executable we will run.
+  bootstrap_python="$staged_channel_app/Contents/Resources/runtime/bin/vc-python"
+  [[ -f "$bootstrap_python" && -x "$bootstrap_python" && ! -L "$bootstrap_python" ]] \
+    || die "Authenticated App interpreter is missing or unsafe"
+  bootstrap_python_type="$(file -Lb "$bootstrap_python")" || die "Cannot inspect the authenticated App interpreter"
+  case "$early_arch:$bootstrap_python_type" in
+    arm64:*Mach-O*arm64*|x64:*Mach-O*x86_64*) ;;
+    *) die "Authenticated App interpreter is incompatible with host $early_platform" ;;
+  esac
 else
   bootstrap_python="$(command -v python3)"
   # A present Apple shim is not a usable interpreter. Skip without executing it
@@ -1430,6 +1879,7 @@ PY_BOOTSTRAP_USABLE
 then
   die "The selected bootstrap Python is unusable (Python 3.9 or newer required)"
 fi
+bootstrap_python_usable=1
 
 # macOS App pairing (side-by-side generation contract, 2026-10-22).
 # The Runtime Pack installer refuses to publish when the fixed host
@@ -1508,7 +1958,7 @@ install_channel_dmg() {
   transaction="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
   local transaction_dir="$state_dir/transactions/$transaction"
   mkdir -p "$transaction_dir"
-  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" bash "$helper" \
+  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" installer_capture bash "$helper" \
     --source "$staged_app" \
     --destination "$PAIRED_APP_ROOT" \
     --receipt "$transaction_dir/receipt.json" \
@@ -1544,34 +1994,57 @@ if [[ "$channel_mode" == "1" ]]; then
   if [[ -z "$channel_manifest" ]] && ! channel_manifest="$(curl -fsSL "$channel_url")"; then
     die "Could not fetch the channel manifest $channel_url (network, proxy, or unknown --ref '$ref')"
   fi
+  case "$(uname -m)" in
+    arm64|aarch64) channel_arch=arm64 ;;
+    x86_64|amd64) channel_arch=x64 ;;
+    *) die "No prebuilt Runtime Pack available for architecture $(uname -m)" ;;
+  esac
+  case "$PLATFORM_OS" in
+    macos) channel_platform="darwin-$channel_arch" ;;
+    linux|wsl) channel_platform="linux-$channel_arch" ;;
+    *) die "No prebuilt Runtime Pack available for $PLATFORM_OS-$channel_arch" ;;
+  esac
   channel_fields=""
-  if ! channel_fields="$(printf '%s' "$channel_manifest" | "$bootstrap_python" -I -S -c "
+  if ! channel_fields="$(printf '%s' "$channel_manifest" | "$bootstrap_python" -I -S -c '
 import json, sys
+from urllib.parse import urlsplit
 p = json.load(sys.stdin)
-fields = (p.get('archive_url',''), p.get('runtime_pack_url',''))
-if not all(isinstance(field, str) and field.isprintable() for field in fields):
+if not isinstance(p, dict):
     raise SystemExit(3)
-print(fields[0])
-print(fields[1])
-" 2>/dev/null)"; then
-    die "Channel manifest $channel_url is not a JSON object with string archive_url/runtime_pack_url fields; refusing to guess a release"
+archive = p.get("archive_url", "")
+legacy = p.get("runtime_pack_url", "")
+platforms = p.get("platforms", {})
+if not isinstance(platforms, dict):
+    raise SystemExit(3)
+entry = platforms.get(sys.argv[1], {})
+if not isinstance(entry, dict):
+    raise SystemExit(3)
+pack = entry.get("runtime_pack_url", "")
+if not all(isinstance(v, str) and (not v or v.isprintable()) for v in (archive, legacy, pack)):
+    raise SystemExit(3)
+# Legacy channels have no platform field. Only the canonical carrier filename
+# identifies their target; an opaque URL is not evidence of compatibility.
+if not pack and legacy:
+    basename = urlsplit(legacy).path.rsplit("/", 1)[-1]
+    if basename.startswith("Vibecrafted_RuntimePack_") and basename.endswith("-" + sys.argv[1] + ".tar.gz"):
+        pack = legacy
+print(archive)
+print(pack)
+' "$channel_platform" 2>/dev/null)"; then
+    die "Channel manifest $channel_url is malformed; refusing to guess a release"
   fi
   resolved_url="${channel_fields%%$'\n'*}"
   resolved_pack_url=""
   if [[ "$channel_fields" == *$'\n'* ]]; then
     resolved_pack_url="${channel_fields#*$'\n'}"
   fi
-  if [[ -n "$resolved_url" && -n "$resolved_pack_url" ]]; then
-    archive_url="$resolved_url"
+  [[ -n "$resolved_url" ]] || die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker)"
+  if [[ -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+    [[ -n "$resolved_pack_url" ]] || die "No prebuilt Runtime Pack available for $channel_platform on channel $ref; use a matching published Runtime Pack or a verified source carrier"
     runtime_pack_url="$resolved_pack_url"
-    vinfo "Resolved from channel ($ref): $archive_url"
-  else
-    # Raw GitHub source archives do not carry the writer-bound v2 distribution
-    # tree receipt.  Minting one after download would let candidate bytes attest
-    # to themselves, so this legacy path is deliberately closed.  Release
-    # authentication remains a named W4 blocker while signature fetch is soft.
-    die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker; $channel_url has archive_url=${resolved_url:-<missing>} runtime_pack_url=${resolved_pack_url:-<missing>})"
   fi
+  archive_url="$resolved_url"
+  vinfo "Resolved from channel ($ref): $archive_url"
 
   # macOS pairing: the channel also binds the notarized App DMG. Extract it
   # here, next to the other channel fields, so the App-pairing step can fall
@@ -1625,6 +2098,55 @@ if [[ -z "$selected_runtime_pack" && -z "$archive_file" && -z "$local_carrier_di
   die "No Runtime Pack is bound to this public source candidate"
 fi
 
+# The authenticated source carrier may contain an older pack wrapper. Refuse
+# foreign native bytes here as well, before handing control to that wrapper.
+# This is a rejection-only probe: signature and closed inventory remain the
+# pack owner's responsibility and are never established by this inspection.
+if [[ -n "$selected_runtime_pack" ]]; then
+  case "$(uname -m)" in
+    arm64|aarch64) probe_arch=arm64 ;;
+    x86_64|amd64) probe_arch=x64 ;;
+    *) die "Unsupported Runtime Pack host architecture: $(uname -m)" ;;
+  esac
+  case "$PLATFORM_OS" in
+    macos) probe_platform="darwin-$probe_arch" ;;
+    linux|wsl) probe_platform="linux-$probe_arch" ;;
+    *) die "Unsupported Runtime Pack host: $PLATFORM_OS" ;;
+  esac
+  probe_python="$tmpdir/runtime-python-probe"
+  if ! "$bootstrap_python" -I -S - "$selected_runtime_pack" "$probe_platform" "$probe_arch" "$probe_python" <<'PY_PACK_HOST'
+import json, shutil, sys, tarfile
+pack, platform, arch, destination = sys.argv[1:]
+try:
+    with tarfile.open(pack, "r:gz") as archive:
+        members = archive.getmembers()
+        manifests = [m for m in members if m.name.endswith("/runtime-pack-provenance.json") and m.name.count("/") == 1]
+        if len(manifests) != 1 or not manifests[0].isfile() or manifests[0].size > 2_000_000:
+            raise ValueError("missing or ambiguous Runtime Pack provenance")
+        manifest = json.load(archive.extractfile(manifests[0]))
+        if manifest.get("platform") != platform or manifest.get("architecture") != arch:
+            raise ValueError("Runtime Pack provenance does not match host")
+        root = manifests[0].name.split("/", 1)[0]
+        interpreters = [m for m in members if m.name == root + "/bin/python3"]
+        if len(interpreters) != 1 or not interpreters[0].isfile() or not 0 < interpreters[0].size <= 512_000_000:
+            raise ValueError("missing or ambiguous Runtime Pack Python")
+        with archive.extractfile(interpreters[0]) as source, open(destination, "wb") as output:
+            shutil.copyfileobj(source, output)
+except (OSError, ValueError, TypeError, AttributeError, tarfile.TarError) as exc:
+    print("Runtime Pack host inspection failed: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY_PACK_HOST
+  then
+    die "Runtime Pack is unavailable or incompatible with host $probe_platform"
+  fi
+  probe_type="$(file -Lb "$probe_python")" || die "Cannot inspect Runtime Pack Python"
+  case "$probe_platform:$probe_type" in
+    darwin-arm64:*Mach-O*arm64*|darwin-x64:*Mach-O*x86_64*|linux-arm64:*ELF*ARM\ aarch64*|linux-x64:*ELF*x86-64*|*:*script*) ;;
+    *) die "Runtime Pack Python is incompatible with host $probe_platform: $probe_type" ;;
+  esac
+  rm -f "$probe_python"
+fi
+
 # Candidate commands must return through this shell so the EXIT trap can remove
 # the private verified payload. Publication is owned by install-bundle-tools
 # under the installer lease; the bootstrap itself never writes `current`.
@@ -1632,7 +2154,10 @@ run_candidate_command() {
   local status=0
   # From here the candidate installer owns its verdict and its error text.
   bootstrap_handoff=1
-  "$@" || status=$?
+  if [[ "$installer_output" == "1" ]]; then
+    installer_stage 2 "Install Vibecrafted and command-line tools"
+  fi
+  installer_capture "$@" || status=$?
   exit "$status"
 }
 
@@ -1940,7 +2465,10 @@ info "✓ Verified vibecrafted $_installed_version candidate; transactional inst
 macos_app_args=()
 app_pairing_via_dmg=0
 if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" && -n "$selected_runtime_pack" && "$use_gui" != "1" ]]; then
-  macos_pair_channel_app || die "macOS App pairing failed; nothing was published"
+  if [[ "$installer_output" == "1" ]]; then
+    installer_stage 2 "Install Vibecrafted and command-line tools"
+  fi
+  macos_pair_channel_app || die "macOS App pairing failed; completed steps may remain"
 fi
 
 

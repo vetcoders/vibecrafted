@@ -269,6 +269,7 @@ def test_build_server_registers_tools_and_resources() -> None:
     tool_names, resource_uris = _run(_inspect())
     assert {
         "vc_repo_full",
+        "vc_worktrees",
         "vc_doctor",
         "vc_board_status",
         "vc_launch",
@@ -1225,3 +1226,48 @@ def test_run_launch_await_completion_keeps_receipt_and_verdict(
     assert data["report"] == "/stub/report.md"
     assert data["completion"]["completed"] is True
     assert data["exit_code"] == exit_code
+
+
+def test_vc_worktrees_uses_core_triage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from fastmcp import Client
+    from vibecrafted_core.git_worktrees import worktree_inventory
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "test"], check=True)
+    (repo / "readme").write_text("hello")
+    subprocess.run(["git", "-C", str(repo), "add", "readme"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    async def call() -> Any:
+        async with Client(server.build_server()) as client:
+            return await client.call_tool(
+                "vc_worktrees", {"project": str(repo), "target": "main"}
+            )
+
+    result = _run(call())
+    assert result.data == worktree_inventory(repo, target="main")
+    assert result.data["worktrees"][0]["triage"] == "unknown"
+
+
+def test_worktree_tool_is_readonly_and_has_no_mutation_endpoints() -> None:
+    async def inspect() -> Any:
+        return await server.build_server().get_tools()
+
+    tools = _run(inspect())
+    assert tools["vc_worktrees"].annotations.readOnlyHint is True
+    assert not {
+        "vc_worktrees_clean",
+        "vc_worktrees_prune",
+        "vc_worktrees_merge",
+        "vc_worktree_merge_plan",
+    }.intersection(tools)

@@ -56,6 +56,23 @@ def test_provider_conflict_refuses_even_with_cli_model(tmp_path):
         )
 
 
+@pytest.mark.parametrize("source", ["file", "prompt"])
+@pytest.mark.parametrize("binding", ["", "agent: codex\n"])
+def test_brief_author_is_not_the_seeded_executor(tmp_path, source, binding):
+    body = f"---\nauthor: claude\n{binding}model: exact-model\n---\ntask\n"
+    plan = tmp_path / "plan.md"
+    plan.write_text(body, encoding="utf-8")
+    selected = spec(tmp_path, **{source: str(plan) if source == "file" else body})
+    assert selected.agent == "codex"
+    assert selected.model == "exact-model"
+    assert workflow._source_prompt(selected) == body
+
+
+def test_author_does_not_override_conflicting_executor_binding(tmp_path):
+    with pytest.raises(ValueError, match="agent.*conflict"):
+        spec(tmp_path, prompt="---\nauthor: codex\nagent: claude\n---\ntask")
+
+
 def test_inline_whitespace_preserved(tmp_path):
     body = '  Żółć\n"hello" $(false)\n\n'
     assert spec(tmp_path, prompt=body).prompt == body
@@ -305,6 +322,47 @@ def test_dispatch_plan_model_selection(tmp_path, override, expected, origin):
     cut = parse_dispatch(source).cuts[0]
     assert cut.model == expected
     assert cut.model_source == origin
+
+
+def test_dispatch_brief_author_survives_canonical_launch_seed(tmp_path, monkeypatch):
+    import json
+
+    from vibecrafted_core.dispatch import supervisor
+    from vibecrafted_core.dispatch.schema import DispatchSchemaError, parse_dispatch
+
+    plan = tmp_path / "plan.md"
+    body = "---\nauthor: claude\nmodel: from-plan\n---\ntask\n"
+    plan.write_text(body, encoding="utf-8")
+    source = (
+        Path(__file__).parent / "dispatch" / "fixtures" / "minimal.dispatch.toml"
+    ).read_text()
+    source = source.replace("/tmp/vibecrafted-dispatch-fixture", str(tmp_path))
+    source = source.replace(
+        'prompt = "Implement parser cut {id} in {repo}."',
+        "brief = " + json.dumps(str(plan)),
+    )
+    dispatch = parse_dispatch(source)
+    cut = dispatch.cuts[0]
+    captured = {}
+
+    def capture_launch(spec, *_args, **_kwargs):
+        captured["spec"] = spec
+        return {"accepted": True, "run_id": "fixture"}
+
+    monkeypatch.setattr(supervisor, "launch_workflow", capture_launch)
+    result = supervisor.workflow_cell_launcher(dispatch)(
+        cut, "rendered task", "initial"
+    )
+    assert result.accepted
+    assert captured["spec"].agent == "codex"
+    assert captured["spec"].model == "from-plan"
+    assert captured["spec"].plan_source == body
+    assert captured["spec"].source_path == str(plan)
+    assert plan.read_text(encoding="utf-8") == body
+
+    plan.write_text(body.replace("author: claude", "author: codex\nagent: claude"))
+    with pytest.raises(DispatchSchemaError, match="agent.*conflict"):
+        parse_dispatch(source)
 
 
 def test_agy_is_admitted_like_every_other_agent(tmp_path, monkeypatch):

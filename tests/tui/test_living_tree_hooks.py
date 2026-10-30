@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK_INSTALLER = REPO_ROOT / "templates" / "hooks" / "install.sh"
+RUFF_SPEC_HELPER = REPO_ROOT / "scripts" / "lib" / "ruff-spec.sh"
 
 
 def run(
@@ -184,11 +187,85 @@ def test_prepush_checks_commit_projection_not_foreign_dirty_worktree(
     assert source.read_text(encoding="utf-8") == "x=1\n"
 
 
+def resolve_ruff_spec(pyproject: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(RUFF_SPEC_HELPER), str(pyproject)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def repo_ruff_spec() -> str:
+    result = resolve_ruff_spec(REPO_ROOT / "pyproject.toml")
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_ruff_pin_matches_the_contract_everywhere() -> None:
+    """Unpinned `uvx ruff` made the pre-push gate differ across hosts.
+
+    The contract names one version. The config, the dev group and the spec
+    the hooks hand to uvx must all be that version, so moving every hook or
+    the whole config to another ruff turns this red until the contract moves.
+    """
+    contract = (REPO_ROOT / "docs" / "runtime" / "CONTRACT.md").read_text(
+        encoding="utf-8"
+    )
+    named = re.findall(
+        r"ruff runs at one pinned version in this repo,\s+`ruff@([^`]+)`", contract
+    )
+    assert len(named) == 1, "docs/runtime/CONTRACT.md must name the one ruff version"
+    (version,) = named
+
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert pyproject["tool"]["ruff"]["required-version"] == f"=={version}"
+    assert f"ruff=={version}" in pyproject["dependency-groups"]["dev"]
+    assert repo_ruff_spec() == f"ruff@{version}"
+
+
+@pytest.mark.parametrize(
+    "path", ["scripts/hooks/pre-commit", "scripts/hooks/pre-push", "Makefile"]
+)
+def test_repo_ruff_entry_points_read_the_pin(path: str) -> None:
+    """A literal or bare `uvx ruff` in one entry point could drift unseen."""
+    code = [
+        line
+        for line in (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert not [line for line in code if re.search(r"ruff@\d|uvx\s+ruff\b", line)]
+    assert any("scripts/lib/ruff-spec.sh" in line for line in code)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "[tool.ruff]\n",
+        '[tool.ruff]\nrequired-version = ">=0.17"\n',
+        '[tool.ruff]\nrequired-version = "==0.17"\n',
+    ],
+    ids=["missing", "range", "partial"],
+)
+def test_ruff_spec_refuses_a_missing_or_loose_pin(tmp_path: Path, config: str) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(config, encoding="utf-8")
+
+    result = resolve_ruff_spec(pyproject)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "must pin one exact ruff" in result.stderr
+
+
 def test_ruff_format_check_on_repo_root_passes() -> None:
     """Husky full-repo ruff and a manual `ruff format --check .` must stay green.
 
     ruff 0.16 includes Markdown. Fenced examples in docs used to fail this
     gate and refuse `git push` even when every `*.py` file was formatted.
+    The check runs the ruff pyproject.toml pins, like the hooks.
     """
     if shutil.which("uvx") is None:
         pytest.skip("uvx is required for the repository-wide Ruff contract")
@@ -196,7 +273,14 @@ def test_ruff_format_check_on_repo_root_passes() -> None:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     result = subprocess.run(
-        ["uvx", "ruff", "format", "--check", "--", str(REPO_ROOT)],
+        [
+            "uvx",
+            repo_ruff_spec(),
+            "format",
+            "--check",
+            "--",
+            str(REPO_ROOT),
+        ],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,

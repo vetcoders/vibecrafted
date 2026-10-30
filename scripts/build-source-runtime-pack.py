@@ -220,8 +220,10 @@ def materialize_sources(
                 env=environment,
                 check=True,
             )
-            (isolated / "objects/info/alternates").write_text(
-                objects.resolve().as_posix() + "\n", encoding="utf-8"
+            # Git treats a CR as part of the path, so bypass Windows text-mode
+            # newline translation for this LF-delimited Git protocol file.
+            (isolated / "objects/info/alternates").write_bytes(
+                (objects.resolve().as_posix() + "\n").encode("utf-8")
             )
             subprocess.run(
                 [
@@ -286,8 +288,15 @@ def main() -> int:
         }
         for name, repository in repositories.items():
             verify_version(name, pins[name], repository)
+            try:
+                available_head = git(
+                    "rev-parse", "--verify", "HEAD^{commit}", cwd=repository
+                )
+            except subprocess.CalledProcessError:
+                available_head = "unavailable (fetched objects only)"
             print(
-                f"{name}: {pins[name]['version']} {pins[name]['revision']} ({repository})",
+                f"{name}: selected: {pins[name]['version']} {pins[name]['revision']} "
+                f"({repository}); available HEAD: {available_head}",
                 flush=True,
             )
         if args.check:

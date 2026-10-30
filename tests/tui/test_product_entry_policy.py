@@ -41,6 +41,7 @@ Evidence discipline
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1484,7 +1485,68 @@ def test_retirement_leaves_a_drifted_foreign_bare_name_untouched(
 
     assert retired == []
     assert "user copy" in stale.read_text(encoding="utf-8")
-    assert str(stale) in receipt["owned_files"]
+    assert str(stale) not in receipt["owned_files"]
+
+
+@pytest.mark.parametrize(
+    "historical_kind,occupant_kind",
+    [("file", "file"), ("file", "link"), ("link", "file"), ("link", "link")],
+)
+def test_retired_public_tool_releases_stale_claim_without_restoring_over_new_owner(
+    tmp_path: Path, historical_kind: str, occupant_kind: str
+) -> None:
+    stage = _stage_retirement(tmp_path)
+    stale = stage.launcher_home / "prview"
+    old_target = tmp_path / "old-managed-tool"
+    old_target.write_text("historical managed tool")
+    previous_digest = hashlib.sha256(b"historical managed tool").hexdigest()
+    previous = {"owned_files": {}, "owned_symlinks": {}}
+    if historical_kind == "file":
+        previous["owned_files"][str(stale)] = previous_digest
+    else:
+        previous["owned_symlinks"][str(stale)] = str(old_target)
+    backup = stage.backup_root / "original-prview"
+    backup.write_bytes(b"pre-install owner; never restore over the newer owner")
+    user_bytes = b"newer own-channel tool"
+    if occupant_kind == "file":
+        stale.write_bytes(user_bytes)
+        current_proof = hashlib.sha256(user_bytes).hexdigest()
+    else:
+        target = tmp_path / "public-channel-tool"
+        target.write_bytes(user_bytes)
+        stale.symlink_to(target)
+        current_proof = str(target)
+    receipt = json.loads(json.dumps(previous))
+    receipt["backups"] = {str(stale): str(backup)}
+
+    retired = installer._reclaim_foreign_launcher_names(
+        stage.generation_bin,
+        stage.launcher_home,
+        runtime_home=stage.runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
+
+    assert retired == []
+    assert stale.read_bytes() == user_bytes
+    assert stale.is_symlink() is (occupant_kind == "link")
+    assert (
+        backup.read_bytes() == b"pre-install owner; never restore over the newer owner"
+    )
+    for mapping in ("owned_files", "owned_symlinks", "backups"):
+        assert str(stale) not in receipt.get(mapping, {})
+    history = json.dumps(receipt.get("drift_backup_history", {}))
+    assert str(backup) in history
+    reconciliation = json.dumps(receipt.get("ownership_reconciliation", []))
+    assert str(stale) in reconciliation and current_proof in reconciliation
+    assert (
+        previous_digest if historical_kind == "file" else str(old_target)
+    ) in reconciliation
+    persisted = json.loads(
+        installer._runtime_receipt_path(stage.runtime_home).read_text()
+    )
+    for mapping in ("owned_files", "owned_symlinks", "backups"):
+        assert str(stale) not in persisted.get(mapping, {})
 
 
 def test_retirement_preserves_drifted_namespace_bytes_before_removing(

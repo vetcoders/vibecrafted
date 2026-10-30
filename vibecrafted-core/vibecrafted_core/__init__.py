@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import re
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,10 @@ def _resolve_installed_version() -> str:
     packaged_version = read_version_file(package_dir)
     staged_version = read_staged_tools_version()
 
+    # A private container snapshot may include uncommitted source. Preserve
+    # that qualifier instead of presenting it as an immutable release.
+    if re.fullmatch(r"[^+]+\+g[0-9a-fA-F]+\.dirty", packaged_version):
+        return packaged_version
     if version_is_stamped(packaged_version):
         return packaged_version
     if version_is_stamped(staged_version):

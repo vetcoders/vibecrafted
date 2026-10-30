@@ -61,6 +61,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -293,6 +294,12 @@ class TeeLogger:
 @contextmanager
 def compact_logging(log_path: Path, quiet: bool = True):
     """Context manager: redirects stdout to log, keeps real stdout for compact lines."""
+    if os.environ.get("VIBECRAFTED_INSTALL_LOG_CAPTURED") == "1":
+        # The public bootstrap owns both OS streams and their redacted durable
+        # log. Opening install.log here would truncate that attempt, while the
+        # inherited stdout already reaches the same capture boundary.
+        yield sys.stdout
+        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tee = TeeLogger(log_path, quiet=quiet)
     real_stdout = sys.stdout
@@ -1747,7 +1754,7 @@ def collect_orphaned_skills(
                 continue
             if not entry.name.startswith("vc-"):
                 continue
-            if entry.is_symlink() or entry.is_dir() and (entry / "SKILL.md").exists():
+            if _is_owned_pointer(entry) or entry.is_dir() or entry.is_file():
                 orphans.append(("store", entry))
 
     for rt in runtimes:
@@ -1757,7 +1764,7 @@ def collect_orphaned_skills(
         for entry in sorted(rt_skills.iterdir()):
             if not entry.name.startswith("vc-") or entry.name in current_bundle:
                 continue
-            if entry.is_symlink() or entry.is_dir() and (entry / "SKILL.md").exists():
+            if _is_owned_pointer(entry) or entry.is_dir() or entry.is_file():
                 orphans.append((rt, entry))
 
     return orphans
@@ -11108,10 +11115,24 @@ def prune_orphaned_skills(
     orphaned_entries: list[tuple[str, Path]] | None = None,
     interactive: bool = True,
 ) -> int:
+    with _skill_view_mutation_lease(dry_run):
+        return _prune_orphaned_skills_locked(
+            store_path, runtimes, current_bundle, dry_run, orphaned_entries, interactive
+        )
+
+
+def _prune_orphaned_skills_locked(
+    store_path: Path,
+    runtimes: list[str],
+    current_bundle: set[str],
+    dry_run: bool = False,
+    orphaned_entries: list[tuple[str, Path]] | None = None,
+    interactive: bool = True,
+) -> int:
     """Remove vc-* skills from store and runtime dirs that are no longer in the bundle.
 
-    A pointer or a stray file is removed as before — a view we wrote, or the
-    remains of one. A real *directory* has to prove it came from Vibecrafted
+    A pointer or stray file is preserved because its name is not ownership
+    proof. A real directory has to prove it came from Vibecrafted
     first, exactly as a shadowing copy does, and is quarantined under
     `shadowed-views-<timestamp>/<location>/<skill>` before it goes. One that
     cannot is kept, reported with the command to move it aside, and never
@@ -11128,8 +11149,11 @@ def prune_orphaned_skills(
     removable: list[tuple[str, Path]] = []
     kept: list[tuple[str, Path, str]] = []
     for location, entry in orphans:
+        if _local_skill_pointer(entry):
+            kept.append((location, entry, "local skill version is user data"))
+            continue
         if _is_owned_pointer(entry) or entry.is_file():
-            removable.append((location, entry))
+            kept.append((location, entry, "pointer or file ownership is unproven"))
             continue
         reason = unremovable_orphan_reason(store_path, location, entry, provenance)
         if reason is None:
@@ -11193,12 +11217,22 @@ def prune_legacy_skills(
     dry_run: bool = False,
     interactive: bool = True,
 ) -> int:
-    """Remove old vetcoders-* skills replaced by vc-* equivalents."""
+    with _skill_view_mutation_lease(dry_run):
+        return _prune_legacy_skills_locked(store_path, runtimes, dry_run, interactive)
+
+
+def _prune_legacy_skills_locked(
+    store_path: Path,
+    runtimes: list[str],
+    dry_run: bool = False,
+    interactive: bool = True,
+) -> int:
+    """Quarantine proven old skill copies; keep unproven user entries."""
     legacy: list[tuple] = []
 
     if store_path.exists():
         for entry in sorted(store_path.iterdir()):
-            if entry.is_dir() and entry.name.startswith(OLD_SKILL_PREFIX):
+            if entry.name.startswith(OLD_SKILL_PREFIX):
                 legacy.append(("store", entry))
 
     for rt in runtimes:
@@ -11206,68 +11240,17 @@ def prune_legacy_skills(
         if not rt_skills.exists():
             continue
         for entry in sorted(rt_skills.iterdir()):
-            if (entry.is_dir() or entry.is_symlink()) and entry.name.startswith(
-                OLD_SKILL_PREFIX
-            ):
+            if entry.name.startswith(OLD_SKILL_PREFIX):
                 legacy.append((rt, entry))
 
     old_helper = xdg_config_home() / "zsh" / OLD_HELPER_NAME
-    if old_helper.exists():
-        legacy.append(("helper", old_helper))
-
+    if _path_present(old_helper):
+        print(f"  {WARN} Keeping legacy helper without ownership proof: {old_helper}")
     if not legacy:
         return 0
-
-    print(bold("Old vetcoders-* entries detected:"))
-    for location, entry in legacy:
-        kind = (
-            "symlink" if entry.is_symlink() else ("file" if entry.is_file() else "dir")
-        )
-        print(f"  {yellow(f'[{kind}]')} {location}/{entry.name}")
-    print()
-
-    if interactive and not ask_yn(
-        "Remove the old vetcoders-* entries now?", default=True
-    ):
-        print(dim("  Keeping the old entries."))
-        print()
-        return 0
-
-    removed = 0
-    for location, entry in legacy:
-        if dry_run:
-            print(f"  {dim('rm')} {entry}")
-            removed += 1
-        else:
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-            removed += 1
-
-    if removed:
-        print(f"  {OK} Removed {removed} old entries")
-
-    # Clean old source line from .zshrc
-    zshrc = Path.home() / ".zshrc"
-    if zshrc.exists():
-        content = zshrc.read_text()
-        if OLD_HELPER_NAME in content:
-            if not _is_writable(zshrc):
-                print(f"  {WARN} {zshrc} is locked — cannot remove old source line")
-                print(
-                    f"       {dim('Remove manually: line referencing ' + OLD_HELPER_NAME)}"
-                )
-            elif not dry_run:
-                lines = content.splitlines(keepends=True)
-                new_lines = [ln for ln in lines if OLD_HELPER_NAME not in ln]
-                zshrc.write_text("".join(new_lines))
-                print(f"  {OK} Cleaned old source line from .zshrc")
-            else:
-                print(f"  {dim('would clean old source line from .zshrc')}")
-
-    print()
-    return removed
+    return _prune_orphaned_skills_locked(
+        store_path, runtimes, set(), dry_run, legacy, interactive
+    )
 
 
 def create_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
@@ -11307,8 +11290,28 @@ def _remove_view_pointer(path: Path) -> None:
     path.rmdir()
 
 
+def _local_skill_pointer(path: Path) -> bool:
+    return _is_owned_pointer(path) and _is_subpath(
+        path.resolve(strict=False),
+        (vibecrafted_home() / "local-skills").resolve(strict=False),
+    )
+
+
+@contextmanager
+def _skill_view_mutation_lease(dry_run: bool) -> Iterator[None]:
+    if dry_run:
+        yield
+        return
+    current = vibecrafted_runtime_home() / "tools/vibecrafted-current"
+    with (
+        _tools_install_lease(current, operation="skill-view-reconcile") as descriptor,
+        _inherited_tools_install_lease(descriptor),
+    ):
+        yield
+
+
 def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -> None:
-    """Create an agent skill view, replacing stale legacy store views.
+    """Create an absent view or reconcile a receipt-proven release pointer.
 
     Nothing real at `link` is ever removed — not a directory and not a file. By
     the time the writer runs, `reconcile_shadowed_skill_dirs` has quarantined
@@ -11320,13 +11323,9 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
     reached through a symlink — so `~/.grok/skills -> ~/notes` with a note
     called `vc-research` in it was, until now, a note the installer deleted.
 
-    Only a pointer gives way, and it is removed as a pointer — see
-    `_remove_view_pointer`, which never reaches the tree on the far side. A
-    dangling one counts: it is still an entry in the way. A pointer that
-    already resolves to `target` is left exactly as it is:
-    unlinking and relinking it would be a no-op at best, and at worst — when the
-    runtime skill dir is itself a link into the store — a removal inside the
-    store.
+    A pointer that already resolves to `target` is a no-op. A different
+    pointer, including a dangling one, is not ownership proof. A matching
+    Runtime Pack receipt permits its transaction owner to retarget the pointer.
     """
     if target == link:
         if dry_run:
@@ -11341,6 +11340,18 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
         if dry_run:
             print(f"  {dim('same-path')} {link} -> {target}")
         return
+    if (
+        present
+        and _is_owned_pointer(link)
+        and not dry_run
+        and _reconcile_receipted_release_skill_view(link, target)
+    ):
+        return
+    if present and _is_owned_pointer(link):
+        print(
+            f"  {WARN} Keeping unproven skill view {link}; reconcile it with its owner"
+        )
+        return
     if present and not _is_owned_pointer(link):
         kind = "directory" if link.is_dir() else "file"
         print(
@@ -11351,9 +11362,97 @@ def create_skill_view_symlink(target: Path, link: Path, dry_run: bool = False) -
     if dry_run:
         print(f"  {dim('ln -s')} {target} -> {link}")
         return
-    if present:
-        _remove_view_pointer(link)
     link.symlink_to(target)
+
+
+def _reconcile_receipted_release_skill_view(link: Path, target: Path) -> bool:
+    """Move only a receipt-proven release pointer through its publication owner."""
+    if not _local_skill_view_is_allowed(link):
+        return False
+    with _skill_view_mutation_lease(False):
+        paths = _runtime_install_paths()
+        runtime_home = paths["runtime_home"]
+        previous = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+        if not previous or previous.get("roots") != {
+            key: str(value) for key, value in paths.items()
+        }:
+            return False
+        if _runtime_rescue_pending_publication_reason(previous):
+            return False
+        if _path_present(
+            paths["crafted_home"] / "local-skills" / link.name / "selected.json"
+        ):
+            return False
+        old = previous.get("owned_symlinks", {}).get(str(link))
+        if not old or not _is_owned_pointer(link):
+            return False
+        current = runtime_home / "tools/vibecrafted-current"
+        try:
+            generation = current.resolve(strict=True)
+            resolved = target.resolve(strict=True)
+            old_path = Path(old)
+            old_relative = old_path.relative_to(runtime_home / "releases")
+            suffix = ("vibecrafted-core", "vibecrafted_core", "skills", link.name)
+            if (
+                len(old_relative.parts) != 5
+                or old_relative.parts[1:] != suffix
+                or not re.fullmatch(r"[A-Za-z0-9.+_-]+", old_relative.parts[0])
+                or old_relative.parts[0] in {".", ".."}
+                or _symlink_target(link) != old_path
+                or generation.parent != runtime_home / "releases"
+                or previous["owned_symlinks"].get(str(current)) != str(generation)
+                or previous.get("version") != generation.name
+                or resolved != generation.joinpath(*suffix)
+                or _runtime_generation_payload_errors(generation)
+            ):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+        _assert_runtime_physical_path(link, leaf_symlink=True)
+        _validate_runtime_backup_receipts(previous, paths)
+        before = _runtime_config_digest(link)
+        # Bind the captured preimage to the same receipt-owned pointer checked
+        # above. A foreign retarget during digest capture must not become the
+        # preimage that authorizes the transaction to replace it.
+        try:
+            raw_pointer = os.readlink(link)
+            pointer_digest = hashlib.sha256(
+                json.dumps({".": ["symlink", raw_pointer]}, sort_keys=True).encode()
+            ).hexdigest()
+            latest = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+            if (
+                before != pointer_digest
+                or not _is_owned_pointer(link)
+                or _symlink_target(link) != old_path
+                or latest != previous
+            ):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+        receipt = json.loads(json.dumps(previous))
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix="publication-", dir=runtime_home / ".installer-backups"
+            )
+        )
+        staged = staging / "view"
+        if sys.platform == "win32":
+            _atomic_symlink(resolved, staged)
+        else:
+            staged.symlink_to(resolved)
+        receipt["owned_symlinks"][str(link)] = str(resolved)
+        _publish_runtime_config_transaction(
+            paths,
+            receipt,
+            previous,
+            [(link, staged)],
+            staging,
+            None,
+            expected_preimages={link: before},
+        )
+        receipt.pop("install_phase", None)
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        return True
 
 
 def _write_skill_views(
@@ -11393,7 +11492,7 @@ def _write_skill_views(
                     "the store already answers as this runtime's skill dir, "
                     "so no view is written into it"
                 )
-                continue
+            continue
         if not dry_run:
             rt_skills.mkdir(parents=True, exist_ok=True)
         print(f"  {cyan(runtime) if styled else runtime} -> {rt_skills}")
@@ -11436,6 +11535,25 @@ def link_and_reconcile_skill_views(
     runtime this pass is about to link is still safe to quarantine — the view
     lands a moment later, in the call below.
     """
+    with _skill_view_mutation_lease(dry_run):
+        _link_and_reconcile_skill_views_locked(
+            all_runtimes,
+            store_path,
+            skills_dir,
+            skill_names,
+            dry_run=dry_run,
+            styled=styled,
+        )
+
+
+def _link_and_reconcile_skill_views_locked(
+    all_runtimes: Sequence[str],
+    store_path: Path,
+    skills_dir: Path,
+    skill_names: Sequence[str],
+    dry_run: bool = False,
+    styled: bool = True,
+) -> None:
     canonical = [rt for rt in all_runtimes if rt in SYMLINK_TARGETS]
     rest = [rt for rt in all_runtimes if rt not in SYMLINK_TARGETS]
     _write_skill_views(
@@ -11455,7 +11573,19 @@ def prune_shadowed_skill_views(
     active_runtimes: list[str],
     dry_run: bool = False,
 ) -> list[Path]:
-    """Remove managed runtime views shadowed by the canonical .agents view.
+    with _skill_view_mutation_lease(dry_run):
+        return _prune_shadowed_skill_views_locked(
+            store_path, skill_names, active_runtimes, dry_run
+        )
+
+
+def _prune_shadowed_skill_views_locked(
+    store_path: Path,
+    skill_names: list[str],
+    active_runtimes: list[str],
+    dry_run: bool = False,
+) -> list[Path]:
+    """Report shadowed views; a matching target alone does not prove ownership.
 
     A pointer-free root is a precondition, and it is checked per runtime rather
     than per entry. `~/.codex/skills -> ~/.claude/skills` on a host where only
@@ -11498,9 +11628,7 @@ def prune_shadowed_skill_views(
             )
             if not managed_target:
                 continue
-            if not dry_run:
-                shadow.unlink()
-            removed.append(shadow)
+            print(f"  {WARN} Keeping shadowed view without ownership proof: {shadow}")
     return removed
 
 
@@ -13453,6 +13581,37 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
             )
         ]
     findings: list[DoctorFinding] = []
+    local_views = receipt.get("local_skill_projections", {})
+    local_selections = receipt.get("local_skill_selections", {})
+    if local_views or local_selections:
+        try:
+            owner = _load_local_skill_owner()
+            for name, value in local_selections.items():
+                _check_recorded_local_skill_selection(name, value, paths, owner)
+            for raw, value in local_views.items():
+                path = Path(raw)
+                proof = _validate_local_skill_receipt(path, value, paths, owner)
+                if (
+                    not _is_owned_pointer(path)
+                    or _symlink_target(path) != proof.directory
+                ):
+                    raise RuntimeInstallRefusal(f"local skill view drifted: {path}")
+                selector = owner.local_skill_selector_path(proof.name)
+                if _capture_runtime_bound_file(
+                    selector, max_bytes=65536
+                ) != owner.selected_bytes(proof):
+                    raise RuntimeInstallRefusal(
+                        f"local skill selection drifted: {proof.name}"
+                    )
+            findings.append(
+                DoctorFinding(
+                    "ok",
+                    "local-skill-projections",
+                    "local skill views match their owner receipts",
+                )
+            )
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            findings.append(DoctorFinding("fail", "local-skill-projections", str(exc)))
     if receipt.get("candidate_conflicts"):
         findings.append(
             DoctorFinding(
@@ -13741,6 +13900,24 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     # product surface. Claude Code and Codex read only their own skill dirs;
     # a manifest that recorded just "agents" leaves their /vc-* decks dark,
     # and doctor must surface that instead of trusting the manifest.
+    local_view_targets: dict[str, Path] = {}
+    try:
+        paths = _runtime_install_paths()
+        installed_receipt = _load_runtime_install_receipt(
+            _runtime_receipt_path(paths["runtime_home"])
+        )
+        local_views = installed_receipt.get("local_skill_projections", {})
+        if local_views:
+            owner = _load_local_skill_owner()
+            for raw, value in local_views.items():
+                proof = _validate_local_skill_receipt(Path(raw), value, paths, owner)
+                if _capture_runtime_bound_file(
+                    owner.local_skill_selector_path(proof.name), max_bytes=65536
+                ) == owner.selected_bytes(proof):
+                    local_view_targets[raw] = proof.directory
+    except (OSError, RuntimeError, ValueError, TypeError):
+        # The receipt finding reports invalid state; never bless a view here.
+        local_view_targets = {}
     recorded_runtimes = list(state.runtimes)
     view_runtimes = recorded_runtimes + [
         rt for rt in STANDARD_VIEW_RUNTIMES if rt not in recorded_runtimes
@@ -13761,7 +13938,7 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
             default = store_path / skill_name
             if link.is_symlink():
                 target = link.resolve()
-                if target == default.resolve():
+                if target in {default.resolve(), local_view_targets.get(str(link))}:
                     findings.append(
                         DoctorFinding(
                             "ok", f"symlink:{runtime}/{skill_name}", "correct"
@@ -18848,21 +19025,45 @@ def _compact_legacy_receipt_layers(receipt: dict[str, Any]) -> dict[str, Any]:
     machine (observed 2026-10-10: a 70 MiB document refused each install).
     Configuration transactions also carried a full previous receipt. Their
     rollback uses the same live-layer ledger, so normalize that duplicate
-    through the canonical recovery snapshot. Ownership and retirement proof
-    fields survive; the live-layer ledger stays untouched.
+    through the canonical recovery snapshot. Retirement inventories likewise
+    stay only in the live layer: restore carries them forward with the backup
+    history, rather than multiplying every per-file inventory at each phase.
     """
+    # Producers materialize these live maps before creating recovery snapshots.
+    # An absent live map is not evidence that a historical copy is disposable.
+    # Refuse before compaction rather than silently dropping its only proof.
+    snapshots = [receipt]
+    seen: set[int] = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or id(snapshot) in seen:
+            continue
+        seen.add(id(snapshot))
+        for key in (
+            "retirement_generations",
+            "retirement_copies",
+            "retirement_pending",
+        ):
+            if key not in receipt and snapshot.get(key):
+                raise RuntimeInstallRefusal(
+                    f"runtime retirement ledger {key} exists only in a recovery "
+                    "snapshot; explicit receipt recovery required"
+                )
+        snapshots.append(snapshot.get("preparing_previous_receipt"))
+        transaction = snapshot.get("config_transaction")
+        if isinstance(transaction, dict):
+            snapshots.append(transaction.get("previous_receipt"))
+        rollback = snapshot.get("retirement_rollback")
+        if isinstance(rollback, dict):
+            snapshots.append(rollback.get("receipt"))
     for holder in (receipt, receipt.get("preparing_previous_receipt")):
         if not isinstance(holder, dict):
             continue
         rollback = holder.get("retirement_rollback")
         if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
-            rollback["receipt"].pop("drift_backup_history", None)
-            rollback["receipt"].pop("preparing_previous_receipt", None)
+            rollback["receipt"] = _rollback_receipt_snapshot(rollback["receipt"])
     saved = receipt.get("preparing_previous_receipt")
-    if isinstance(saved, dict):
-        if saved.get("drift_backup_history"):
-            saved["drift_backup_history"] = {}
-        saved.pop("preparing_previous_receipt", None)
+    if isinstance(saved, dict) and saved:
+        receipt["preparing_previous_receipt"] = _recovery_receipt_snapshot(saved)
     transaction = receipt.get("config_transaction")
     if isinstance(transaction, dict):
         previous = transaction.get("previous_receipt")
@@ -18917,6 +19118,20 @@ def _load_runtime_install_receipt(
             raise RuntimeInstallRefusal(
                 f"invalid runtime receipt field: {receipt_field}"
             )
+    local_views = receipt.get("local_skill_projections", {})
+    if not isinstance(local_views, dict) or any(
+        not isinstance(key, str) or not isinstance(value, dict)
+        for key, value in local_views.items()
+    ):
+        raise RuntimeInstallRefusal("invalid local skill projection receipt")
+    if set(local_views) & set(receipt.get("owned_symlinks", {})):
+        raise RuntimeInstallRefusal("overlapping runtime projection ownership")
+    local_selections = receipt.get("local_skill_selections", {})
+    if not isinstance(local_selections, dict) or any(
+        not isinstance(key, str) or not isinstance(value, dict)
+        for key, value in local_selections.items()
+    ):
+        raise RuntimeInstallRefusal("invalid local skill selection receipt")
     for receipt_field in (
         "config_defaults",
         "roots_created",
@@ -20616,12 +20831,42 @@ def _reconcile_runtime_preference(
                 "legacy partial configuration publication requires explicit "
                 "backup recovery; per-file markers cannot prove a complete install"
             )
+        resolution = old.get("resolution")
+        replay = bool(
+            isinstance(resolution, dict)
+            and choice in PREFERENCE_CHOICES
+            and previous.get("version") == generation.name
+            and prior_generation == str(generation)
+            and old.get("generation") == str(generation)
+            and old.get("sha256") == outcome["incoming_sha256"]
+            and resolution.get("choice") == choice
+            and resolution.get("current_sha256") == expected_current_sha256
+            and resolution.get("incoming_sha256") == expected_incoming_sha256
+            and resolution.get("postimage_sha256") == outcome["current_sha256"]
+        )
+        if choice:
+            if choice not in PREFERENCE_CHOICES:
+                raise ValueError("unsupported preference choice")
+            if not expected_current_sha256 or not expected_incoming_sha256:
+                raise ValueError(
+                    "preference choice requires bound current and incoming hashes"
+                )
+            if outcome["incoming_sha256"] != expected_incoming_sha256:
+                raise ValueError(
+                    "incoming defaults changed during retry; concurrent edit refused"
+                )
+            if current_raw is None or (
+                outcome["current_sha256"] != expected_current_sha256 and not replay
+            ):
+                raise ValueError(
+                    "preference changed during retry; concurrent edit refused"
+                )
         old_generation = old.get("generation", prior_generation)
         # A missing product preference has no user bytes to reconcile.  Seed
         # the already-validated incoming default without requiring a legacy
         # generation to prove a three-way baseline it will never consume.
         # Present preferences keep the strict lineage and digest checks below.
-        if old_generation and current_raw is not None:
+        if old_generation and current_raw is not None and not replay:
             old_root = Path(old_generation)
             if (
                 not old_root.is_absolute()
@@ -20645,17 +20890,6 @@ def _reconcile_runtime_preference(
                     baseline = incoming
                 elif choice not in PREFERENCE_CHOICES:
                     raise ValueError("previous shipped defaults are missing")
-                # A deliberate choice consumes no historical bytes, but its
-                # bindings must hold even when automatic merging would succeed.
-                if choice:
-                    if outcome["current_sha256"] != expected_current_sha256:
-                        raise ValueError(
-                            "preference changed during retry; concurrent edit refused"
-                        )
-                    if outcome["incoming_sha256"] != expected_incoming_sha256:
-                        raise ValueError(
-                            "incoming defaults changed during retry; concurrent edit refused"
-                        )
             else:
                 manifest, manifest_error = _load_runtime_generation_manifest(old_root)
                 if manifest is None:
@@ -20691,15 +20925,12 @@ def _reconcile_runtime_preference(
                     )
                 else:
                     raise ValueError("previous shipped defaults are unavailable")
-        if choice:
-            if choice not in PREFERENCE_CHOICES:
-                raise ValueError("unsupported preference choice")
-            if not expected_current_sha256 or not expected_incoming_sha256:
-                raise ValueError(
-                    "preference choice requires bound current and incoming hashes"
-                )
         current = current_raw.decode("utf-8") if current_raw is not None else None
-        if destination.name == "terminal-policy.toml" and current is not None:
+        if (
+            destination.name == "terminal-policy.toml"
+            and current is not None
+            and not replay
+        ):
             import tomllib
 
             current_shell = _toml_flatten(tomllib.loads(current)).get("terminal.shell")
@@ -20732,60 +20963,17 @@ def _reconcile_runtime_preference(
                 )
             )
 
-        current_matches = (
-            not outcome["current_sha256"]
-            or outcome["current_sha256"] == expected_current_sha256
-        )
-        incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
-        if choice == "keep-current":
-            if current is None:
-                raise ValueError("keep-current requires an existing preference file")
-            if not incoming_matches:
-                raise ValueError(
-                    "incoming defaults changed during retry; concurrent edit refused"
-                )
-            if current_matches:
-                # Bound keep-current must merge on the current canvas even when
-                # auto-merge would succeed. merge(None) overlays onto incoming
-                # and rewrites operator spelling after a successful result.
-                body = merge(choice)
-            else:
-                # Idempotent retry: the first apply already rewrote bound keys
-                # (padding upgrade), so the pre-merge snapshot no longer
-                # matches. Accept only when replaying keep-current is a no-op
-                # on the live bytes; a concurrent edit still changes the tree.
-                try:
-                    replay = merge(choice)
-                except ValueError as exc:
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    ) from exc
-                if replay != current:
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    )
-                body = replay
+        if replay:
+            body = current
+            outcome["user_override_keys"] = sorted(prior_terminal_overrides)
+        elif choice == "keep-current":
+            # Keep the user's canvas, including its spelling and comments.
+            body = merge(choice)
         else:
             try:
-                # A later retry of an already-applied choice must not fail merely
-                # because the bound current hash is the pre-merge snapshot.
                 body = merge(None)
             except ValueError:
                 if not choice:
-                    raise
-                if current_matches and not incoming_matches:
-                    raise ValueError(
-                        "incoming defaults changed during retry; concurrent edit refused"
-                    ) from None
-                if (
-                    incoming_matches
-                    and outcome["current_sha256"]
-                    and not current_matches
-                ):
-                    raise ValueError(
-                        "preference changed during retry; concurrent edit refused"
-                    ) from None
-                if not (current_matches and incoming_matches):
                     raise
                 body = merge(choice)
         if not body.strip() or "\0" in body:
@@ -20828,6 +21016,22 @@ def _reconcile_runtime_preference(
         "generation": str(generation),
         "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
     }
+    if choice:
+        outcome["defaults"]["resolution"] = {
+            "choice": choice,
+            "current_sha256": expected_current_sha256,
+            "incoming_sha256": expected_incoming_sha256,
+            "postimage_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }
+    elif (
+        isinstance(resolution, dict)
+        and old.get("generation") == str(generation)
+        and old.get("sha256") == outcome["incoming_sha256"]
+        and resolution.get("postimage_sha256") == outcome["current_sha256"]
+        and hashlib.sha256(body.encode("utf-8")).hexdigest()
+        == outcome["current_sha256"]
+    ):
+        outcome["defaults"]["resolution"] = resolution
     return outcome
 
 
@@ -20856,15 +21060,18 @@ def _recovery_receipt_snapshot(previous: Mapping[str, Any]) -> dict[str, Any]:
     (`owned_dirs`, `generation`, `publication`). Embedding the full per-file
     backup ledger here put one 75k-entry map into the receipt four times and
     breached the 128 MiB checkpoint limit (fail-ledger 2026-10-04/05):
-    recovery needs identity and ownership, never the backup history.
+    recovery needs identity and ownership, never duplicate bulk ledgers.
+    Retirement inventories are also carried forward from the live layer by
+    that owner; retain their rollback identity, not their per-file maps.
     """
     snapshot = json.loads(json.dumps(previous))
     snapshot["drift_backup_history"] = {}
     snapshot.pop("preparing_previous_receipt", None)
+    for key in ("retirement_generations", "retirement_copies", "retirement_pending"):
+        snapshot.pop(key, None)
     rollback = snapshot.get("retirement_rollback")
     if isinstance(rollback, dict) and isinstance(rollback.get("receipt"), dict):
-        rollback["receipt"].pop("drift_backup_history", None)
-        rollback["receipt"].pop("preparing_previous_receipt", None)
+        rollback["receipt"] = _rollback_receipt_snapshot(rollback["receipt"])
     return snapshot
 
 
@@ -21304,7 +21511,9 @@ def _validate_runtime_backup_receipts(
                     f"runtime path must be normalized and absolute: {path}"
                 )
             directory(path.parent)
-        if not any(_is_subpath(destination, root) for root in allowed_destinations):
+        if not any(
+            _is_subpath(destination, root) for root in allowed_destinations
+        ) and not _local_skill_view_is_allowed(destination):
             raise RuntimeInstallRefusal(
                 f"receipt restore path escapes managed roots: {destination}"
             )
@@ -21602,7 +21811,11 @@ def _runtime_rescue_expected_publication_paths(
     # Ownership history is not a mutation set. Immutable releases are reused
     # or newly created; no historical generation is overwritten by publication.
     releases = paths["runtime_home"] / "releases"
-    for raw in [*receipt.get("owned_files", {}), *receipt.get("owned_symlinks", {})]:
+    for raw in [
+        *receipt.get("owned_files", {}),
+        *receipt.get("owned_symlinks", {}),
+        *receipt.get("local_skill_projections", {}),
+    ]:
         path = Path(raw)
         if path != releases and releases not in path.parents:
             expected.append(path)
@@ -22077,8 +22290,10 @@ def _runtime_rescue_apply_shell_stanzas(
 
 
 def _runtime_owned_path_is_managed(path: Path, paths: Mapping[str, Path]) -> bool:
-    return _receipt_path_is_allowed(path, paths) or _receipt_projection_path_is_allowed(
-        path
+    return (
+        _receipt_path_is_allowed(path, paths)
+        or _receipt_projection_path_is_allowed(path)
+        or _local_skill_view_is_allowed(path)
     )
 
 
@@ -22389,6 +22604,48 @@ def _runtime_rescue_ownership_inventory(
         items.append(_classify_runtime_owned_file(Path(raw), str(digest), paths))
     for raw, target in receipt.get("owned_symlinks", {}).items():
         items.append(_classify_runtime_owned_symlink(Path(raw), str(target), paths))
+    local_views = receipt.get("local_skill_projections", {})
+    local_selections = receipt.get("local_skill_selections", {})
+    if local_views or local_selections:
+        owner = _load_local_skill_owner()
+        for name, value in local_selections.items():
+            try:
+                _check_recorded_local_skill_selection(name, value, paths, owner)
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                items.append(
+                    {
+                        "path": str(
+                            paths["crafted_home"]
+                            / "local-skills"
+                            / name
+                            / "selected.json"
+                        ),
+                        "kind": "file",
+                        "class": "unsafe",
+                        "reason": str(exc),
+                        "disposition": "preserve",
+                    }
+                )
+        for raw, value in local_views.items():
+            try:
+                proof = _validate_local_skill_receipt(Path(raw), value, paths, owner)
+                record = _classify_runtime_owned_symlink(
+                    Path(raw), str(proof.directory), paths
+                )
+                if record["class"] != "present" and record["current_type"] != "absent":
+                    record["class"] = "unknown_ownership"
+                    record["disposition"] = "preserve"
+                items.append(record)
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                items.append(
+                    {
+                        "path": raw,
+                        "kind": "symlink",
+                        "class": "unsafe",
+                        "reason": str(exc),
+                        "disposition": "preserve",
+                    }
+                )
     for raw in receipt.get("owned_dirs", []):
         items.append(_classify_runtime_owned_dir(Path(raw), paths))
     return items
@@ -23333,6 +23590,24 @@ def _runtime_rescue_verify_destination(
                     errors.append(f"owned symlink target drifted: {path.name}")
             except OSError:
                 errors.append(f"owned symlink is dangling: {path.name}")
+        local_views = receipt.get("local_skill_projections", {})
+        local_selections = receipt.get("local_skill_selections", {})
+        local_owner = (
+            _load_local_skill_owner() if local_views or local_selections else None
+        )
+        for name, value in local_selections.items():
+            _check_recorded_local_skill_selection(name, value, paths, local_owner)
+        for raw, value in local_views.items():
+            path = Path(raw)
+            proof = _validate_local_skill_receipt(path, value, paths, local_owner)
+            selector = local_owner.local_skill_selector_path(proof.name)
+            if (
+                not _is_owned_pointer(path)
+                or _symlink_target(path) != proof.directory
+                or _capture_runtime_bound_file(selector, max_bytes=65536)
+                != local_owner.selected_bytes(proof)
+            ):
+                errors.append(f"local skill projection drifted: {path}")
         for raw in receipt.get("owned_dirs", []):
             path = Path(raw)
             if (
@@ -23367,7 +23642,9 @@ def _runtime_rescue_verify_destination(
                     errors.append(f"skill projection missing: {runtime}/{skill.name}")
                     continue
                 try:
-                    if link.resolve(strict=True) != skill.resolve():
+                    local = local_views.get(str(link))
+                    expected = Path(local["directory"]) if local else skill.resolve()
+                    if link.resolve(strict=True) != expected:
                         errors.append(
                             f"skill projection drifted: {runtime}/{skill.name}"
                         )
@@ -24510,6 +24787,8 @@ def _runtime_transaction_paths(
         allowed
         or _receipt_projection_path_is_allowed(destination)
         or (destination == paths["crafted_home"] / STATE_FILE)
+        or _local_skill_selector_is_allowed(destination, paths)
+        or _local_skill_view_is_allowed(destination)
     )
     if not allowed:
         raise RuntimeInstallRefusal(
@@ -24531,6 +24810,203 @@ def _runtime_transaction_paths(
             raise RuntimeInstallRefusal("config transaction temporary path mismatch")
         _assert_runtime_physical_path(expected, leaf_symlink=True)
     return destination, before, after
+
+
+def _local_skill_selector_is_allowed(path: Path, paths: Mapping[str, Path]) -> bool:
+    """Only the owner selector, never a version or arbitrary user data."""
+    root = paths["crafted_home"] / "local-skills"
+    return (
+        path.name == "selected.json"
+        and path.parent.parent == root
+        and len(path.parent.name) <= 128
+        and re.fullmatch(r"(?:vc|vetcoders)-[A-Za-z0-9_-]+", path.parent.name)
+        is not None
+    )
+
+
+def _local_skill_view_is_allowed(path: Path) -> bool:
+    return (
+        path.parent in {runtime_skills_dir(rt) for rt in SYMLINK_TARGET_CHOICES}
+        and len(path.name) <= 128
+        and re.fullmatch(r"(?:vc|vetcoders)-[A-Za-z0-9_-]+", path.name) is not None
+    )
+
+
+def _load_local_skill_owner() -> Any:
+    """Load the co-distributed owner without importing the whole core package."""
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted-core/vibecrafted_core/local_skills.py"
+    )
+    # Source loaders can populate __pycache__ inside a signed generation.
+    module = types.ModuleType("_vc_local_skill_owner")
+    module.__file__ = str(module_path)
+    source = _capture_runtime_bound_file(module_path)
+    exec(compile(source, str(module_path), "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
+def _local_skill_receipt(proof: Any) -> dict[str, str]:
+    return {
+        "schema": "vibecrafted.local-skill-projection.v1",
+        "name": proof.name,
+        "directory": str(proof.directory),
+        "version_id": proof.version_id,
+        "content_sha256": proof.content_sha256,
+        "tree_sha256": proof.tree_sha256,
+    }
+
+
+def _local_skill_selection_receipt(proof: Any) -> dict[str, str]:
+    return {
+        **_local_skill_receipt(proof),
+        "schema": "vibecrafted.local-skill-selection-proof.v1",
+    }
+
+
+def _validate_local_skill_proof(
+    value: Any, paths: Mapping[str, Path], owner: Any, *, schema: str
+) -> Any:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema",
+            "name",
+            "directory",
+            "version_id",
+            "content_sha256",
+            "tree_sha256",
+        }
+        or any(not isinstance(item, str) for item in value.values())
+    ):
+        raise RuntimeInstallRefusal("invalid local skill projection receipt")
+    name, version = value["name"], value["version_id"]
+    expected = (
+        paths["crafted_home"]
+        / "local-skills"
+        / name
+        / "versions"
+        / version
+        / "tree"
+        / "skills"
+        / name
+    )
+    if (
+        value["schema"] != schema
+        or len(name) > 128
+        or not re.fullmatch(r"(?:vc|vetcoders)-[A-Za-z0-9_-]+", name)
+        or not re.fullmatch(r"[0-9a-f]{32}", version)
+        or not re.fullmatch(r"[0-9a-f]{64}", value["content_sha256"])
+        or not re.fullmatch(r"[0-9a-f]{64}", value["tree_sha256"])
+        or Path(value["directory"]) != expected
+    ):
+        raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
+    _assert_runtime_physical_path(expected)
+    proof = owner.LocalSkillProjection(
+        name, expected, version, value["content_sha256"], value["tree_sha256"]
+    )
+    try:
+        return owner.validate_candidate(proof)
+    except owner.LocalSkillError as exc:
+        raise RuntimeInstallRefusal("local skill projection proof is invalid") from exc
+
+
+def _validate_local_skill_receipt(
+    path: Path, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    if not _local_skill_view_is_allowed(path):
+        raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
+    _assert_runtime_physical_path(path, leaf_symlink=True)
+    proof = _validate_local_skill_proof(
+        value, paths, owner, schema="vibecrafted.local-skill-projection.v1"
+    )
+    if path.name != proof.name:
+        raise RuntimeInstallRefusal("local skill projection receipt escapes its owner")
+    return proof
+
+
+def _validate_local_skill_selection_receipt(
+    name: str, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    proof = _validate_local_skill_proof(
+        value, paths, owner, schema="vibecrafted.local-skill-selection-proof.v1"
+    )
+    if proof.name != name:
+        raise RuntimeInstallRefusal("local skill selection receipt name disagrees")
+    return proof
+
+
+def _check_recorded_local_skill_selection(
+    name: str, value: Any, paths: Mapping[str, Path], owner: Any
+) -> Any:
+    proof = _validate_local_skill_selection_receipt(name, value, paths, owner)
+    selector = owner.local_skill_selector_path(name)
+    if not _local_skill_selector_is_allowed(selector, paths):
+        raise RuntimeInstallRefusal("local skill selector is outside its owner")
+    _assert_runtime_physical_path(selector)
+    try:
+        raw = _capture_runtime_bound_file(selector, max_bytes=65536)
+        expected = owner.selected_bytes(proof)
+    except (OSError, owner.LocalSkillError) as exc:
+        raise RuntimeInstallRefusal("local skill selection is unavailable") from exc
+    if raw != expected:
+        raise RuntimeInstallRefusal("local skill selection disagrees with its receipt")
+    return proof
+
+
+def _prove_current_local_skill_selection(
+    name: str,
+    selected: Any,
+    previous: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    owner: Any,
+) -> tuple[dict[str, str] | None, tuple[Path, Any] | None]:
+    """Bind the selector to a transaction receipt or a proven legacy view."""
+    records = previous.get("local_skill_selections", {})
+    if name in records:
+        recorded = _validate_local_skill_selection_receipt(
+            name, records[name], paths, owner
+        )
+        if selected != recorded:
+            raise RuntimeInstallRefusal(
+                "local skill selection disagrees with its receipt"
+            )
+        return dict(records[name]), None
+    related: list[tuple[Path, Any]] = []
+    for raw, value in previous.get("local_skill_projections", {}).items():
+        path = Path(raw)
+        if path.name != name:
+            continue
+        proof = _validate_local_skill_receipt(path, value, paths, owner)
+        related.append((path, proof))
+    if selected is None:
+        if related:
+            raise RuntimeInstallRefusal(
+                "local skill selection is missing for receipted views"
+            )
+        return None, None
+    # An older receipt has no independent selector proof. Do not infer one
+    # from a pathname or from a stale/conflicting view: one exact live
+    # receipted pointer must agree with this immutable version.
+    live = [
+        (path, proof)
+        for path, proof in related
+        if _is_owned_pointer(path) and _symlink_target(path) == proof.directory
+    ]
+    if not live or any(proof != selected for _, proof in live):
+        raise RuntimeInstallRefusal(
+            "local skill selection has no unambiguous live receipt proof"
+        )
+    path, proof = live[0]
+    before = _runtime_config_digest(path)
+    if (
+        before is None
+        or not _is_owned_pointer(path)
+        or _symlink_target(path) != proof.directory
+    ):
+        raise RuntimeInstallRefusal("local skill selection witness changed")
+    return _local_skill_selection_receipt(selected), (path, proof)
 
 
 def _replace_runtime_transaction_entry(
@@ -24643,6 +25119,8 @@ def _restore_runtime_publication_receipt(
     # Keep all newly captured user snapshots and staged-generation ownership.
     for key in ("backups", "drift_backups", "drift_backup_history"):
         restored[key] = receipt.get(key, {})
+    for key in ("retirement_generations", "retirement_copies", "retirement_pending"):
+        restored[key] = receipt.get(key, restored.get(key, {}))
     restored["owned_dirs"] = sorted(
         set(restored.get("owned_dirs", []))
         | {
@@ -24672,16 +25150,28 @@ def _publish_runtime_config_transaction(
     replacements: Sequence[tuple[Path, Path]],
     staging_root: Path,
     product_before: str | None,
+    expected_preimages: Mapping[Path, str | None] | None = None,
+    validate_publication: Callable[[], None] | None = None,
 ) -> None:
     entries = []
     token = staging_root.name
     for index, (destination, source) in enumerate(replacements):
         _assert_runtime_physical_path(destination, leaf_symlink=True)
         before = staging_root / f"before-{index}"
+        pinned = expected_preimages is not None and destination in expected_preimages
+        if (
+            pinned
+            and _runtime_config_digest(destination) != expected_preimages[destination]
+        ):
+            raise RuntimeError(
+                f"projection changed after ownership check: {destination}"
+            )
         # Completed publication trees are temporary recovery, while a human's
         # divergent managed leaf belongs to the existing durable drift archive.
         # Save only overwritten divergent leaves, not another whole config tree.
         for raw, digest in previous.get("owned_files", {}).items():
+            if pinned:
+                break
             leaf = Path(raw)
             if leaf != destination and not leaf.is_relative_to(destination):
                 continue
@@ -24705,7 +25195,8 @@ def _publish_runtime_config_transaction(
                 )
         old_target = previous.get("owned_symlinks", {}).get(str(destination))
         if (
-            old_target
+            not pinned
+            and old_target
             and destination.is_symlink()
             and str(destination.readlink()) != old_target
         ):
@@ -24714,6 +25205,14 @@ def _publish_runtime_config_transaction(
             )
         if _path_present(destination):
             _copy_path_to_backup(destination, before)
+        if (
+            expected_preimages is not None
+            and destination in expected_preimages
+            and _runtime_config_digest(before) != expected_preimages[destination]
+        ):
+            raise RuntimeError(
+                f"projection changed after ownership check: {destination}"
+            )
         entry = {
             "path": str(destination),
             "before": str(before),
@@ -24760,6 +25259,8 @@ def _publish_runtime_config_transaction(
     }
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
     try:
+        if validate_publication is not None:
+            validate_publication()
         for entry in entries:
             destination, _, source = _runtime_transaction_paths(entry, paths)
             if _runtime_config_digest(destination) != entry["before_digest"]:
@@ -24778,6 +25279,8 @@ def _publish_runtime_config_transaction(
                 raise RuntimeError(
                     "configuration changed before publication could be sealed"
                 )
+        if validate_publication is not None:
+            validate_publication()
     except BaseException:
         # Crash/SIGKILL recovery uses this same path on the next explicit
         # runtime-install. Reads never call it. Keep pending on any conflict.
@@ -24787,6 +25290,192 @@ def _publish_runtime_config_transaction(
     receipt.pop("preparing_previous_receipt", None)
     receipt["install_phase"] = "ancillary"
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+
+
+def publish_local_skill(name: str, text: str, revision: str) -> dict[str, Any]:
+    """Prepare and publish one user version under the Runtime Pack lease.
+
+    The caller must execute this code from the selected generation. A version
+    is preserved user data; only its selector and agent pointers are published.
+    """
+    paths = _runtime_install_paths()
+    runtime_home = paths["runtime_home"]
+    current = runtime_home / "tools/vibecrafted-current"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    with _tools_install_lease(current, operation="local-skill-save"):
+        previous = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+        if not previous or previous.get("roots") != {
+            key: str(value) for key, value in paths.items()
+        }:
+            raise RuntimeInstallRefusal("selected runtime receipt is unavailable")
+        if _runtime_rescue_pending_publication_reason(previous):
+            raise RuntimeInstallRefusal("runtime publication is pending")
+        generation = current.resolve(strict=True)
+        if (
+            generation.parent != runtime_home / "releases"
+            or previous.get("owned_symlinks", {}).get(str(current)) != str(generation)
+            or previous.get("version") != generation.name
+            or Path(__file__).resolve() != generation / "scripts/vetcoders_install.py"
+            or _runtime_generation_payload_errors(generation)
+        ):
+            raise RuntimeInstallRefusal(
+                "selected runtime identity or receipt is inconsistent"
+            )
+        owner = _load_local_skill_owner()
+        selector = owner.local_skill_selector_path(name)
+        if not _local_skill_selector_is_allowed(selector, paths):
+            raise RuntimeInstallRefusal("local skill selector is outside its owner")
+        _assert_runtime_physical_path(selector, leaf_symlink=True)
+        selector_before = _runtime_config_digest(selector)
+        selected = owner.validated_local_skill(name, lease_held=True)
+        _, migration_witness = _prove_current_local_skill_selection(
+            name, selected, previous, paths, owner
+        )
+        if (
+            name not in {skill.name for skill in discover_skills(generation)}
+            and selected is None
+        ):
+            raise RuntimeInstallRefusal("skill has no bundled or local version")
+        proof = owner.prepare_skill(name, text, revision, lease_held=True)
+        if (
+            owner.read_skill(name, lease_held=True)["revision"] != revision
+            or owner.validated_local_skill(name, lease_held=True) != selected
+            or _runtime_config_digest(selector) != selector_before
+        ):
+            raise RuntimeInstallRefusal("skill changed before publication")
+        owner.validate_candidate(proof)
+        receipt = json.loads(json.dumps(previous))
+        local_views = receipt.setdefault("local_skill_projections", {})
+        receipt.setdefault("local_skill_selections", {})[name] = (
+            _local_skill_selection_receipt(proof)
+        )
+        backup_root = runtime_home / ".installer-backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="publication-", dir=backup_root))
+        staged_selector = staging / "selected.json"
+        _atomic_bytes_file(staged_selector, owner.selected_bytes(proof), mode=0o600)
+        expected = {selector: selector_before}
+        replacements: list[tuple[Path, Path]] = []
+        statuses: dict[str, str] = {}
+        for runtime in SYMLINK_TARGET_CHOICES:
+            view = runtime_skills_dir(runtime) / name
+            if runtime not in STANDARD_VIEW_RUNTIMES:
+                if not _path_present(view.parent):
+                    statuses[runtime] = "not_configured"
+                    continue
+                try:
+                    _assert_runtime_physical_path(view.parent)
+                except RuntimeError:
+                    statuses[runtime] = "unmanaged"
+                    continue
+                if not view.parent.is_dir():
+                    statuses[runtime] = "unmanaged"
+                    continue
+                if _path_present(view) and str(view) not in previous.get(
+                    "local_skill_projections", {}
+                ):
+                    statuses[runtime] = "unmanaged"
+                    continue
+            _assert_runtime_physical_path(view, leaf_symlink=True)
+            old_local = previous.get("local_skill_projections", {}).get(str(view))
+            if old_local is not None:
+                old_proof = _validate_local_skill_receipt(view, old_local, paths, owner)
+                old_target = old_proof.directory
+            else:
+                old_raw = previous.get("owned_symlinks", {}).get(str(view))
+                old_target = Path(old_raw) if old_raw else None
+                if old_target is not None:
+                    releases = runtime_home / "releases"
+                    try:
+                        relative = old_target.relative_to(releases)
+                    except ValueError as exc:
+                        raise RuntimeInstallRefusal(
+                            "skill projection receipt target escapes releases"
+                        ) from exc
+                    if (
+                        len(relative.parts) != 5
+                        or not re.fullmatch(r"[A-Za-z0-9.+_-]+", relative.parts[0])
+                        or relative.parts[0] in {".", ".."}
+                        or relative.parts[1:]
+                        != (
+                            "vibecrafted-core",
+                            "vibecrafted_core",
+                            "skills",
+                            name,
+                        )
+                    ):
+                        raise RuntimeInstallRefusal("invalid release skill projection")
+            if _path_present(view) and (
+                old_target is None
+                or not _is_owned_pointer(view)
+                or _symlink_target(view) != old_target.resolve(strict=False)
+            ):
+                statuses[runtime] = "conflict"
+                continue
+            before = _runtime_config_digest(view)
+            if before is not None and (
+                old_target is None
+                or not _is_owned_pointer(view)
+                or _symlink_target(view) != old_target.resolve(strict=False)
+            ):
+                raise RuntimeInstallRefusal("skill view changed during ownership check")
+            if not view.parent.is_dir():
+                statuses[runtime] = "missing_root"
+                continue
+            staged = staging / (
+                "link-" + hashlib.sha256(str(view).encode()).hexdigest()
+            )
+            if sys.platform == "win32":
+                _atomic_symlink(proof.directory, staged)
+            else:
+                staged.symlink_to(proof.directory)
+            replacements.append((view, staged))
+            expected[view] = before
+            receipt.setdefault("owned_symlinks", {}).pop(str(view), None)
+            local_views[str(view)] = _local_skill_receipt(proof)
+            statuses[runtime] = "published"
+        # Selector is last; readers hold the same lease and reject a pending
+        # transaction, while recovery restores all preimages after a crash.
+        if migration_witness is not None and migration_witness[0] not in expected:
+            raise RuntimeInstallRefusal(
+                "local skill selection witness is not publishable"
+            )
+
+        def validate_local_publication() -> None:
+            owner.validate_candidate(proof)
+            if migration_witness is not None:
+                witness, old_proof = migration_witness
+                if not _is_owned_pointer(witness) or _symlink_target(witness) not in {
+                    old_proof.directory,
+                    proof.directory,
+                }:
+                    raise RuntimeInstallRefusal("local skill selection witness changed")
+
+        replacements.append((selector, staged_selector))
+        _publish_runtime_config_transaction(
+            paths,
+            receipt,
+            previous,
+            replacements,
+            staging,
+            None,
+            expected_preimages=expected,
+            validate_publication=validate_local_publication,
+        )
+        receipt.pop("install_phase", None)
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        return {
+            "ok": True,
+            "name": name,
+            "revision": proof.content_sha256,
+            "origin": "local",
+            "activation": "published"
+            if all(
+                value in {"published", "not_configured"} for value in statuses.values()
+            )
+            else "partial",
+            "views": statuses,
+        }
 
 
 def _runtime_launcher_public_name(name: str) -> str | None:
@@ -24861,22 +25550,27 @@ def _reclaim_foreign_launcher_names(
     byte-identical file is removed and its collision backup (if any) restored,
     so the pre-Vibecrafted owner of a public name resurfaces. A bare foreign
     name whose bytes moved on is left untouched — that is the user's own
-    install now (canonical releases land there), and the user's PATH install
-    always wins. A retired name inside the Vibecrafted namespace is ours under
-    any drift: divergent bytes are preserved under `.installer-backups/drift`
-    and the wrapper is removed, so no stale `vibecrafted-*` surface lingers.
+    install now (canonical releases land there), and its stale ownership and
+    automatic collision restore are released without deleting backup history.
+    The user's PATH install always wins. A retired name inside the Vibecrafted
+    namespace is ours under any drift: divergent bytes are preserved under
+    `.installer-backups/drift` and the wrapper is removed, so no stale
+    `vibecrafted-*` surface lingers.
 
     Returns the retired paths so the caller can repoint their dependents.
     """
     published = _runtime_published_launcher_names(bin_dir)
     previous_owned = previous.get("owned_files", {})
+    previous_links = previous.get("owned_symlinks", {})
     retired: list[Path] = []
-    for stale_key in sorted(previous_owned):
+    for stale_key in sorted(set(previous_owned) | set(previous_links)):
         stale = Path(stale_key)
         if stale.parent != launcher_home or stale.name in published:
             continue
         backup_raw = receipt.setdefault("backups", {}).get(stale_key)
         if not _path_present(stale):
+            if stale_key not in previous_owned:
+                continue
             receipt.setdefault("owned_files", {}).pop(stale_key, None)
             if backup_raw:
                 _restore_receipt_collision_backup(
@@ -24885,15 +25579,50 @@ def _reclaim_foreign_launcher_names(
                 receipt.setdefault("backups", {}).pop(stale_key, None)
             continue
         identical = (
-            not stale.is_symlink()
+            stale_key in previous_owned
+            and not stale.is_symlink()
             and stale.is_file()
             and _sha256_path(stale) == previous_owned[stale_key]
         )
+        if stale_key in previous_links and stale.is_symlink():
+            identical = _symlink_target(stale) == Path(
+                previous_links[stale_key]
+            ).resolve(strict=False)
         ours_regardless = (
             stale.name.startswith(_RUNTIME_NAMESPACE_PREFIXES)
             or stale.name in _RUNTIME_NAMESPACE_NAMES
         )
         if not identical and not ours_regardless:
+            occupant = _runtime_owned_occupant_state(stale)
+            receipt.setdefault("owned_files", {}).pop(stale_key, None)
+            receipt.setdefault("owned_symlinks", {}).pop(stale_key, None)
+            receipt.setdefault("backups", {}).pop(stale_key, None)
+            if backup_raw:
+                history = receipt.setdefault("drift_backup_history", {}).setdefault(
+                    stale_key, []
+                )
+                if backup_raw not in history:
+                    history.append(backup_raw)
+            receipt.setdefault("ownership_reconciliation", []).append(
+                {
+                    "path": stale_key,
+                    "action": "release_retired_foreign_launcher",
+                    "disposition": "preserve",
+                    "reason": (
+                        "retired public tool has an unproven replacement; "
+                        "release ownership and automatic restore, preserving "
+                        "current bytes and backup history"
+                    ),
+                    "receipt_sha256": previous_owned.get(stale_key, ""),
+                    "receipt_target": previous_links.get(stale_key, ""),
+                    "released_collision_backup": backup_raw or "",
+                    **occupant,
+                }
+            )
+            continue
+        # Matching historical symlink claims retain their existing treatment;
+        # this migration only releases their unproven foreign replacements.
+        if stale_key not in previous_owned:
             continue
         if not identical:
             _backup_runtime_drift(stale, runtime_home=runtime_home, receipt=receipt)
@@ -27325,6 +28054,67 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             return _install_runtime_pack(args)
 
 
+def _verify_local_skill_install_resume(
+    paths: Mapping[str, Path], previous: Mapping[str, Any]
+) -> tuple[bytes, str | None, str | None]:
+    """Prove a sealed publication under the installer's exclusive recovery lease."""
+    if (
+        previous.get("schema") != RUNTIME_INSTALL_SCHEMA
+        or previous.get("roots") != {key: str(value) for key, value in paths.items()}
+        or previous.get("install_pending") is not True
+        or previous.get("install_phase") != "ancillary"
+        or "config_transaction" in previous
+        or "preparing_previous_receipt" in previous
+        or any(
+            previous.get(key)
+            for key in (
+                "config_pending",
+                "config_conflicts",
+                "uninstall_pending",
+                "rescue_pending",
+            )
+        )
+    ):
+        raise RuntimeInstallRefusal(
+            "local skill install recovery is not in a sealed ancillary phase"
+        )
+    descriptor = _require_inherited_tools_install_lease(paths["crafted_home"])
+    runtime_home = paths["runtime_home"]
+    current = runtime_home / "tools/vibecrafted-current"
+    _validate_tools_lease_descriptor(descriptor, _tools_install_lease_path(current))
+    active = runtime_home / "active.json"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    _assert_runtime_physical_path(active)
+    current_digest = _runtime_config_digest(current)
+    active_digest = _runtime_config_digest(active)
+    if not _previous_runtime_is_available(runtime_home, previous):
+        raise RuntimeInstallRefusal("local skill install recovery selectors disagree")
+    generation = current.resolve(strict=True)
+    if (
+        generation.parent != runtime_home / "releases"
+        or previous.get("owned_files", {}).get(str(active)) != _sha256_path(active)
+        or _runtime_generation_payload_errors(generation)
+    ):
+        raise RuntimeInstallRefusal(
+            "local skill install recovery generation is not usable"
+        )
+    raw = _capture_runtime_bound_file(
+        _runtime_receipt_path(runtime_home),
+        max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES,
+    )
+    if (
+        _load_runtime_install_receipt(_runtime_receipt_path(runtime_home), raw=raw)
+        != previous
+    ):
+        raise RuntimeInstallRefusal("local skill install recovery receipt changed")
+    if (
+        _runtime_config_digest(current) != current_digest
+        or _runtime_config_digest(active) != active_digest
+    ):
+        raise RuntimeInstallRefusal("local skill install recovery selectors changed")
+    return raw, current_digest, active_digest
+
+
 def _install_runtime_pack(
     args: argparse.Namespace,
     *,
@@ -27409,6 +28199,56 @@ def _install_runtime_pack(
         raise RuntimeInstallRefusal(
             "legacy partial config publication requires explicit backup recovery before install"
         )
+    local_owner = None
+    local_selected: dict[str, Any] = {}
+    selection_receipts = dict(previous.get("local_skill_selections", {}))
+    selection_witnesses: list[tuple[Path, Any]] = []
+    local_store = paths["crafted_home"] / "local-skills"
+    resume_proof = None
+    if (
+        _path_present(local_store)
+        or previous.get("local_skill_projections")
+        or selection_receipts
+    ):
+        resume_proof = (
+            _verify_local_skill_install_resume(paths, previous)
+            if previous.get("install_pending")
+            else None
+        )
+        local_owner = _load_local_skill_owner()
+        names = {skill.name for skill in discover_skills(payload_root)}
+        names.update(selection_receipts)
+        for raw, value in previous.get("local_skill_projections", {}).items():
+            names.add(
+                _validate_local_skill_receipt(Path(raw), value, paths, local_owner).name
+            )
+        for name in sorted(names):
+            proof = (
+                local_owner._selected_local_skill_after_install_recovery(name)
+                if resume_proof is not None
+                else local_owner.validated_local_skill(name, lease_held=True)
+            )
+            selection_receipt, witness = _prove_current_local_skill_selection(
+                name, proof, previous, paths, local_owner
+            )
+            if selection_receipt is not None:
+                selection_receipts[name] = selection_receipt
+            if witness is not None:
+                selection_witnesses.append(witness)
+            if proof is not None:
+                local_selected[name] = proof
+        if resume_proof is not None and (
+            _capture_runtime_bound_file(
+                receipt_path, max_bytes=_RUNTIME_LEGACY_DOCUMENT_MAX_BYTES
+            )
+            != resume_proof[0]
+            or _runtime_config_digest(runtime_home / "tools/vibecrafted-current")
+            != resume_proof[1]
+            or _runtime_config_digest(runtime_home / "active.json") != resume_proof[2]
+        ):
+            raise RuntimeInstallRefusal(
+                "local skill install recovery receipt or selectors changed"
+            )
     previous_healthy = False
     if previous and previous.get("version") != version and not rescue_record:
         previous_healthy, _ = _runtime_rescue_verify_destination(paths)
@@ -27431,6 +28271,10 @@ def _install_runtime_pack(
         "roots_created": root_created,
         "owned_files": dict(previous.get("owned_files", {})),
         "owned_symlinks": dict(previous.get("owned_symlinks", {})),
+        "local_skill_projections": json.loads(
+            json.dumps(previous.get("local_skill_projections", {}))
+        ),
+        "local_skill_selections": json.loads(json.dumps(selection_receipts)),
         "owned_dirs": list(previous.get("owned_dirs", [])),
         "owned_empty_dirs": list(previous.get("owned_empty_dirs", [])),
         "backups": dict(previous.get("backups", {})),
@@ -27603,6 +28447,11 @@ def _install_runtime_pack(
     frame_config = product_config / "vc-frame"
     current_link = runtime_home / "tools/vibecrafted-current"
     replacements: dict[Path, Path] = {product_config: staged_config}
+    projection_preimages: dict[Path, str | None] = {}
+    if resume_proof is not None:
+        projection_preimages[current_link] = resume_proof[1]
+        projection_preimages[runtime_home / "active.json"] = resume_proof[2]
+    projection_conflicts: list[str] = []
 
     def stage_launcher(destination: Path, body: str, *, mode: int = 0o755) -> None:
         if str(destination) not in previous.get("owned_files", {}):
@@ -27616,7 +28465,46 @@ def _install_runtime_pack(
         receipt["owned_files"][str(destination)] = _sha256_path(staged)
 
     def stage_symlink(destination: Path, target: Path) -> None:
-        if str(destination) not in previous.get("owned_symlinks", {}):
+        # A receipt names what we published, not whoever occupies that name
+        # today. Never replace a foreign skill view, including a retargeted
+        # previously-owned pointer. Other installer surfaces retain their own
+        # collision policy.
+        is_skill_view = any(
+            destination.parent == runtime_skills_dir(runtime)
+            for runtime in STANDARD_VIEW_RUNTIMES
+        )
+        if is_skill_view:
+            _assert_runtime_physical_path(destination, leaf_symlink=True)
+            expected = previous.get("owned_symlinks", {}).get(str(destination))
+            old_local = previous.get("local_skill_projections", {}).get(
+                str(destination)
+            )
+            if old_local is not None:
+                expected = str(
+                    _validate_local_skill_receipt(
+                        destination, old_local, paths, local_owner
+                    ).directory
+                )
+            if _path_present(destination) and (
+                expected is None
+                or not _is_owned_pointer(destination)
+                or _symlink_target(destination) != Path(expected).resolve(strict=False)
+            ):
+                projection_conflicts.append(str(destination))
+                return
+            before = _runtime_config_digest(destination)
+            if before is not None and (
+                expected is None
+                or not _is_owned_pointer(destination)
+                or _symlink_target(destination) != Path(expected).resolve(strict=False)
+            ):
+                raise RuntimeInstallRefusal("skill view changed during ownership check")
+            projection_preimages[destination] = before
+            if destination.name in local_selected:
+                target = local_selected[destination.name].directory
+        if str(destination) not in previous.get("owned_symlinks", {}) and str(
+            destination
+        ) not in previous.get("local_skill_projections", {}):
             _backup_runtime_collision(
                 destination, runtime_home=runtime_home, receipt=receipt
             )
@@ -27631,7 +28519,14 @@ def _install_runtime_pack(
             # off, so POSIX keeps the pre-merge absolute symlink here.
             staged.symlink_to(resolved_target)
         replacements[destination] = staged
-        receipt["owned_symlinks"][str(destination)] = str(resolved_target)
+        if is_skill_view and destination.name in local_selected:
+            receipt["owned_symlinks"].pop(str(destination), None)
+            receipt["local_skill_projections"][str(destination)] = _local_skill_receipt(
+                local_selected[destination.name]
+            )
+        else:
+            receipt["local_skill_projections"].pop(str(destination), None)
+            receipt["owned_symlinks"][str(destination)] = str(resolved_target)
 
     bin_dir = generation / "bin"
     skip_launcher_names = {
@@ -27752,6 +28647,24 @@ def _install_runtime_pack(
         raise RuntimeError(
             "product configuration changed during install; selectors were not published"
         )
+
+    def validate_local_selections() -> None:
+        for proof in local_selected.values():
+            local_owner.validate_candidate(proof)
+            selector = local_owner.local_skill_selector_path(proof.name)
+            if _capture_runtime_bound_file(selector, max_bytes=65536) != (
+                local_owner.selected_bytes(proof)
+            ):
+                raise RuntimeInstallRefusal(
+                    "local skill selection changed during install"
+                )
+        for witness, proof in selection_witnesses:
+            if (
+                not _is_owned_pointer(witness)
+                or _symlink_target(witness) != proof.directory
+            ):
+                raise RuntimeInstallRefusal("local skill selection witness changed")
+
     _publish_runtime_config_transaction(
         paths,
         receipt,
@@ -27759,6 +28672,8 @@ def _install_runtime_pack(
         list(replacements.items()),
         staging_root,
         product_before,
+        expected_preimages=projection_preimages,
+        validate_publication=validate_local_selections if local_selected else None,
     )
     try:
         copy_proof = _runtime_retirement_tree(staging_root, pointers=True)
@@ -27806,7 +28721,21 @@ def _install_runtime_pack(
     result["foundation_service_actions"] = foundation_service_actions
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
-    result["runtime_views"] = ",".join(runtime_views)
+    conflicts = set(projection_conflicts)
+    complete_views = [
+        runtime
+        for runtime in runtime_views
+        if all(
+            str(runtime_skills_dir(runtime) / name) not in conflicts
+            for name in skill_names
+        )
+    ]
+    result["runtime_views"] = ",".join(complete_views)
+    result["attempted_runtime_views"] = ",".join(runtime_views)
+    result["skill_projection_conflicts"] = projection_conflicts
+    result["skill_projection_status"] = (
+        "partial" if projection_conflicts else "published"
+    )
     if not rescue_record:
         result["retirement"] = _finish_runtime_retirement(paths, receipt)
     foundations = _ensure_foundations_installed(
@@ -27820,7 +28749,8 @@ def _install_runtime_pack(
     # "installed, but not a complete product" so wrappers cannot claim success.
     return (
         0
-        if foundations["status"] in ("installed", "skipped", "unsupported-platform")
+        if not projection_conflicts
+        and foundations["status"] in ("installed", "skipped", "unsupported-platform")
         else 1
     )
 
@@ -28223,6 +29153,7 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
     for raw_path in (
         *receipt.get("owned_files", {}),
         *receipt.get("owned_symlinks", {}),
+        *receipt.get("local_skill_projections", {}),
         *receipt.get("owned_dirs", []),
     ):
         path = Path(raw_path)
@@ -28232,6 +29163,17 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
             )
     owned_files = receipt.get("owned_files", {})
     owned_symlinks = receipt.get("owned_symlinks", {})
+    local_views = receipt.get("local_skill_projections", {})
+    local_selections = receipt.get("local_skill_selections", {})
+    local_owner = _load_local_skill_owner() if local_views or local_selections else None
+    for name, value in local_selections.items():
+        _validate_local_skill_selection_receipt(name, value, paths, local_owner)
+    local_targets = {
+        raw: _validate_local_skill_receipt(
+            Path(raw), value, paths, local_owner
+        ).directory
+        for raw, value in local_views.items()
+    }
     for raw_path in owned_files:
         path = Path(raw_path)
         if not (
@@ -28287,6 +29229,12 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
             not _is_owned_pointer(path)
             or _symlink_target(path) != Path(raw_target).resolve(strict=False)
         )
+    )
+    conflicts.extend(
+        raw
+        for raw, target in sorted(local_targets.items())
+        if _path_present(path := Path(raw))
+        and (not _is_owned_pointer(path) or _symlink_target(path) != target)
     )
     if conflicts:
         result = {
@@ -28363,6 +29311,14 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
         return 1
 
     for raw_path in sorted(owned_symlinks, reverse=True):
+        path = Path(raw_path)
+        if not _path_present(path):
+            continue
+        actions.append(f"remove {path}")
+        if not dry_run:
+            _remove_path(path)
+
+    for raw_path in sorted(local_targets, reverse=True):
         path = Path(raw_path)
         if not _path_present(path):
             continue

@@ -681,8 +681,224 @@ def _fake_target(tmp_path: Path, root: Path) -> dev_container.ContainerTarget:
     )
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_container_refuses_missing_own_tooling_before_provider(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, capsys, provider: str
+) -> None:
+    repo = tmp_path / "project"
+    _repo(repo)
+    target = _fake_target(tmp_path, repo)
+    monkeypatch.setenv(
+        "PATH", f"{Path(target.cli).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setattr(dev_container, "ensure_container", lambda *_a, **_k: target)
+
+    def missing(*_a, **_k):
+        raise dev_container.ContainerError("own runtime unavailable", stage="runtime")
+
+    monkeypatch.setattr(dev_container, "prepare_agent_runtime", missing)
+    run_id = "init-20261010-020202-bridge"
+    status = launch_interactive_workspace(
+        provider,
+        "/vc-init",
+        "local-vm",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        admission={"run_id": run_id, "skill": "init"},
+    )
+    assert status == 1
+    assert "own runtime unavailable" in capsys.readouterr().err
+    meta = json.loads(
+        (home / "control_plane" / "runtime_runs" / run_id / "meta.json").read_text()
+    )
+    assert meta["status"] == "failed"
+    assert meta["terminal_reason"] == "container_runtime_failed"
+
+
+@pytest.fixture
+def fake_container_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vibecrafted_core import container_message_bridge
+
+    class Relay:
+        guest_path = "/guest/run/message-test"
+        failure = ""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(container_message_bridge, "ContainerMessageRelay", Relay)
+    monkeypatch.setattr(
+        dev_container,
+        "prepare_agent_runtime",
+        lambda *_a, **_k: SimpleNamespace(
+            bin_dir="/guest/runtime/bin",
+            skill_paths={},
+            receipt=lambda: {"version": "test"},
+        ),
+    )
+
+
+def test_container_maps_selected_host_skill_to_guest_prompt(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, fake_container_runtime
+) -> None:
+    repo = tmp_path / "project"
+    _repo(repo)
+    selected = tmp_path / "local" / "vc-init" / "SKILL.md"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("selected local skill")
+    target = _fake_target(tmp_path, repo)
+    log, stage = tmp_path / "exec.jsonl", tmp_path / "stage.jsonl"
+    monkeypatch.setenv("FAKE_EXEC_LOG", str(log))
+    monkeypatch.setenv("FAKE_EXEC_STAGE", str(stage))
+    monkeypatch.setenv(
+        "PATH", f"{Path(target.cli).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setattr(dev_container, "ensure_container", lambda *_a, **_k: target)
+    monkeypatch.setattr(spawn, "canonical_skill_file", lambda _name: selected)
+
+    def prepare(_target, _run_id, *, selected_skills, env):
+        assert selected_skills == {str(selected): selected}
+        return SimpleNamespace(
+            bin_dir="/guest/runtime/bin",
+            skill_paths={str(selected): "/guest/runtime/skills/vc-init/SKILL.md"},
+            receipt=lambda: {"version": "test"},
+        )
+
+    monkeypatch.setattr(dev_container, "prepare_agent_runtime", prepare)
+    prompt = spawn.compose_interactive_task_prompt(
+        skill="init", source="", root=str(repo), resume_block=""
+    )
+    status = launch_interactive_workspace(
+        "codex",
+        prompt,
+        "local-vm",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        admission={"run_id": "init-20261010-020203-local", "skill": "init"},
+    )
+    assert status == 0
+    body = [json.loads(line) for line in stage.read_text().splitlines()][-1]["body"]
+    assert "/guest/runtime/skills/vc-init/SKILL.md" in body
+    assert str(selected) not in body
+    assert str(repo) not in body
+
+
+def test_container_refuses_bridge_failure_before_provider(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, fake_container_runtime
+) -> None:
+    from vibecrafted_core import container_message_bridge, message_control
+
+    repo = tmp_path / "project"
+    _repo(repo)
+    target = _fake_target(tmp_path, repo)
+    monkeypatch.setenv("FAKE_EXEC_LOG", str(tmp_path / "exec.jsonl"))
+    monkeypatch.setenv("FAKE_EXEC_STAGE", str(tmp_path / "stage.jsonl"))
+    monkeypatch.setenv(
+        "PATH", f"{Path(target.cli).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setattr(dev_container, "ensure_container", lambda *_a, **_k: target)
+
+    class BrokenRelay:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise message_control.MessageControlError("bridge_start_failed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(container_message_bridge, "ContainerMessageRelay", BrokenRelay)
+    run_id = "init-20261010-020204-relay"
+    assert (
+        launch_interactive_workspace(
+            "codex",
+            "/vc-init",
+            "local-vm",
+            "bypass",
+            repo,
+            token_budget="unmetered",
+            admission={"run_id": run_id, "skill": "init"},
+        )
+        == 1
+    )
+    calls = [
+        json.loads(line)["argv"]
+        for line in (tmp_path / "exec.jsonl").read_text().splitlines()
+    ]
+    assert all(call[:2] != ["exec", "-it"] for call in calls)
+    meta = json.loads(
+        (home / "control_plane" / "runtime_runs" / run_id / "meta.json").read_text()
+    )
+    assert meta["status"] == "failed"
+    assert meta["terminal_reason"] == "container_message_bridge_failed"
+    assert "bridge_start_failed" in meta["error"]
+
+
+def test_container_closes_relay_when_transcript_setup_fails(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, fake_container_runtime
+) -> None:
+    from vibecrafted_core import container_message_bridge
+
+    repo = tmp_path / "project"
+    _repo(repo)
+    target = _fake_target(tmp_path, repo)
+    monkeypatch.setenv("FAKE_EXEC_LOG", str(tmp_path / "exec.jsonl"))
+    monkeypatch.setenv("FAKE_EXEC_STAGE", str(tmp_path / "stage.jsonl"))
+    monkeypatch.setenv(
+        "PATH", f"{Path(target.cli).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setattr(dev_container, "ensure_container", lambda *_a, **_k: target)
+    closed: list[bool] = []
+
+    class Relay:
+        guest_path = "/guest/message"
+        failure = ""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(container_message_bridge, "ContainerMessageRelay", Relay)
+
+    def fail_capture(*_args):
+        raise OSError("capture unavailable")
+
+    monkeypatch.setattr(spawn, "InteractiveTranscriptCapture", fail_capture)
+    run_id = "init-20261010-020205-capture"
+    with pytest.raises(OSError, match="capture unavailable"):
+        launch_interactive_workspace(
+            "codex",
+            "/vc-init",
+            "local-vm",
+            "bypass",
+            repo,
+            token_budget="unmetered",
+            admission={"run_id": run_id, "skill": "init"},
+        )
+    assert closed == [True]
+    meta = json.loads(
+        (home / "control_plane" / "runtime_runs" / run_id / "meta.json").read_text()
+    )
+    assert meta["status"] == "failed"
+    assert meta["terminal_reason"] == "transcript_prepare_failed"
+
+
 def test_container_launch_runs_the_provider_inside_and_binds_its_session(
-    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, fake_container_runtime
 ) -> None:
     repo = tmp_path / "project"
     _repo(repo)
@@ -903,7 +1119,7 @@ if sys.platform == "win32":  # pragma: no cover - POSIX PTY contract
 
 
 def test_terminal_state_is_published_before_container_teardown(
-    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch, fake_container_runtime
 ) -> None:
     repo = tmp_path / "project"
     _repo(repo)

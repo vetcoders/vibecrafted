@@ -5,11 +5,22 @@ use control_core::{ControlPlane, USAGE_REPORT_SCHEMA, UsageFilter};
 use serde_json::json;
 
 fn fixture_home(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir -- fresh atomic create below refuses pre-existing paths/symlinks; Unix mode is private before creation.
+    let path = std::env::temp_dir().join(format!(
         "control-core-usage-{label}-{}-{}",
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ))
+    ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .expect("exclusive private usage fixture");
+    path
 }
 
 fn write_meta(home: &std::path::Path, run_id: &str, value: serde_json::Value) {
@@ -217,17 +228,31 @@ fn usage_report_recovers_transcript_totals_without_treating_missing_as_zero() {
         }),
     );
 
-    let report = ControlPlane::new(&home).usage_report(
-        now,
-        UsageFilter {
-            since: Some(Duration::days(7)),
-            since_label: "7d".into(),
-            ..UsageFilter::default()
-        },
-    );
+    let plane = ControlPlane::new(&home);
+    let filter = UsageFilter {
+        since: Some(Duration::days(7)),
+        since_label: "7d".into(),
+        ..UsageFilter::default()
+    };
+    let first = plane.usage_report(now, filter.clone());
+    assert_eq!(first.totals.tokens_total_known, 0);
+    assert!(first.recovery.refreshing);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let report = loop {
+        let report = plane.usage_report(now, filter.clone());
+        if !report.recovery.refreshing {
+            break report;
+        }
+        assert!(std::time::Instant::now() < deadline, "bounded recovery");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
 
     assert_eq!(report.totals.runs, 2);
-    assert_eq!(report.totals.runs_tokens_unknown, 1);
+    assert_eq!(
+        report.totals.runs_tokens_unknown, 1,
+        "{:?}",
+        report.recovery
+    );
     assert_eq!(report.totals.tokens_total_known, 51);
     let measured = report
         .runs
@@ -324,6 +349,21 @@ fn day_row(
     })
 }
 
+fn settled_local_report(home: &std::path::Path, filter: UsageFilter) -> control_core::UsageReport {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let report = ControlPlane::new(home).usage_report(now(), filter.clone());
+        if !report.local_sources.iter().any(|source| source.refreshing) {
+            return report;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "local projection did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn fleet_entry(
     id: &str,
     model: &str,
@@ -404,7 +444,7 @@ fn local_usage_reads_real_provider_formats_and_never_fabricates_completion() {
             "days": [day_row("2026-10-12", "kimi-k3", 60, 30, 0, 0)]}}),
     );
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     assert_eq!(report.totals.runs, 2);
     assert_eq!(report.totals.tokens_total_known, 60 + 90);
@@ -466,7 +506,7 @@ fn vc_run_wins_over_its_local_twin_and_is_counted_once() {
         }),
     );
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     assert_eq!(
         report.totals.runs, 2,
@@ -518,7 +558,7 @@ fn a_filtered_out_vc_run_does_not_resurface_as_a_local_session() {
         ..UsageFilter::default()
     };
 
-    let report = ControlPlane::new(&home).usage_report(now(), filter);
+    let report = settled_local_report(&home, filter);
 
     assert_eq!(
         report.totals.runs, 0,
@@ -544,7 +584,7 @@ fn a_moved_session_file_is_counted_once() {
                                         "/new/moved-session-id-0001.jsonl": entry}),
     );
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     assert_eq!(report.totals.runs, 1);
     assert_eq!(report.totals.tokens_total_known, 15);
@@ -585,7 +625,7 @@ fn archive_fallback_is_last_wins_and_withholds_days_vc_already_covers() {
     )
     .unwrap();
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     let local: Vec<_> = report.runs.iter().filter(|r| r.origin == "local").collect();
     assert_eq!(local.len(), 1);
@@ -619,7 +659,7 @@ fn malformed_local_projections_stay_absent_not_zero() {
     )
     .unwrap();
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     assert_eq!(report.totals.runs, 0);
     assert_eq!(source(&report, "grok").source, "absent");
@@ -859,7 +899,7 @@ fn a_local_session_without_token_measurements_stays_unknown_not_zero() {
     )
     .unwrap();
 
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
 
     let local: Vec<_> = report.runs.iter().filter(|r| r.origin == "local").collect();
     assert_eq!(local.len(), 2, "unmeasured activity is still counted");
@@ -904,7 +944,7 @@ fn a_measured_zero_token_bucket_stays_known_in_scan_and_archive() {
     let archive = home.join("telemetry/archive");
     fs::create_dir_all(&archive).expect("private archive");
     fs::write(archive.join("grok.jsonl"), json!({"day":"2026-10-12", "model":"private-model", "input_tokens":0, "output_tokens":0, "cache_read_tokens":0, "cache_creation_tokens":0}).to_string()+"\n").expect("zero row");
-    let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    let report = settled_local_report(&home, UsageFilter::default());
     assert_eq!(report.runs.len(), 2);
     for run in &report.runs {
         assert_eq!(run.tokens.events, 1, "a real zero is measured");
@@ -947,7 +987,7 @@ fn omp_missing_projection_and_unmeasured_archive_never_become_known_zero() {
         ),
     )
     .unwrap();
-    let report = plane.usage_report(now(), filter);
+    let report = settled_local_report(&home, filter);
     assert_eq!(source(&report, "omp").source, "archive");
     assert_eq!(source(&report, "omp").counted, 2);
     assert_eq!(report.totals.runs, 2);
@@ -968,4 +1008,168 @@ fn omp_missing_projection_and_unmeasured_archive_never_become_known_zero() {
     }
     assert_eq!(control_core::usage::provider_pool("omp"), None);
     fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn a_native_sized_local_cache_never_blocks_requests_and_retains_failed_refresh() {
+    use std::io::Write;
+    use std::time::{Duration as StdDuration, Instant};
+    let home = fixture_home("large-cache");
+    let dir = home.join("telemetry/claude");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("scan-cache.json");
+    // Same native fleet shape as production: useful day buckets beside large
+    // parser state in record.native. Only synthetic repeated bytes are stored.
+    let mut file = fs::File::create(&path).unwrap();
+    write!(file, "{{\"files\":{{\"/synthetic/large-session.jsonl\":{{\"days\":[{{\"day\":\"2026-10-12\",\"model\":\"model-A\",\"input_tokens\":40,\"output_tokens\":11}}],\"record\":{{\"id\":\"large-session\",\"mtime\":{},\"native\":\"", now().timestamp()).unwrap();
+    let block = vec![b'x'; 1024 * 1024];
+    for _ in 0..211 {
+        file.write_all(&block).unwrap();
+    }
+    file.write_all(b"\"}}}}").unwrap();
+    drop(file);
+    let start = Instant::now();
+    let first = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    assert!(
+        start.elapsed() < StdDuration::from_millis(500),
+        "foreground read the native-sized ledger"
+    );
+    assert!(first.local_sources.iter().any(|s| s.refreshing));
+    assert_eq!(source(&first, "agy").source, "unavailable");
+    assert_eq!(source(&first, "cursor").source, "unavailable");
+    assert_eq!(
+        first.totals.runs, 0,
+        "unknown pending data must not masquerade as a measured session"
+    );
+    let mut requests = Vec::new();
+    for _ in 0..8 {
+        let home = home.clone();
+        requests.push(std::thread::spawn(move || {
+            let start = Instant::now();
+            let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+            assert!(start.elapsed() < StdDuration::from_millis(500));
+            report
+        }));
+    }
+    for request in requests {
+        request.join().unwrap();
+    }
+    let deadline = Instant::now() + StdDuration::from_secs(30);
+    let complete = loop {
+        let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+        if !report.local_sources.iter().any(|s| s.refreshing) {
+            break report;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(StdDuration::from_millis(20));
+    };
+    assert_eq!(complete.totals.tokens_total_known, 51);
+    assert_eq!(source(&complete, "claude").counted, 1);
+    let stamp = source(&complete, "claude").refreshed_at.clone();
+    for _ in 0..3 {
+        let report = settled_local_report(
+            &home,
+            UsageFilter {
+                model: Some("model-A".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(report.totals.tokens_total_known, 51);
+        assert_eq!(
+            source(&report, "claude").refreshed_at,
+            stamp,
+            "unchanged source must reuse the completed projection"
+        );
+        let other = settled_local_report(
+            &home,
+            UsageFilter {
+                model: Some("model-B".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            other.totals.runs, 0,
+            "one cached projection must preserve filter scope"
+        );
+    }
+    fs::write(&path, b"invalid replacement").unwrap();
+    let previous = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    assert_eq!(previous.totals.tokens_total_known, 51);
+    assert!(source(&previous, "claude").stale);
+    let failed = settled_local_report(&home, UsageFilter::default());
+    assert_eq!(failed.totals.tokens_total_known, 51);
+    assert!(source(&failed, "claude").stale);
+    assert_eq!(
+        source(&failed, "claude").error.as_deref(),
+        Some("scan_cache_unreadable")
+    );
+    write_cache(
+        &home,
+        "claude",
+        json!({"/synthetic/large-session.jsonl": fleet_entry("large-session", "model-A", -1, vec![day_row("2026-10-12", "model-A", 71, 11, 0, 0)])}),
+    );
+    let repaired = settled_local_report(&home, UsageFilter::default());
+    assert_eq!(repaired.totals.tokens_total_known, 82);
+    assert!(!source(&repaired, "claude").stale);
+    assert!(source(&repaired, "claude").error.is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let restore = Restore(dir.clone());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "USAGE_PERMISSION_CAPABILITY denied_traversal=true permission_subcase=asserted"
+                );
+                let denied = settled_local_report(&home, UsageFilter::default());
+                assert_eq!(
+                    denied.totals.tokens_total_known, 82,
+                    "unreadable is not absent"
+                );
+                assert!(source(&denied, "claude").stale);
+                assert_eq!(
+                    source(&denied, "claude").error.as_deref(),
+                    Some("projection_source_unreadable")
+                );
+            }
+            Ok(_) => {
+                // Root/CAP_DAC_OVERRIDE can traverse mode000. That is not a
+                // reader failure: retain all other assertions in this test.
+                eprintln!(
+                    "USAGE_PERMISSION_CAPABILITY denied_traversal=false permission_subcase=not_enforceable"
+                );
+            }
+            Err(error) => panic!("unexpected traversal probe error: {:?}", error.kind()),
+        }
+        drop(restore);
+        let restored = settled_local_report(&home, UsageFilter::default());
+        assert_eq!(restored.totals.tokens_total_known, 82);
+        assert!(!source(&restored, "claude").stale);
+    }
+    write_meta(
+        &home,
+        "new-vc-twin",
+        json!({
+            "run_id":"new-vc-twin", "agent":"claude", "provider_session_id":"large-session",
+            "completed_at":now().to_rfc3339(), "usage":{"tokens_total":82},
+            "cost":{"amount":0.1,"currency":"USD"}
+        }),
+    );
+    let pending = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
+    assert_eq!(
+        pending.totals.tokens_total_known, 82,
+        "an old local snapshot must not double-count a newly recorded VC twin"
+    );
+    let deduplicated = settled_local_report(&home, UsageFilter::default());
+    assert_eq!(deduplicated.totals.tokens_total_known, 82);
+    assert_eq!(source(&deduplicated, "claude").matched_vc, 1);
+    assert_eq!(source(&deduplicated, "claude").counted, 0);
+    fs::remove_dir_all(home).unwrap();
 }

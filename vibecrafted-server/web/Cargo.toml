@@ -1,6 +1,6 @@
 [package]
 name = "vibecrafted-server-web"
-version = "4.5.0"
+version = "4.5.1"
 edition = "2024"
 rust-version = "1.85.0"
 license = "BUSL-1.1"
@@ -132,6 +132,11 @@ path = "tests/usage_heatmap_lock.rs"
 required-features = ["ssr"]
 
 [[test]]
+name = "usage_latency_http"
+path = "tests/usage_latency_http.rs"
+required-features = ["ssr"]
+
+[[test]]
 name = "mcp_http"
 path = "tests/mcp_http.rs"
 required-features = ["ssr"]
@@ -169,3 +174,13 @@ lib-default-features = false
 lib-profile-release = "wasm-release"
 hash-files = false
 watch-additional-files = ["public", "styles"]
+
+[[test]]
+name = "usage_large_cache_http"
+path = "tests/usage_large_cache_http.rs"
+required-features = ["ssr"]
+
+[[test]]
+name = "usage_refresh_dom"
+path = "tests/usage_refresh_dom.rs"
+required-features = ["ssr"]

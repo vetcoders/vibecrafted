@@ -109,6 +109,34 @@ func productUpdateDownloadFile(
   return { task.cancel() }
 }
 
+/// Probe support before mounting; a refused mount is never retried via hdiutil.
+func runProductUpdateDMGAttach(
+  dmg: URL,
+  mount: URL,
+  run: (String, [String], TimeInterval) -> Result<ProductUpdateBoundProcessResult, ProductUpdateProcessError> = {
+    runProductUpdateBoundProcess(executable: $0, arguments: $1, timeout: $2)
+  }
+) -> Result<ProductUpdateBoundProcessResult, ProductUpdateProcessError> {
+  var modern = false
+  switch run("/usr/sbin/diskutil", ["image", "attach", "--help"], 5) {
+  case .failure(.executableMissing): break
+  case .failure(let error): return .failure(error)
+  case .success(let result):
+    if result.timedOut { return .failure(.timedOut) }
+    let help = String(data: result.stdout, encoding: .utf8) ?? ""
+    modern = result.status == 0
+      && ["--readOnly", "--nobrowse", "--mountPoint"].allSatisfy { help.contains($0) }
+  }
+  if modern {
+    return run("/usr/sbin/diskutil", [
+      "image", "attach", "--readOnly", "--nobrowse", "--mountPoint", mount.path, dmg.path,
+    ], 90)
+  }
+  return run("/usr/bin/hdiutil", [
+    "attach", "-readonly", "-nobrowse", "-mountpoint", mount.path, dmg.path,
+  ], 90)
+}
+
 func productUpdateExtractApp(
   from dmg: URL,
   to destination: URL,
@@ -128,12 +156,7 @@ func productUpdateExtractApp(
     let mount = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-update-dmg-\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
-    let attach = runProductUpdateBoundProcess(
-      executable: "/usr/bin/hdiutil",
-      arguments: [
-        "attach", dmg.path, "-nobrowse", "-readonly", "-mountpoint", mount.path,
-      ],
-      timeout: 90)
+    let attach = runProductUpdateDMGAttach(dmg: dmg, mount: mount)
     defer {
       _ = runProductUpdateBoundProcess(
         executable: "/usr/bin/hdiutil",
