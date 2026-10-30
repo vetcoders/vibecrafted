@@ -1779,6 +1779,19 @@ verify_channel_app() {
   spctl --assess --type execute "$app" >/dev/null 2>&1
 }
 
+# Capability is selected before the single mount attempt. A mount refusal must
+# propagate; retrying it through another tool would hide the real failure.
+readonly_dmg_attach() {
+  local help=""
+  if command -v diskutil >/dev/null 2>&1 \
+      && help="$(diskutil image attach --help 2>&1)" \
+      && [[ "$help" == *--readOnly* && "$help" == *--nobrowse* && "$help" == *--mountPoint* ]]; then
+    diskutil image attach --readOnly --nobrowse --mountPoint "$2" "$1"
+  else
+    hdiutil attach -readonly -nobrowse -mountpoint "$2" "$1"
+  fi
+}
+
 stage_channel_app() {
   [[ -n "$staged_channel_app" ]] && return 0
   [[ "$channel_dmg_url" == https://* ]] \
@@ -1787,7 +1800,7 @@ stage_channel_app() {
   curl -fsSL "$channel_dmg_url" -o "$dmg" \
     || die "Could not download the Vibecrafted App DMG $channel_dmg_url"
   mkdir -p "$mount"
-  hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null \
+  readonly_dmg_attach "$dmg" "$mount" >/dev/null \
     || die "Could not mount the downloaded DMG"
   if ! verify_channel_app "$mount/Vibecrafted.app"; then
     hdiutil detach "$mount" >/dev/null 2>&1 || true

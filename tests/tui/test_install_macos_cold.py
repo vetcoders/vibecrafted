@@ -267,6 +267,8 @@ if '--display' in sys.argv:
     )
     _write_executable(tools / "spctl", '#!/bin/bash\necho notarized >> "$EVENTS"\n')
     _write_executable(tools / "open", '#!/bin/bash\necho opened >> "$EVENTS"\n')
+    # Never let capability selection reach the host diskutil for fake images.
+    _write_executable(tools / "diskutil", "#!/bin/bash\nexit 1\n")
     _python_script(
         tools / "hdiutil",
         """import os,shutil,sys
