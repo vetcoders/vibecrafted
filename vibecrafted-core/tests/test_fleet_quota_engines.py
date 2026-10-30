@@ -763,7 +763,8 @@ def test_omp_bounded_modes_remain_available(
         )
     )
     assert saved["metrics"]["processed_total"] == 10
-    assert saved["quota"]["status"] == "ok"
+    assert saved["quota"]["status"] == "unavailable"
+    assert "token counters" in saved["quota"]["reason"]
     assert "limit" not in saved["quota"]
 
 

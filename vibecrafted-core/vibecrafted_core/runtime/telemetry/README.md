@@ -68,11 +68,65 @@ reads local files only.
 
 The network is touched solely by a quota refresh, on explicit request
 (`GET /api/usage/quota?refresh=network`, the "Refresh quota" button) or as a
-plan's preflight (`refresh=preflight&agents=a,b`). Only providers with a
-provider-owned source answer (kimi probe, agy transcript 429 scan); every other
-provider reports `unknown` — quota exhaustion is never inferred from token
-totals. Agy keeps estimated transcripts only, so its local usage stays
+plan's preflight (`refresh=preflight&agents=a,b`). Providers with a provider-owned source answer: Codex reads native local
+rate-limit observations, Kimi uses its existing explicit probe, and Agy reads
+native 429 evidence. Other providers report `unknown` — quota exhaustion is
+never inferred from token totals. Codex quota refresh stays local and does not
+backfill token histories or the usage archive. Agy keeps estimated transcripts only, so its local usage stays
 `unavailable` rather than becoming a zero.
+
+## Native quota observations
+
+Codex `event_msg` / `token_count` records can carry `payload.rate_limits`
+independently of token usage. The collector preserves the native percentage,
+window duration, reset epoch and observation timestamp under `quota.windows`:
+
+```json
+{
+  "id": "primary",
+  "used_ratio": 0.25,
+  "remaining_ratio": 0.75,
+  "window_minutes": 10080,
+  "resets_at": 1893456000,
+  "observed_at": "2029-12-25T00:00:00Z",
+  "source": "codex.native.token_count.rate_limits",
+  "scope": { "pool": "openai", "limit_id": "codex", "plan_type": "pro" }
+}
+```
+
+`remaining_ratio` is the complement of the native used percentage; no absolute
+token allowance is invented. A 10080-minute window is seven days, not a daily
+or monthly allowance. Account/model scope is included only when explicitly
+reported by the native quota record. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` select
+the native local stores when set.
+
+The adapter reads at most eight recent rollout tails of 512 KiB and keeps its
+versioned observations in the existing `scan-cache.json`. An unchanged source
+is not reopened. A known event moved beyond the tail by appended tool output
+is retained only after checking that its original bytes still match; its
+original timestamp remains. Truncation/replacement cannot inherit that event.
+The native timestamp, rather than collection `generated_at`, determines age;
+an elapsed reset or observation older than five minutes is stale. An explicit
+null secondary removes the old secondary window for that native limit.
+
+`refresh_native_quota` is the same collector's local-only quota refresh entry;
+it writes the existing projection and cache, starts no provider and creates no
+separate scheduler or store. All fleet publication paths share a nonblocking
+per-projection lease, acquired before reading the cache and released before a
+daemon sleeps. A concurrent quota refresh reports `TelemetryBusy`, not a false
+unavailable measurement; the CLI returns busy/75. Cache and quota writes use
+unique private temporary files. Already running pre-lease legacy daemons need
+an ordinary upgrade before they can participate in this ownership contract.
+An older token-only cache is inspected once for
+quota without invalidating all token history. Missing or malformed native
+observations remain unavailable, distinct from a measured exhausted window.
+
+Claude, Grok, Junie, Copilot and OMP adapters currently expose local token
+usage, not remaining subscription capacity. Cursor has no local usage source.
+Kimi's existing adapter can expose 5h/month windows from its explicit source;
+Agy's existing adapter can report observed exhaustion/reset evidence. Absence
+of either native snapshot remains unavailable. No extra network or credential
+flow is introduced by the Codex adapter.
 
 ## Web
 
