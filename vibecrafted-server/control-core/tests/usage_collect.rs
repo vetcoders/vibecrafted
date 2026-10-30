@@ -11,11 +11,21 @@ use control_core::{ControlPlane, UsageFilter};
 
 #[test]
 fn collector_fills_the_projections_the_report_reads_without_resident_children() {
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir -- atomic private creation below rejects existing paths and symlinks before writing the inert executable or fixtures.
     let root = std::env::temp_dir().join(format!(
         "control-core-collect-{}-{}",
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&root)
+        .expect("exclusive private collector fixture");
     let host = root.join("host");
     let vc_home = root.join("vc");
     fs::create_dir_all(&vc_home).unwrap();
@@ -54,6 +64,7 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
     )
     .unwrap();
     // SAFETY: single test in this process; nothing reads the environment concurrently.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- this binary owns its only test; fixture environment is established before any collector or projection starts.
     unsafe {
         std::env::set_var("HOME", &host);
         std::env::set_var("VIBECRAFTED_HOME", &vc_home);
@@ -85,7 +96,18 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         "every provider is collected by the one owner"
     );
 
-    let report = plane.usage_report(Utc::now(), UsageFilter::default());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let report = loop {
+        let report = plane.usage_report(Utc::now(), UsageFilter::default());
+        if !report.local_sources.iter().any(|source| source.refreshing) {
+            break report;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "collector projection did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let claude = report
         .runs
         .iter()
@@ -171,6 +193,7 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         // SAFETY: this binary contains exactly one test.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- the only test has awaited all local projection work above; no background environment reader remains when replacing the inert boundary.
         unsafe {
             std::env::set_var("VIBECRAFTED_PYTHON", &executable);
         }
