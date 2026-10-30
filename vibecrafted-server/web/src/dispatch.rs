@@ -89,11 +89,11 @@ pub async fn receive_claim(request: Request) -> Response {
             "claim transport requires a local headless peer",
         );
     }
-    if !request
+    if request
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(';').next().unwrap_or("").trim() == "application/json")
+        .is_none_or(|value| value.split(';').next().unwrap_or("").trim() != "application/json")
     {
         return error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,

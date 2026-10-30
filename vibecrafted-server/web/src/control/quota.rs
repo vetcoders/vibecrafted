@@ -1026,9 +1026,9 @@ fn native_windows(id: &str, value: &Value, query: &QuotaQuery) -> Option<(QuotaF
         let stale = window.get("stale").and_then(Value::as_bool) == Some(true)
             || now.saturating_sub(timestamp) > STALE_SECS
             || reset <= now;
-        let label = if minutes.is_multiple_of(1440) {
+        let label = if minutes % 1440 == 0 {
             format!("{}d", minutes / 1440)
-        } else if minutes.is_multiple_of(60) {
+        } else if minutes % 60 == 0 {
             format!("{}h", minutes / 60)
         } else {
             format!("{minutes}m")
