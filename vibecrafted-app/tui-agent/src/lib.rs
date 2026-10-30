@@ -65,7 +65,6 @@ struct RefreshPlan {
 
 #[derive(Debug)]
 struct RefreshScheduler {
-    state_watcher_active: bool,
     artifact_watcher_active: bool,
     state_dirty_since: Option<Instant>,
     polarize_dirty_since: Option<Instant>,
@@ -78,9 +77,8 @@ struct RefreshScheduler {
 }
 
 impl RefreshScheduler {
-    fn new(now: Instant, state_watcher_active: bool, artifact_watcher_active: bool) -> Self {
+    fn new(now: Instant, artifact_watcher_active: bool) -> Self {
         Self {
-            state_watcher_active,
             artifact_watcher_active,
             state_dirty_since: None,
             polarize_dirty_since: None,
@@ -121,11 +119,15 @@ impl RefreshScheduler {
             .min(WATCHER_FALLBACK_INTERVAL)
     }
 
-    fn plan(&mut self, now: Instant) -> RefreshPlan {
+    fn plan(&mut self, now: Instant, usage_interval: Option<Duration>) -> RefreshPlan {
         let mut plan = RefreshPlan::default();
         if due(self.state_dirty_since, now, CHANGE_DEBOUNCE)
-            || (!self.state_watcher_active
-                && now.duration_since(self.last_control_plane) >= WATCHER_FALLBACK_INTERVAL)
+            // Even a healthy watcher cannot observe process-local completion,
+            // or a telemetry root created after watch registration. The normal
+            // fallback only stats the revision; unchanged ready data stays cached.
+            || now.duration_since(self.last_control_plane)
+                >= usage_interval.unwrap_or(WATCHER_FALLBACK_INTERVAL)
+                    .min(WATCHER_FALLBACK_INTERVAL)
         {
             plan.control_plane = true;
             self.state_dirty_since = None;
@@ -245,7 +247,6 @@ enum LoopControl {
 struct ChangeFeeds {
     state: mpsc::Receiver<()>,
     artifacts: mpsc::Receiver<ArtifactChange>,
-    state_watcher_active: bool,
     artifact_watcher_active: bool,
 }
 
@@ -293,11 +294,7 @@ impl ConsoleLoop {
                 .is_ok()
         })
         .context("failed to start the transcript worker")?;
-        let scheduler = RefreshScheduler::new(
-            Instant::now(),
-            feeds.state_watcher_active,
-            feeds.artifact_watcher_active,
-        );
+        let scheduler = RefreshScheduler::new(Instant::now(), feeds.artifact_watcher_active);
         Ok(Self {
             background_tx,
             background_rx,
@@ -354,7 +351,6 @@ impl ConsoleLoop {
             .as_ref()
             .and_then(|rx| rx.try_recv().ok())
         {
-            self.scheduler.state_watcher_active = setup.state.is_some();
             self.scheduler.artifact_watcher_active = setup.artifacts.is_some();
             for error in &setup.errors {
                 app.append_status(error.clone());
@@ -389,7 +385,7 @@ impl ConsoleLoop {
         for event in events {
             app.handle_ipc_event(event);
         }
-        let plan = self.scheduler.plan(now);
+        let plan = self.scheduler.plan(now, app.state.usage.refresh_interval());
         if plan.control_plane || plan.polarize || plan.mission_control {
             app.request_refresh(RefreshNeeds {
                 control_plane: plan.control_plane,
@@ -483,7 +479,6 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
             ChangeFeeds {
                 state: state_rx,
                 artifacts: artifact_rx,
-                state_watcher_active: false,
                 artifact_watcher_active: false,
             },
         )?;
@@ -1740,7 +1735,8 @@ fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
 }
 
 struct WatcherSetup {
-    state: Option<RecommendedWatcher>,
+    // Retain the handle for its lifetime; state reads also have a revision fallback.
+    _state: Option<RecommendedWatcher>,
     artifacts: Option<RecommendedWatcher>,
     errors: Vec<String>,
 }
@@ -1764,7 +1760,7 @@ fn spawn_watchers(
             .map_err(|error| errors.push(format!("artifact watcher unavailable: {error}")))
             .ok();
         let _ = tx.send(WatcherSetup {
-            state,
+            _state: state,
             artifacts,
             errors,
         });
@@ -1859,6 +1855,9 @@ fn control_plane_watch_roots(state_root: &Path) -> Vec<(PathBuf, RecursiveMode)>
         roots.push((locks, RecursiveMode::Recursive));
         roots.push((marbles, RecursiveMode::Recursive));
     }
+    if let Some(home) = state_root.parent() {
+        roots.push((home.join("telemetry"), RecursiveMode::Recursive));
+    }
     roots
 }
 
@@ -1873,7 +1872,8 @@ fn raw_run_source_roots(state_root: &Path) -> Option<(PathBuf, PathBuf)> {
 /// [`projection_revision`], whose inputs are exactly `events.jsonl`, the JSON
 /// snapshots in `runs/` and `runs/.archived/`, the entry names directly in
 /// `runtime_runs/`, and the raw run sources (`locks/**/*.lock`,
-/// `marbles/**/state.json`). Anything else in the watched roots cannot change
+/// `marbles/**/state.json`) and canonical telemetry scan caches/archives.
+/// Anything else in the watched roots cannot change
 /// the board: `caretaker.json`, rewritten every five seconds by the server's
 /// caretaker, used to wake every console into a refresh pass around the clock.
 fn is_projection_path(path: &Path) -> bool {
@@ -1899,7 +1899,21 @@ fn is_projection_path(path: &Path) -> bool {
                     .any(|component| component.as_os_str() == "runtime_runs")
         }
     };
-    control_plane || is_raw_run_source(path, name)
+    let telemetry = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .is_some_and(|value| value == "telemetry")
+        && ((name == "scan-cache.json" && control_core::USAGE_PROVIDER_ADAPTERS.contains(&parent))
+            || (parent == "archive"
+                && path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|agent| {
+                        name.ends_with(".jsonl")
+                            && control_core::USAGE_PROVIDER_ADAPTERS.contains(&agent)
+                    })));
+    control_plane || telemetry || is_raw_run_source(path, name)
 }
 
 /// Raw run evidence under `locks/` or `marbles/`. A lock counts as its own
@@ -1933,6 +1947,16 @@ fn projection_revision(root: &Path) -> u64 {
     if let Some((locks, marbles)) = raw_run_source_roots(root) {
         hash_tree_files(&locks, &|name| name.ends_with(".lock"), &mut hasher);
         hash_tree_files(&marbles, &|name| name == "state.json", &mut hasher);
+    }
+    if let Some(home) = root.parent() {
+        let telemetry = home.join("telemetry");
+        for agent in control_core::USAGE_PROVIDER_ADAPTERS {
+            hash_mtime(&telemetry.join(agent).join("scan-cache.json"), &mut hasher);
+            hash_mtime(
+                &telemetry.join("archive").join(format!("{agent}.jsonl")),
+                &mut hasher,
+            );
+        }
     }
     hasher.finish()
 }
@@ -2619,12 +2643,12 @@ mod tests {
     #[test]
     fn ui_ticks_do_not_schedule_expensive_projection_or_prism_discovery() {
         let start = Instant::now();
-        let mut scheduler = RefreshScheduler::new(start, true, true);
+        let mut scheduler = RefreshScheduler::new(start, true);
         let mut control_plane_refreshes = 0;
         let mut prism_discoveries = 0;
 
         for tick in 1..=400 {
-            let plan = scheduler.plan(start + Duration::from_millis(tick * 10));
+            let plan = scheduler.plan(start + Duration::from_millis(tick * 10), None);
             control_plane_refreshes += usize::from(plan.control_plane);
             prism_discoveries += usize::from(plan.polarize);
         }
@@ -2634,10 +2658,60 @@ mod tests {
     }
 
     #[test]
+    fn pending_usage_is_polled_without_watch_events_and_stops_when_ready() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true);
+        let pending = Some(Duration::from_secs(1));
+        assert!(
+            !scheduler
+                .plan(start + Duration::from_millis(999), pending)
+                .control_plane
+        );
+        assert!(
+            scheduler
+                .plan(start + Duration::from_secs(1), pending)
+                .control_plane
+        );
+        assert!(
+            scheduler
+                .plan(start + Duration::from_secs(2), pending)
+                .control_plane
+        );
+        // Completion removes the fast poll; stale failures use the slow fallback.
+        assert!(
+            !scheduler
+                .plan(start + Duration::from_secs(3), None)
+                .control_plane
+        );
+        let stale = Some(Duration::from_secs(30));
+        assert!(
+            !scheduler
+                .plan(start + Duration::from_secs(31), stale)
+                .control_plane
+        );
+        assert!(
+            scheduler
+                .plan(start + Duration::from_secs(32), stale)
+                .control_plane
+        );
+    }
+
+    #[test]
+    fn revision_fallback_covers_inputs_created_after_watcher_registration() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true);
+        assert!(
+            scheduler
+                .plan(start + WATCHER_FALLBACK_INTERVAL, None)
+                .control_plane
+        );
+    }
+
+    #[test]
     fn changed_state_and_prism_are_scheduled_inside_the_documented_bound() {
         let start = Instant::now();
         let changed_at = start + Duration::from_secs(1);
-        let mut scheduler = RefreshScheduler::new(start, true, true);
+        let mut scheduler = RefreshScheduler::new(start, true);
         scheduler.mark_state_changed(changed_at);
         scheduler.mark_artifacts_changed(
             ArtifactChange {
@@ -2647,17 +2721,17 @@ mod tests {
             changed_at,
         );
 
-        let before_debounce = scheduler.plan(changed_at + CHANGE_DEBOUNCE / 2);
+        let before_debounce = scheduler.plan(changed_at + CHANGE_DEBOUNCE / 2, None);
         assert!(!before_debounce.control_plane);
         assert!(!before_debounce.polarize);
 
         let visible_at = changed_at + MAX_CHANGE_LATENCY;
-        let due = scheduler.plan(visible_at);
+        let due = scheduler.plan(visible_at, None);
         assert!(due.control_plane);
         assert!(due.polarize);
         assert!(due.mission_control);
 
-        let unchanged_tick = scheduler.plan(visible_at + Duration::from_millis(10));
+        let unchanged_tick = scheduler.plan(visible_at + Duration::from_millis(10), None);
         assert!(!unchanged_tick.control_plane);
         assert!(!unchanged_tick.polarize);
         assert!(!unchanged_tick.mission_control);
@@ -2745,6 +2819,43 @@ mod tests {
         assert_eq!(before, projection_revision(&root));
         std::fs::write(root.join("events.jsonl"), "{}\n{}\n").expect("events grew");
         assert_ne!(before, projection_revision(&root));
+    }
+
+    #[test]
+    fn telemetry_cache_and_archive_are_revision_inputs_but_quota_churn_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        let telemetry = dir.path().join("telemetry");
+        std::fs::create_dir_all(telemetry.join("codex")).unwrap();
+        std::fs::create_dir_all(telemetry.join("archive")).unwrap();
+        let before = projection_revision(&root);
+        std::fs::write(telemetry.join("codex/quota.json"), "{}").unwrap();
+        assert_eq!(before, projection_revision(&root));
+        let cache = telemetry.join("codex/scan-cache.json");
+        std::fs::write(&cache, "{}").unwrap();
+        let cached = projection_revision(&root);
+        assert_ne!(before, cached);
+        let archive = telemetry.join("archive/codex.jsonl");
+        std::fs::write(&archive, "{}\n").unwrap();
+        let archived = projection_revision(&root);
+        assert_ne!(cached, archived);
+        std::fs::remove_file(&cache).unwrap();
+        assert_ne!(archived, projection_revision(&root));
+        assert!(
+            control_plane_watch_roots(&root)
+                .contains(&(telemetry.clone(), RecursiveMode::Recursive))
+        );
+        for file in [cache, archive] {
+            assert!(is_projection_path(&file), "{}", file.display());
+        }
+        for file in [
+            "codex/quota.json",
+            "codex/scan-cache.json.tmp",
+            "archive/unknown.jsonl",
+            "unknown/scan-cache.json",
+        ] {
+            assert!(!is_projection_path(&telemetry.join(file)), "{file}");
+        }
     }
 
     #[test]
@@ -2842,13 +2953,13 @@ mod tests {
     #[test]
     fn observe_polling_backs_off_after_failures_and_resets_on_success() {
         let start = Instant::now();
-        let mut scheduler = RefreshScheduler::new(start, true, true);
+        let mut scheduler = RefreshScheduler::new(start, true);
         scheduler.note_observe_result(false);
         scheduler.note_observe_result(false);
         assert_eq!(scheduler.observe_interval(), Duration::from_secs(8));
-        let idle = scheduler.plan(start + Duration::from_secs(4));
+        let idle = scheduler.plan(start + Duration::from_secs(4), None);
         assert!(!idle.observe);
-        let due = scheduler.plan(start + Duration::from_secs(8));
+        let due = scheduler.plan(start + Duration::from_secs(8), None);
         assert!(due.observe);
         scheduler.note_observe_result(true);
         assert_eq!(scheduler.observe_interval(), OBSERVE_REFRESH_INTERVAL);
@@ -2876,10 +2987,10 @@ mod tests {
         .expect("run snapshot");
 
         let now = Instant::now();
-        let mut scheduler = RefreshScheduler::new(now, true, true);
+        let mut scheduler = RefreshScheduler::new(now, true);
         scheduler.mark_state_changed(now);
         assert!(
-            !scheduler.plan(now).control_plane,
+            !scheduler.plan(now, None).control_plane,
             "change remains debounced"
         );
 
@@ -2996,6 +3107,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn console_observes_native_usage_completion_without_disk_changes_or_manual_refresh() {
+        use crate::usage::UsageRefreshState;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        let telemetry = dir.path().join("telemetry/codex");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&telemetry).unwrap();
+        std::fs::write(telemetry.join("scan-cache.json"), serde_json::to_vec(&serde_json::json!({
+            "files": {"/synthetic/session.jsonl": {
+                "days": [{"day":"2026-10-12", "model":"synthetic", "input_tokens":40, "output_tokens":11}],
+                "record": {"id":"synthetic-session", "mtime":chrono::Utc::now().timestamp()}
+            }}
+        })).unwrap()).unwrap();
+        let revision = projection_revision(&root);
+        let mut app = sample_app();
+        app.config.state_root = root.clone();
+        app.config.repo = dir.path().to_path_buf();
+        app.mission_artifact_root = dir.path().join("artifacts");
+        app.state = ControlPlaneState::empty(&root);
+        let (_state_tx, state_rx) = mpsc::channel();
+        let (_artifact_tx, artifact_rx) = mpsc::channel();
+        let mut console = ConsoleLoop::start(
+            &app,
+            CanonicalRefreshSource,
+            FixtureTranscripts,
+            ChangeFeeds {
+                state: state_rx,
+                artifacts: artifact_rx,
+                artifact_watcher_active: true,
+            },
+        )
+        .unwrap();
+        app.request_refresh(RefreshNeeds {
+            control_plane: true,
+            ..RefreshNeeds::default()
+        });
+        let start = Instant::now();
+        console.tick(&mut app, start);
+        assert!(console.wait_until(&mut app, GUARD, |app| app.refresh.applied_generation >= 1));
+        assert_eq!(app.state.usage.refresh_state, UsageRefreshState::Pending);
+        assert_eq!(app.state.usage.tokens_total_known, 0);
+        for tick in 1..=20 {
+            let generation = app.refresh.applied_generation;
+            console.tick(&mut app, start + Duration::from_secs(tick));
+            assert!(
+                console.wait_until(&mut app, GUARD, |app| app.refresh.applied_generation
+                    > generation)
+            );
+            if app.state.usage.refresh_state == UsageRefreshState::Ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.state.usage.refresh_state, UsageRefreshState::Ready);
+        assert_eq!(app.state.usage.tokens_total_known, 51);
+        assert_eq!(
+            revision,
+            projection_revision(&root),
+            "only the process-local projection completed"
+        );
+        console.shutdown();
+    }
+
     /// A transcript source whose first read parks at a barrier; later reads
     /// answer at once.
     struct HeldTranscripts {
@@ -3041,7 +3216,6 @@ mod tests {
             ChangeFeeds {
                 state: state_rx,
                 artifacts: artifact_rx,
-                state_watcher_active: true,
                 artifact_watcher_active: true,
             },
         )
@@ -3162,25 +3336,22 @@ mod tests {
         let mut held = held_console(&app, ControlPlaneState::empty("/tmp/state"));
         let (tx, rx) = mpsc::channel();
         held.console.watcher_setup = Some(rx);
-        held.console.scheduler.state_watcher_active = false;
         held.console.scheduler.artifact_watcher_active = false;
         held.console.tick(&mut app, Instant::now());
         assert!(held.console.watcher_setup.is_some());
-        assert!(!held.console.scheduler.state_watcher_active);
         assert_eq!(
             press(&mut held, &mut app, key(KeyCode::Char('q'))),
             LoopControl::Exit
         );
         tx.send(WatcherSetup {
-            state: None,
+            _state: None,
             artifacts: None,
             errors: vec!["watcher unavailable".into()],
         })
         .unwrap();
         held.console.tick(&mut app, Instant::now());
         assert!(held.console.watcher_setup.is_none());
-        assert!(held.console.watchers.is_some());
-        assert!(!held.console.scheduler.state_watcher_active);
+        assert!(held.console.watchers.as_ref().unwrap()._state.is_none());
         assert!(!held.console.scheduler.artifact_watcher_active);
         assert!(app.status_line.contains("watcher unavailable"));
         held.release.send(()).unwrap();
