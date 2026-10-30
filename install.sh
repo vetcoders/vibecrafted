@@ -55,6 +55,12 @@ installer_capture_index=0
 installer_stdout_fd=""
 installer_stderr_fd=""
 installer_log_fd=""
+installer_phase_number=""
+installer_phase_settled=0
+installer_progress_pid=""
+installer_progress_fd=""
+installer_progress_sequence=0
+installer_progress_owner_depth="${BASH_SUBSHELL:-0}"
 
 # The public bootstrap runs before a trusted Python exists on cold macOS.
 # Keep its diagnostic boundary self-contained; never put credentials in the
@@ -151,14 +157,100 @@ installer_log_line() {
 }
 
 installer_line() {
+  local resume=0
+  if [[ -n "$installer_progress_pid" && "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" ]]; then
+    installer_progress_stop "·"
+    resume=1
+  fi
   printf '%s\n' "$*" | installer_redact display
   [[ ! -e "/dev/fd/$installer_log_fd" ]] || installer_log_line "$*"
+  if [[ "$resume" == "1" ]]; then installer_progress_start || true; fi
+}
+
+# Both ends open before the presenter forks; only descriptors survive unlink.
+# shellcheck disable=SC2094
+installer_progress_start() {
+  local pipe reader
+  [[ "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" \
+     && "$installer_output" == "1" && "${VERBOSE:-0}" != "1" \
+     && -n "$installer_phase_number" && "$installer_phase_number" != "3" \
+     && -t "$installer_stdout_fd" ]] || return 1
+  command -v mkfifo >/dev/null 2>&1 || return 1
+  installer_progress_sequence=$((installer_progress_sequence + 1))
+  pipe="$installer_output_dir/progress-$installer_progress_sequence.pipe"
+  installer_progress_fd="$(installer_free_fd)" || return 1
+  if ! mkfifo "$pipe"; then installer_progress_fd=""; return 1; fi
+  if ! eval "exec $installer_progress_fd<>\"\$pipe\""; then
+    rm -f "$pipe"
+    installer_progress_fd=""
+    return 1
+  fi
+  # Open the reader while our RW descriptor is still held. Opening it only
+  # after fork can block forever if an immediate stop closes the writer first.
+  reader="$(installer_free_fd)" || reader=""
+  if [[ -z "$reader" ]] || ! eval "exec $reader<\"\$pipe\""; then
+    eval "exec $installer_progress_fd>&-"
+    rm -f "$pipe"
+    installer_progress_fd=""
+    return 1
+  fi
+  (
+    # The reader never retains its writer. Stop/EOF needs no filesystem write
+    # or signal; the script stdin stays free for curl|bash and consent.
+    eval "exec $installer_progress_fd>&- $reader<&-"
+    frames=(⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ ⠋)
+    index=0
+    while kill -0 "$$" 2>/dev/null; do
+      message=waiting
+      if IFS= read -r -t 1 message; then break; else read_status=$?; fi
+      # Bash 3.2 returns1 on timeout without assigning; EOF clears the value.
+      # Newer Bash returns>128 on timeout. Both stop promptly on EOF.
+      [[ "$read_status" -gt 128 || "$message" == "waiting" ]] || break
+      printf '\r  %s [%s/3] %s…' "${frames[index]}" "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || break
+      index=$(((index + 1) % ${#frames[@]}))
+    done
+  ) <&"$reader" &
+  installer_progress_pid="$!"
+  eval "exec $reader<&-"
+  rm -f "$pipe"
+  printf '\r  ⠋ [%s/3] %s…' "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || true
+}
+
+installer_progress_stop() {
+  [[ "${BASH_SUBSHELL:-0}" == "$installer_progress_owner_depth" \
+     && -n "$installer_progress_pid" ]] || return 0
+  printf '\n' >&"$installer_progress_fd" || true
+  eval "exec $installer_progress_fd>&-"
+  wait "$installer_progress_pid" || true
+  installer_progress_pid=""
+  installer_progress_fd=""
+  printf '\r  %s [%s/3] %s  \n' "$1" "$installer_phase_number" "$installer_phase" >&"$installer_stdout_fd" || true
+}
+
+installer_phase_finish() {
+  [[ -n "$installer_phase_number" && "$installer_phase_settled" == "0" ]] || return 0
+  if [[ -n "$installer_progress_pid" ]]; then
+    installer_progress_stop "$1"
+  else
+    installer_line "  $1 [$installer_phase_number/3] $installer_phase"
+  fi
+  installer_phase_settled=1
+  installer_log_line "phase $installer_phase_number $1: $installer_phase"
 }
 
 installer_stage() {
   [[ "$installer_phase" != "$2" ]] || return 0
+  installer_phase_finish "✓"
+  installer_phase_number="$1"
+  installer_phase_settled=0
   installer_phase="$2"
-  installer_line "  [$1/3] $2…"
+  if [[ "$1" == "3" ]]; then
+    installer_phase_finish "✓"
+  elif installer_progress_start; then
+    installer_log_line "  [$1/3] $2…"
+  else
+    installer_line "  · [$1/3] $2…"
+  fi
 }
 
 installer_free_fd() {
@@ -198,7 +290,7 @@ installer_capture() {
   # temporary function descriptors that descendants could inherit.
   (
     exec 1>&"$writer" 2>&1
-    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&- $installer_stderr_reader>&- $writer>&- $reader>&-"
+    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&- $installer_stderr_reader>&- $writer>&- $reader>&- ${installer_progress_fd:+$installer_progress_fd>&-}"
     "$@"
   ) || status=$?
   eval "exec $writer>&-"
@@ -329,11 +421,15 @@ on_bootstrap_exit() {
       [[ "$status" != "0" ]] || status=1
     fi
     eval "exec $installer_stderr_reader<&-"
+    if [[ "$status" != "0" ]]; then
+      installer_phase_finish "✗"
+    elif [[ "$bootstrap_handoff" != "1" ]]; then
+      installer_progress_stop "·"
+    fi
     if [[ "$status" == "0" && "$bootstrap_handoff" == "1" ]]; then
       installer_stage 3 "Complete"
       installer_line "  ✓ Installed Vibecrafted ${_installed_version:-release}"
       installer_line "    Start: vibecrafted"
-      installer_line "    Details: $installer_log"
     elif [[ "$status" != "0" ]]; then
       detail="$installer_failure"
       cause="$(installer_last_diagnostic)" || cause=""
@@ -1396,6 +1492,7 @@ prompt_attended_consent() {
 
   [[ "$auto_yes" == "1" ]] && return 0
   has_attended_tty || return 0
+  installer_progress_stop "·"
 
   if [[ -n "$archive_file" ]]; then
     source_description="unpack"
@@ -1422,6 +1519,7 @@ prompt_attended_consent() {
     case "$response" in
       [yY]|[yY][eE][sS])
         printf '\n' > /dev/tty
+        installer_progress_start || true
         return 0
         ;;
       ""|[nN]|[nN][oO])
