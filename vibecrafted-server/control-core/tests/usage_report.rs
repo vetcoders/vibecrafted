@@ -1123,16 +1123,31 @@ fn a_native_sized_local_cache_never_blocks_requests_and_retains_failed_refresh()
         }
         let restore = Restore(dir.clone());
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
-        let denied = settled_local_report(&home, UsageFilter::default());
-        assert_eq!(
-            denied.totals.tokens_total_known, 82,
-            "unreadable is not absent"
-        );
-        assert!(source(&denied, "claude").stale);
-        assert_eq!(
-            source(&denied, "claude").error.as_deref(),
-            Some("projection_source_unreadable")
-        );
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "USAGE_PERMISSION_CAPABILITY denied_traversal=true permission_subcase=asserted"
+                );
+                let denied = settled_local_report(&home, UsageFilter::default());
+                assert_eq!(
+                    denied.totals.tokens_total_known, 82,
+                    "unreadable is not absent"
+                );
+                assert!(source(&denied, "claude").stale);
+                assert_eq!(
+                    source(&denied, "claude").error.as_deref(),
+                    Some("projection_source_unreadable")
+                );
+            }
+            Ok(_) => {
+                // Root/CAP_DAC_OVERRIDE can traverse mode000. That is not a
+                // reader failure: retain all other assertions in this test.
+                eprintln!(
+                    "USAGE_PERMISSION_CAPABILITY denied_traversal=false permission_subcase=not_enforceable"
+                );
+            }
+            Err(error) => panic!("unexpected traversal probe error: {:?}", error.kind()),
+        }
         drop(restore);
         let restored = settled_local_report(&home, UsageFilter::default());
         assert_eq!(restored.totals.tokens_total_known, 82);
