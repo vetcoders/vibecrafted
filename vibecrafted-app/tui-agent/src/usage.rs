@@ -4,10 +4,43 @@
 //! module only converts that public projection into compact terminal labels.
 
 use chrono::Utc;
-use control_core::{ControlPlane, UsageFilter};
+use control_core::{ControlPlane, UsageFilter, UsageReport};
 use serde_json::Value;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
+
+/// Reader state from the canonical projection, independent of unknown prices
+/// or providers that do not expose measurements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageRefreshState {
+    #[default]
+    Ready,
+    Pending,
+    Stale,
+}
+
+impl UsageRefreshState {
+    fn from_report(report: &UsageReport) -> Self {
+        if report.recovery.refreshing
+            || report.recovery.pending_runs > 0
+            || report.local_sources.iter().any(|source| source.refreshing)
+        {
+            Self::Pending
+        } else if report.recovery.stale_runs > 0
+            || !report.recovery.failure_reasons.is_empty()
+            || report.recovery.last_error.is_some()
+            || report
+                .local_sources
+                .iter()
+                .any(|source| source.stale || source.error.is_some())
+        {
+            Self::Stale
+        } else {
+            Self::Ready
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageDashboard {
@@ -20,6 +53,7 @@ pub struct UsageDashboard {
     pub failures: usize,
     pub observed_from: Option<String>,
     pub observed_to: Option<String>,
+    pub refresh_state: UsageRefreshState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +87,7 @@ impl UsageDashboard {
         );
         let observed_from = report.runs.last().map(|run| run.recorded_at.clone());
         let observed_to = report.runs.first().map(|run| run.recorded_at.clone());
+        let refresh_state = UsageRefreshState::from_report(&report);
         let usd_total = report
             .totals
             .cost_by_unit
@@ -102,15 +137,35 @@ impl UsageDashboard {
             failures: report.totals.runs_failed,
             observed_from,
             observed_to,
+            refresh_state,
         })
     }
 
+    /// Background readers publish in memory, so a pending answer needs another
+    /// call even when no file changed. Failed readers retain measurements and
+    /// retry slowly; complete but unmeasured answers do not spin.
+    pub fn refresh_interval(&self) -> Option<Duration> {
+        match self.refresh_state {
+            UsageRefreshState::Ready => None,
+            UsageRefreshState::Pending => Some(Duration::from_secs(1)),
+            UsageRefreshState::Stale => Some(Duration::from_secs(30)),
+        }
+    }
+
     pub fn window_label(&self) -> String {
-        match (&self.observed_from, &self.observed_to) {
+        let window = match (&self.observed_from, &self.observed_to) {
             (Some(from), Some(to)) => {
                 format!("all retained · {} → {}", short_time(from), short_time(to))
             }
+            _ if self.refresh_state == UsageRefreshState::Pending => {
+                return "all retained · loading telemetry".to_string();
+            }
             _ => "all retained · no telemetry receipts".to_string(),
+        };
+        match self.refresh_state {
+            UsageRefreshState::Ready => window,
+            UsageRefreshState::Pending => format!("{window} · updating"),
+            UsageRefreshState::Stale => format!("{window} · stale · retrying"),
         }
     }
 }
@@ -171,5 +226,81 @@ mod tests {
             dashboard.window_label(),
             "all retained · no telemetry receipts"
         );
+    }
+
+    #[test]
+    fn canonical_reader_state_distinguishes_pending_stale_and_complete_unknown() {
+        let dir = tempdir().unwrap();
+        let mut report = ControlPlane::from_control_plane_home(dir.path())
+            .usage_report(Utc::now(), UsageFilter::default());
+        // Providers without a native ledger and successfully unknown costs are
+        // complete answers; absence must not cause endless recovery polling.
+        report.recovery.unavailable_runs = 3;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Ready
+        );
+
+        report.recovery.pending_runs = 1;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Pending
+        );
+        report.recovery.pending_runs = 0;
+        report.recovery.refreshing = true;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Pending
+        );
+        report.recovery.refreshing = false;
+        report.recovery.stale_runs = 1;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Stale
+        );
+        report.recovery.stale_runs = 0;
+        report
+            .recovery
+            .failure_reasons
+            .insert("parser_failed".into(), 1);
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Stale
+        );
+        report.recovery.failure_reasons.clear();
+        report.local_sources[0].stale = true;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Stale
+        );
+        report.local_sources[0].refreshing = true;
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Pending
+        );
+        report.local_sources[0].refreshing = false;
+        report.local_sources[0].stale = false;
+        report.local_sources[0].error = Some("unreadable".into());
+        assert_eq!(
+            UsageRefreshState::from_report(&report),
+            UsageRefreshState::Stale
+        );
+    }
+
+    #[test]
+    fn pending_is_polled_faster_than_stale_and_known_values_remain_visible() {
+        let mut dashboard = UsageDashboard {
+            refresh_state: UsageRefreshState::Pending,
+            tokens_total_known: 42,
+            ..UsageDashboard::default()
+        };
+        assert_eq!(dashboard.refresh_interval(), Some(Duration::from_secs(1)));
+        assert_eq!(dashboard.window_label(), "all retained · loading telemetry");
+        dashboard.refresh_state = UsageRefreshState::Stale;
+        assert_eq!(dashboard.refresh_interval(), Some(Duration::from_secs(30)));
+        assert!(dashboard.window_label().ends_with("stale · retrying"));
+        assert_eq!(dashboard.tokens_total_known, 42);
+        dashboard.refresh_state = UsageRefreshState::Ready;
+        assert_eq!(dashboard.refresh_interval(), None);
     }
 }

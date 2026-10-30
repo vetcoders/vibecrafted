@@ -239,6 +239,7 @@ fn usage_tab_truthful_units_and_unknowns_snapshot() {
         failures: 1,
         observed_from: Some("2026-09-21T16:09:00Z".to_string()),
         observed_to: Some("2026-09-21T16:12:00Z".to_string()),
+        refresh_state: Default::default(),
     };
     app.set_active_tab(AppTab::Usage);
     let text = buffer_text(&render(&app));

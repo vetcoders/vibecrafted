@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 /// is dropped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RefreshNeeds {
-    /// Reload the projection when its on-disk revision moved.
+    /// Reload when its revision moved or Usage has an unfinished background read.
     pub control_plane: bool,
     /// Reload the projection even when the revision did not move.
     pub force_control_plane: bool,
@@ -110,7 +110,7 @@ pub struct RefreshResult {
     pub generation: u64,
     /// The repository the polarize and Mission Control parts were read for.
     pub repo: PathBuf,
-    /// `None` when the projection revision did not move and no reload was forced.
+    /// `None` when the revision is unchanged, Usage is complete and no reload was forced.
     pub control_plane: Option<Result<ControlPlaneState, String>>,
     pub polarize: Option<Vec<PolarizeIntent>>,
     pub mission_control: Option<MissionControlState>,
@@ -441,7 +441,10 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
             job.state_root.clone(),
             source.projection_revision(&job.state_root),
         );
-        if needs.force_control_plane || cache.revision.as_ref() != Some(&revision) {
+        if needs.force_control_plane
+            || cache.revision.as_ref() != Some(&revision)
+            || cache.state.usage.refresh_interval().is_some()
+        {
             result.control_plane = Some(match source.control_plane(&job.state_root) {
                 Ok(state) => {
                     cache.state = state.clone();
@@ -702,6 +705,42 @@ mod tests {
                 .unwrap()
                 .control_plane
                 .is_some()
+        );
+        assert!(harness.worker.shutdown(GUARD));
+        assert_eq!(harness.ledger.lock().unwrap().loads, 3);
+    }
+
+    #[test]
+    fn unfinished_usage_bypasses_revision_cache_until_complete() {
+        use crate::usage::UsageRefreshState;
+        let mut pending = state_with(&["retained"]);
+        pending.usage.refresh_state = UsageRefreshState::Pending;
+        pending.usage.tokens_total_known = 17;
+        let mut stale = pending.clone();
+        stale.usage.refresh_state = UsageRefreshState::Stale;
+        let mut complete = pending.clone();
+        complete.usage.refresh_state = UsageRefreshState::Ready;
+        complete.usage.tokens_total_known = 51;
+        let mut harness = harness(false, vec![Ok(pending), Ok(stale), Ok(complete)], &[]);
+        for (generation, tokens) in [(1, 17), (2, 17), (3, 51)] {
+            harness.worker.submit(job(generation, only_control_plane()));
+            let state = harness
+                .results
+                .recv_timeout(GUARD)
+                .unwrap()
+                .control_plane
+                .expect("unfinished Usage must be re-read without a disk change")
+                .unwrap();
+            assert_eq!(state.usage.tokens_total_known, tokens);
+        }
+        harness.worker.submit(job(4, only_control_plane()));
+        assert!(
+            harness
+                .results
+                .recv_timeout(GUARD)
+                .unwrap()
+                .control_plane
+                .is_none()
         );
         assert!(harness.worker.shutdown(GUARD));
         assert_eq!(harness.ledger.lock().unwrap().loads, 3);
