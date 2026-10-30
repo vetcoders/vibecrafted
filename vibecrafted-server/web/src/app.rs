@@ -973,24 +973,13 @@ pub fn UsagePage() -> impl IntoView {
                         <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
                     </form>
                 </header>
-                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
-                    <div class="control-panel-head">
-                        <h2>"Live quota"</h2>
-                        <span id="quota-status">"shared server observation"</span>
-                        <button type="button" id="quota-refresh" class="server-console-link" title="Ask provider-owned quota sources now (explicit request)">"Refresh quota"</button>
-                    </div>
-                    <div id="quota-agents" class="quota-agents"></div>
-                    <p class="control-plane-meta">"One shared observation for all 8 providers: state, source, age and pool/account/model scope. Unknown, stale and exhausted stay distinct; token totals never imply exhaustion. Prices are api-equiv, not a bill."</p>
-                    <script inner_html=quota_dashboard_script()></script>
-                </section>
-                <p class="control-plane-meta" id="usage-local-sources" aria-label="Local collection by provider"></p>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
+                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
+                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
+                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
                     <div class="usage-attention"><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
                     <div class="usage-attention"><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
                     <div class="usage-attention"><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
-                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
-                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
-                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
                 </dl>
                 <section class="usage-charts" aria-label="Usage over time">
                     <div class="usage-hero">
@@ -1007,6 +996,24 @@ pub fn UsagePage() -> impl IntoView {
                         <div class="usage-chart-plot" id="usage-chart-cost-plot"></div>
                     </figure>
                 </section>
+                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
+                    <div class="control-panel-head">
+                        <h2>"Live quota windows"</h2>
+                        <span id="quota-status" role="status">"Reading provider observations…"</span>
+                        <button type="button" id="quota-refresh" class="server-console-link" title="Read provider-owned quota sources (explicit request)">"Refresh quota"</button>
+                    </div>
+                    <div id="quota-agents" class="quota-agents" aria-label="Measured quota windows"></div>
+                    <p id="quota-empty" class="quota-empty">"No fresh remaining-limit measurements available. Usage totals are measured separately."</p>
+                    <details class="quota-unavailable">
+                        <summary id="quota-unavailable-summary">"Unavailable or stale sources"</summary>
+                        <div id="quota-unmeasured" class="quota-unmeasured"></div>
+                    </details>
+                    <script inner_html=quota_dashboard_script()></script>
+                </section>
+                <details class="usage-source-details">
+                    <summary>"Measurement sources and collection status"</summary>
+                    <p class="control-plane-meta" id="usage-local-sources" aria-label="Local collection by provider"></p>
+                </details>
                 <section class="usage-breakdown" aria-label="Usage dimensions">
                     <div class="usage-breakdown-switch" role="tablist" aria-label="Breakdown">
                         <button type="button" role="tab" aria-selected="true" data-usage-dim="providers">"Providers"</button>
@@ -1063,6 +1070,7 @@ fn quota_dashboard_script() -> &'static str {
     r#"(() => {
   const root = document.querySelector('[data-quota-board]');
   const host = document.getElementById('quota-agents');
+  const unmeasured = document.getElementById('quota-unmeasured');
   const status = document.getElementById('quota-status');
   if (!root || !host || !status) return;
   const ageText = (seconds) => {
@@ -1072,9 +1080,9 @@ fn quota_dashboard_script() -> &'static str {
     return Math.floor(seconds / 3600) + 'h ago';
   };
   const money = (value) => value === null || value === undefined ? '' : '≈$' + Number(value).toFixed(3) + ' api-equiv';
-  const card = (agent) => {
+  const card = (agent, compact = false) => {
     const article = document.createElement('article');
-    article.className = 'quota-card';
+    article.className = compact ? 'quota-card quota-card-compact' : 'quota-card';
     article.dataset.status = agent.status || 'unknown';
     const head = document.createElement('div');
     head.className = 'quota-card-head';
@@ -1092,7 +1100,9 @@ fn quota_dashboard_script() -> &'static str {
     const detail = document.createElement('p');
     detail.className = 'quota-detail';
     detail.textContent = agent.detail || '';
-    article.append(head, headline, detail);
+    article.append(head);
+    if (!compact) article.append(headline);
+    article.append(detail);
     const bars = document.createElement('div');
     bars.className = 'quota-bars';
     for (const bar of agent.bars || []) {
@@ -1109,18 +1119,29 @@ fn quota_dashboard_script() -> &'static str {
       fill.style.setProperty('--ratio', String(ratio));
       track.append(fill);
       const text = document.createElement('span');
-      text.textContent = bar.text || '';
+      text.textContent = (bar.text || '') + (bar.stale ? ' · stale' : '');
       row.append(label, track, text);
       bars.append(row);
+      if (bar.resets_at) {
+        const reset = document.createElement('small');
+        reset.className = 'quota-reset';
+        reset.textContent = 'Resets ' + new Date(bar.resets_at * 1000).toLocaleString();
+        bars.append(reset);
+      }
     }
-    if ((agent.bars || []).length) article.append(bars);
+    if (!compact && (agent.bars || []).length) article.append(bars);
     const meta = document.createElement('p');
     meta.className = 'quota-meta';
     const scope = agent.scope || {};
-    const scoped = [scope.pool && 'pool ' + scope.pool, scope.account && 'account ' + scope.account, scope.model && 'model ' + scope.model].filter(Boolean).join(' ');
+    const scoped = [scope.pool && 'pool ' + scope.pool, scope.account && 'account ' + scope.account, scope.model && 'model ' + scope.model, scope.limit_id && 'limit ' + scope.limit_id, scope.plan_type && 'plan ' + scope.plan_type].filter(Boolean).join(' ');
     const bits = [scoped, agent.model, agent.tokens !== null && agent.tokens !== undefined ? String(agent.tokens) + ' tok' : '', money(agent.cost_usd), ageText(agent.age_s), agent.source].filter(Boolean);
     meta.textContent = bits.join(' · ');
-    article.append(meta);
+    const diagnostics = document.createElement('details');
+    diagnostics.className = 'quota-source-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Source and scope';
+    diagnostics.append(summary, meta);
+    article.append(diagnostics);
     return article;
   };
   // An explicit ask is never answered silently: the collector's outcome rides
@@ -1135,9 +1156,23 @@ fn quota_dashboard_script() -> &'static str {
   };
   const render = (payload) => {
     host.replaceChildren();
-    for (const agent of payload.agents || []) host.append(card(agent));
+    if (unmeasured) unmeasured.replaceChildren();
+    let measured = 0, missing = 0, stale = 0;
+    for (const agent of payload.agents || []) {
+      // Native token counters are usage. A remaining limit needs an actual
+      // window ratio, or an authoritative fresh exhausted observation.
+      const window = (agent.bars || []).some((bar) => Number.isFinite(bar.ratio));
+      const available = !agent.stale && ['ok', 'low', 'exhausted'].includes(agent.state) && (window || agent.state === 'exhausted');
+      if (available) { host.append(card(agent)); measured++; }
+      else { if (unmeasured) unmeasured.append(card(agent, true)); missing++; if (agent.stale) stale++; }
+    }
+    const empty = document.getElementById('quota-empty');
+    if (empty) empty.hidden = measured !== 0;
+    host.hidden = measured === 0;
+    const summary = document.getElementById('quota-unavailable-summary');
+    if (summary) summary.textContent = missing + ' source(s) without fresh quota windows' + (stale ? ' · ' + stale + ' stale' : '');
     const stamp = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
-    status.textContent = [stamp, refreshText(payload.refresh)].filter(Boolean).join(' · ');
+    status.textContent = [measured + ' measured window source(s)', stamp, refreshText(payload.refresh)].filter(Boolean).join(' · ');
   };
   const load = async () => {
     try {
@@ -1175,6 +1210,13 @@ fn usage_dashboard_script() -> &'static str {
   const form = document.getElementById('usage-filter-form');
   const status = document.getElementById('usage-status');
   const body = document.getElementById('usage-runs-body');
+  let selectedRunId = '';
+  body.addEventListener('click', (event) => {
+    const row = event.target.closest('tr[data-run-id]');
+    if (!row || event.target.closest('a, button')) return;
+    selectedRunId = row.getAttribute('data-run-id') || '';
+    body.querySelectorAll('tr.is-selected').forEach((item) => item.classList.remove('is-selected'));
+  });
   const empty = document.getElementById('usage-empty');
   const byId = (id) => document.getElementById(id);
   const number = new Intl.NumberFormat();
@@ -1260,7 +1302,7 @@ fn usage_dashboard_script() -> &'static str {
   const populatePicker = (key, models) => {
     const select = byId('usage-' + key);
     if (!select) return;
-    const current = select.value || params.get(key) || '';
+    const current = select.value || '';
     const seen = new Set();
     select.replaceChildren();
     const defaultOpt = document.createElement('option');
@@ -1322,6 +1364,9 @@ fn usage_dashboard_script() -> &'static str {
       const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
       const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
       const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
+      const previousFields = (report.recovery && report.recovery.stale_fields && report.recovery.stale_fields[run.run_id]) || [];
+      if (previousFields.includes('usage')) { tokens.title = 'Previous measured tokens; current transcript evidence is incomplete or updating'; tokens.dataset.stale = 'true'; }
+      if (previousFields.includes('cost')) { cost.title = 'Previous measured cost; current transcript evidence is incomplete or updating'; cost.dataset.stale = 'true'; }
       const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
       if (run.failure) state.title = run.failure;
       if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok' && run.status !== 'observed')) tr.className = 'is-attention';
@@ -1331,10 +1376,27 @@ fn usage_dashboard_script() -> &'static str {
     empty.hidden = runs.length !== 0;
     set('usage-run-count', String(runs.length));
     const first = body.querySelector('tr[data-run-id]');
-    if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const selected = [...body.querySelectorAll('tr[data-run-id]')].find((row) => row.getAttribute('data-run-id') === selectedRunId);
+    if (selected) selected.classList.add('is-selected');
+    else if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    else {
+      selectedRunId = '';
+      const inspector = byId('overview-inspector');
+      if (inspector) inspector.hidden = true;
+    }
     set('usage-schema', report.schema || 'unknown schema');
     set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
     status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
+    const recovery = report.recovery || {};
+    if (recovery.pending_runs) status.textContent += ' · ' + recovery.pending_runs + ' transcript(s) updating';
+    if (recovery.stale_runs) status.textContent += ' · ' + recovery.stale_runs + ' previous transcript measurement(s) retained';
+    if (recovery.unavailable_runs) status.textContent += ' · ' + recovery.unavailable_runs + ' transcript source(s) unavailable';
+    if (recovery.last_error) status.textContent += ' · ' + recovery.last_error;
+    const failures = Object.entries(recovery.failure_reasons || {}).map(([code, count]) => count + ' ' + code).join(' · ');
+    if (failures) {
+      const sources = byId('usage-local-sources');
+      if (sources) sources.textContent += ' · Transcript recovery: ' + failures;
+    }
     drawCharts(report);
   };
   const knownAmount = (cost) => {
@@ -1572,24 +1634,38 @@ fn usage_dashboard_script() -> &'static str {
       '#6a9fb5'
     );
   };
+  let activeRequest = null, requestVersion = 0, recoveryTimer = null, hasMeasurements = false;
   const load = async () => {
-    status.textContent = 'Loading canonical telemetry…';
+    if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+    if (activeRequest) activeRequest.abort();
+    const controller = new AbortController();
+    activeRequest = controller;
+    const version = ++requestVersion;
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    status.textContent = hasMeasurements ? 'Refreshing measured usage…' : 'Loading recorded telemetry…';
     const query = new URLSearchParams(new FormData(form));
     for (const [key, value] of [...query.entries()]) if (!String(value).trim()) query.delete(key);
     try {
-      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store' });
+      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
       const payload = await response.json();
+      if (version !== requestVersion) return;
       if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
       history.replaceState(null, '', '/usage?' + query.toString());
       render(payload);
+      hasMeasurements = true;
+      if (payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) recoveryTimer = setTimeout(load, 1500);
     } catch (error) {
-      status.textContent = 'Usage telemetry unavailable: ' + error.message;
-      empty.hidden = false;
-      empty.textContent = 'The canonical usage projection could not be read.';
+      if (version !== requestVersion) return;
+      status.textContent = 'Usage telemetry unavailable: ' + error.message + (hasMeasurements ? ' · showing previous measurements' : '');
+      if (!hasMeasurements) { empty.hidden = false; empty.textContent = 'The usage projection could not be read. Retry with Apply.'; }
+    } finally {
+      clearTimeout(timeout);
+      if (version === requestVersion) activeRequest = null;
     }
   };
   form.addEventListener('submit', (event) => { event.preventDefault(); load(); });
   load();
+  setInterval(() => { if (!document.hidden && !activeRequest && !recoveryTimer) load(); }, 15000);
 })();"#
 }
 

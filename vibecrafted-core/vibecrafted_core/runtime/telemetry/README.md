@@ -130,10 +130,14 @@ flow is introduced by the Codex adapter.
 
 ## Web
 
-`vc-server` `/usage` shows one card per provider (all eight, alphabetical, no
-provider first) from `GET /api/usage/quota`: `state` (`ok`, `low`, `exhausted`,
-`stale`, `unknown`, `absent`, `malformed`), source, age and pool/account/model
-scope. `exhausted` is only ever a fresh observation; an old one is `stale`. The
+`vc-server` `/usage` leads with measured totals and usage charts. Fresh measured
+quota windows from `GET /api/usage/quota` follow them; unavailable or stale
+providers and source diagnostics remain in expandable details. The API keeps
+`state` (`ok`, `low`, `exhausted`, `stale`, `unknown`, `absent`, `malformed`),
+source, age and pool/account/model scope. `exhausted` is only ever a fresh
+observation; an old one is `stale`. Model/account filters apply to native windows
+before severity is aggregated. Background transcript recovery reports pending,
+unavailable and retained previous measurements separately. The
 usage table merges Vibecrafted runs (`origin: vc`) with all other local sessions
 (`origin: local`); a session a VC run already carries is counted once. Shadow
 prices stay `api-equiv`.

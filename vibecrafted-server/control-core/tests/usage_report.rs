@@ -5,11 +5,22 @@ use control_core::{ControlPlane, USAGE_REPORT_SCHEMA, UsageFilter};
 use serde_json::json;
 
 fn fixture_home(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir -- fresh atomic create below refuses pre-existing paths/symlinks; Unix mode is private before creation.
+    let path = std::env::temp_dir().join(format!(
         "control-core-usage-{label}-{}-{}",
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ))
+    ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .expect("exclusive private usage fixture");
+    path
 }
 
 fn write_meta(home: &std::path::Path, run_id: &str, value: serde_json::Value) {
@@ -217,17 +228,31 @@ fn usage_report_recovers_transcript_totals_without_treating_missing_as_zero() {
         }),
     );
 
-    let report = ControlPlane::new(&home).usage_report(
-        now,
-        UsageFilter {
-            since: Some(Duration::days(7)),
-            since_label: "7d".into(),
-            ..UsageFilter::default()
-        },
-    );
+    let plane = ControlPlane::new(&home);
+    let filter = UsageFilter {
+        since: Some(Duration::days(7)),
+        since_label: "7d".into(),
+        ..UsageFilter::default()
+    };
+    let first = plane.usage_report(now, filter.clone());
+    assert_eq!(first.totals.tokens_total_known, 0);
+    assert!(first.recovery.refreshing);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let report = loop {
+        let report = plane.usage_report(now, filter.clone());
+        if !report.recovery.refreshing {
+            break report;
+        }
+        assert!(std::time::Instant::now() < deadline, "bounded recovery");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
 
     assert_eq!(report.totals.runs, 2);
-    assert_eq!(report.totals.runs_tokens_unknown, 1);
+    assert_eq!(
+        report.totals.runs_tokens_unknown, 1,
+        "{:?}",
+        report.recovery
+    );
     assert_eq!(report.totals.tokens_total_known, 51);
     let measured = report
         .runs

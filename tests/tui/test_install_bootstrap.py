@@ -573,9 +573,11 @@ def test_channel_archive_checksum_is_matched_by_release_name(
         "mismatch": f"SHA256 mismatch for {RELEASE_ARCHIVE}",
     }[sums_shape]
     assert result.returncode == 1
-    # Dual-stream: the refusal survives a caller that only keeps one stream.
+    # One actionable stderr verdict; full diagnostics remain discoverable on disk.
     assert expected in result.stderr
-    assert expected in result.stdout
+    assert expected not in result.stdout
+    assert "Details:" in result.stderr
+    assert expected in (home / ".vibecrafted/install.log").read_text()
     assert "vibecrafted-input" not in result.stderr
     assert not stage_marker.exists()
 
@@ -711,7 +713,10 @@ def test_portable_copy_installs_its_own_carrier_without_the_channel(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "local portable copy" in result.stdout
+    assert (
+        "local portable copy"
+        in (tmp_path / "home/.vibecrafted/install.log").read_text()
+    )
     assert not curl_capture.exists(), "portable install reached for the network"
     assert stage_marker.read_text(encoding="utf-8") == "stage-ran\n"
     make_args = make_capture.read_text(encoding="utf-8").splitlines()
@@ -1507,8 +1512,7 @@ def test_install_sh_default_output_fits_the_ten_line_budget(tmp_path: Path) -> N
         "default install.sh output must stay within the 10-line budget; "
         f"got {len(lines)} lines:\n" + "\n".join(lines)
     )
-    # The staging truth still lands in the calm view.
-    assert any("vibecrafted 9.9.9-test" in line for line in lines)
+    assert any("Installed Vibecrafted 9.9.9-test" in line for line in lines)
 
 
 def test_install_sh_verbose_output_is_a_superset_of_default(tmp_path: Path) -> None:

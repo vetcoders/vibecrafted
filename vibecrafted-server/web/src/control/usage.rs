@@ -53,17 +53,27 @@ pub async fn usage(
         )
             .into_response());
     }
-    let report = plane.usage_report(
-        Utc::now(),
-        UsageFilter {
-            since,
-            since_label: window.to_string(),
-            provider: provider.expect("validated provider"),
-            agent: agent.expect("validated agent"),
-            model: model.expect("validated model"),
-        },
-    );
-    no_store(Json(report).into_response())
+    let filter = UsageFilter {
+        since,
+        since_label: window.to_string(),
+        provider: provider.expect("validated provider"),
+        agent: agent.expect("validated agent"),
+        model: model.expect("validated model"),
+    };
+    // The report reads bounded local files. Keep even slow filesystems off
+    // the async reactor; legacy Python recovery is already single-flight and
+    // asynchronous inside the canonical reader.
+    let projection = tokio::task::spawn_blocking(move || plane.usage_report(Utc::now(), filter));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), projection).await {
+        Ok(Ok(report)) => no_store(Json(report).into_response()),
+        _ => no_store((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "schema": "vibecrafted.error.v1",
+                "error": "Usage files could not be read promptly. Existing measurements remain available; retry shortly.",
+            })),
+        ).into_response()),
+    }
 }
 
 fn no_store(mut response: Response) -> Response {

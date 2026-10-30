@@ -20,6 +20,9 @@ the bootstrap installs that local copy under the same carrier preflight as
 `--archive-file`, without a channel lookup; `--ref`, `--archive-url` or
 `--archive-file` select another source explicitly.
 Non-interactive runs without `--gui` bypass the browser and call the compact installer directly.
+CLI installs show progress and a final result. Detailed diagnostics append to
+${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/install.log (private, credentials redacted).
+Use VERBOSE=1 for additional diagnostics on the terminal.
 
 Examples:
   curl -fsSL https://vibecrafted.io/install.sh | bash
@@ -34,20 +37,272 @@ Examples:
 EOF_USAGE
 }
 
-# Every refusal must reach the operator. `set -euo pipefail` alone turned a
-# failed lookup into a bare RC=1 after "Fetching vibecrafted…" (Linux container
-# test, 2026-09-29). Error text goes to stderr and — unless both streams are the
-# same terminal — to stdout as well, so `curl | bash > log` and wrappers that
-# eat stderr (HAK-28/HAK-72 class) still carry the reason.
+# Every refusal must name its cause. The CLI view emits it once on stderr and
+# points to the private durable log; redirected stdout remains readable progress.
 bootstrap_error_reported=0
 bootstrap_handoff=0
+bootstrap_python_usable=0
 tmpdir=""
+installer_output=0
+installer_log=""
+installer_log_ready=0
+installer_stderr_reader=""
+installer_phase="preparing the installation"
+installer_failure=""
+installer_attempt=""
+installer_output_dir=""
+installer_capture_index=0
+installer_stdout_fd=""
+installer_stderr_fd=""
+installer_log_fd=""
+
+# The public bootstrap runs before a trusted Python exists on cold macOS.
+# Keep its diagnostic boundary self-contained; never put credentials in the
+# durable log or echo an unfiltered child diagnostic onto the terminal.
+installer_redact() {
+  awk -v prefix="${installer_attempt:-}" -v display="${1:-log}" \
+    -v console="/dev/fd/${installer_stdout_fd:-1}" '
+  function literal(s, needle, replacement, p, out) {
+    if (needle == "") return s
+    out = ""
+    while ((p = index(s, needle)) > 0) {
+      out = out substr(s, 1, p - 1) replacement
+      s = substr(s, p + length(needle))
+    }
+    return out s
+  }
+  function values(s, p, n, tail, out, replacement, q) {
+    out = ""
+    while (match(tolower(s), /([a-z_][a-z0-9_-]*)?(token|secret|password|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key)[a-z0-9_-]*[\\"]*[ \t]*[:=][ \t]*/)) {
+      p = RSTART + RLENGTH - 1
+      tail = substr(s, p + 1)
+      q = substr(tail, 1, 1)
+      if (q == "\"" && match(tail, /^"([^"\\]|\\.)*"/)) n = RLENGTH
+      else if (match(tolower(tail), /^(bearer|basic)[ \t]+[^[:space:],;}]+/)) n = RLENGTH
+      else if (match(tail, /^[^[:space:],;}]+/)) n = RLENGTH
+      else n = 0
+      replacement = (q == "\"" || substr(s, p, 1) == ":") ? "\"[redacted]\"" : "[redacted]"
+      out = out substr(s, 1, p) replacement
+      s = substr(tail, n + 1)
+      if (n == 0) return out s
+    }
+    return out s
+  }
+  function urls(s, out, before, scheme) {
+    out = ""
+    while (match(s, /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/[:space:]@]+@/)) {
+      before = substr(s, RSTART, RLENGTH)
+      scheme = substr(before, 1, index(before, "://") + 2)
+      out = out substr(s, 1, RSTART - 1) scheme "[redacted]@"
+      s = substr(s, RSTART + RLENGTH)
+    }
+    return out s
+  }
+  function flags(s, out, p, tail, n) {
+    out = ""
+    while (match(tolower(s), /--(token|secret|password|api[_-]?key|authorization|credential)[ \t]+/)) {
+      p = RSTART + RLENGTH - 1
+      tail = substr(s, p + 1)
+      if (substr(tail, 1, 1) == "\"" && match(tail, /^"([^"\\]|\\.)*"/)) n = RLENGTH
+      else if (match(tail, /^[^[:space:]]+/)) n = RLENGTH
+      else n = 0
+      out = out substr(s, 1, p) "[redacted]"
+      s = substr(tail, n + 1)
+      if (n == 0) return out s
+    }
+    return out s
+  }
+  BEGIN {
+    esc = sprintf("%c", 27)
+    for (name in ENVIRON)
+      if (tolower(name) ~ /(^|[_-])(token|secret|password|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key)([_-]|$)/ && ENVIRON[name] != "")
+        secrets[++count] = ENVIRON[name]
+  }
+  {
+    line = $0
+    gsub(esc "\\[[0-?]*[ -/]*[@-~]", "", line)
+    gsub(/[[:cntrl:]]/, "", line)
+    for (i = 1; i <= count; i++) line = literal(line, secrets[i], "[redacted]")
+    if (line ~ /-----BEGIN.*PRIVATE KEY-----/) private_key = 1
+    if (private_key) {
+      if (line ~ /-----END.*PRIVATE KEY-----/) private_key = 0
+      line = "[redacted private key]"
+    }
+    line = urls(line)
+    line = flags(values(line))
+    if (display == "display") print line
+    else {
+      print "[" prefix "] " line
+      if (display == "verbose") print line > console
+    }
+    fflush()
+  }'
+}
+
+installer_log_line() {
+  [[ "$installer_log_ready" == "1" ]] || return 0
+  if [[ -e "/dev/fd/$installer_log_fd" ]]; then
+    printf '%s\n' "$*" | installer_redact >&"$installer_log_fd" || true
+  else
+    # Captured shell functions run with saved console/log descriptors closed,
+    # just like external children. Their diagnostics use the capture stream.
+    printf '%s\n' "$*"
+  fi
+}
+
+installer_line() {
+  printf '%s\n' "$*" | installer_redact display
+  [[ ! -e "/dev/fd/$installer_log_fd" ]] || installer_log_line "$*"
+}
+
+installer_stage() {
+  [[ "$installer_phase" != "$2" ]] || return 0
+  installer_phase="$2"
+  installer_line "  [$1/3] $2…"
+}
+
+installer_free_fd() {
+  local fd
+  for ((fd=20; fd<256; fd++)); do
+    if [[ ! -e "/dev/fd/$fd" ]]; then printf '%s\n' "$fd"; return 0; fi
+  done
+  return 1
+}
+
+installer_collect() {
+  local reader="$1" size
+  size="$(stat -Lc %s "/dev/fd/$reader" 2>/dev/null || stat -Lf %z "/dev/fd/$reader")" || return 1
+  [[ "$size" != "0" ]] || return 0
+  # A snapshot bound prevents a detached writer from extending this read forever.
+  head -c "$size" <&"$reader" | installer_redact "${2:-log}" >&"$installer_log_fd"
+}
+
+installer_capture() {
+  local status=0 mode="log" spool writer reader
+  if [[ "$installer_output" != "1" ]]; then
+    "$@"
+    return $?
+  fi
+  [[ "${VERBOSE:-0}" != "1" ]] || mode="verbose"
+  installer_capture_index=$((installer_capture_index + 1))
+  spool="$installer_output_dir/command-$installer_capture_index"
+  (umask 077; : >"$spool") || die "Cannot prepare private installer diagnostics"
+  writer="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  # Only internally selected numeric descriptors enter eval; paths/argv remain
+  # quoted variable expansions. Bash 3.2 has no exec {fd} allocation syntax.
+  eval "exec $writer>>\"\$spool\""
+  reader="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $reader<\"\$spool\""
+  rm -f "$spool"
+  # Permanent exec redirections in this child shell avoid Bash 3.2 saving
+  # temporary function descriptors that descendants could inherit.
+  (
+    exec 1>&"$writer" 2>&1
+    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&- $installer_stderr_reader>&- $writer>&- $reader>&-"
+    "$@"
+  ) || status=$?
+  eval "exec $writer>&-"
+  if ! installer_collect "$reader" "$mode"; then
+    installer_failure="Cannot preserve installer diagnostics; completed steps may remain"
+    [[ "$status" != "0" ]] || status=1
+  fi
+  eval "exec $reader<&-"
+  return "$status"
+}
+
+installer_output_start() {
+  local log_home="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}" links tool
+  # Interactive GUI/TUI and explicit diagnostic make targets retain their own
+  # transport. The common public Mac/non-TTY install gets this presentation.
+  [[ "$use_gui" != "1" ]] || return 0
+  case "$target" in vibecrafted|install|install-auto|install-source) ;; *) return 0 ;; esac
+  if [[ "$target" == "vibecrafted" ]] && is_interactive_session \
+      && [[ "$PLATFORM_OS" != "macos" || "$channel_mode" != "1" ]]; then return 0; fi
+  for tool in awk mkdir stat chmod mktemp head date rm; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      printf 'Installer details unavailable: missing %s; prerequisite checks will continue.\n' "$tool" >&2
+      return 0
+    fi
+  done
+  [[ ! -L "$log_home" ]] || die "Installer log directory is a symlink: $log_home"
+  (umask 077; mkdir -p "$log_home") || die "Cannot create installer log directory: $log_home"
+  [[ -d "$log_home" && -O "$log_home" ]] || die "Installer log directory is not owned by this user: $log_home"
+  installer_log="$log_home/install.log"
+  if [[ ! -e "$installer_log" && ! -L "$installer_log" ]]; then
+    (umask 077; set -C; : > "$installer_log") || die "Cannot create private installer log: $installer_log"
+  fi
+  [[ -f "$installer_log" && ! -L "$installer_log" && -O "$installer_log" ]] \
+    || die "Installer log is not an owned regular file: $installer_log"
+  links="$(stat -c %h "$installer_log" 2>/dev/null || stat -f %l "$installer_log")"
+  [[ "$links" == "1" ]] || die "Installer log has multiple hard links: $installer_log"
+  chmod 600 "$installer_log" || die "Cannot make installer log private: $installer_log"
+  installer_stdout_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stdout_fd>&1"
+  installer_stderr_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stderr_fd>&2"
+  installer_log_fd="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_log_fd>>\"\$installer_log\""
+  installer_output_dir="$(umask 077; mktemp -d "$log_home/.install-output.XXXXXX")" \
+    || die "Cannot prepare private installer diagnostics"
+  (umask 077; : >"$installer_output_dir/stderr") || die "Cannot prepare private installer diagnostics"
+  installer_stderr_reader="$(installer_free_fd)" || die "Cannot allocate installer diagnostics"
+  eval "exec $installer_stderr_reader<\"\$installer_output_dir/stderr\""
+  installer_log_ready=1
+  installer_output=1
+  installer_attempt="install-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  export VIBECRAFTED_INSTALL_LOG_CAPTURED=1
+  installer_log_line "begin · $(uname -s) $(uname -m)"
+  # Capture bootstrap stderr too: App mounting happens before candidate handoff.
+  exec 2>>"$installer_output_dir/stderr"
+  rm -f "$installer_output_dir/stderr"
+  installer_line "Vibecrafted installer"
+  installer_line "  Platform: $(uname -s) $(uname -m)"
+  installer_line "  Details: $installer_log"
+  installer_stage 1 "Download and verify the release"
+}
+
+# Called by the EXIT trap through on_bootstrap_exit.
+# shellcheck disable=SC2317,SC2329
+installer_last_diagnostic() {
+  # A refusal can occur before the interpreter is admitted. Diagnostic output
+  # must never execute bytes rejected by the canonical bootstrap checks.
+  [[ "$bootstrap_python_usable" == "1" ]] || return 0
+  "$bootstrap_python" -I -S - "$installer_log" "$installer_attempt" <<'PY_INSTALL_DIAGNOSTIC'
+import json
+import re
+import sys
+
+prefix = "[" + sys.argv[2] + "] "
+last = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        if not line.startswith(prefix):
+            continue
+        text = line[len(prefix):].strip()
+        if text.startswith("{"):
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and str(record.get("schema", "")).startswith("vibecrafted."):
+                reason = record.get("reason")
+                if isinstance(reason, str) and reason:
+                    last = reason
+        elif re.search(r"error|fail|refus|missing|cannot|permission|mismatch|invalid|unsafe|integrity|unavailable|denied|corrupt|ambiguous", text, re.I):
+            last = text
+if last:
+    print(last[:300])
+PY_INSTALL_DIAGNOSTIC
+}
 
 report_error() {
-  printf '%s\n' "$@" >&2
-  if ! [[ -t 1 && -t 2 ]]; then
-    printf '%s\n' "$@"
+  installer_failure="$*"
+  if [[ "$installer_output" == "1" ]]; then
+    installer_log_line "$*"
+    bootstrap_error_reported=1
+    return 0
   fi
+  printf '%s\n' "$@" >&2
   bootstrap_error_reported=1
 }
 
@@ -63,28 +318,86 @@ die() {
 # shellcheck disable=SC2317,SC2329
 on_bootstrap_exit() {
   local status=$?
+  local detail="" cause=""
+  if [[ "$installer_output" != "1" && -n "$tmpdir" ]]; then
+    rm -rf -- "$tmpdir" || true
+  fi
+  if [[ "$installer_output" == "1" ]]; then
+    exec 2>&"$installer_stderr_fd"
+    if ! installer_collect "$installer_stderr_reader"; then
+      installer_failure="Cannot preserve installer diagnostics; completed steps may remain"
+      [[ "$status" != "0" ]] || status=1
+    fi
+    eval "exec $installer_stderr_reader<&-"
+    if [[ "$status" == "0" && "$bootstrap_handoff" == "1" ]]; then
+      installer_stage 3 "Complete"
+      installer_line "  ✓ Installed Vibecrafted ${_installed_version:-release}"
+      installer_line "    Start: vibecrafted"
+      installer_line "    Details: $installer_log"
+    elif [[ "$status" != "0" ]]; then
+      detail="$installer_failure"
+      cause="$(installer_last_diagnostic)" || cause=""
+      if [[ -z "$detail" ]]; then detail="$cause"; cause=""; fi
+      [[ "$cause" != "$detail" ]] || cause=""
+      {
+        printf '\n✗ Installation stopped at: %s (exit %s).\n' "$installer_phase" "$status"
+        [[ -z "$detail" ]] || printf '  %s\n' "$detail"
+        [[ -z "$cause" ]] || printf '  Cause: %s\n' "$cause"
+        if [[ "$status" == "130" || "$status" == "143" ]]; then
+          printf '  Next: rerun the installer when ready; completed steps may remain.\n'
+        else
+          printf '  Next: correct the reported issue, then retry the same installer.\n'
+        fi
+        printf '  Details: %s\n' "$installer_log"
+      } | installer_redact display >&"$installer_stderr_fd"
+      installer_log_line "stopped · phase=$installer_phase · exit=$status"
+    fi
+    # Cold macOS uses Python from the authenticated staged App. Keep it alive
+    # through diagnostic extraction, then release the private candidate.
+    if [[ -n "$tmpdir" ]]; then
+      rm -rf -- "$tmpdir" 2>&1 | installer_redact >&"$installer_log_fd" || true
+    fi
+    installer_log_line "end · exit=$status"
+    rm -rf -- "$installer_output_dir" || true
+    eval "exec $installer_stdout_fd>&- $installer_stderr_fd>&- $installer_log_fd>&-"
+    trap - EXIT
+    exit "$status"
+  fi
   if [[ "$status" != "0" && "$bootstrap_error_reported" == "0" \
         && "$bootstrap_handoff" == "0" ]]; then
     if [[ "$status" == "130" ]]; then
-      report_error "Interrupted; nothing was published."
+      report_error "Interrupted; completed steps may remain. Rerun the installer when ready."
     else
       report_error "Error: the bootstrap stopped unexpectedly (exit $status) before naming the failure; rerun with VERBOSE=1 and report the last lines above."
     fi
   fi
-  if [[ -n "$tmpdir" ]]; then
-    rm -rf -- "$tmpdir"
-  fi
 }
 trap on_bootstrap_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 info() {
+  if [[ "$installer_output" == "1" ]]; then
+    if [[ "${VERBOSE:-0}" == "1" ]]; then installer_line "$*"
+    else
+      case "$*" in
+        *'[warn]'*) installer_line "  ! $*" ;;
+        *) installer_log_line "$*" ;;
+      esac
+    fi
+    return 0
+  fi
   printf '%s\n' "$*"
 }
 
-# Output discipline: the default view is calm storytelling (≤10 lines total,
-# ≤2 per install section). Detail lines are gated — VERBOSE=1 restores the
-# full bazaar, nothing is lost.
+# Default CLI output is bounded progress. Detail lines go to the private log;
+# VERBOSE=1 also shows them on the terminal after credential redaction.
 vinfo() {
+  if [[ "$installer_output" == "1" ]]; then
+    if [[ "${VERBOSE:-0}" == "1" ]]; then installer_line "$*"
+    else installer_log_line "$*"; fi
+    return 0
+  fi
   if [[ "${VERBOSE:-0}" == "1" ]]; then
     printf '%s\n' "$*"
   fi
@@ -1253,8 +1566,13 @@ detect_local_carrier() {
 }
 detect_local_carrier
 
+channel_mode=0
+if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
+  channel_mode=1
+fi
 detect_platform
 detect_linux_distro
+installer_output_start
 platform_banner
 
 if [[ "$PLATFORM_OS" == "unsupported" ]]; then
@@ -1308,10 +1626,6 @@ preflight_require_all() {
 # and bootstrap Python; the channel always binds a Runtime Pack. A local
 # source-only carrier (--archive-file, portable copy) still needs make, but the
 # production channel never gains a compiler toolchain fallback.
-channel_mode=0
-if [[ -z "$archive_url" && -z "$archive_file" && -z "$local_carrier_dir" ]]; then
-  channel_mode=1
-fi
 # A supplied pack installs through install_selected_runtime_pack (below), which
 # never runs make. Only routes that still hand off to the candidate Makefile
 # need it: no supplied pack (source carrier), the attended TUI (its manifest
@@ -1454,6 +1768,7 @@ PY_BOOTSTRAP_USABLE
 then
   die "The selected bootstrap Python is unusable (Python 3.9 or newer required)"
 fi
+bootstrap_python_usable=1
 
 # macOS App pairing (side-by-side generation contract, 2026-10-22).
 # The Runtime Pack installer refuses to publish when the fixed host
@@ -1532,7 +1847,7 @@ install_channel_dmg() {
   transaction="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
   local transaction_dir="$state_dir/transactions/$transaction"
   mkdir -p "$transaction_dir"
-  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" bash "$helper" \
+  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" installer_capture bash "$helper" \
     --source "$staged_app" \
     --destination "$PAIRED_APP_ROOT" \
     --receipt "$transaction_dir/receipt.json" \
@@ -1728,7 +2043,10 @@ run_candidate_command() {
   local status=0
   # From here the candidate installer owns its verdict and its error text.
   bootstrap_handoff=1
-  "$@" || status=$?
+  if [[ "$installer_output" == "1" ]]; then
+    installer_stage 2 "Install Vibecrafted and command-line tools"
+  fi
+  installer_capture "$@" || status=$?
   exit "$status"
 }
 
@@ -2036,7 +2354,10 @@ info "✓ Verified vibecrafted $_installed_version candidate; transactional inst
 macos_app_args=()
 app_pairing_via_dmg=0
 if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" && -n "$selected_runtime_pack" && "$use_gui" != "1" ]]; then
-  macos_pair_channel_app || die "macOS App pairing failed; nothing was published"
+  if [[ "$installer_output" == "1" ]]; then
+    installer_stage 2 "Install Vibecrafted and command-line tools"
+  fi
+  macos_pair_channel_app || die "macOS App pairing failed; completed steps may remain"
 fi
 
 

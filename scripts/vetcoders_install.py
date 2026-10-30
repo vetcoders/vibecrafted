@@ -294,6 +294,12 @@ class TeeLogger:
 @contextmanager
 def compact_logging(log_path: Path, quiet: bool = True):
     """Context manager: redirects stdout to log, keeps real stdout for compact lines."""
+    if os.environ.get("VIBECRAFTED_INSTALL_LOG_CAPTURED") == "1":
+        # The public bootstrap owns both OS streams and their redacted durable
+        # log. Opening install.log here would truncate that attempt, while the
+        # inherited stdout already reaches the same capture boundary.
+        yield sys.stdout
+        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tee = TeeLogger(log_path, quiet=quiet)
     real_stdout = sys.stdout
