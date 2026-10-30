@@ -23,11 +23,18 @@ impl TestHome {
         let path = (0..100)
             .find_map(|attempt| {
                 let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                // nosemgrep: rust.lang.security.temp-dir.temp-dir -- atomic private create below refuses existing paths/symlinks before any fixture data is written.
                 let candidate = std::env::temp_dir().join(format!(
                     "vc-usage-http-{}-{nanos}-{nonce}-{attempt}",
                     std::process::id()
                 ));
-                match fs::create_dir(&candidate) {
+                let mut builder = fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                match builder.create(&candidate) {
                     Ok(()) => Some(candidate),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => None,
                     Err(error) => panic!("create isolated usage home: {error}"),
@@ -162,7 +169,20 @@ async fn usage_api_marks_origin_and_every_picker_option_round_trips() {
     )
     .expect("scan cache");
 
-    let (status, _, all) = get(&home.0, "/api/usage?window=all").await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (status, _, all) = loop {
+        let result = get(&home.0, "/api/usage?window=all").await;
+        if !result.2["local_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["refreshing"] == true)
+        {
+            break result;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
     assert_eq!(status, StatusCode::OK);
     let origins: Vec<_> = all["runs"]
         .as_array()

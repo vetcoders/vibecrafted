@@ -1255,7 +1255,8 @@ fn usage_dashboard_script() -> &'static str {
       const detail = item.source === 'scan_cache' || item.source === 'archive'
         ? item.counted + ' local' + (item.matched_vc ? ' · ' + item.matched_vc + ' already in VC runs' : '') + (item.withheld_days ? ' · ' + item.withheld_days + ' day(s) withheld' : '')
         : item.source + (item.note ? ' (' + item.note + ')' : '');
-      return item.agent + ': ' + detail;
+      const state = (item.refreshing ? ' · updating' : '') + (item.stale ? ' · previous measurements' : '') + (item.error ? ' · ' + item.error : '');
+      return item.agent + ': ' + detail + state;
     });
     set('usage-local-sources', bits.length ? 'Local collection — ' + bits.join(' · ') : '');
   };
@@ -1388,6 +1389,9 @@ fn usage_dashboard_script() -> &'static str {
     set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
     status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
     const recovery = report.recovery || {};
+    const localSources = report.local_sources || [];
+    if (localSources.some((source) => source.refreshing)) status.textContent += ' · local provider measurements updating';
+    if (localSources.some((source) => source.stale)) status.textContent += ' · previous local measurements retained';
     if (recovery.pending_runs) status.textContent += ' · ' + recovery.pending_runs + ' transcript(s) updating';
     if (recovery.stale_runs) status.textContent += ' · ' + recovery.stale_runs + ' previous transcript measurement(s) retained';
     if (recovery.unavailable_runs) status.textContent += ' · ' + recovery.unavailable_runs + ' transcript source(s) unavailable';
@@ -1653,7 +1657,7 @@ fn usage_dashboard_script() -> &'static str {
       history.replaceState(null, '', '/usage?' + query.toString());
       render(payload);
       hasMeasurements = true;
-      if (payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) recoveryTimer = setTimeout(load, 1500);
+      if ((payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) || (payload.local_sources || []).some((source) => source.refreshing)) recoveryTimer = setTimeout(load, 1500);
     } catch (error) {
       if (version !== requestVersion) return;
       status.textContent = 'Usage telemetry unavailable: ' + error.message + (hasMeasurements ? ' · showing previous measurements' : '');

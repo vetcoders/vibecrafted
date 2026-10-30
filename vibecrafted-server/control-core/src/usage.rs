@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::usage_local::{LocalSource, VcSessions, read_local_usage};
+use crate::usage_local::{LocalSource, VcSessions, project_local_usage};
 use crate::{ControlPlane, is_safe_run_id};
 
 #[path = "usage_recovery.rs"]
@@ -223,7 +223,7 @@ impl ControlPlane {
 
         // Local activity of every provider, deduplicated against the runs the
         // runtime already accounts for (those keep origin `vc`).
-        let local = read_local_usage(
+        let local = project_local_usage(
             &self.home().join("telemetry"),
             &vc_sessions,
             cutoff,

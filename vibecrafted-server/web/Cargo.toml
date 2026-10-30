@@ -174,3 +174,8 @@ lib-default-features = false
 lib-profile-release = "wasm-release"
 hash-files = false
 watch-additional-files = ["public", "styles"]
+
+[[test]]
+name = "usage_large_cache_http"
+path = "tests/usage_large_cache_http.rs"
+required-features = ["ssr"]
