@@ -214,6 +214,13 @@ FORBIDDEN_COMPONENTS = frozenset(
 
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~", ".pem", ".p12", ".pfx")
 _SECRET_NAME_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+# Theme editors leave dated backup symlinks next to the live .kdl. The stamp
+# is YYYYMMDD_HHMMSS. Those names are host leftovers, not payload. A bare
+# ".bak" suffix would also hide a real payload file, so the predicate stays
+# this narrow and does not relax symlink escape checks for anything else.
+_HOST_THEME_BACKUP = re.compile(
+    r"config/vc-frame/themes/[^/]+\.kdl\.bak\.\d{8}_\d{6}\Z"
+)
 REQUIRED_LOCKFILES = frozenset(
     {
         "vibecrafted-app/Cargo.lock",
@@ -950,6 +957,11 @@ def _component_looks_like_secret(name: str) -> bool:
     return lowered.startswith(_SECRET_NAME_PREFIXES)
 
 
+def _is_disposable_host_theme_backup(relative: Path) -> bool:
+    """True for a dated vc-frame theme backup left beside the live .kdl."""
+    return _HOST_THEME_BACKUP.fullmatch(relative.as_posix()) is not None
+
+
 def path_is_forbidden(relative: str | Path) -> bool:
     """Return True when a relative path matches a forbidden component/suffix rule."""
     relative_path = _relative_path(relative)
@@ -957,6 +969,8 @@ def path_is_forbidden(relative: str | Path) -> bool:
         return True
     if relative_path.as_posix() in REQUIRED_LOCKFILES:
         return False
+    if _is_disposable_host_theme_backup(relative_path):
+        return True
     return any(
         part in FORBIDDEN_COMPONENTS
         or _component_is_secret_env(part)

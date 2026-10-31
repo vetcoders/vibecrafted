@@ -877,6 +877,8 @@ def _operator_state(run: dict[str, Any]) -> str:
     if state in {"report_validated", "completed", "closed"}:
         if artifact_ok is False or artifact_errors:
             return "blocked"
+        if _report_denies_success(run):
+            return "blocked"
         return "completed"
     if artifact_ok is False or artifact_errors:
         return "blocked"
@@ -978,7 +980,12 @@ def _artifact_projection(
         result["liveness"] = str(result.get("liveness") or "terminal")
         result["recovery_required"] = False
         result["last_error"] = ""
-    elif terminal_state and artifact_ok and not errors:
+    elif (
+        terminal_state
+        and artifact_ok
+        and not errors
+        and not _report_denies_success(result)
+    ):
         if _coerce_int(result.get("exit_code")) is None:
             result["exit_code"] = 0
         if not str(result.get("completed_at") or ""):
@@ -1415,10 +1422,39 @@ def _delivered_report_claims_completion(run: dict[str, Any]) -> bool:
     return verdict.claim_status in CLAIM_COMPLETED
 
 
+def _report_denies_success(run: dict[str, Any]) -> str:
+    """Reason a present report refuses a success verdict, or "" when it does not.
+
+    No report path leaves process evidence alone. A report that predates the
+    ``finalized`` key also leaves that path alone. An explicit ``finalized:
+    false``, an explicit finalized report with an empty ``claim``, or a
+    finalized claim that is not a completed attestation vetoes exit 0, state,
+    and terminal liveness. The launcher shell (``finalized: false``, empty
+    claim, ``claim_status: pending``) is the case this closes.
+    """
+    report = str(run.get("latest_report") or "").strip()
+    if not report:
+        return ""
+    verdict = validate_report_file(report, require_frontmatter=False)
+    if "report_missing" in verdict.errors:
+        return ""
+    if _report_attests_completion(run):
+        return ""
+    if "finalized" not in verdict.fields:
+        return ""
+    if not verdict.finalized:
+        return "report finalized is false"
+    if not verdict.claim:
+        return "report claim is empty"
+    return "report is not a completed attestation"
+
+
 def _has_success_evidence(run: dict[str, Any]) -> bool:
     """True when any independent signal (state, exit 0, completed_at, terminal
     liveness, or a self-attesting report) proves the run finished successfully."""
     if run.get("artifact_ok") is False or run.get("artifact_errors"):
+        return False
+    if _report_denies_success(run):
         return False
     exit_code = _coerce_int(run.get("exit_code"))
     if exit_code not in (None, 0):

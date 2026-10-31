@@ -2040,7 +2040,7 @@ print(pack)
   fi
   [[ -n "$resolved_url" ]] || die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker)"
   if [[ -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
-    [[ -n "$resolved_pack_url" ]] || die "No prebuilt Runtime Pack available for $channel_platform on channel $ref; use a matching published Runtime Pack or a verified source carrier"
+    [[ -n "$resolved_pack_url" ]] || die "No prebuilt Runtime Pack available for $channel_platform on channel $ref; use a matching published Runtime Pack, or pass --archive-file with a verified portable source copy (that route still needs make)"
     runtime_pack_url="$resolved_pack_url"
   fi
   archive_url="$resolved_url"
