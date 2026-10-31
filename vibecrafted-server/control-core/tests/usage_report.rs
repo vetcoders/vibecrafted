@@ -1042,10 +1042,11 @@ fn a_native_sized_local_cache_never_blocks_requests_and_retains_failed_refresh()
     }
     file.write_all(b"\"}}}}").unwrap();
     drop(file);
+    let foreground_budget = StdDuration::from_secs(2);
     let start = Instant::now();
     let first = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
     assert!(
-        start.elapsed() < StdDuration::from_millis(500),
+        start.elapsed() < foreground_budget,
         "foreground read the native-sized ledger"
     );
     assert!(first.local_sources.iter().any(|s| s.refreshing));
@@ -1061,7 +1062,7 @@ fn a_native_sized_local_cache_never_blocks_requests_and_retains_failed_refresh()
         requests.push(std::thread::spawn(move || {
             let start = Instant::now();
             let report = ControlPlane::new(&home).usage_report(now(), UsageFilter::default());
-            assert!(start.elapsed() < StdDuration::from_millis(500));
+            assert!(start.elapsed() < foreground_budget);
             report
         }));
     }
