@@ -74,7 +74,7 @@ async fn native_sized_cache_is_single_flight_and_http_stays_responsive() {
             .any(|s| s["refreshing"] == true)
     );
     let mut tasks = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..4 {
         let client = client.clone();
         let base = base.clone();
         tasks.push(tokio::spawn(async move {

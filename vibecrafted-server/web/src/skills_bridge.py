@@ -105,4 +105,7 @@ except (
         if code in ("conflict", "invalid", "not_found", "unsafe", "io")
         else "unavailable"
     )
-print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
+sys.stdout.buffer.write(
+    json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    + b"\n"
+)

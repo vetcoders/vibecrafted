@@ -35,7 +35,8 @@ def _load_local_skill_owner():
     class Owner:
         @staticmethod
         def read_skill(name):
-            text = "owner content"
+            text_path = os.environ.get("VIBECRAFTED_TEST_SKILL_TEXT_FILE")
+            text = Path(text_path).read_text() if text_path else "owner content"
             return {"ok": True, "name": name, "text": text, "revision": hashlib.sha256(text.encode()).hexdigest(), "origin": "bundled", "activation": "unknown"}
     return Owner()
 def publish_local_skill(name, text, revision):
@@ -95,7 +96,7 @@ def publish_local_skill(name, text, revision):
     return env, root
 
 
-def call(env: dict[str, str], request: dict[str, str]) -> dict:
+def invoke(env: dict[str, str], request: dict[str, str]) -> str:
     child = subprocess.Popen(
         [sys.executable, "-I", "-B", str(BOOTSTRAP_PATH)],
         stdin=subprocess.PIPE,
@@ -112,7 +113,11 @@ def call(env: dict[str, str], request: dict[str, str]) -> dict:
         raise
     assert child.returncode == 0
     assert errors == ""
-    return json.loads(output)
+    return output
+
+
+def call(env: dict[str, str], request: dict[str, str]) -> dict:
+    return json.loads(invoke(env, request))
 
 
 def test_selected_generation_read_publish_conflict_and_partial(
@@ -146,3 +151,18 @@ def test_drifted_installer_and_wrong_selector_fail_closed(
     assert call(
         env, {"op": "save", "name": "vc-alpha", "text": "private", "revision": "0" * 64}
     ) == {"ok": False, "code": "unavailable"}
+
+
+def test_unicode_skill_response_fits_rust_bridge_limit(
+    generation: tuple[dict[str, str], Path],
+) -> None:
+    env, root = generation
+    text = "é" * 400_000
+    skill_file = root / "large-skill.md"
+    skill_file.write_text(text, encoding="utf-8")
+    env = {**env, "VIBECRAFTED_TEST_SKILL_TEXT_FILE": str(skill_file)}
+
+    output = invoke(env, {"op": "read", "name": "vc-large"})
+
+    assert len(output.encode("utf-8")) <= 2 * 1024 * 1024
+    assert json.loads(output)["text"] == text

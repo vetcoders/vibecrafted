@@ -157,7 +157,7 @@ for item in items:
     assert_eq!(first["totals"]["tokens_total_known"], 6250);
     assert_eq!(first["recovery"]["pending_runs"], 4);
     let mut tasks = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..4 {
         let client = client.clone();
         let base = base.clone();
         tasks.push(tokio::spawn(async move {

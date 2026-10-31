@@ -9,7 +9,7 @@ use control_core::{ControlPlane, UsageFilter};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 static USAGE_PROJECTION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -19,6 +19,25 @@ pub struct UsageQuery {
     provider: Option<String>,
     agent: Option<String>,
     model: Option<String>,
+}
+
+fn acquire_usage_projection_permit() -> Result<OwnedSemaphorePermit, StatusCode> {
+    Arc::clone(USAGE_PROJECTION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(4))))
+        .try_acquire_owned()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn usage_projection_busy_response(status: StatusCode) -> Response {
+    no_store(
+        (
+            status,
+            Json(json!({
+                "schema": "vibecrafted.error.v1",
+                "error": "Usage projection capacity is busy; retry shortly.",
+            })),
+        )
+            .into_response(),
+    )
 }
 
 pub async fn usage(
@@ -67,24 +86,10 @@ pub async fn usage(
     // The report reads bounded local files. Keep even slow filesystems off
     // the async reactor; legacy Python recovery is already single-flight and
     // asynchronous inside the canonical reader.
-    let permit =
-        match Arc::clone(USAGE_PROJECTION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(4))))
-            .try_acquire_owned()
-        {
-            Ok(permit) => permit,
-            Err(_) => {
-                return no_store(
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({
-                            "schema": "vibecrafted.error.v1",
-                            "error": "Usage projection capacity is busy; retry shortly.",
-                        })),
-                    )
-                        .into_response(),
-                );
-            }
-        };
+    let permit = match acquire_usage_projection_permit() {
+        Ok(permit) => permit,
+        Err(status) => return usage_projection_busy_response(status),
+    };
     let projection = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         plane.usage_report(Utc::now(), filter)
@@ -127,7 +132,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_projection_capacity_is_bounded() {
+    fn usage_projection_capacity_returns_no_store_when_full() {
         let slots = USAGE_PROJECTION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(4)));
         let permits = (0..4)
             .map(|_| {
@@ -136,8 +141,12 @@ mod tests {
                     .expect("available slot")
             })
             .collect::<Vec<_>>();
-        assert!(Arc::clone(slots).try_acquire_owned().is_err());
+        let busy_status = acquire_usage_projection_permit()
+            .expect_err("capacity exhaustion should return a busy status");
+        let busy = usage_projection_busy_response(busy_status);
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.headers()[header::CACHE_CONTROL], "no-store");
         drop(permits);
-        assert!(Arc::clone(slots).try_acquire_owned().is_ok());
+        assert!(acquire_usage_projection_permit().is_ok());
     }
 }
