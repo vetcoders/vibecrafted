@@ -31,6 +31,7 @@ from .message_control import (
 BRIDGE_ENV = "VIBECRAFTED_MESSAGE_BRIDGE"
 _MAX_REQUEST = transport._MAX_REQUEST
 _MAX_RESPONSE = transport._MAX_RESPONSE
+_REQUEST_ATTEMPTS = 3
 _ID = re.compile(r"^[0-9a-f]{32}$")
 
 # These programs execute inside the container. Their argv are literal arguments,
@@ -187,19 +188,59 @@ class ContainerMessageRelay:
         self._closed = False
 
     def _exec(
-        self, script: str, *args: str, data: bytes | None = None
+        self,
+        script: str,
+        *args: str,
+        data: bytes | None = None,
+        python: str = "python3",
     ) -> subprocess.CompletedProcess[bytes]:
         argv = [self.cli, "exec"]
         if data is not None:
             argv.append("-i")
-        argv.extend([self.container_id, "python3", "-c", script, *args])
+        argv.extend([self.container_id, python, "-c", script, *args])
         return subprocess.run(
             argv, env=self.env, input=data, capture_output=True, timeout=15, check=False
         )
 
-    def start(self) -> None:
+    def _dispatch_request(self, payload: Any) -> dict[str, Any]:
+        for attempt in range(_REQUEST_ATTEMPTS):
+            try:
+                return _handle_request(self.run_id, payload)
+            except OSError:
+                if attempt + 1 == _REQUEST_ATTEMPTS:
+                    return {"ok": False, "error": "bridge_host_unavailable"}
+                self._stop.wait(0.05 * (attempt + 1))
+                if self._stop.is_set():
+                    return {"ok": False, "error": "bridge_stopped"}
+        raise AssertionError("request retry loop exhausted unexpectedly")
+
+    def _exec_with_retry(
+        self, script: str, *args: str, data: bytes | None = None
+    ) -> subprocess.CompletedProcess[bytes] | None:
+        result: subprocess.CompletedProcess[bytes] | None = None
+        failure: OSError | subprocess.SubprocessError | None = None
+        for attempt in range(_REQUEST_ATTEMPTS):
+            try:
+                result = self._exec(script, *args, data=data)
+                failure = None
+                if result.returncode == 0:
+                    return result
+            except (OSError, subprocess.SubprocessError) as exc:
+                failure = exc
+            if attempt + 1 == _REQUEST_ATTEMPTS:
+                break
+            self._stop.wait(0.05 * (attempt + 1))
+            if self._stop.is_set():
+                return None
+        if failure is not None:
+            raise failure
+        return result
+
+    def start(self, *, guest_python: str) -> None:
         if self._thread is not None or self._stop.is_set():
             raise MessageControlError("bridge_already_started_or_closed")
+        if not Path(guest_python).is_absolute() or ".." in Path(guest_python).parts:
+            raise MessageControlError("bridge_guest_runtime_invalid")
         resolve_message_run(run_id=self.run_id)
         try:
             client = Path(transport.__file__).read_bytes()
@@ -223,6 +264,14 @@ class ContainerMessageRelay:
             )
             if result.returncode:
                 raise MessageControlError("bridge_roundtrip_failed")
+            result = self._exec(
+                _RUNTIME_PROBE,
+                self.guest_path,
+                self.run_id,
+                python=guest_python,
+            )
+            if result.returncode:
+                raise MessageControlError("bridge_guest_runtime_incompatible")
         except (OSError, subprocess.SubprocessError, MessageControlError):
             self.close()
             raise
@@ -230,7 +279,9 @@ class ContainerMessageRelay:
     def _serve(self) -> None:
         try:
             while not self._stop.is_set():
-                result = self._exec(_SCAN, self.guest_path)
+                result = self._exec_with_retry(_SCAN, self.guest_path)
+                if result is None:
+                    return
                 if result.returncode:
                     raise RuntimeError("container request scan failed")
                 rows = json.loads(result.stdout)
@@ -249,11 +300,15 @@ class ContainerMessageRelay:
                         if len(row[1].encode()) > _MAX_REQUEST:
                             raise ValueError("request too large")
                         payload = json.loads(row[1])
-                        reply = _handle_request(self.run_id, payload)
+                        reply = self._dispatch_request(payload)
                     except (ValueError, UnicodeError):
                         reply = {"ok": False, "error": "bridge_invalid_request"}
                     encoded = json.dumps(reply, ensure_ascii=False).encode()
-                    sent = self._exec(_REPLY, self.guest_path, row[0], data=encoded)
+                    sent = self._exec_with_retry(
+                        _REPLY, self.guest_path, row[0], data=encoded
+                    )
+                    if sent is None:
+                        return
                     if sent.returncode:
                         raise RuntimeError("container response write failed")
                 self._stop.wait(0.15)
@@ -314,4 +369,11 @@ channel=module.discover_channel(Path(root).parent,run_id)
 if channel!=root: raise SystemExit(2)
 result=module.request(channel=channel,action="ping",run_id=run_id,session="",message_id="",timeout=8)
 if result!={"run_id":run_id}: raise SystemExit(2)
+"""
+_RUNTIME_PROBE = """import os,sys
+channel,run_id=sys.argv[1:]
+os.environ["VIBECRAFTED_MESSAGE_BRIDGE"]=channel
+os.environ["VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED"]="1"
+from vibecrafted_core.container_message_bridge import guest_request
+if guest_request(action="ping",run_id=run_id,session="",message_id="")!={"run_id":run_id}: raise SystemExit(2)
 """

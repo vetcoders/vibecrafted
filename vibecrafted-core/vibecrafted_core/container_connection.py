@@ -110,6 +110,21 @@ def _target(
     )
 
 
+def _guest_python(meta: Mapping[str, Any]) -> str:
+    runtime = meta.get("container_runtime")
+    bin_dir = runtime.get("bin_dir") if isinstance(runtime, dict) else None
+    path = Path(bin_dir) if isinstance(bin_dir, str) else Path()
+    if (
+        not isinstance(bin_dir, str)
+        or not bin_dir
+        or not path.is_absolute()
+        or ".." in path.parts
+        or path.name != "bin"
+    ):
+        raise MessageControlError("container_connection_guest_runtime_missing")
+    return str(path / "python")
+
+
 def connect_container(
     run_id: str,
     *,
@@ -119,6 +134,7 @@ def connect_container(
     """Serve until interrupted or the original recorded owners stop matching."""
     child_env = dict(os.environ if env is None else env)
     meta = _live_meta(run_id)
+    guest_python = _guest_python(meta)
     target = _target(meta, child_env)
     relay = ContainerMessageRelay(
         cli=target.cli,
@@ -144,7 +160,7 @@ def connect_container(
             if check.returncode or json.loads(check.stdout) != identity:
                 raise MessageControlError("container_connection_provider_changed")
 
-        relay.start()
+        relay.start(guest_python=guest_python)
         # The provider may have ended while the guest handshake was in flight.
         prove_current_ownership()
         ready(

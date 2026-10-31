@@ -94,7 +94,7 @@ else
   fi
 fi
 
-# ── Stage 3: Node 22 (official static) + corepack ───────────────────────────
+# ── Stage 3: Node.js (official static) + corepack ───────────────────────────
 # Security floors from nodejs.org/en/blog/vulnerability/october-2026-security-releases.
 # A newer major alone does not prove that CVE-2026-111497 is fixed.
 node_security_fixed() {
@@ -112,11 +112,32 @@ node_security_fixed() {
   (( minor > floor_minor || (minor == floor_minor && patch >= floor_patch) ))
 }
 
-log "Stage 3/8: Node.js 22"
+node_security_repair_version() {
+  local version="${1#v}" major
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  major=$((10#${BASH_REMATCH[1]}))
+  case "$major" in
+    22) printf '22.23.4\n' ;;
+    24) printf '24.22.1\n' ;;
+    26) printf '26.12.1\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+log "Stage 3/8: Node.js"
 if command -v node >/dev/null 2>&1 && node_security_fixed "$(node --version)"; then
   ok "node present: $(node --version)"
 else
+  requested_node_version="${NODE_VERSION:-}"
   NODE_VERSION="${NODE_VERSION:-22.23.4}"
+  if [ -z "$requested_node_version" ]; then
+    installed_node_version="$(node --version 2>/dev/null || true)"
+    case "$installed_node_version" in
+      v24.*|v26.*)
+        NODE_VERSION="$(node_security_repair_version "$installed_node_version" || printf '22.23.4')"
+        ;;
+    esac
+  fi
   if ! node_security_fixed "$NODE_VERSION"; then
     err "NODE_VERSION must select a supported release containing the October 2026 security fixes (22.23.4, 24.22.1, 26.12.1 or later in that line)"
     exit 1
@@ -135,7 +156,10 @@ else
       exit 1
     fi
     ok "node installed: $(node --version 2>&1)"
-  else warn "node download failed for arch=$arch"; fi
+  else
+    err "node download failed for arch=$arch; refusing to continue without a security-fixed Node.js"
+    exit 1
+  fi
 fi
 command -v corepack >/dev/null 2>&1 && { $SUDO corepack enable >/dev/null 2>&1 || corepack enable >/dev/null 2>&1 || true; }
 command -v npm >/dev/null 2>&1 && { npm config set fund false >/dev/null 2>&1; npm config set audit false >/dev/null 2>&1; }

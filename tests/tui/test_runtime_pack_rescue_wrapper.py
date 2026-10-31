@@ -1222,7 +1222,13 @@ def test_public_rescue_plan_never_reconciles_installed_service(tmp_path, install
     host_bin = tmp_path / "host-bin"
     host_bin.mkdir()
     uname = host_bin / "uname"
-    uname.write_text('#!/bin/sh\nprintf "Darwin\\n"\n')
+    uname.write_text(
+        '#!/bin/sh\ncase "${1:-}" in\n'
+        '  -s) printf "Darwin\\n" ;;\n'
+        '  -m) printf "arm64\\n" ;;\n'
+        '  *) printf "Darwin\\n" ;;\n'
+        "esac\n"
+    )
     uname.chmod(0o755)
     archive, key = _sign_payload_archive(tmp_path / "carrier", payload)
     result = _run_wrapper(

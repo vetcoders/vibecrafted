@@ -8,6 +8,10 @@ use chrono::{Duration, Utc};
 use control_core::{ControlPlane, UsageFilter};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
+
+static USAGE_PROJECTION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Debug, Default, Deserialize)]
 pub struct UsageQuery {
@@ -63,7 +67,27 @@ pub async fn usage(
     // The report reads bounded local files. Keep even slow filesystems off
     // the async reactor; legacy Python recovery is already single-flight and
     // asynchronous inside the canonical reader.
-    let projection = tokio::task::spawn_blocking(move || plane.usage_report(Utc::now(), filter));
+    let permit = match Arc::clone(
+        USAGE_PROJECTION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(4))),
+    )
+    .try_acquire_owned()
+    {
+        Ok(permit) => permit,
+        Err(_) => {
+            return no_store((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "schema": "vibecrafted.error.v1",
+                    "error": "Usage projection capacity is busy; retry shortly.",
+                })),
+            )
+                .into_response());
+        }
+    };
+    let projection = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        plane.usage_report(Utc::now(), filter)
+    });
     match tokio::time::timeout(std::time::Duration::from_secs(5), projection).await {
         Ok(Ok(report)) => no_store(Json(report).into_response()),
         _ => no_store((
@@ -95,4 +119,20 @@ fn clean_filter(value: Option<String>) -> Result<Option<String>, ()> {
         return Err(());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_projection_capacity_is_bounded() {
+        let slots = USAGE_PROJECTION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(4)));
+        let permits = (0..4)
+            .map(|_| Arc::clone(slots).try_acquire_owned().expect("available slot"))
+            .collect::<Vec<_>>();
+        assert!(Arc::clone(slots).try_acquire_owned().is_err());
+        drop(permits);
+        assert!(Arc::clone(slots).try_acquire_owned().is_ok());
+    }
 }

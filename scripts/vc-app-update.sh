@@ -1691,27 +1691,29 @@ def transient_install(checked):
         return False
 
 def publication():
-    pointer = read(runtime / "active.json")
-    install = read(runtime / "install-receipt.json")
-    require(pointer.get("schema") == "vibecrafted.active-runtime.v1" and install.get("schema") == "vibecrafted.runtime-install.v1", "wrong publication schema")
-    version = pointer.get("version", "")
-    require(isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9.+_-]+", version) and install.get("version") == version, "mismatched publication")
-    require(not any(install.get(key) for key in ("install_pending", "config_pending", "uninstall_pending", "config_conflicts", "rescue_pending", "foundation_service_pending", "rolled_back_at")), "publication pending or rolled back")
-    require("config_transaction" not in install and install.get("install_phase") not in ("preparing", "ancillary"), "publication unresolved")
-    require(pointer.get("app_root") == str(dest) and install.get("app_root") == str(dest), "publication names another App")
-    generation = physical(runtime / "releases" / version)
-    require(pointer.get("runtime_root") == str(generation), "publication names another runtime root")
-    require(physical(generation / "VERSION").read_text().strip() == version, "runtime VERSION mismatch")
-    product = read(dest / "Contents/Resources/product-manifest.json")
-    manifest = read(generation / "runtime-manifest.json")
-    provenance = read(generation / "runtime-pack-provenance.json")
-    require(product.get("schema") == "io.vetcoders.vibecrafted.product.v1" and manifest.get("schema") == "vibecrafted.runtime-generation.v2", "wrong product/generation schema")
-    revision = product.get("git_sha", "")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", revision)) and manifest.get("source_revision") == revision and manifest.get("version") == version, "published source is not signed App source")
-    expected = {"vibecrafted": revision}
-    for module in product.get("modules", []):
-        expected[module["module"]] = module["git_sha"]
-    require(provenance.get("schema") == "io.vetcoders.vibecrafted.runtime-pack-provenance.v1" and provenance.get("source_revisions") == expected, "published modules do not match signed App")
+    def publication_state():
+        pointer = read(runtime / "active.json")
+        install = read(runtime / "install-receipt.json")
+        require(pointer.get("schema") == "vibecrafted.active-runtime.v1" and install.get("schema") == "vibecrafted.runtime-install.v1", "wrong publication schema")
+        version = pointer.get("version", "")
+        require(isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9.+_-]+", version) and install.get("version") == version, "mismatched publication")
+        require(pointer.get("app_root") == str(dest) and install.get("app_root") == str(dest), "publication names another App")
+        generation = physical(runtime / "releases" / version)
+        require(pointer.get("runtime_root") == str(generation), "publication names another runtime root")
+        require(physical(generation / "VERSION").read_text().strip() == version, "runtime VERSION mismatch")
+        product = read(dest / "Contents/Resources/product-manifest.json")
+        manifest = read(generation / "runtime-manifest.json")
+        provenance = read(generation / "runtime-pack-provenance.json")
+        require(product.get("schema") == "io.vetcoders.vibecrafted.product.v1" and manifest.get("schema") == "vibecrafted.runtime-generation.v2", "wrong product/generation schema")
+        revision = product.get("git_sha", "")
+        require(bool(re.fullmatch(r"[0-9a-f]{40}", revision)) and manifest.get("source_revision") == revision and manifest.get("version") == version, "published source is not signed App source")
+        expected = {"vibecrafted": revision}
+        for module in product.get("modules", []):
+            expected[module["module"]] = module["git_sha"]
+        require(provenance.get("schema") == "io.vetcoders.vibecrafted.runtime-pack-provenance.v1" and provenance.get("source_revisions") == expected, "published modules do not match signed App")
+        return pointer, install, generation, expected
+
+    pointer, install, generation, expected = publication_state()
     # The signed carrier's existing read-only destination owner validates
     # hashes, selectors, native helpers, configuration lineage and launchers.
     # Do not grow a second partial definition of runtime health here.
@@ -1726,8 +1728,13 @@ def publication():
     checked = resolve()
     # Only the canonical in-progress refusal is retried, once, under the shared lease.
     if transient_install(checked) and share_install_lease():
+        pointer, install, generation, expected = publication_state()
+        python = physical(generation / "bin/python3")
+        verifier = physical(dest / "Contents/Resources/runtime/scripts/vetcoders_install.py")
         checked = resolve()
     require(checked.returncode == 0, "canonical destination verifier refused: " + (checked.stdout + checked.stderr)[-1500:])
+    require(not any(install.get(key) for key in ("install_pending", "config_pending", "uninstall_pending", "config_conflicts", "rescue_pending", "foundation_service_pending", "rolled_back_at")), "publication pending or rolled back")
+    require("config_transaction" not in install and install.get("install_phase") not in ("preparing", "ancillary"), "publication unresolved")
     resolution = json.loads(checked.stdout)
     require(resolution.get("schema") == "vibecrafted.runtime-resolution.v1" and resolution.get("status") == "ready", "canonical destination is not ready")
     resolved = resolution.get("runtime") or {}

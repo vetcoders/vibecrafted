@@ -253,9 +253,9 @@ fn refresh(shared: Shared, root: PathBuf, version: Version) {
                     let error = source.error.clone();
                     *source = old.clone();
                     source.error = error;
+                    source.stale = true;
                 }
             }
-            source.stale = true;
         } else {
             source.refreshed_at = Some(stamp.clone());
         }

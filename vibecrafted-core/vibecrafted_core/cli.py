@@ -2317,6 +2317,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_workflow_help(raw_args[0]), end="")
             return 0
 
+    if raw_args and raw_args[0] == "agents":
+        from .help_surface import render_agents_help
+
+        print(render_agents_help(), end="")
+        return 0
+
     try:
         raw_args = _normalize_research_arity_args(raw_args)
     except ValueError as exc:

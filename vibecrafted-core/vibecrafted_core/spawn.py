@@ -3265,6 +3265,7 @@ def launch_interactive_workspace(
     except (OSError, ValueError) as exc:
         if container_relay is not None:
             container_relay.close()
+        cleanup = _cleanup_unspawned_interactive_launch(launch)
         _terminalize_interactive_launch(
             launch,
             launch.receipt,
@@ -3272,6 +3273,7 @@ def launch_interactive_workspace(
             exit_code=2,
             terminal_reason="transcript_prepare_failed",
             error=str(exc),
+            extra={"prepared_worktree_cleanup": cleanup},
         )
         raise
     launch.receipt["transcript"] = str(transcript)
@@ -3699,7 +3701,7 @@ def _prepare_container_launch(
             env=child_env,
             staging_root=dev_container._run_dir(launch.run_id),
         )
-        relay.start()
+        relay.start(guest_python=f"{runtime.bin_dir}/python")
     except (OSError, ValueError, dev_container.ContainerError) as exc:
         if relay is not None:
             relay.close()

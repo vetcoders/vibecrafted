@@ -63,6 +63,43 @@ def test_profile_roundtrip_and_unknown_binding_refusal(tmp_path, profile):
         pr.load_profile(path)
 
 
+def test_gh_calls_are_pinned_to_the_public_github_host(monkeypatch):
+    observed = {}
+
+    def run(argv, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setenv("GH_HOST", "github.enterprise.example")
+    monkeypatch.setattr(pr.subprocess, "run", run)
+    assert pr._run(["gh", "api", "repos/example/project"]) == "ok\n"
+    assert observed["env"]["GH_HOST"] == "github.com"
+
+
+def test_git_push_retains_explicit_global_config_selectors(monkeypatch):
+    observed = {}
+
+    def run(argv, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/operator/config")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/operator/gitconfig")
+    monkeypatch.setattr(pr.subprocess, "run", run)
+    assert pr._run(["git", "status"]) == "ok\n"
+    assert observed["env"]["XDG_CONFIG_HOME"] == "/operator/config"
+    assert observed["env"]["GIT_CONFIG_GLOBAL"] == "/operator/gitconfig"
+
+
+def test_candidate_repository_comparison_is_case_insensitive(profile, snapshot):
+    profile["repository"] = "Example/Project"
+    snapshot["head_repository"] = "example/project"
+    pr._candidate(profile, snapshot)
+    snapshot["head_repository"] = None
+    with pytest.raises(ValueError, match="fork"):
+        pr._candidate(profile, snapshot)
+
+
 def test_profile_requires_actual_test_count_contract(tmp_path, profile):
     del profile["checks"][0]["test_counts_regex"]
     path = tmp_path / "workflow.json"
@@ -264,6 +301,18 @@ def test_admit_read_only_by_default_and_exact_head_mutation_when_requested(
     assert "--admin" not in calls[-1]
 
 
+def test_pending_review_does_not_replace_submitted_changes_request(
+    monkeypatch, profile, snapshot, tmp_path
+):
+    snapshot["reviews"] = [
+        {"state": "CHANGES_REQUESTED", "user": {"login": "reviewer"}},
+        {"state": "PENDING", "user": {"login": "reviewer"}},
+    ]
+    _admission_setup(monkeypatch, snapshot)
+    with pytest.raises(ValueError, match="requested changes"):
+        pr.admission(profile, tmp_path, 12, tmp_path / "receipt")
+
+
 @pytest.mark.parametrize("strict,queue", [(True, False), (False, True)])
 def test_auto_merge_requires_pinned_checks_and_server_base_freshness(
     monkeypatch, profile, snapshot, tmp_path, strict, queue
@@ -284,6 +333,23 @@ def test_auto_merge_requires_pinned_checks_and_server_base_freshness(
     assert result["auto_merge_requested"]
     assert calls[-2][-1].endswith("/rules/branches/develop?per_page=100")
     assert calls[-1][:3] == ["gh", "pr", "merge"]
+    assert "--squash" in calls[-1]
+
+
+def test_promotion_pr_uses_merge_commit(monkeypatch, profile, snapshot, tmp_path):
+    profile["target_branches"] = ["develop", "main"]
+    snapshot["headRefName"] = "develop"
+    calls = _admission_setup(monkeypatch, snapshot)
+    batch = {
+        "schema": "vibecrafted.pr-closure-batch.v1",
+        "repository": profile["repository"],
+        "profile_sha256": pr._digest(profile),
+        "order": [12],
+        "pull_requests": [{"number": 12}],
+    }
+    pr.admission(profile, tmp_path, 12, tmp_path / "receipt", enable=True, batch=batch)
+    assert "--merge" in calls[-1]
+    assert "--squash" not in calls[-1]
 
 
 @pytest.mark.parametrize(

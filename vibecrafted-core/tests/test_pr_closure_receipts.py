@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -192,6 +193,35 @@ def test_timeout_retains_output_and_fails(candidate):
     assert result["status"] == "failed"
     assert result["checks"][0]["timed_out"] is True
     assert result["checks"][0]["test_counts"]["passed"] == 3
+
+
+def test_successful_gate_kills_descendants_before_recording_evidence(candidate):
+    profile, repo, snapshot, output = candidate
+    started = output.parent / "descendant-started"
+    mutation = output.parent / "descendant-mutation"
+    descendant = (
+        "from pathlib import Path; import time; "
+        f"Path({str(started)!r}).write_text('started'); "
+        "time.sleep(0.3); "
+        f"Path({str(mutation)!r}).write_text('late')"
+    )
+    gate = "\n".join(
+        (
+            "from pathlib import Path; import subprocess,sys,time",
+            f"subprocess.Popen([sys.executable, '-c', {descendant!r}])",
+            f"started=Path({str(started)!r})",
+            "deadline=time.monotonic()+2",
+            "while not started.exists() and time.monotonic()<deadline:",
+            "    time.sleep(0.005)",
+            "assert started.exists()",
+            "print('3 passed, 0 failed, 0 skipped')",
+        )
+    )
+    profile["checks"][0]["argv"][-1] = gate
+    result = verify_candidate(profile, repo, snapshot, output)
+    assert result["status"] == "pass"
+    time.sleep(0.4)
+    assert not mutation.exists(), "descendant mutated after successful gate settlement"
 
 
 @pytest.mark.parametrize("name", ["tracked.txt", "new-untracked.txt"])

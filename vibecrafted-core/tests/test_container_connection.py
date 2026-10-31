@@ -31,6 +31,9 @@ def _meta(root: Path) -> dict:
             "image_id": "sha256:original",
             "recipe_digest": "original-recipe",
         },
+        "container_runtime": {
+            "bin_dir": "/run/staging/runtime/venv/bin",
+        },
     }
 
 
@@ -125,7 +128,8 @@ def test_recovery_closes_connection_when_original_provider_changes(
                 [], 0, json.dumps(identity).encode(), b""
             )
 
-        def start(self):
+        def start(self, *, guest_python):
+            assert guest_python == "/run/staging/runtime/venv/bin/python"
             events.append("roundtrip")
 
         def close(self):
@@ -147,6 +151,27 @@ def test_recovery_closes_connection_when_original_provider_changes(
             "provider",
             "closed",
         ]
+
+
+def test_recovery_refuses_live_run_without_staged_guest_runtime(tmp_path, monkeypatch):
+    meta = _meta(tmp_path)
+    meta.pop("container_runtime")
+    target = dev_container.ContainerTarget(
+        cli="docker",
+        project="vc-project",
+        container_id="a" * 64,
+        container_name="c",
+        image="image",
+        recipe_digest="original-recipe",
+        host_root=str(tmp_path),
+    )
+    monkeypatch.setattr(connection, "_live_meta", lambda _: meta)
+    monkeypatch.setattr(connection, "_target", lambda *_: target)
+
+    with pytest.raises(
+        MessageControlError, match="container_connection_guest_runtime_missing"
+    ):
+        connection.connect_container("run-1", ready=lambda _: pytest.fail())
 
 
 def test_connect_flag_does_not_accept_guest_or_message_mutations(

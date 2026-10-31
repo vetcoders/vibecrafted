@@ -368,6 +368,29 @@ def _counts(check: dict, raw: bytes) -> dict | None:
     return counts
 
 
+def _process_group_has_live_members(pgid: int) -> bool:
+    """Treat terminated zombies as settled; they cannot mutate gate evidence."""
+    result = subprocess.run(
+        ["ps", "-eo", "pgid=,stat="],
+        capture_output=True,
+        text=True,
+        timeout=1,
+        check=False,
+    )
+    if result.returncode:
+        raise OSError("could not inspect gate process group")
+    for row in result.stdout.splitlines():
+        fields = row.split()
+        if (
+            len(fields) == 2
+            and fields[0].isdigit()
+            and int(fields[0]) == pgid
+            and not fields[1].startswith("Z")
+        ):
+            return True
+    return False
+
+
 def _run_check(check: dict, repo: Path, log: Path, junit: Path | None = None) -> dict:
     """Run argv directly, retaining the complete combined byte stream."""
     started = time.monotonic()
@@ -400,6 +423,23 @@ def _run_check(check: dict, repo: Path, log: Path, junit: Path | None = None) ->
                 except ProcessLookupError:
                     pass
                 exit_code = process.wait()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    alive = _process_group_has_live_members(process.pid)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    error = f"could not verify gate process group settled: {exc}"
+                    break
+                if not alive:
+                    break
+                if time.monotonic() >= deadline:
+                    error = "gate process group did not settle after termination"
+                    break
+                time.sleep(0.01)
         except OSError as exc:
             error = str(exc)
         stream.flush()

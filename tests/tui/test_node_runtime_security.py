@@ -83,6 +83,7 @@ def test_hardened_and_developer_base_images_share_the_verified_digest():
         ("v22.19.0", "26.12.1", True, 0, "ok"),
         ("v22.19.0", "", True, 1, "shadow"),
         ("v22.19.0", "", True, 1, "fail"),
+        ("v22.19.0", "", False, 1, "download-fail"),
     ),
 )
 def test_bootstrap_repairs_vulnerable_node_without_replacing_fixed_node(
@@ -111,7 +112,10 @@ node() {
   else printf '%s\n' "$INSTALLED"; fi
 }
 dpkg() { printf 'arm64\n'; }
-curl() { printf '%s\n' "$*" > "$RECEIPT"; }
+curl() {
+  [[ "$INSTALLATION" != download-fail ]] || return 1
+  printf '%s\n' "$*" > "$RECEIPT"
+}
 tar() {
   [[ "$INSTALLATION" != fail ]] || return 1
   if [[ "$INSTALLATION" != shadow ]]; then NODE_INSTALLED=1; fi
@@ -134,7 +138,13 @@ npm() { :; }
     assert result.returncode == exit_code, result.stderr
     assert receipt.exists() is downloads
     if downloads:
-        expected = override or "22.23.4"
+        expected = override or (
+            "24.22.1"
+            if installed.startswith("v24.")
+            else "26.12.1"
+            if installed.startswith("v26.")
+            else "22.23.4"
+        )
         assert (
             f"/v{expected}/node-v{expected}-linux-arm64.tar.xz" in receipt.read_text()
         )
@@ -142,5 +152,7 @@ npm() { :; }
         assert "node on PATH is still below the security floor" in result.stderr
     elif installation == "fail":
         assert "node extraction failed" in result.stderr
+    elif installation == "download-fail":
+        assert "refusing to continue without a security-fixed Node.js" in result.stderr
     elif exit_code:
         assert "NODE_VERSION must select a supported release" in result.stderr

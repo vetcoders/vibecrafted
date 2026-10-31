@@ -203,7 +203,7 @@ def _fake_node_and_npm(fake_bin: Path, prefix: Path, capture: Path) -> None:
         fake_bin / "npm",
         "#!/bin/sh\n"
         "set -eu\n"
-        'if [ "$1 $2" = "prefix -g" ]; then dirname "$NPM_PREFIX_BIN"; exit 0; fi\n'
+        'if [ "$1 $2" = "prefix -g" ]; then printf "%s\\n" "${AMBIENT_PREFIX:-$(dirname "$NPM_PREFIX_BIN")}"; exit 0; fi\n'
         'printf "%s\\n" "$*" >> "$NPM_CAPTURE"\n'
         'case "$3" in\n'
         '  @loctree/loctree) names="loct loctree loctree-mcp loctree-lsp" ;;\n'
@@ -282,6 +282,41 @@ def test_npm_install_rechecks_new_executables_after_broken_legacy_shims(
             subprocess.run([str(npm_bin / name), "--version"], check=False).returncode
             == 0
         )
+
+
+def test_private_npm_prefix_resolves_broken_ambient_shims(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    private_bin = tmp_path / "home/.vibecrafted/tools/node/bin"
+    legacy_bin = tmp_path / "legacy-bin"
+    user_bin = tmp_path / "user-bin"
+    capture = tmp_path / "npm-args.txt"
+    user_tools = tmp_path / "user-tools.txt"
+    ambient_prefix = tmp_path / "unwritable-prefix"
+    ambient_prefix.write_text("unavailable shared prefix\n")
+    _fake_node_and_npm(fake_bin, private_bin, capture)
+    _executable(legacy_bin / "loct", "#!/bin/sh\nexit 19\n")
+    _executable(legacy_bin / "loctree", "#!/bin/sh\nexit 19\n")
+    _executable(legacy_bin / "loctree-mcp", "#!/bin/sh\nexit 19\n")
+    for name in ("loctree", "loctree-mcp"):
+        _executable(
+            user_bin / name,
+            f"#!/bin/sh\nprintf '{name}\\n' >> \"$USER_TOOL_LOG\"\nexit 0\n",
+        )
+    result = _run_installer(
+        tmp_path,
+        "loctree",
+        path=[legacy_bin, user_bin, fake_bin],
+        AMBIENT_PREFIX=str(ambient_prefix),
+        NPM_CAPTURE=str(capture),
+        NPM_PREFIX_BIN=str(private_bin),
+        USER_TOOL_LOG=str(user_tools),
+        REQUIRE_FOUNDATIONS="1",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (private_bin / "loct").is_file()
+    assert capture.exists()
+    assert user_tools.read_text().splitlines().count("loctree") >= 2
+    assert user_tools.read_text().splitlines().count("loctree-mcp") >= 2
 
 
 @pytest.mark.parametrize("ambient_writable", [False, True])

@@ -116,10 +116,13 @@ def _run(argv: list[str], *, repo: Path | None = None) -> str:
     for key in ("GH_FORCE_TTY", "FORCE_COLOR", "CLICOLOR_FORCE"):
         env.pop(key, None)
     env.update(NO_COLOR="1", GH_PROMPT_DISABLED="1", GIT_TERMINAL_PROMPT="0")
+    if argv[0] == "gh":
+        env["GH_HOST"] = "github.com"
     if argv[0] == "git":
         extra = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0"}
-        if os.environ.get("SSH_AUTH_SOCK"):
-            extra["SSH_AUTH_SOCK"] = os.environ["SSH_AUTH_SOCK"]
+        for key in ("SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+            if os.environ.get(key):
+                extra[key] = os.environ[key]
         env = sanitize_env(extra=extra)
     result = subprocess.run(
         argv,
@@ -285,7 +288,10 @@ def _candidate(profile: dict[str, Any], row: dict[str, Any]) -> None:
         raise ValueError(
             "PR base is outside permitted targets; verify its dependency or intended retargeting"
         )
-    if row["head_repository"] != profile["repository"]:
+    head_repository = row.get("head_repository")
+    if not isinstance(head_repository, str) or (
+        head_repository.casefold() != profile["repository"].casefold()
+    ):
         raise ValueError("fork publication is outside this profile's owned repository")
 
 
@@ -553,7 +559,7 @@ def admission(
         raise ValueError("unresolved review threads block admission")
     latest_reviews: dict[str, str] = {}
     for review in row["reviews"]:
-        if review["state"] != "COMMENTED":
+        if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
             latest_reviews[review["user"]["login"]] = review["state"]
     if "CHANGES_REQUESTED" in latest_reviews.values():
         raise ValueError("requested changes block admission")
@@ -602,6 +608,11 @@ def admission(
         for previous in batch["order"][: batch["order"].index(number)]:
             _confirmed_merge(profile, previous)
         _require_server_policy(profile, row["baseRefName"])
+        merge_method = (
+            "--merge"
+            if row["headRefName"] in profile["target_branches"]
+            else "--squash"
+        )
         _run(
             [
                 "gh",
@@ -611,7 +622,7 @@ def admission(
                 "--repo",
                 profile["repository"],
                 "--auto",
-                "--squash",
+                merge_method,
                 "--match-head-commit",
                 proof["tested_head_sha"],
             ]

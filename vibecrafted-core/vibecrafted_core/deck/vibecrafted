@@ -6385,11 +6385,7 @@ cmd_update() {
 }
 
 cmd_agents() {
-  printf '\n'
-  printf '%bVibecrafted agent helpers%b\n' "$_bold" "$_reset"
-  printf '  Use %bvibecrafted <skill> <agent>%b for workflows and %bvibecrafted init <agent>%b to orient.\n' "$_cyan" "$_reset" "$_cyan" "$_reset"
-  printf '  Example: vibecrafted implement codex .vibecrafted/plans/my-plan.md\n'
-  printf '\n'
+  cmd_core_cli agents "$@"
 }
 
 # Ask core for the stable provider identity a fork branches from. Prints

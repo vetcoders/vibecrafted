@@ -14,12 +14,12 @@ The publisher's closed allowlist contains **16 assets**:
 
 | Carrier or receipt                                                    | Required sidecars | Evidence                              |
 | --------------------------------------------------------------------- | ----------------- | ------------------------------------- |
-| `Vibecrafted_4.5.0-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
-| `Vibecrafted_RuntimePack_4.5.0-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
-| `Vibecrafted_4.5.0-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
-| `Vibecrafted_4.5.0-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
-| `Vibecrafted_4.5.0-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
-| `Vibecrafted_RuntimePack_4.5.0-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
+| `Vibecrafted_4.5.1-<YYYYMMDD>-<sha8>.dmg`                             | `.sha256`         | signed, notarized, stapled macOS App  |
+| `Vibecrafted_RuntimePack_4.5.1-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | `.sha256`, `.sig` | same signed macOS runtime             |
+| `Vibecrafted_4.5.1-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | `.sha256`         | provenance-bound source distribution  |
+| `Vibecrafted_4.5.1-<YYYYMMDD>-<sha8>-windows-x64.msi`                 | `.sha256`         | Windows per-user installer            |
+| `Vibecrafted_4.5.1-<YYYYMMDD>-<sha8>-windows-x64.exe`                 | `.sha256`         | Windows setup executable              |
+| `Vibecrafted_RuntimePack_4.5.1-<YYYYMMDD>-<sha8>-win32-x64.tar.gz`    | `.sha256`, `.sig` | product-key-signed Windows runtime    |
 | `release-output.json`                                                 | `.sig`            | source tuple and bound macOS carriers |
 
 Sidecars append their suffix to the complete carrier filename.
@@ -145,7 +145,7 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
 uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
   --release-output dist/release-output.json \
   --signature dist/release-output.json.sig \
-  --output dist/vibecrafted-4.5.0-walkaround.json
+  --output dist/vibecrafted-4.5.1-walkaround.json
 ```
 
 Verify each checksum, detached Runtime Pack signature, DMG staple and
@@ -179,7 +179,7 @@ RELEASE_SHA="$(git rev-parse HEAD)"
 gh workflow run gate-rehearsal.yml --ref main
 # Wait for success on exactly RELEASE_SHA, then admit immediately before tagging.
 bash scripts/check-release-rehearsal.sh "$RELEASE_SHA" && \
-  git tag -a v4.5.1 -m "Vibecrafted 4.5.0" "$RELEASE_SHA"
+  git tag -a v4.5.1 -m "Vibecrafted 4.5.1" "$RELEASE_SHA"
 git push origin v4.5.1
 gh run list --workflow release.yml --commit "$(git rev-parse HEAD)"
 ```

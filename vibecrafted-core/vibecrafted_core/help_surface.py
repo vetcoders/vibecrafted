@@ -438,10 +438,8 @@ def _skill_version(topic: str) -> str:
     try:
         path = resolve_execution_skill(f"vc-{topic}")
         lines = path.read_text(encoding="utf-8").splitlines()
-    except LocalSkillError as exc:
-        if exc.code == "not_found":
-            return ""
-        raise
+    except LocalSkillError:
+        return ""
     except (FileNotFoundError, OSError):
         return ""
     for line in lines[1:40]:
@@ -512,6 +510,16 @@ Words:
 """.lstrip("\n")
 
 
+def render_agents_help() -> str:
+    """Render the shared native help for ``vibecrafted agents`` and ``vc-agents``."""
+    return (
+        "\nVibecrafted agent helpers\n"
+        "  Use vibecrafted <skill> <agent> for workflows and "
+        "vibecrafted init <agent> to orient.\n"
+        "  Example: vibecrafted implement codex .vibecrafted/plans/my-plan.md\n\n"
+    )
+
+
 def render_message_help() -> str:
     """Render the fixed help text for ``vibecrafted message``.
 
@@ -526,6 +534,7 @@ def render_message_help() -> str:
 Usage:
   vibecrafted message (--run-id <id> | --session <id>) --file <path> \\
     [--idempotency-key <key>] [--retry] [--json]
+  vibecrafted message --connect-container --run-id <id>
   vibecrafted message --run-id <id> --receive
   vibecrafted message --run-id <id> --ack <message-id>
   vibecrafted message --inspect <message-id>
@@ -539,6 +548,7 @@ Options:
   --ack <message-id>       Recipient claims receipt of one inbox message
   --idempotency-key <key>  Replay key; same body+run is a receipt replay
   --retry                  Resubmit only unresolved or failed receipts
+  --connect-container      Attach a client to the selected live host container run
   --inspect <message-id>   Read one durable receipt (JSON)
   --mark-context-injected <message-id>
                            Record that the text was attached to a tool response

@@ -26,6 +26,21 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 function Prepare-DonorSources([string]$Destination) {
     & python (Join-Path $repoRoot "scripts\build-source-runtime-pack.py") --materialize $Destination
     if ($LASTEXITCODE -ne 0) { Die "canonical donor selection failed" }
+    $selectionPath = Join-Path $Destination "selection.json"
+    if (-not (Test-Path -LiteralPath $selectionPath -PathType Leaf)) {
+        Die "canonical donor selection is missing"
+    }
+    $selection = Get-Content -LiteralPath $selectionPath -Raw | ConvertFrom-Json
+    foreach ($component in @(
+        @{ Name = "vc-terminal"; Requested = $env:VIBECRAFTED_TERMINAL_REVISION },
+        @{ Name = "vc-frame"; Requested = $env:VIBECRAFTED_FRAME_REVISION }
+    )) {
+        $actual = $selection.components.PSObject.Properties[$component.Name].Value.revision
+        if ($component.Requested -and
+            $component.Requested -cne $actual) {
+            Die "requested $($component.Name) revision does not match materialized source"
+        }
+    }
 }
 # Build-only probe of the actual source path; also useful before provisioning MSVC.
 if ($PrepareSources) {

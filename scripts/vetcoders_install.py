@@ -888,7 +888,9 @@ def _doctor_action_items(findings: Sequence[DoctorFinding]) -> list[str]:
     if any(finding.component == "manifest" for finding in issues):
         actions.append("enable tracking and restore: run the installer once")
     if any(finding.component.startswith("orphan:") for finding in issues):
-        actions.append("clean bundle leftovers: re-run the installer")
+        actions.append(
+            "inspect retained orphan skills; move aside only after verifying they are stale"
+        )
     if any(
         finding.component.startswith("shadow-dir:")
         or (finding.component.startswith("symlink:") and "is a COPY" in finding.message)
@@ -11163,8 +11165,7 @@ def _prune_orphaned_skills_locked(
 
     print(bold("Orphaned skills detected (no longer in bundle):"))
     for location, entry in removable:
-        kind = "symlink" if _is_owned_pointer(entry) else "dir"
-        print(f"  {yellow(f'[{kind}]')} {location}/{entry.name}")
+        print(f"  {yellow('[dir]')} {location}/{entry.name}")
     for location, entry, reason in kept:
         print(
             f"  {WARN} Keeping {location}/{entry.name}: {reason}; move it aside "
@@ -16040,7 +16041,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     DoctorFinding(
                         "warn",
                         f"orphan:store/{entry.name}",
-                        "in store but no longer in bundle — run installer to clean up",
+                        "retained in store but no longer in bundle; inspect and, if stale, "
+                        f"move it aside with: mv {shlex_quote(str(entry))} "
+                        f"{shlex_quote(str(entry) + '.bak')}",
                     )
                 )
     if bundle:
@@ -16060,7 +16063,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         DoctorFinding(
                             "warn",
                             f"orphan:{rt}/{entry.name}",
-                            "symlink/dir for skill no longer in bundle",
+                            "retained skill view is no longer in bundle; inspect and, "
+                            f"if stale, move it aside with: mv {shlex_quote(str(entry))} "
+                            f"{shlex_quote(str(entry) + '.bak')}",
                         )
                     )
 
@@ -28078,7 +28083,7 @@ def _verify_local_skill_install_resume(
         raise RuntimeInstallRefusal(
             "local skill install recovery is not in a sealed ancillary phase"
         )
-    descriptor = _require_inherited_tools_install_lease(paths["crafted_home"])
+    descriptor = _require_inherited_tools_install_lease(paths["runtime_home"])
     runtime_home = paths["runtime_home"]
     current = runtime_home / "tools/vibecrafted-current"
     _validate_tools_lease_descriptor(descriptor, _tools_install_lease_path(current))
@@ -28491,6 +28496,8 @@ def _install_runtime_pack(
                 or _symlink_target(destination) != Path(expected).resolve(strict=False)
             ):
                 projection_conflicts.append(str(destination))
+                receipt["owned_symlinks"].pop(str(destination), None)
+                receipt["local_skill_projections"].pop(str(destination), None)
                 return
             before = _runtime_config_digest(destination)
             if before is not None and (

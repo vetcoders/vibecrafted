@@ -132,8 +132,8 @@ def test_partial_launch_failure_does_not_duplicate_agents(tmp_path, monkeypatch)
     assert any(
         "2 claude: failed" in line and "second start failed" in line for line in visible
     )
-    assert any("1 codex: opened" in line for line in visible)
-    assert any("3 grok: opened" in line for line in visible)
+    assert any("1 codex: tab created" in line for line in visible)
+    assert any("3 grok: tab created" in line for line in visible)
     picker.launch()
     assert len(calls) == 4
     assert [r["status"] for r in picker.launch_results] == ["opened"] * 3
@@ -233,7 +233,7 @@ def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: 
         terminal.send(b"++")
         terminal.expect("3 codex")
         terminal.send(b"\n")
-        terminal.expect("3 codex: opened")
+        terminal.expect("3 codex: tab created")
         lines = [json.loads(line) for line in capture.read_text().splitlines()]
         assert len(lines) == 3
         assert lines[0][lines[0].index("--model") + 1] == "exact-codex-model"

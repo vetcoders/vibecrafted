@@ -1137,7 +1137,11 @@ def resolve_project_destination(
     # renamed project seat. Never call it absent merely because another seat
     # has already been verified.
     if owned:
-        workspace_id = next(iter(owned.values())).workspace_id
+        workspace_id = (
+            owned[preferred[0]].workspace_id
+            if len(preferred) == 1
+            else next(iter(owned.values())).workspace_id
+        )
         historical = _workspace_return_candidates(workspace_id)
         remaining = [
             attachment

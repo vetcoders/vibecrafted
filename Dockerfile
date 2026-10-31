@@ -31,6 +31,7 @@ RUN apt-get update \
     bash \
     ca-certificates \
     curl \
+    file \
     git \
     jq \
     make \

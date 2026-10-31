@@ -2,6 +2,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1351,6 +1352,41 @@ def test_a_proven_retired_copy_is_quarantined_then_removed(
         .read_text(encoding="utf-8")
         .endswith("retired body\n")
     )
+
+
+def test_doctor_gives_manual_cleanup_path_for_retained_orphans(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "home"
+    crafted_home = home / ".vibecrafted"
+    store = crafted_home / "skills"
+    _pin_home(monkeypatch, home, crafted_home)
+    _store_skill(store, "vc-current", "current skill\n")
+    orphan = store / "vc-retired"
+    orphan.mkdir()
+    (orphan / "SKILL.md").write_text("retired skill\n", encoding="utf-8")
+    state = installer.InstallState(
+        framework_version="4.3.1", skills=["vc-current"], runtimes=["agents"]
+    )
+    state.save(store)
+    monkeypatch.setattr(installer, "_canonical_store_path", lambda _: store)
+    monkeypatch.setattr(installer, "_load_install_state", lambda _: state)
+    monkeypatch.setattr(installer, "_known_bundle_names", lambda: ["vc-current"])
+    monkeypatch.setattr(installer, "FOUNDATIONS", [])
+
+    installer.cmd_doctor(
+        SimpleNamespace(
+            fix_rc=False,
+            fix_launchers=False,
+            fix_legacy_bootstrap=False,
+            verbose=False,
+        )
+    )
+    output = capsys.readouterr().out
+
+    assert "retained in store" in output
+    assert f"mv {orphan} {orphan}.bak" in output
+    assert "run installer to clean up" not in output
 
 
 def test_an_unproven_orphan_symlink_is_preserved(tmp_path: Path, monkeypatch) -> None:
