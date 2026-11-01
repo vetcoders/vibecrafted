@@ -45,6 +45,7 @@ impl TempHome {
         let path = (0..100)
             .find_map(|attempt| {
                 let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                // nosemgrep: rust.lang.security.temp-dir.temp-dir -- create_dir atomically rejects pre-existing paths and symlinks before fixture files are written.
                 let candidate = std::env::temp_dir().join(format!(
                     "vc-agg-{label}-{}-{nanos}-{nonce}-{attempt}",
                     std::process::id()
@@ -449,7 +450,14 @@ async fn cached_list_does_not_refetch_until_ttl() {
 async fn pid_header_maps_ancestor_to_worker_and_unknown_is_passthrough() {
     let home = TempHome::new("pid");
     write_meta(&home.path, "run-alpha", 4242, "2026-09-26T12:00:00+00:00");
-    let app = router(&home.path, Aggregator::local_only());
+    let mock = Arc::new(Mutex::new(Mock {
+        faults: HashSetNames(Vec::new()),
+        calls: Vec::new(),
+    }));
+    let app = router(
+        &home.path,
+        aggregator(mock, Duration::from_secs(30), Duration::from_secs(30)),
+    );
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
 
     let (status, headers, _) = post(

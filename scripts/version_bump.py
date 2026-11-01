@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI: bump VERSION and mirror the new semver into every packaged declaration
-(plugin.json, vibecrafted-core/vibecrafted-mcp pyproject.toml, packaged VERSION
-files, and the server crates' Cargo.toml [package] versions)."""
+(plugin.json, core/MCP/guest pyproject.toml files, packaged VERSION files, and
+the server crates' Cargo.toml [package] versions)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ PROJECT_VERSION_RE = re.compile(
 )
 PYPROJECT_RELATIVES = (
     Path("vibecrafted-core/pyproject.toml"),
+    Path("vibecrafted-core/vibecrafted_core/runtime/container-python/pyproject.toml"),
     Path("vibecrafted-mcp/pyproject.toml"),
 )
 PACKAGED_VERSION_RELATIVES = (
