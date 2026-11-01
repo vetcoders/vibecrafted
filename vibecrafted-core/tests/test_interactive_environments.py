@@ -727,7 +727,7 @@ def fake_container_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, **_kwargs):
             pass
 
-        def start(self):
+        def start(self, *, guest_python: str):
             pass
 
         def close(self):
@@ -810,7 +810,7 @@ def test_container_refuses_bridge_failure_before_provider(
         def __init__(self, **_kwargs):
             pass
 
-        def start(self):
+        def start(self, *, guest_python: str):
             raise message_control.MessageControlError("bridge_start_failed")
 
         def close(self):
@@ -866,7 +866,7 @@ def test_container_closes_relay_when_transcript_setup_fails(
         def __init__(self, **_kwargs):
             pass
 
-        def start(self):
+        def start(self, *, guest_python: str):
             pass
 
         def close(self):

@@ -140,9 +140,23 @@ def _wrapper_env(
     fixture_root = installer._FIXED_TERMINAL_HOST.parents[4].resolve()
     wrapper_tmp = fixture_root / "wrapper-tmp"
     wrapper_tmp.mkdir(exist_ok=True)
+    uname_dir = wrapper_tmp / "bin"
+    uname_dir.mkdir(exist_ok=True)
+    uname = uname_dir / "uname"
+    uname.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -s) echo Darwin ;;\n"
+        "  -m) echo arm64 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
     env = {
         **os.environ,
         "TMPDIR": str(wrapper_tmp),
+        "PATH": f"{uname_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
     }
     if extra:
