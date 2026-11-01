@@ -72,7 +72,7 @@ def _write_carrier_python(runtime: Path) -> None:
         )
 
 
-def _cold_fixture(tmp_path: Path, *, damage="none"):
+def _cold_fixture(tmp_path: Path, *, damage="none", force_json_plutil: bool = False):
     home, server, tools = (tmp_path / name for name in ("home", "server", "tools"))
     for directory in (home, server, tools):
         directory.mkdir()
@@ -280,10 +280,18 @@ if sys.argv[1] == 'attach':
     )
     # Linux can execute the same bootstrap test through a strict native-reader
     # boundary double. On macOS the actual system plutil parses the JSON.
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" or force_json_plutil:
         _python_script(
             tools / "plutil",
-            "import json,sys\nprint(json.load(open(sys.argv[-1]))['dmg_url'])\n",
+            "import json,sys\n"
+            "args=sys.argv\n"
+            "key=args[args.index('-extract') + 1]\n"
+            "value=json.load(open(args[-1]))\n"
+            "for part in key.split('.'):\n"
+            "  if not isinstance(value,dict) or part not in value: raise SystemExit(1)\n"
+            "  value=value[part]\n"
+            "if not isinstance(value,str): raise SystemExit(1)\n"
+            "print(value)\n",
         )
     install = tmp_path / "install.sh"
     install.write_text(
@@ -832,7 +840,7 @@ def test_native_main_probe_can_observe_absent_destination(tmp_path: Path) -> Non
 def test_intel_host_refuses_arm_only_channel_before_dmg_or_carrier_python(
     tmp_path: Path,
 ) -> None:
-    install, _, env = _cold_fixture(tmp_path)
+    install, _, env = _cold_fixture(tmp_path, force_json_plutil=True)
     tools = Path(env["PATH"].split(":")[0])
     _write_executable(
         tools / "uname",

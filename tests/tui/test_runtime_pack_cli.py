@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -244,25 +245,39 @@ def _run(
     env: dict[str, str] | None = None,
     umask: int = -1,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "bash",
-            str(INSTALLER),
-            "--expected-version",
-            VERSION,
-            "--expected-platform",
-            "darwin-arm64",
-            "--expected-architecture",
-            "arm64",
-            *arguments,
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, **(env or {})},
-        umask=umask,
-    )
+    with tempfile.TemporaryDirectory(prefix="vc-runtime-pack-host-") as tools_dir:
+        tools = Path(tools_dir)
+        uname = tools / "uname"
+        uname.write_text(
+            '#!/bin/sh\ncase "$1" in\n'
+            "  -s) echo Darwin ;;\n"
+            "  -m) echo arm64 ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
+        child_env = {**os.environ, **(env or {})}
+        child_env["PATH"] = f"{tools}{os.pathsep}{child_env.get('PATH', '')}"
+        return subprocess.run(
+            [
+                "bash",
+                str(INSTALLER),
+                "--expected-version",
+                VERSION,
+                "--expected-platform",
+                "darwin-arm64",
+                "--expected-architecture",
+                "arm64",
+                *arguments,
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=child_env,
+            umask=umask,
+        )
 
 
 def _isolated_repo_install(

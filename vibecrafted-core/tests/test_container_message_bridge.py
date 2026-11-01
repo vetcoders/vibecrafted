@@ -469,6 +469,53 @@ def test_legacy_discovery_refuses_stale_foreign_and_ambiguous_connections(
         guest_channel("run-1")
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+def test_legacy_discovery_rejects_fifo_connection_without_blocking(
+    tmp_path: Path,
+) -> None:
+    channel = _guest_connection(tmp_path, "run-1")
+    connection = channel / "connection.json"
+    connection.unlink()
+    os.mkfifo(connection)
+
+    started = time.monotonic()
+    with pytest.raises(
+        container_message_transport.BridgeTransportError,
+        match="bridge_invalid_connection",
+    ):
+        container_message_transport.discover_channel(channel.parent, "run-1")
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+def test_request_rejects_fifo_reply_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = tmp_path / "channel"
+    channel.mkdir()
+    request_id = "a" * 32
+    monkeypatch.setattr(
+        container_message_transport.uuid,
+        "uuid4",
+        lambda: type("FixedUUID", (), {"hex": request_id})(),
+    )
+    os.mkfifo(channel / f"{request_id}.reply")
+
+    started = time.monotonic()
+    with pytest.raises(
+        container_message_transport.BridgeTransportError,
+        match="bridge_invalid_response",
+    ):
+        container_message_transport.request(
+            channel=str(channel),
+            action="receive",
+            run_id="run-1",
+            session="",
+            message_id="",
+        )
+    assert time.monotonic() - started < 1
+
+
 def test_second_live_connection_does_not_announce_connected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -512,6 +559,23 @@ def test_implicit_bridge_selection_requires_this_staged_run(tmp_path, monkeypatc
     assert guest_bridge_selected("run-owned")
     assert not guest_bridge_selected("run-unrelated")
     assert not guest_bridge_selected("")
+
+
+def test_implicit_bridge_selection_tolerates_inaccessible_guest_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import dev_container
+    from vibecrafted_core.container_message_bridge import guest_bridge_selected
+
+    monkeypatch.delenv(BRIDGE_ENV, raising=False)
+    monkeypatch.delenv("VIBECRAFTED_MESSAGE_BRIDGE_REQUIRED", raising=False)
+    monkeypatch.setattr(dev_container, "RUN_STAGING_ROOT", str(tmp_path))
+
+    def inaccessible(_path: Path) -> bool:
+        raise PermissionError("guest staging is not traversable")
+
+    monkeypatch.setattr(Path, "is_file", inaccessible)
+    assert not guest_bridge_selected("run-id")
 
 
 def test_roundtrip_uses_discovery_and_preserves_old_undiscoverable_channel(

@@ -78,7 +78,9 @@ function createSkillBuffer(initial) {
         var newline = (raw.match(/\r\n|\r|\n/) || ['\n'])[0];
         inserted = inserted.replace(/\n/g, function () { return newline; });
       }
-      raw = raw.slice(0, rawStart) + inserted + raw.slice(rawEnd);
+      var candidateRaw = raw.slice(0, rawStart) + inserted + raw.slice(rawEnd);
+      if (candidateRaw.replace(/\r\n|\r/g, '\n') !== next) { failed = true; return false; }
+      raw = candidateRaw;
       value = next;
       remember();
       return true;
