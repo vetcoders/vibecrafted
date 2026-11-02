@@ -951,7 +951,7 @@ def test_async_supervisor_records_requested_model_next_to_reported_model(
         "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
         "'---\\nrun_id: asup-test\\nagent: python\\nskill: test\\nstatus: completed\\nclaim_status: completed\\n---\\nbody\\n', encoding='utf-8'"
         ")\n"
-        "print('model: gemini-real')\n",
+        "print('[12:00:00] model: gemini-real')\n",
         encoding="utf-8",
     )
     worker.chmod(0o755)
