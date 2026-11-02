@@ -985,6 +985,7 @@ def test_research_runtime_tees_child_output(
 def test_loop_runtime_aggregates_completed_write_children(
     monkeypatch, tmp_path: Path
 ) -> None:
+    # Codex streams report no cost. The sum needs a provider that reports one.
     home = _runtime_env(monkeypatch, tmp_path, "marb-test")
 
     rc = workflow_runtime.main(
@@ -993,7 +994,7 @@ def test_loop_runtime_aggregates_completed_write_children(
             "--workflow",
             "polarize",
             "--agent",
-            "codex",
+            "claude",
             "--root",
             str(tmp_path),
             "--prompt",
@@ -1010,14 +1011,14 @@ def test_loop_runtime_aggregates_completed_write_children(
     assert "vc-polarize supervised run" in report
     assert "polarize-L1" in report
     assert "polarize-L2" in report
-    assert "agent_session_id: codex-session" in report
-    assert "agent_model: codex-model" in report
+    assert "agent_session_id: claude-session" in report
+    assert "agent_model: claude-model" in report
     assert "session_id: aggregated" in report
     # parent: input 20 + output 10; cached 6 subset (not double-counted)
     assert "tokens_total: 30" in report
     assert "cost_usd: 0.03" in report
     assert "cost_source: children_sum" in report
-    assert "codex resume codex-session" in report
+    assert "claude --resume claude-session" in report
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
     assert meta["session_id"] == "aggregated"
     assert meta["tokens_input"] == 20
