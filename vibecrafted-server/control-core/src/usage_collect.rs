@@ -218,7 +218,7 @@ impl ControlPlane {
         if mode != CollectMode::Local {
             return python;
         }
-        let measured = crate::usage_ccusage::collect(self.home());
+        let measured = crate::usage_ccusage::collect(&self.home());
         overlay_ccusage(agents, python, &measured)
     }
 
@@ -323,7 +323,7 @@ fn overlay_ccusage(
             }
             python_rows
                 .iter()
-                .find(|row| row.agent == agent)
+                .find(|row| row.agent == *agent)
                 .cloned()
                 .unwrap_or_else(|| AgentCollect {
                     agent: agent.clone(),
