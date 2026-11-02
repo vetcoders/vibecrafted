@@ -35,10 +35,10 @@ use crate::model::{
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
 fn expanduser(path: PathBuf) -> PathBuf {
-    if let Ok(stripped) = path.strip_prefix("~") {
-        if let Some(home) = home_dir() {
-            return home.join(stripped);
-        }
+    if let Ok(stripped) = path.strip_prefix("~")
+        && let Some(home) = home_dir()
+    {
+        return home.join(stripped);
     }
     path
 }
@@ -52,10 +52,10 @@ fn home_dir() -> Option<PathBuf> {
 /// `$VIBECRAFTED_HOME` (expanded) if set & non-empty, else `~/.vibecrafted`.
 #[must_use]
 pub fn vibecrafted_home() -> PathBuf {
-    if let Some(raw) = std::env::var_os("VIBECRAFTED_HOME") {
-        if !raw.is_empty() {
-            return expanduser(PathBuf::from(raw));
-        }
+    if let Some(raw) = std::env::var_os("VIBECRAFTED_HOME")
+        && !raw.is_empty()
+    {
+        return expanduser(PathBuf::from(raw));
     }
     home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -241,11 +241,11 @@ impl ControlPlane {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(run) = read_run_status(&path, false) {
-                if is_safe_run_id(&run.run_id) {
-                    let run = self.attach_runtime_recovery_if_present(run, false);
-                    runs.push(self.attach_seal_if_present(run));
-                }
+            if let Some(run) = read_run_status(&path, false)
+                && is_safe_run_id(&run.run_id)
+            {
+                let run = self.attach_runtime_recovery_if_present(run, false);
+                runs.push(self.attach_seal_if_present(run));
             }
         }
         runs
@@ -261,11 +261,11 @@ impl ControlPlane {
             return None;
         }
         let direct = self.run_snapshot_dir().join(format!("{target}.json"));
-        if let Some(run) = read_run_status(&direct, true) {
-            if run.run_id == target {
-                let run = self.attach_runtime_recovery_if_present(run, true);
-                return Some(self.attach_seal_if_present(run));
-            }
+        if let Some(run) = read_run_status(&direct, true)
+            && run.run_id == target
+        {
+            let run = self.attach_runtime_recovery_if_present(run, true);
+            return Some(self.attach_seal_if_present(run));
         }
         if let Some(mut run) = self
             .load_snapshots()
@@ -630,10 +630,10 @@ impl ControlPlane {
             if !entry.path().is_dir() {
                 continue;
             }
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(run) = self.resolve_runtime_run(name) {
-                    runs.push(run);
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(run) = self.resolve_runtime_run(name)
+            {
+                runs.push(run);
             }
         }
         runs
@@ -1059,13 +1059,12 @@ impl ControlPlane {
             if !regular_raw_path(&self.home, path, &mut raw_directories) {
                 continue;
             }
-            if let Some(payload) = read_json::<serde_json::Value>(path) {
-                if let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone()) {
-                    if let Some(mut status) = meta.normalize(now) {
-                        enrich_run_status(&mut status, &payload, false);
-                        raw.absorb(&mut merged, status, path);
-                    }
-                }
+            if let Some(payload) = read_json::<serde_json::Value>(path)
+                && let Ok(meta) = serde_json::from_value::<AgentMeta>(payload.clone())
+                && let Some(mut status) = meta.normalize(now)
+            {
+                enrich_run_status(&mut status, &payload, false);
+                raw.absorb(&mut merged, status, path);
             }
         }
         for path in &sources.locks {
@@ -1770,6 +1769,7 @@ fn pid_is_alive(pid: i64) -> bool {
         return false;
     }
     // SAFETY: kill(2) with signal 0 delivers no signal; it only checks `pid`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc::kill with signal 0
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
@@ -2095,6 +2095,7 @@ fn pgid_is_alive(pgid: i64) -> bool {
         return false;
     }
     // SAFETY: signal zero only observes whether the recorded group exists.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc::kill with signal 0
     unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
@@ -2698,6 +2699,7 @@ mod tests {
         assert!(!super::pid_is_alive(reaped), "a reaped child is gone");
 
         // SAFETY: geteuid has no preconditions.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- geteuid
         if unsafe { libc::geteuid() } != 0 {
             // pid 1 belongs to root: signal 0 answers EPERM, which `kill -0`
             // also reported as a failure.
@@ -3447,6 +3449,7 @@ mod tests {
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch under a name unique to this process
         let home = std::env::temp_dir().join(unique);
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs");
@@ -3615,6 +3618,7 @@ mod rglob_listing_tests {
 
     #[test]
     fn a_trusted_listing_still_sees_entries_added_and_removed_later() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch under a name unique to this process
         let root: PathBuf = std::env::temp_dir().join(format!(
             "control-core-rglob-{}-{}",
             std::process::id(),

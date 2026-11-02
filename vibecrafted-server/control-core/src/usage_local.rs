@@ -404,10 +404,10 @@ fn read_scan_entries(
                     .saturating_add(row_write);
                 *by_model.entry(model.to_string()).or_default() += row_total;
             }
-            if let Some(day) = row.get("day").and_then(Value::as_str) {
-                if last_day.as_deref().is_none_or(|last| day > last) {
-                    last_day = Some(day.to_string());
-                }
+            if let Some(day) = row.get("day").and_then(Value::as_str)
+                && last_day.as_deref().is_none_or(|last| day > last)
+            {
+                last_day = Some(day.to_string());
             }
         }
         let total = input
