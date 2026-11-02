@@ -82,6 +82,7 @@ rows.at(-1).tokens.tokens_total = {
   reason: "native source unavailable",
 };
 rows.at(-1).cost.amount = { value: "unknown", reason: "price unavailable" };
+rows.at(-2).cost.source = "estimated:fixture";
 const state = {
   phase: "full",
   pending: false,
@@ -177,7 +178,7 @@ const payload = (q) => {
     local_sources: [
       {
         agent: "codex",
-        source: state.phase === "loading" ? "loading" : "scan_cache",
+        source: state.phase === "loading" ? "loading" : "ccusage",
         counted:
           state.phase === "loading"
             ? 0
@@ -418,6 +419,18 @@ try {
         "document.getElementById('usage-generated').textContent!==beforeGenerated",
       ),
     "background response rendered",
+  );
+  check(
+    "an_estimate_does_not_read_like_a_bill",
+    await evaluate(
+      "[...document.querySelectorAll('#usage-runs-body tr td')].filter((td)=>td.textContent.startsWith('~')).length===1",
+    ),
+  );
+  check(
+    "measured_source_counts_its_local_rows",
+    await evaluate(
+      "/codex: \\d+ local/.test(document.getElementById('usage-local-sources').textContent)",
+    ),
   );
   check(
     "unchanged_chart_nodes_and_geometry",
