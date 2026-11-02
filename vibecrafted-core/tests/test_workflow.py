@@ -2498,26 +2498,29 @@ def test_launch_workflow_artifact_paths_are_terminal_truth(
     assert truth["dou_index"] == 3
 
 
+_VALID_REPORT = (
+    "---\nrun_id: lagging-run\nagent: claude\nskill: workflow\n"
+    "status: completed\n---\nbody\n"
+)
+
+
 @pytest.mark.parametrize(
     ("report_text", "projected_gate", "expected_gate"),
     [
         pytest.param(
-            "---\nstatus: completed\nnext_stage: polarize\n"
-            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            _VALID_REPORT,
             None,
             "validated",
             id="projection-not-there-yet",
         ),
         pytest.param(
-            "---\nstatus: completed\nnext_stage: polarize\n"
-            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            _VALID_REPORT,
             "pending",
             "validated",
             id="projection-still-pending",
         ),
         pytest.param(
-            "---\nstatus: completed\nnext_stage: polarize\n"
-            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            _VALID_REPORT,
             "stopped",
             "stopped",
             id="operator-stop-stands",
@@ -2534,6 +2537,8 @@ def test_await_launch_truth_gates_a_run_the_projection_has_not_reached(
 ) -> None:
     """A terminal meta can outrun the projection, and this await validates by itself."""
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    control_root = workflow.control_plane_home()
+    control_root.mkdir(parents=True)
     report = tmp_path / "report.md"
     transcript = tmp_path / "transcript.log"
     transcript.write_text("worker output\n", encoding="utf-8")
@@ -2561,7 +2566,7 @@ def test_await_launch_truth_gates_a_run_the_projection_has_not_reached(
             "run_id": "lagging-run",
             "report": str(report),
             "transcript": str(transcript),
-            "meta": str(tmp_path / "meta.json"),
+            "meta": str(control_root / "meta.json"),
         },
         timeout_seconds=1,
         interval_seconds=0.01,
