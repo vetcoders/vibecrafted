@@ -75,6 +75,7 @@ from .settlement import BareMarkdownError, require_bound_markdown
 from .telemetry import (
     build_run_telemetry,
     coerce_exit_code,
+    is_model_name,
     parent_session_ids,
     usage_record,
 )
@@ -5269,13 +5270,6 @@ JSON_TOKEN_PATTERNS = {
         r'"(?:output_tokens|outputTokens|completion_tokens)"\s*:\s*([0-9]+)'
     ),
 }
-COST_PATTERNS = (
-    re.compile(
-        r"cost(?:_usd)?['\"]?\s*[:=]\s*\$?([0-9]+(?:\.[0-9]+)?)",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\$([0-9]+\.[0-9]+)\s*(?:usd)?", re.IGNORECASE),
-)
 MODEL_ENV_VARS = (
     "VIBECRAFTED_PARENT_MODEL",
     "CLAUDE_MODEL",
@@ -5284,7 +5278,18 @@ MODEL_ENV_VARS = (
     "GROK_MODEL",
     "OMP_MODEL",
 )
-MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
+# Exact launcher frontmatter. A bare `model:` line is prose.
+_FRONTMATTER_MODEL_PATTERN = re.compile(
+    r"(?m)^---\nrunner:[ \t]*vibecrafted[ \t]*\nmodel:[ \t]*(.+?)[ \t]*$"
+)
+_TIMESTAMPED_MODEL_PATTERN = re.compile(
+    r"(?m)^[^\S\r\n]*\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]\s+model:[ \t]*([^\r\n]*)$",
+    re.IGNORECASE,
+)
+_MODEL_OBJECT_KEYS = ("model", "model_id", "modelId", "model_name", "modelName")
+# `cost_usd` is a total only when it is a JSON key. The YAML footer this
+# runtime writes (`cost_usd: 0.03`) is not a provider cost.
+_COST_TOTAL_KEYS = ("total_cost_usd", "totalCostUsd", "total_cost", "cost_usd")
 
 
 @dataclass
@@ -5797,41 +5802,68 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
     }
 
 
+def _is_number(value: object) -> bool:
+    """True for int/float. ``bool`` is an int subclass and is not a cost."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _json_object_line(line: str) -> dict[str, Any] | None:
+    """Parse one line that is a JSON object after ANSI and whitespace are stripped."""
+    text = ANSI_PATTERN.sub("", line).strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _collect_structured_costs(
+    node: object, totals: list[float], costs: list[float]
+) -> None:
+    """Walk parsed JSON. Never read text inside a string."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _COST_TOTAL_KEYS and _is_number(value):
+                totals.append(float(value))
+            elif key == "cost" and _is_number(value):
+                costs.append(float(value))
+            if isinstance(value, (dict, list)):
+                _collect_structured_costs(value, totals, costs)
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                _collect_structured_costs(item, totals, costs)
+
+
 def _extract_cost(text: str) -> float | None:
-    """Parse a USD cost from combined transcript/report text, preferring the footer."""
-    clean = _clean_text(text)
-    footer = re.findall(
-        r"^\s*cost_usd:\s*\$?([0-9]+(?:\.[0-9]+)?)\s*$",
-        clean,
-        re.IGNORECASE | re.MULTILINE,
-    )
-    if footer:
-        return round(float(footer[-1]), 6)
-    totals = re.findall(
-        r'"(?:total_cost_usd|totalCostUsd|total_cost)"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-        clean,
-        re.IGNORECASE,
-    )
-    if totals:
-        return round(float(totals[-1]), 6)
-    item_costs = re.findall(r'"cost"\s*:\s*([0-9]+(?:\.[0-9]+)?)', clean, re.IGNORECASE)
-    if item_costs:
-        return round(sum(float(value) for value in item_costs), 6)
-    for pattern in COST_PATTERNS:
-        matches = pattern.findall(clean)
-        if not matches:
+    """USD from JSON-object lines only.
+
+    A line counts when, after stripping ANSI and whitespace, it starts with
+    ``{`` and parses as a JSON object. The last ``total_cost_usd`` /
+    ``totalCostUsd`` / ``total_cost`` / ``cost_usd`` wins. With no total, every
+    numeric ``cost`` is summed (Junie's per-call ``modelUsage``). A ``cost_usd:``
+    footer is not a provider cost: this runtime writes that footer itself.
+    """
+    totals: list[float] = []
+    costs: list[float] = []
+    for raw_line in (text or "").splitlines():
+        parsed = _json_object_line(raw_line)
+        if parsed is None:
             continue
-        try:
-            return round(float(matches[-1]), 6)
-        except ValueError:
-            pass
+        _collect_structured_costs(parsed, totals, costs)
+    if totals:
+        return round(totals[-1], 6)
+    if costs:
+        return round(sum(costs), 6)
     return None
 
 
 def _clean_model(value: object) -> str:
-    """Normalize a candidate model value; return "" for known placeholder strings."""
+    """Return a real model label, or "" when ``value`` is missing or not a model."""
     raw = str(value or "").strip()
-    return "" if raw.lower() in MODEL_PLACEHOLDERS else raw
+    return raw if is_model_name(raw) else ""
 
 
 def _fallback_model(agent: object) -> str:
@@ -5842,25 +5874,66 @@ def _fallback_model(agent: object) -> str:
     return f"{agent_name}-cli-default"
 
 
+def _collect_model_names(node: object, found: list[str]) -> None:
+    """Model labels from parsed JSON keys, in document order. Strings are not parsed."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _MODEL_OBJECT_KEYS and isinstance(value, str):
+                model = _clean_model(value)
+                if model:
+                    found.append(model)
+            if key == "modelUsage" and isinstance(value, dict) and value:
+                model = _clean_model(next(iter(value)))
+                if model:
+                    found.append(model)
+            if isinstance(value, (dict, list)):
+                _collect_model_names(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                _collect_model_names(item, found)
+
+
+def _match_inside_json_object(text: str, index: int) -> bool:
+    """True when ``index`` sits on a line that is itself a JSON object."""
+    line_start = text.rfind("\n", 0, index) + 1
+    line_end = text.find("\n", index)
+    if line_end < 0:
+        line_end = len(text)
+    return _json_object_line(text[line_start:line_end]) is not None
+
+
 def _extract_model_from_text(text: str) -> str:
-    """Find a model identifier in transcript/report text via footer, JSON, or usage-map fields."""
-    clean = _clean_text(text)
-    for match in reversed(re.findall(r"^model:\s*(.+?)\s*$", clean, re.MULTILINE)):
-        model = _clean_model(match)
-        if model:
-            return model
-    json_models = re.findall(
-        r'"(?:model|model_id|modelId|model_name|modelName)"\s*:\s*"([^"]+)"',
-        clean,
-    )
-    for match in json_models:
-        model = _clean_model(match)
-        if model:
-            return model
-    model_usage_maps = re.findall(r'"modelUsage"\s*:\s*\{\s*"([^"]+)"', clean)
-    if model_usage_maps:
-        return _clean_model(model_usage_maps[-1])
-    return ""
+    """Last real model from frontmatter, a timestamped header, or a JSON object.
+
+    Bare ``model: X`` and a quoted ``"model"`` inside prose are not sources.
+    Text inside a JSON string is not read. An invalid name does not count, so
+    a later valid source can.
+    """
+    clean = _clean_text(text or "")
+    found: list[tuple[float, int, str]] = []
+    for pattern in (_FRONTMATTER_MODEL_PATTERN, _TIMESTAMPED_MODEL_PATTERN):
+        for match in pattern.finditer(clean):
+            if _match_inside_json_object(clean, match.start()):
+                continue
+            model = _clean_model(match.group(1))
+            if model:
+                found.append((float(match.start()), len(found), model))
+    offset = 0
+    for raw_line in clean.splitlines(keepends=True):
+        line_start = offset
+        offset += len(raw_line)
+        parsed = _json_object_line(raw_line)
+        if parsed is None:
+            continue
+        names: list[str] = []
+        _collect_model_names(parsed, names)
+        for index, model in enumerate(names):
+            found.append((line_start + (index + 1) / 1000.0, len(found), model))
+    if not found:
+        return ""
+    found.sort()
+    return found[-1][2]
 
 
 def _resolve_model(payload: dict[str, Any], combined_text: str) -> str:
