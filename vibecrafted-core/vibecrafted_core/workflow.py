@@ -1313,6 +1313,10 @@ def await_launch_truth(
     path_errors = [
         f"{name}_missing" for name, exists in paths_exist.items() if not exists
     ]
+    artifact_ok = validation.ok and not path_errors
+    # Absent, empty, or pending yields to the gate this await just validated.
+    if terminal and artifact_ok and run.get("artifact_gate") in (None, "", "pending"):
+        run["artifact_gate"] = "validated"
 
     return {
         "run_id": run_id,
@@ -1329,7 +1333,7 @@ def await_launch_truth(
         "transcript": transcript_path,
         "meta": meta_path,
         "paths_exist": paths_exist,
-        "artifact_ok": validation.ok and not path_errors,
+        "artifact_ok": artifact_ok,
         "artifact_errors": list(validation.errors) + path_errors,
         "artifact_warnings": list(validation.warnings),
         "meta_payload": meta_payload or validation.meta_payload,
