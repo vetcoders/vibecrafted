@@ -204,6 +204,7 @@ def tokens_total(
 
 NO_USAGE_EVENTS_REASON = "provider emitted no usage events"
 NO_CACHE_WRITE_REASON = "provider stream carried no cache-write field"
+NO_MEASURED_COUNT_REASON = "measured usage did not record an integer count"
 NO_COST_REASON = "provider emitted no usage events and reported no cost"
 NO_MODEL_REASON = "model unknown; no price table lookup"
 NO_SESSION_REASON = "provider emitted no session id"
@@ -293,10 +294,13 @@ def is_model_name(value: object) -> bool:
 class UsageRecord:
     """Token usage of one run, with the channel it was read from.
 
-    ``events`` counts provider usage events actually observed. With zero
-    events every count is ``Unknown`` — a provider that stays silent did not
-    use zero tokens. ``source`` names the channel inspected
-    (``provider_stream``, ``transcript``, ``transcript(lazy)``).
+    ``events`` counts provider usage events actually observed. A silent
+    provider (``usage_record`` with zero events) is ``Unknown`` on every
+    count — silence is not zero tokens. A partial ``measured_usage`` is
+    different: each recorded integer, including zero, stays, and a missing
+    count is ``Unknown`` even when ``messages`` (and therefore ``events``)
+    is absent. ``source`` names the channel inspected (``provider_stream``,
+    ``transcript``, ``transcript(lazy)``, or the measurement source).
     """
 
     tokens_input: int | Unknown
@@ -846,17 +850,28 @@ def coerce_exit_code(value: object) -> int | None:
     return int(text) if text.lstrip("-").isdigit() else None
 
 
-def _measured_count(value: object) -> int:
-    """One recorded token count. Bools and non-integers are not measurements."""
+def _measured_count(value: object) -> int | Unknown:
+    """One recorded token count.
+
+    A real integer, including zero, stays that integer. ``bool`` is an
+    ``int`` subclass and is not a count. A missing value or any other
+    non-integer is ``Unknown`` — it is not zero.
+    """
     if isinstance(value, bool) or not isinstance(value, int):
-        return 0
+        return Unknown(reason=NO_MEASURED_COUNT_REASON)
     return value
 
 
 def _usage_from_measured(
     measured: Mapping[str, Any], meta: Mapping[str, Any]
 ) -> UsageRecord:
-    """Project ``measured_usage`` as recorded. Do not recompute ``tokens_total``."""
+    """Project ``measured_usage`` as recorded. Do not recompute ``tokens_total``.
+
+    ``messages`` becomes ``events`` only when it is an integer. A missing
+    ``messages`` stays ``events: 0``. Cost of a partial record stays unknown
+    because ``resolve_cost`` refuses an unknown input, cache, or output, and
+    also refuses a record with no events.
+    """
     measurement = meta.get("usage_measurement")
     source = "meta"
     if isinstance(measurement, Mapping):
