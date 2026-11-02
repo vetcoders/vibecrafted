@@ -200,3 +200,115 @@ def test_launcher_template_is_not_success(tmp_path: Path) -> None:
         )
         == 3
     )
+
+
+def _report_only_record(report: str, *, key: str = "report") -> dict[str, object]:
+    """Parent-probe shape: the path lives on one key, never both."""
+    record: dict[str, object] = {
+        "run_id": "parent-probe",
+        "state": "report_invalid",
+        "exit_code": 0,
+        "artifact_ok": False,
+        "artifact_errors": ["report_frontmatter_missing"],
+        "recovery_required": True,
+        "last_error": "report contract still open",
+    }
+    record[key] = report
+    return record
+
+
+def test_report_only_finalized_repair_completes(tmp_path: Path) -> None:
+    """A finalized report stored only under ``report`` is a real attestation.
+
+    ``_report_denies_success`` and ``_report_attests_completion`` must resolve
+    ``latest_report`` or ``report``. The same file under either key completes
+    through ``_reconcile_repaired_report_terminal``.
+    """
+    report = tmp_path / "attested.md"
+    _write_report(
+        report,
+        """---
+run_id: parent-probe
+agent: agy
+skill: workflow
+status: completed
+claim_status: completed
+finalized: true
+claim: shipped the bounded cut
+---
+The worker finished the cut.
+""",
+    )
+    for key in ("report", "latest_report"):
+        run = _report_only_record(str(report), key=key)
+        assert control_plane._report_denies_success(run) == ""
+        healed = control_plane._reconcile_repaired_report_terminal(run)
+        assert healed["state"] == "completed"
+        assert healed["operator_state"] == "completed"
+        assert healed["artifact_ok"] is True
+        assert healed["artifact_errors"] == []
+        assert "recovery_required" not in healed
+        assert run["state"] == "report_invalid"
+
+
+def test_report_only_legacy_repair_completes(tmp_path: Path) -> None:
+    """A report that predates ``finalized`` still heals when only ``report`` is set."""
+    report = tmp_path / "legacy.md"
+    _write_report(
+        report,
+        """---
+run_id: parent-probe
+agent: agy
+skill: workflow
+status: completed
+---
+Predates the finalized key.
+""",
+    )
+    run = _report_only_record(str(report))
+    assert control_plane._report_denies_success(run) == ""
+    healed = control_plane._reconcile_repaired_report_terminal(run)
+    assert healed["state"] == "completed"
+    assert healed["operator_state"] == "completed"
+    assert healed["artifact_ok"] is True
+
+
+def test_report_only_open_claim_stays_invalid(tmp_path: Path) -> None:
+    """Report-only absence of attestation must not be promoted."""
+    cases = {
+        "unfinalized": (
+            "report finalized is false",
+            """---
+run_id: parent-probe
+agent: agy
+skill: workflow
+status: completed
+finalized: false
+claim: ""
+---
+""",
+        ),
+        "empty-claim": (
+            "report claim is empty",
+            """---
+run_id: parent-probe
+agent: agy
+skill: workflow
+status: completed
+claim_status: completed
+finalized: true
+claim: ""
+---
+""",
+        ),
+    }
+    for name, (denial, text) in cases.items():
+        report = tmp_path / f"{name}.md"
+        _write_report(report, text)
+        run = _report_only_record(str(report))
+        assert control_plane._report_denies_success(run) == denial
+        healed = control_plane._reconcile_repaired_report_terminal(run)
+        assert healed["state"] == "report_invalid"
+        assert healed.get("operator_state") != "completed"
+        assert healed.get("recovery_required") is True
+        assert healed["artifact_ok"] is False
