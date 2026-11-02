@@ -1,11 +1,13 @@
 //! `vc-server`-owned collection of provider usage and quota observations.
 //!
-//! One owner, no resident children. A collection is a bounded one-shot of the
-//! existing Python parsers (`fleet_engine` for six providers, the kimi harvest,
-//! the agy snapshot) run by the server on its own schedule or on request, which
-//! writes the same `<home>/telemetry/` projections the report reads. Nothing
-//! here parses a provider format itself, and no per-provider monitor has to be
-//! alive for the numbers to move.
+//! One owner, no resident children. A collection is a bounded one-shot. Python
+//! (`fleet_engine`, the kimi harvest, the agy snapshot) still runs for every
+//! provider: it writes `telemetry/<agent>/quota.json` and scans junie and omp.
+//! The same flight also reads claude, codex, grok, kimi, copilot and agy in
+//! process through the `ccusage` adapters (`usage_ccusage`). That measurement
+//! replaces Python's row for those providers. A dead Python interpreter does
+//! not discard a measurement the in-process adapters already made. No
+//! per-provider monitor has to be alive for the numbers to move.
 //!
 //! Two modes, and only the second may touch the network:
 //!
@@ -212,6 +214,20 @@ impl ControlPlane {
         let Ok(_flight) = SINGLE_FLIGHT.try_lock() else {
             return CollectOutcome::skipped(mode, "a collection is already running");
         };
+        let python = self.invoke_python(mode, agents, timeout);
+        if mode != CollectMode::Local {
+            return python;
+        }
+        let measured = crate::usage_ccusage::collect(self.home());
+        overlay_ccusage(agents, python, &measured)
+    }
+
+    fn invoke_python(
+        &self,
+        mode: CollectMode,
+        agents: &[String],
+        timeout: Duration,
+    ) -> CollectOutcome {
         let Some(mut command) = telemetry_python() else {
             return CollectOutcome::skipped(mode, "no python interpreter");
         };
@@ -270,5 +286,56 @@ impl ControlPlane {
                     .collect(),
             },
         }
+    }
+}
+
+fn overlay_ccusage(
+    agents: &[String],
+    python: CollectOutcome,
+    measured: &[crate::usage_ccusage::ProviderRow],
+) -> CollectOutcome {
+    let fallback = if python.reason.is_empty() {
+        "collector did not finish"
+    } else {
+        python.reason.as_str()
+    };
+    let python_rows = if python.agents.is_empty() {
+        agents
+            .iter()
+            .map(|agent| AgentCollect {
+                agent: agent.clone(),
+                status: "error".to_string(),
+                detail: fallback.to_string(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        python.agents
+    };
+    let rows = agents
+        .iter()
+        .map(|agent| {
+            if let Some(row) = measured.iter().find(|row| row.agent == agent) {
+                return AgentCollect {
+                    agent: agent.clone(),
+                    status: row.status.clone(),
+                    detail: row.detail.clone(),
+                };
+            }
+            python_rows
+                .iter()
+                .find(|row| row.agent == agent)
+                .cloned()
+                .unwrap_or_else(|| AgentCollect {
+                    agent: agent.clone(),
+                    status: "error".to_string(),
+                    detail: "collector did not finish".to_string(),
+                })
+        })
+        .collect();
+    CollectOutcome {
+        mode: CollectMode::Local.name().to_string(),
+        started: true,
+        reason: String::new(),
+        agents: rows,
     }
 }

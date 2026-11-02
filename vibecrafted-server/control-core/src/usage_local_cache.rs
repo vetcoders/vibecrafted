@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 
 use super::{LocalSource, LocalUsage, VcSessions, read_local_usage};
 use crate::usage::{USAGE_PROVIDER_ADAPTERS, UsageFilter, matches_filter};
+use crate::usage_ccusage::PROJECTION_FILE;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Stamp {
@@ -34,6 +35,7 @@ impl Version {
                 [
                     root.join(agent).join("scan-cache.json"),
                     root.join("archive").join(format!("{agent}.jsonl")),
+                    root.join(agent).join(PROJECTION_FILE),
                 ]
             })
             .map(|path| match fs::symlink_metadata(path) {
@@ -231,7 +233,9 @@ fn refresh(shared: Shared, root: PathBuf, version: Version) {
         .map(|(_, rows)| Arc::clone(rows));
     let stamp = Utc::now().to_rfc3339();
     for (index, source) in next.sources.iter_mut().enumerate() {
-        if version.files[index * 2..index * 2 + 2].contains(&Stamp::Unreadable) {
+        if source.error.is_none()
+            && version.files[index * 3..index * 3 + 3].contains(&Stamp::Unreadable)
+        {
             source.error = Some("projection_source_unreadable".into());
         }
         if source.error.is_some() {

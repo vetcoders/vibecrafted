@@ -295,6 +295,7 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
         .and_then(|stamp| parse_timestamp(stamp).map(|parsed| parsed.to_rfc3339()))?;
 
     let usage = object.get("usage").and_then(Value::as_object);
+    let measured = object.get("measured_usage").and_then(Value::as_object);
     let cost = object.get("cost").and_then(Value::as_object);
     let failure = object.get("failure").and_then(Value::as_object);
     let agent = value_or_unknown(object.get("agent"), "agent not recorded");
@@ -305,23 +306,48 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
         .filter(|value| !value.is_null() && value.as_str().is_none_or(|text| !text.is_empty()))
         .cloned()
         .unwrap_or_else(|| agent.clone());
-    let model = value_or_unknown(
-        object.get("agent_model").or_else(|| object.get("model")),
-        "model not reported by provider stream",
-    );
+    let model = recorded_model(object);
+    let tokens = if usage.is_some() {
+        usage_from(usage)
+    } else if let Some(measured) = measured {
+        tokens_from_measured(object, measured)
+    } else {
+        usage_from(None)
+    };
+    let (cost, priced_unpriced) = if cost.is_some() {
+        (cost_from(cost), Vec::new())
+    } else if usage.is_none() && measured.is_some() {
+        price_measured(&model, &tokens)
+    } else {
+        (cost_from(None), Vec::new())
+    };
+    let mut unpriced_models = object
+        .get("unpricedModels")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in priced_unpriced {
+        if !unpriced_models.contains(&name) {
+            unpriced_models.push(name);
+        }
+    }
+    let recorded_blocks = object.get("usage").is_some_and(Value::is_object)
+        || object.get("cost").is_some_and(Value::is_object)
+        || measured.is_some();
+    let telemetry_source = if recorded_blocks {
+        "meta"
+    } else {
+        "meta(legacy-uninstrumented)"
+    };
 
     Some(UsageRun {
-        unpriced_models: object
-            .get("unpricedModels")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        unpriced_models,
         run_id,
         provider,
         agent,
@@ -329,8 +355,8 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
         status: text(object, "status").unwrap_or("unknown").to_string(),
         exit_code: integer(object.get("exit_code")),
         recorded_at,
-        tokens: usage_from(usage),
-        cost: cost_from(cost),
+        tokens,
+        cost,
         failure_kind: failure
             .and_then(|block| text(block, "kind"))
             .map(str::to_string),
@@ -341,13 +367,109 @@ fn read_usage_run(run_dir: &Path) -> Option<UsageRun> {
             object.get("provider_session_id"),
             "provider emitted no session id",
         ),
-        telemetry_source: if usage.is_some() || cost.is_some() {
-            "meta".to_string()
-        } else {
-            "meta(legacy-uninstrumented)".to_string()
-        },
+        telemetry_source: telemetry_source.to_string(),
         origin: origin_vc(),
     })
+}
+
+fn recorded_model(object: &Map<String, Value>) -> Value {
+    for key in ["model_effective", "model_requested", "agent_model", "model"] {
+        if let Some(name) = object.get(key).and_then(Value::as_str)
+            && valid_model_name(name)
+        {
+            return json!(name);
+        }
+    }
+    unknown("model not reported by provider stream")
+}
+
+pub(crate) fn valid_model_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(lower.as_str(), "none" | "null" | "unknown" | "pending") {
+        return false;
+    }
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return false;
+    }
+    if trimmed.ends_with("-cli-default") || trimmed.contains("_source:") {
+        return false;
+    }
+    !trimmed.contains(['&', '(', ')', '{', '}'])
+}
+
+fn tokens_from_measured(meta: &Map<String, Value>, measured: &Map<String, Value>) -> UsageTokens {
+    let source = meta
+        .get("usage_measurement")
+        .and_then(Value::as_object)
+        .and_then(|block| text(block, "source"))
+        .unwrap_or("unknown");
+    let field = |key: &str| {
+        measured
+            .get(key)
+            .cloned()
+            .filter(|value| value.as_u64().is_some())
+            .unwrap_or_else(|| unknown("measured usage omitted this token field"))
+    };
+    UsageTokens {
+        schema: "vibecrafted.usage.v1".to_string(),
+        unit: "tokens".to_string(),
+        source: source.to_string(),
+        events: measured
+            .get("messages")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        tokens_input: field("input_tokens"),
+        tokens_cached_input: field("cache_read_input_tokens"),
+        tokens_cache_write: field("cache_creation_input_tokens"),
+        tokens_output: field("output_tokens"),
+        tokens_total: field("total_tokens"),
+        semantics: BTreeMap::new(),
+    }
+}
+
+fn price_measured(model: &Value, tokens: &UsageTokens) -> (UsageCost, Vec<String>) {
+    let Some(name) = model.as_str().filter(|name| valid_model_name(name)) else {
+        return (
+            UsageCost {
+                amount: unknown("model not reported by provider stream"),
+                currency: None,
+                unit: Some("USD".to_string()),
+                source: "estimated:ccusage".to_string(),
+            },
+            Vec::new(),
+        );
+    };
+    let count = |value: &Value| value.as_u64().unwrap_or(0);
+    match crate::usage_ccusage::price_base(
+        name,
+        count(&tokens.tokens_input),
+        count(&tokens.tokens_cached_input),
+        count(&tokens.tokens_cache_write),
+        count(&tokens.tokens_output),
+    ) {
+        Some(amount) => (
+            UsageCost {
+                amount: json!(amount),
+                currency: Some("USD".to_string()),
+                unit: Some("USD".to_string()),
+                source: "estimated:ccusage".to_string(),
+            },
+            Vec::new(),
+        ),
+        None => (
+            UsageCost {
+                amount: unknown("no price for this model"),
+                currency: None,
+                unit: Some("USD".to_string()),
+                source: "estimated:ccusage".to_string(),
+            },
+            vec![name.to_string()],
+        ),
+    }
 }
 
 fn usage_from(block: Option<&Map<String, Value>>) -> UsageTokens {
@@ -482,7 +604,7 @@ fn totals(runs: &[UsageRun]) -> UsageTotals {
                 .or(run.cost.currency.as_deref())
                 .unwrap_or("USD");
             let sum = result.cost_by_unit.entry(unit.to_string()).or_default();
-            *sum = round_six(*sum + amount);
+            *sum = round_cost(*sum + amount);
         } else {
             result.runs_cost_unknown += 1;
         }
@@ -546,41 +668,54 @@ pub(crate) fn unknown(reason: &str) -> Value {
     json!({"value": "unknown", "reason": reason})
 }
 
-fn round_six(value: f64) -> f64 {
-    (value * 1_000_000.0).round() / 1_000_000.0
+fn round_cost(value: f64) -> f64 {
+    // Six places turns the measured sum 13.9189558 into 13.918956.
+    (value * 1_000_000_000.0).round() / 1_000_000_000.0
 }
 
 fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
-    if let Some(models) = telemetry.get("unpricedModels").and_then(Value::as_array) {
+    let model_name = telemetry
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|name| valid_model_name(name));
+    let usage = telemetry.get("usage").and_then(Value::as_object);
+    let measured_tokens = usage
+        .and_then(|usage| usage.get("tokens_total"))
+        .and_then(Value::as_u64)
+        .is_some_and(|total| total > 0);
+    // A transcript that produced neither a real model nor a positive token
+    // count did not measure a cost. Prose such as `cost_usd: 0.0` must stay
+    // unknown.
+    let accept = model_name.is_some() || measured_tokens;
+    if accept
+        && run.tokens.tokens_total.as_u64().is_none()
+        && let Some(usage) = usage
+    {
+        run.tokens = usage_from(Some(usage));
+    }
+    if accept
+        && run.cost.amount.as_f64().is_none()
+        && let Some(cost) = telemetry.get("cost").and_then(Value::as_object)
+    {
+        run.cost = cost_from(Some(cost));
+    }
+    if accept && let Some(models) = telemetry.get("unpricedModels").and_then(Value::as_array) {
         run.unpriced_models = models
             .iter()
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect();
     }
-    if run.tokens.tokens_total.as_u64().is_none()
-        && let Some(usage) = telemetry.get("usage").and_then(Value::as_object)
-    {
-        run.tokens = usage_from(Some(usage));
-    }
-    if run.cost.amount.as_f64().is_none()
-        && let Some(cost) = telemetry.get("cost").and_then(Value::as_object)
-    {
-        run.cost = cost_from(Some(cost));
-    }
-    if let Some(source) = telemetry
-        .get("telemetry_source")
-        .and_then(Value::as_str)
-        .filter(|source| !source.is_empty())
+    if accept
+        && let Some(source) = telemetry
+            .get("telemetry_source")
+            .and_then(Value::as_str)
+            .filter(|source| !source.is_empty())
     {
         run.telemetry_source = source.to_string();
     }
-    if let Some(model) = telemetry.get("model") {
-        let usable =
-            model.as_str().is_some_and(|text| !text.is_empty()) || model.get("value").is_some();
-        if usable {
-            run.model = model.clone();
-        }
+    if let Some(name) = model_name {
+        run.model = json!(name);
     }
 }
 
