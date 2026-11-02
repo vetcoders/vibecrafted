@@ -32,6 +32,10 @@ use crate::usage::{
     regular_file, unknown,
 };
 
+#[path = "usage_local_cache.rs"]
+mod projection;
+pub(crate) use projection::project_local_usage;
+
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const MIN_SESSION_ID_LEN: usize = 8;
 const LONG_SESSION_ID_LEN: usize = 16;
@@ -40,7 +44,7 @@ const LONG_SESSION_ID_LEN: usize = 16;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalSource {
     pub agent: String,
-    /// `scan_cache`, `archive`, `unavailable` or `absent`.
+    /// `scan_cache`, `archive`, `loading`, `unavailable` or `absent`.
     pub source: String,
     pub sessions_seen: usize,
     pub counted: usize,
@@ -51,6 +55,17 @@ pub struct LocalSource {
     /// Archive day rows withheld because VC runs already cover that day.
     pub withheld_days: usize,
     pub note: String,
+    #[serde(default)]
+    pub refreshing: bool,
+    /// Previous measurements retained during changed or unreadable input.
+    #[serde(default)]
+    pub stale: bool,
+    /// Collection time of this read model, not a provider event timestamp.
+    #[serde(default)]
+    pub refreshed_at: Option<String>,
+    /// Bounded reason code; never a raw file path or parser exception.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -60,7 +75,7 @@ pub struct LocalUsage {
 }
 
 /// Sessions and days the runtime already accounted for, per agent.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VcSessions {
     ids: BTreeMap<String, HashSet<String>>,
     without_id: BTreeMap<String, usize>,
@@ -150,7 +165,9 @@ pub fn read_local_usage(
         };
         let cache = telemetry_dir.join(agent).join("scan-cache.json");
         let archive = telemetry_dir.join("archive").join(format!("{agent}.jsonl"));
-        if let Some(files) = read_scan_cache(&cache) {
+        let cached = read_scan_cache(&cache);
+        let cache_failed = cached.is_err();
+        if let Ok(Some(files)) = cached {
             source.source = "scan_cache".to_string();
             read_scan_entries(
                 agent,
@@ -182,17 +199,30 @@ pub fn read_local_usage(
         } else {
             source.note = "no local projection collected yet".to_string();
         }
+        if cache_failed {
+            source.error = Some("scan_cache_unreadable".into());
+        }
         usage.sources.push(source);
     }
     usage
 }
 
-fn read_scan_cache(path: &Path) -> Option<Map<String, Value>> {
-    if !regular_file(path) || fs::metadata(path).ok()?.len() > MAX_CACHE_BYTES {
-        return None;
+fn read_scan_cache(path: &Path) -> Result<Option<Map<String, Value>>, ()> {
+    if !regular_file(path) {
+        return Ok(None);
     }
-    let value = serde_json::from_slice::<Value>(&fs::read(path).ok()?).ok()?;
-    value.get("files")?.as_object().cloned()
+    if fs::metadata(path).map_err(|_| ())?.len() > MAX_CACHE_BYTES {
+        return Err(());
+    }
+    let mut value =
+        serde_json::from_slice::<Value>(&fs::read(path).map_err(|_| ())?).map_err(|_| ())?;
+    // Move the provider map out: cloning it duplicated the complete 221MB
+    // native cache on every foreground request.
+    match value.as_object_mut().ok_or(())?.remove("files") {
+        Some(Value::Object(files)) => Ok(Some(files)),
+        None => Ok(None),
+        _ => Err(()),
+    }
 }
 
 const TOKEN_KEYS: [&str; 4] = [
@@ -358,6 +388,7 @@ fn read_archive(
     out: &mut Vec<UsageRun>,
 ) {
     let Ok(text) = fs::read_to_string(path) else {
+        source.error = Some("archive_unreadable".into());
         return;
     };
     // Last-wins per (day, model), exactly as `usage_archive.read_last_wins`.

@@ -16,8 +16,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 const MAX_CLAIM_BYTES: usize = 64 * 1024;
+const MAX_REJECTION_BYTES: usize = 4096;
 const WRITER_TIMEOUT: Duration = Duration::from_secs(30);
 const GENERATION_BOOTSTRAP: &str = "import sys, runpy; from pathlib import Path; root = Path(sys.argv[1]); sys.path[:0] = [str(root / 'vibecrafted-core'), str(root / 'python-site')]; runpy.run_module('vibecrafted_core.dispatch.claims', run_name='__main__')";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriterRejection {
+    status: String,
+    error: String,
+}
 
 pub fn dispatch_routes() -> Router<leptos::config::LeptosOptions> {
     Router::new().route("/api/dispatch/claim", post(receive_claim))
@@ -81,11 +89,11 @@ pub async fn receive_claim(request: Request) -> Response {
             "claim transport requires a local headless peer",
         );
     }
-    if !request
+    if request
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(';').next().unwrap_or("").trim() == "application/json")
+        .is_none_or(|value| value.split(';').next().unwrap_or("").trim() != "application/json")
     {
         return error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -176,6 +184,14 @@ pub async fn receive_claim(request: Request) -> Response {
     // transport is never verification or settlement, and no writer output may
     // turn this endpoint into a delivery stamp.
     if status.code() == Some(2) {
+        if bytes.len() <= MAX_REJECTION_BYTES
+            && let Ok(rejection) = serde_json::from_slice::<WriterRejection>(&bytes)
+            && rejection.status == "rejected"
+            && !rejection.error.trim().is_empty()
+            && !rejection.error.chars().any(char::is_control)
+        {
+            return error(StatusCode::BAD_REQUEST, &rejection.error);
+        }
         return error(
             StatusCode::BAD_REQUEST,
             "canonical writer rejected the claim",

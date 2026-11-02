@@ -1,5 +1,43 @@
 # Compare parallel work before deploy
 
+## Read-only worktree inventory and triage
+
+```sh
+vc-git worktrees list /path/to/repository --target main
+vc-git worktrees triage /path/to/repository --target main --json
+vc-git /path/to/repository --worktrees triage --target main
+```
+
+`list` and `triage` expose the same read-only inventory, also available through
+MCP `vc_worktrees(project=".", target=None)`. With no target they compare to
+the invoking checkout's HEAD. An explicit target must name a local branch.
+Rows include full source and target SHAs, ahead/behind counts, canonical
+runtime/dispatch owners, baseline and report paths, tracked/untracked/ignored
+payload, process observations, integration evidence and protection reasons.
+
+Only genuine Git ancestry is reported as `exact_ancestor`. Replacement refs
+and grafts cannot fabricate that evidence. Repository-local Git environment
+overrides are refused instead of redirecting inspection. Cherry-picks and
+squashes without exact ancestry remain `review_reception`; this is an invitation
+to inspect their code, not proof that work is absent from the destination.
+
+The conservative triage marks live or restarted runs as `working`, dirty or
+hidden tracked work as `recoverable_work`, ignored payload as `ignored_payload`,
+and missing or inconsistent ownership/identity as `unknown`. An exact ancestor
+can be `integrated` with protection reasons, or `removable` when the observed
+predicates have no blocker. `removable` is an inspection result, never permission
+to remove the checkout. Primary/current/default/integrator/recovery checkouts,
+active parent workspaces, durable reports/artifacts, ambiguous history and
+observed open-file/process holders remain protected.
+
+This bounded surface supports inspection only. Cleanup, metadata pruning,
+merge preparation, merge execution, dry-run mutation plans and apply endpoints
+are deferred and unavailable. It creates no second ownership registry and does
+not update dispatch receipts. Existing `vc-git --compare ... --cuts ...` and
+rich repository output remain available.
+
+## Compare deliveries
+
 Let independent workers finish their cuts, then review their delivered work
 before deciding what to integrate and deploy:
 

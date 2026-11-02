@@ -157,6 +157,19 @@ def _function_calls_install_signed_pack_allow_older(fn: ast.AST) -> bool:
     return False
 
 
+def _settlement_publication_function() -> ast.FunctionDef:
+    source = HELPER.read_text(encoding="utf-8")
+    start = source.index("settle_capture() {")
+    python_start = source.index("<<'PY'\n", start) + len("<<'PY'\n")
+    python_end = source.index("\nPY\n", python_start)
+    tree = ast.parse(source[python_start:python_end])
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "publication"
+    )
+
+
 def _installed_frame_engine(candidate_app: Path) -> Path | None:
     # The physically admitted candidate App owns the engine under test.
     # An arbitrary Founder-installed generation cannot stand in for these bytes.
@@ -164,6 +177,111 @@ def _installed_frame_engine(candidate_app: Path) -> Path | None:
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return candidate
     return None
+
+
+def test_product_update_publication_reloads_pending_state_under_install_lease(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    dest = tmp_path / "Installed.app"
+    generation = runtime / "releases/4.5.0"
+    generation.mkdir(parents=True)
+    (generation / "VERSION").write_text("4.5.0\n", encoding="utf-8")
+    revision = "a" * 40
+    pointer = {
+        "schema": "vibecrafted.active-runtime.v1",
+        "version": "4.5.0",
+        "app_root": str(dest),
+        "runtime_root": str(generation),
+    }
+    product = {
+        "schema": "io.vetcoders.vibecrafted.product.v1",
+        "git_sha": revision,
+        "modules": [],
+    }
+    manifest = {
+        "schema": "vibecrafted.runtime-generation.v2",
+        "version": "4.5.0",
+        "source_revision": revision,
+    }
+    provenance = {
+        "schema": "io.vetcoders.vibecrafted.runtime-pack-provenance.v1",
+        "source_revisions": {"vibecrafted": revision},
+    }
+    state = {"install_pending": True, "receipt_reads": 0, "resolve_calls": 0}
+    in_progress = {
+        "schema": "vibecrafted.runtime-resolution.v1",
+        "status": "unusable",
+        "reason": "runtime installation is in progress",
+        "runtime": None,
+    }
+    ready = {
+        "schema": "vibecrafted.runtime-resolution.v1",
+        "status": "ready",
+        "runtime": {"root": str(generation), "app_root": str(dest)},
+    }
+
+    def read(path: Path) -> dict[str, object]:
+        if path == runtime / "active.json":
+            return pointer
+        if path == runtime / "install-receipt.json":
+            state["receipt_reads"] += 1
+            return {
+                "schema": "vibecrafted.runtime-install.v1",
+                "version": "4.5.0",
+                "app_root": str(dest),
+                "install_pending": state["install_pending"],
+            }
+        return {
+            dest / "Contents/Resources/product-manifest.json": product,
+            generation / "runtime-manifest.json": manifest,
+            generation / "runtime-pack-provenance.json": provenance,
+        }[path]
+
+    def require(condition: object, message: str) -> None:
+        if not condition:
+            raise RuntimeError(message)
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        state["resolve_calls"] += 1
+        if state["resolve_calls"] == 1:
+            return subprocess.CompletedProcess([], 2, json.dumps(in_progress), "")
+        return subprocess.CompletedProcess([], 0, json.dumps(ready), "")
+
+    def share_install_lease() -> bool:
+        state["install_pending"] = False
+        return True
+
+    namespace = {
+        "IN_PROGRESS": in_progress,
+        "dest": dest,
+        "digest": lambda receipt: (
+            "ready" if not receipt["install_pending"] else "pending"
+        ),
+        "json": json,
+        "os": os,
+        "physical": Path,
+        "read": read,
+        "re": re,
+        "require": require,
+        "runtime": runtime,
+        "share_install_lease": share_install_lease,
+        "subprocess": type("SubprocessStub", (), {"run": staticmethod(run)}),
+        "transient_install": lambda checked: (
+            checked.returncode == 2 and json.loads(checked.stdout) == in_progress
+        ),
+    }
+    module = ast.Module(body=[_settlement_publication_function()], type_ignores=[])
+    exec(compile(module, str(HELPER), "exec"), namespace)  # noqa: S102 - executes the checked-in helper fixture.
+
+    result = namespace["publication"]()
+
+    assert result["installer_receipt_sha256"] == "ready"
+    assert state == {
+        "install_pending": False,
+        "receipt_reads": 2,
+        "resolve_calls": 2,
+    }
 
 
 def test_product_update_source_contract() -> None:

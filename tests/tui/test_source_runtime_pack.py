@@ -15,6 +15,93 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/build-source-runtime-pack.py"
 
 
+def test_source_check_reports_selected_and_available_head(tmp_path: Path) -> None:
+    from _source_component_fixture import source_fixture
+
+    checkout, pins, repos = source_fixture(tmp_path)
+    frame = repos["vc-frame"]
+    (frame / "later.txt").write_text("later\n")
+    subprocess.run(["git", "-C", str(frame), "add", "later.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(frame),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "later",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(frame), "rev-parse", "HEAD"], text=True
+    ).strip()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(checkout / "scripts/build-source-runtime-pack.py"),
+            "--check",
+        ],
+        env={
+            **os.environ,
+            "VIBECRAFTED_FRAME_REPO": str(frame),
+            "VIBECRAFTED_TERMINAL_REPO": str(repos["vc-terminal"]),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        f"selected: 4.3.1 {pins['components']['vc-frame']['revision']}" in result.stdout
+    )
+    assert f"available HEAD: {head}" in result.stdout
+
+
+def test_make_install_forwards_bound_preference_retry() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "install",
+            "RUNTIME_PACK=/candidate.tar.gz",
+            "RUNTIME_PACK_RESOLVE_PREFERENCE=keep-current",
+            "RUNTIME_PACK_PREFERENCE_CURRENT_SHA256=" + "a" * 64,
+            "RUNTIME_PACK_PREFERENCE_INCOMING_SHA256=" + "b" * 64,
+            "RUNTIME_PACK_PREFERENCE_PATH=/config/config.kdl",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '--resolve-preference "keep-current"' in result.stdout
+    assert '--preference-current-sha256 "' + "a" * 64 + '"' in result.stdout
+    assert '--preference-incoming-sha256 "' + "b" * 64 + '"' in result.stdout
+    assert '--preference-path "/config/config.kdl"' in result.stdout
+
+
+def test_nested_kdl_conflict_and_explicit_keep_current() -> None:
+    from scripts.vetcoders_install import _merge_runtime_preferences
+
+    previous = "themes {\n}\nmouse_mode true\n"
+    current = "themes {\n    copy_on_select true\n}\nmouse_mode true\n"
+    incoming = "themes {\n}\nmouse_mode false\n"
+    with pytest.raises(ValueError, match="nested or structural"):
+        _merge_runtime_preferences(previous, current, incoming, kdl=True)
+    assert (
+        _merge_runtime_preferences(
+            previous, current, incoming, kdl=True, choice="keep-current"
+        )
+        == current
+    )
+
+
 @pytest.fixture
 def inherited_git_location(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reproduce repository-location variables inherited from a foreign hook."""
@@ -132,6 +219,72 @@ def test_source_check_fetches_missing_donor_objects_into_temporary_repositories(
         ).strip()
         == frame_sha
     )
+
+
+def test_source_materialization_preserves_lf_alternates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runpy
+    import tempfile
+
+    from _source_component_fixture import source_fixture
+
+    checkout, pins, _ = source_fixture(tmp_path / "upstream with spaces")
+    builder = runpy.run_path(str(checkout / "scripts/build-source-runtime-pack.py"))
+    destination = tmp_path / "export with spaces"
+    scratch = tmp_path / "temporary donors with spaces"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    for name in ("VIBECRAFTED_FRAME_REPO", "VIBECRAFTED_TERMINAL_REPO"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--materialize", str(destination)],
+    )
+    real_open = Path.open
+    alternates = []
+
+    def windows_text_open(path, mode="r", *args, **kwargs):
+        # Windows text writes translate LF to CRLF by default. Git's alternates
+        # parser treats that CR as part of the object directory on every OS.
+        if (
+            path.name == "alternates"
+            and "w" in mode
+            and "b" not in mode
+            and kwargs.get("newline") is None
+        ):
+            kwargs["newline"] = "\r\n"
+        return real_open(path, mode, *args, **kwargs)
+
+    real_run = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if command[0] == "git" and "archive" in command:
+            isolated = Path(command[command.index("-C") + 1])
+            raw = (isolated / "objects/info/alternates").read_bytes()
+            alternates.append(raw)
+            # These are fetched scratch donors, which must still exist while
+            # the real Git archive consumes their objects.
+            assert Path(raw.rstrip(b"\r\n").decode()).is_dir()
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", windows_text_open)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert builder["main"]() == 0
+    assert len(alternates) == 2
+    assert all(raw.endswith(b"\n") and b"\r" not in raw for raw in alternates)
+    assert not list(scratch.iterdir()), "temporary donors must be cleaned after export"
+    selection = json.loads((destination / "selection.json").read_text())
+    assert {
+        name: component["revision"]
+        for name, component in selection["components"].items()
+    } == {name: pin["revision"] for name, pin in pins["components"].items()}
+    for name, manifest in (
+        ("vc-frame", "Cargo.toml"),
+        ("vc-terminal", "alacritty/Cargo.toml"),
+    ):
+        assert (destination / name / manifest).is_file()
 
 
 @pytest.mark.parametrize("builder", ["helper", "linux", "windows"])

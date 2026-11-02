@@ -3,6 +3,26 @@
 All notable changes to 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+## [4.5.1] - 2026-10-26
+
+### Fixed
+
+- Frame clears vacated floating-pane regions during forced repaint, including
+  sparse workspaces, preventing trails when panes move, resize, hide or close.
+- Fork worktree selection accepts an omitted execution selector and follows the
+  task runtime rather than a conflicting implicit default.
+- Foundation installation refreshes executable lookup after npm and uses a
+  writable per-user prefix when the ambient global installation is unavailable.
+- Runtime upgrades release obsolete ownership claims over independently updated
+  public tools, preserving their current bytes and historical collision backups.
+- App capture settlement waits out the transient install lease of a relaunched
+  App instead of failing `install.sh` after a successful swap. `vc-app-update`
+  retries only the canonical `runtime installation is in progress` refusal,
+  once, under the shared install lease within the existing 60-second budget,
+  so every caller shares the recovery `install-app.sh` already carried.
+
 ## [4.5.0] - 2026-10-21
 
 ### Changed

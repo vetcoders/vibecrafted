@@ -97,6 +97,9 @@ def main(w):
                 w.addstr(20, 10, "Unsaved form changes - press Ctrl+Q or y to close")
         elif state == "step2":
             w.addstr(6, 10, "Step 2: Terminal Typography - policy preserved", curses.A_DIM)
+            if BROKEN == "split-preview":
+                w.refresh()
+                time.sleep(0.15)
             if BROKEN != "no-glyph":
                 w.addstr(7, 10, "Glyph sample: 0O1lI -> !==")
             w.addstr(9, 10, "[ Apply Font (Enter) ]  [ Close (Esc) ]")
@@ -184,10 +187,13 @@ def _assert_workshop_reaped(tmp_path: Path) -> None:
     pytest.fail(f"probe left the Workshop process {pid} running")
 
 
+@pytest.mark.parametrize(
+    "broken", ["", "split-preview"], ids=["one-read", "split-read"]
+)
 def test_onboarding_walks_installed_agents_route_to_typography(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
 ) -> None:
-    scenario = _installed_workshop(tmp_path)
+    scenario = _installed_workshop(tmp_path, broken=broken)
     policy = scenario.product_config / "terminal-policy.toml"
     before = policy.read_bytes()
 

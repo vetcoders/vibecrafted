@@ -13,6 +13,7 @@ from tests.tui.test_runtime_pack_cli import (
     SOURCE_SHA,
     TERMINAL_SHA,
     VERSION,
+    _darwin_host_env,
     _fake_runtime_payload,
     _sealed_archive,
 )
@@ -54,19 +55,21 @@ def test_runtime_pack_timeout_signal_settles_owned_python_before_bash_exits(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={
-            **os.environ,
-            "CAPTURE": str(capture),
-            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
-            "INSTALLER_CHILD_FIXTURE": "1",
-            "INSTALLER_CHILD_PID": str(child_pid),
-            "INSTALLER_CHILD_MUTATION": str(mutation),
-            # Long enough that a loaded CI host still KILLs the child before
-            # its natural exit (installer TERM-grace is 1s), short enough
-            # that the orphaned grandchild `sleep` releases the stdout pipe
-            # before the communicate() deadline below.
-            "INSTALLER_CHILD_SLEEP": "4",
-        },
+        env=_darwin_host_env(
+            tmp_path / "host-bin",
+            {
+                "CAPTURE": str(capture),
+                "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+                "INSTALLER_CHILD_FIXTURE": "1",
+                "INSTALLER_CHILD_PID": str(child_pid),
+                "INSTALLER_CHILD_MUTATION": str(mutation),
+                # Long enough that a loaded CI host still KILLs the child before
+                # its natural exit (installer TERM-grace is 1s), short enough
+                # that the orphaned grandchild `sleep` releases the stdout pipe
+                # before the communicate() deadline below.
+                "INSTALLER_CHILD_SLEEP": "4",
+            },
+        ),
     )
     deadline = time.monotonic() + 10
     while not child_pid.exists() and time.monotonic() < deadline:

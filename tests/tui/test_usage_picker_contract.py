@@ -44,19 +44,29 @@ def test_actual_picker_script_roundtrips_known_and_unknown_selection():
 const vm=require('vm');
 const nodes=new Map();
 class Element {
- constructor(id='') {this.id=id;this.children=[];this.events={};this.value='';this.style={setProperty(){}};this.classList={add(){},toggle(){}};this.dataset={};}
+ constructor(tag='div') {this.tagName=tag.toUpperCase();this.nodeName=this.tagName;this.nodeType=1;this.id='';this.children=[];this.childNodes=this.children;this.attributes=[];this.events={};this.value='';this.style={setProperty(){}};this.classList={add(){},toggle(){}};this.dataset={};}
  get options(){return this.children;}
- append(...children){this.children.push(...children);}
- appendChild(child){this.children.push(child);if(child.selected)this.value=child.value;}
- replaceChildren(){this.children=[];}
- setAttribute(){}
- getAttribute(){return '';}
+ get firstElementChild(){return this.children[0]||null;}
+ get nextElementSibling(){if(!this.parentElement)return null;return this.parentElement.children[this.parentElement.children.indexOf(this)+1]||null;}
+ append(...children){for(const child of children)this.insertBefore(child,null);}
+ appendChild(child){this.append(child);if(child.selected)this.value=child.value;return child;}
+ insertBefore(child,reference){if(child.parentElement)child.remove();const index=reference?this.children.indexOf(reference):-1;this.children.splice(index<0?this.children.length:index,0,child);child.parentElement=this;return child;}
+ replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
+ remove(){if(this.parentElement){const siblings=this.parentElement.children;siblings.splice(siblings.indexOf(this),1);this.parentElement=null;}}
+ contains(child){return this===child||this.children.some(item=>item.contains(child));}
+ setAttribute(name,value){const current=this.attributes.find(attr=>attr.name===name);if(current)current.value=String(value);else this.attributes.push({name,value:String(value)});}
+ getAttribute(name){return this.attributes.find(attr=>attr.name===name)?.value??null;}
+ hasAttribute(name){return this.attributes.some(attr=>attr.name===name);}
+ removeAttribute(name){this.attributes=this.attributes.filter(attr=>attr.name!==name);}
  addEventListener(name,fn){this.events[name]=fn;}
  querySelectorAll(){return [];}
  querySelector(){return null;}
+ replaceWith(node){if(this.parentElement)this.parentElement.insertBefore(node,this);this.remove();}
 }
-function byId(id){if(!nodes.has(id))nodes.set(id,new Element(id));return nodes.get(id);}
-global.document={getElementById:byId,querySelector:()=>byId('root'),querySelectorAll:()=>[],createElement:()=>new Element(),createElementNS:()=>new Element()};
+function byId(id){if(!nodes.has(id)){const node=new Element();node.id=id;nodes.set(id,node);}return nodes.get(id);}
+global.document={getElementById:byId,querySelector:()=>byId('root'),querySelectorAll:()=>[],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}};
+global.MutationObserver=class { observe(){} };
+global.setInterval=()=>0;
 global.location={search:'?provider=openai&agent=codex&model=unobserved-model&window=all'};
 global.history={replaceState(_a,_b,url){global.lastUrl=url;}};
 global.FormData=class { constructor(){this.values=['window','provider','agent','model'].map(k=>[k,byId('usage-'+k).value]);} [Symbol.iterator](){return this.values[Symbol.iterator]();} };
@@ -104,13 +114,23 @@ def test_actual_quota_script_keeps_old_observation_age_and_explicit_refresh():
     harness = r"""
 const vm = require('vm');
 class Element {
- constructor() {this.children=[];this.dataset={};this.events={};this.style={setProperty(){}};this.textContent='';}
- append(...children) {this.children.push(...children);}
- replaceChildren() {this.children=[];}
+ constructor(tag='div') {this.tagName=tag.toUpperCase();this.nodeName=this.tagName;this.nodeType=1;this.children=[];this.childNodes=this.children;this.attributes=[];this.dataset={};this.events={};this.style={setProperty(){}};this.textContent='';}
+ get firstElementChild(){return this.children[0]||null;}
+ get nextElementSibling(){if(!this.parentElement)return null;return this.parentElement.children[this.parentElement.children.indexOf(this)+1]||null;}
+ append(...children) {for(const child of children)this.insertBefore(child,null);}
+ insertBefore(child,reference){if(child.parentElement)child.remove();const index=reference?this.children.indexOf(reference):-1;this.children.splice(index<0?this.children.length:index,0,child);child.parentElement=this;return child;}
+ replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
+ remove(){if(this.parentElement){const siblings=this.parentElement.children;siblings.splice(siblings.indexOf(this),1);this.parentElement=null;}}
+ contains(child){return this===child||this.children.some(item=>item.contains(child));}
+ setAttribute(name,value){const current=this.attributes.find(attr=>attr.name===name);if(current)current.value=String(value);else this.attributes.push({name,value:String(value)});}
+ getAttribute(name){return this.attributes.find(attr=>attr.name===name)?.value??null;}
+ hasAttribute(name){return this.attributes.some(attr=>attr.name===name);}
+ removeAttribute(name){this.attributes=this.attributes.filter(attr=>attr.name!==name);}
  addEventListener(name,fn) {this.events[name]=fn;}
+ replaceWith(node){if(this.parentElement)this.parentElement.insertBefore(node,this);this.remove();}
 }
-const nodes = new Map(['quota-agents','quota-status','quota-refresh'].map(id=>[id,new Element()]));
-global.document={querySelector:()=>new Element(),getElementById:id=>nodes.get(id),createElement:()=>new Element()};
+const nodes = new Map(['quota-agents','quota-unmeasured','quota-status','quota-refresh'].map(id=>[id,Object.assign(new Element(),{id})]));
+global.document={querySelector:()=>new Element(),getElementById:id=>nodes.get(id),createElement:()=>new Element(),addEventListener(){}};
 const ids=['agy','claude','codex','copilot','cursor','grok','junie','kimi'];
 const states=['stale','unknown','exhausted','malformed','absent','low','ok','unknown'];
 const agents=ids.map((id,i)=>({id,name:id,state:states[i],status:states[i]==='exhausted'?'blocked':'warn',age_s:i===0?148*3600:null,scope:{model:i===0?'old-model':null},source:'private fixture',tokens:null,cost_usd:null,bars:[]}));
@@ -122,9 +142,11 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  await settle();
  const host=nodes.get('quota-agents');
- if(host.children.length!==8)throw Error('peers lost');
- host.children.forEach((card,i)=>{if(card.children[0].children[1].textContent!==states[i])throw Error('state collapsed for '+ids[i]);});
- const meta=host.children[0].children.at(-1).textContent;
+const cards=[...host.children,...nodes.get('quota-unmeasured').children];
+if(cards.length!==8)throw Error('peers lost');
+for(const card of cards){const name=card.children[0].children[0].textContent;const index=ids.indexOf(name);if(card.children[0].children[1].textContent!==states[index])throw Error('state collapsed for '+name);}
+const measuredCard=cards.find(card=>card.children[0].children[0].textContent==='agy');
+const meta=measuredCard.children.at(-1).children[1].textContent;
  if(!meta.includes('148h ago') || !meta.includes('model old-model'))throw Error('observation age/scope lost');
  if(fetched.some(url=>url.includes('refresh=')))throw Error('implicit network refresh');
  if(timers.length!==1 || timers[0].ms!==15000)throw Error('unexpected timer');
@@ -132,7 +154,8 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
  if(fetched.some(url=>url.includes('refresh=')))throw Error('timer requested provider network');
  await nodes.get('quota-refresh').events.click();
  if(fetched.at(-1)!=='/api/usage/quota?refresh=network')throw Error('explicit refresh lost');
- if(host.children[0].children[0].children[1].textContent!=='stale' || !host.children[0].children.at(-1).textContent.includes('148h ago'))throw Error('refresh laundered observation');
+ const retainedCard=[...host.children,...nodes.get('quota-unmeasured').children].find(card=>card.children[0].children[0].textContent==='agy');
+ if(retainedCard.children[0].children[1].textContent!=='stale' || !retainedCard.children.at(-1).children[1].textContent.includes('148h ago'))throw Error('refresh laundered observation');
  console.log(JSON.stringify({ids,states,meta,fetched}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
@@ -220,16 +243,26 @@ def test_quota_board_script_shows_the_refresh_outcome(refresh, expected):
 const vm=require('vm');
 const nodes=new Map();
 class Element {
- constructor(id='') {this.id=id;this.children=[];this.events={};this.value='';this.style={setProperty(){}};this.dataset={};this.textContent='';}
- append(...children){this.children.push(...children);}
- appendChild(child){this.children.push(child);}
- replaceChildren(){this.children=[];}
- setAttribute(){}
+ constructor(tag='div') {this.tagName=tag.toUpperCase();this.nodeName=this.tagName;this.nodeType=1;this.id='';this.children=[];this.childNodes=this.children;this.attributes=[];this.events={};this.value='';this.style={setProperty(){}};this.dataset={};this.textContent='';}
+ get firstElementChild(){return this.children[0]||null;}
+ get nextElementSibling(){if(!this.parentElement)return null;return this.parentElement.children[this.parentElement.children.indexOf(this)+1]||null;}
+ append(...children){for(const child of children)this.insertBefore(child,null);}
+ appendChild(child){return this.append(child);}
+ insertBefore(child,reference){if(child.parentElement)child.remove();const index=reference?this.children.indexOf(reference):-1;this.children.splice(index<0?this.children.length:index,0,child);child.parentElement=this;return child;}
+ replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
+ remove(){if(this.parentElement){const siblings=this.parentElement.children;siblings.splice(siblings.indexOf(this),1);this.parentElement=null;}}
+ contains(child){return this===child||this.children.some(item=>item.contains(child));}
+ setAttribute(name,value){const current=this.attributes.find(attr=>attr.name===name);if(current)current.value=String(value);else this.attributes.push({name,value:String(value)});}
+ getAttribute(name){return this.attributes.find(attr=>attr.name===name)?.value??null;}
+ hasAttribute(name){return this.attributes.some(attr=>attr.name===name);}
+ removeAttribute(name){this.attributes=this.attributes.filter(attr=>attr.name!==name);}
  addEventListener(name,fn){this.events[name]=fn;}
  querySelectorAll(){return [];}
+ querySelector(){return null;}
+ replaceWith(node){if(this.parentElement)this.parentElement.insertBefore(node,this);this.remove();}
 }
-function byId(id){if(!nodes.has(id))nodes.set(id,new Element(id));return nodes.get(id);}
-global.document={getElementById:byId,querySelector:(sel)=>sel==='[data-quota-board]'?byId('board'):null,createElement:()=>new Element()};
+function byId(id){if(!nodes.has(id)){const node=new Element();node.id=id;nodes.set(id,node);}return nodes.get(id);}
+global.document={getElementById:byId,querySelector:(sel)=>sel==='[data-quota-board]'?byId('board'):null,createElement:tag=>new Element(tag),addEventListener(){}};
 global.setInterval=()=>0;
 const plain={generated_at:'2026-10-13T00:00:00Z',agents:[{id:'kimi',name:'Kimi',status:'ok',state:'ok',bars:[],scope:{}}]};
 const refreshed={generated_at:'2026-10-13T00:00:10Z',agents:plain.agents,refresh:OUTCOME};

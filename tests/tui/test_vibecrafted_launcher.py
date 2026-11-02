@@ -3346,13 +3346,20 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     # shell proves an owned terminal entry. Build the installed-generation shape
     # (front door exists) and declare that boundary, so the live-session direct
     # path under test stays reachable from a pipe.
-    generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
-    wrapper.symlink_to(generation / "bin" / "vibecrafted")
-
     frame = fake_bin / "vc-frame"
     frame.write_text(
-        frame.read_text().replace('} > "$CAPTURE_FILE"', '} >> "$CAPTURE_FILE"')
+        frame.read_text()
+        .replace('} > "$CAPTURE_FILE"', '} >> "$CAPTURE_FILE"')
+        .replace("operator-test (attached)", "operator-test [Created 1s ago]")
+        .replace("  exit 0\nfi", '  printf "vc-host [Created 1s ago]\\n"\n  exit 0\nfi')
+        .replace(
+            "{\n  printf",
+            'if [[ "${3:-} ${4:-}" == "action dump-layout" ]]; then printf "layout { frame_host true; pane; }\\n"; exit 0; fi\n{\n  printf',
+        )
     )
+
+    generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
+    wrapper.symlink_to(generation / "bin" / "vibecrafted")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -3371,6 +3378,30 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
 
+    # Existing engine names need a durable project binding, never name adoption.
+    env["VC_FRAME_SOCKET_DIR"] = str(tmp_path / "sockets")
+    seed_env = dict(env)
+    seed_env["PYTHONPATH"] = str(REPO_ROOT / "vibecrafted-core")
+    subprocess.run(
+        [
+            str(generation / "bin/python3"),
+            "-c",
+            (
+                "import os,sys; from vibecrafted_core.workspace_catalog import "
+                "resolve_run_workspace_identity,record_runtime_session_attachment; "
+                "i=resolve_run_workspace_identity(root=sys.argv[1],env={}); "
+                "record_runtime_session_attachment(workspace_id=i.workspace_id,"
+                "vibecrafted_session_id=i.vibecrafted_session_id,"
+                "workspace_instance_id=i.workspace_instance_id,runtime='vc-frame',"
+                "runtime_session_id='operator-test',state='live',"
+                "socket_dir=os.environ['VC_FRAME_SOCKET_DIR'])"
+            ),
+            str(root),
+        ],
+        check=True,
+        env=seed_env,
+    )
+
     subprocess.run(
         ["bash", str(wrapper), "codex", "resume-session-789", "--repo", str(root)],
         check=True,
@@ -3378,11 +3409,12 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
         env=env,
     )
 
-    # Resume now launches through the control plane and hands the live frame
-    # session an attach; the positional-id contract is recorded in the run's
-    # admission (identity_source explicit_session), not in a new-tab argv.
+    # Resume launches through the control plane into the bound Frame surface;
+    # the positional id lives in the admission, not in the engine argv.
     payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert payload[:2] == ["attach", "operator-test"]
+    pane = payload.index("new-pane")
+    assert payload[pane - 3 : pane] == ["--session", "operator-test", "action"]
+    assert "--floating" in payload
     admissions = sorted(
         (home / ".vibecrafted/control_plane/runtime_runs").glob("*/admission.json")
     )

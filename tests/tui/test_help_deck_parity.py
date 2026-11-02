@@ -19,6 +19,7 @@ from vibecrafted_core import cli
 from vibecrafted_core.help_surface import (
     CORE_SURFACE_COMMANDS,
     advertised_compact_verbs,
+    render_agents_help,
 )
 from vibecrafted_core.repository_claims import RESULT_SCHEMA
 
@@ -33,11 +34,16 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 UNKNOWN = "not in the command deck"
 CORE_HELP_MARKERS = {
     "claims": ("acquire", "heartbeat"),
-    "message": ("Codex `queue --thread`", "never starts or resumes another worker"),
+    "message": (
+        "Codex `queue --thread`",
+        "never starts or resumes another worker",
+        "--connect-container",
+    ),
     "reinstall": ("--clean", "--dry-run", "resurrect"),
     "relocate": ("snapshot", "restore"),
     "resume-session": ("--agent-session-id", "always headless"),
     "settlements": ("summary", "inspect"),
+    "pr-closure": ("verify", "admit"),
 }
 # Full deck-verb coverage as vc-<command> is the Founder's standing agreement
 # (re-confirmed 2026-09-30). vc-relocate is the one deliberate exception: it
@@ -64,6 +70,7 @@ def _isolated_env(home: Path, extra_bin: Path | None = None) -> dict[str, str]:
             "PYTHONHOME",
             "VIBECRAFTED_ROOT",
             "VIBECRAFTED_RUNTIME_ROOT",
+            "VIBECRAFTED_RUNTIME_HOME",
             "VIBECRAFTED_RUNTIME_BIN",
             "VIBECRAFTED_PYTHON",
             "VIBECRAFTED_PREFER_REPO_SPAWN",
@@ -126,6 +133,15 @@ def test_deck_twins_stay_byte_identical() -> None:
     assert SCRIPTS_DECK.read_bytes() == PACKAGE_DECK.read_bytes()
 
 
+def test_agents_help_uses_the_shared_python_owner(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    result = _run(["agents"], home=home)
+
+    assert result.returncode == 0, result.stderr
+    assert _display_text(result.stdout) == _display_text(render_agents_help())
+
+
 def test_core_surface_is_advertised_and_python_owned() -> None:
     advertised = advertised_compact_verbs()
     assert set(CORE_SURFACE_COMMANDS) <= set(advertised)
@@ -133,7 +149,9 @@ def test_core_surface_is_advertised_and_python_owned() -> None:
     assert set(CORE_SURFACE_COMMANDS) <= set(owned)
     deck = SCRIPTS_DECK.read_text(encoding="utf-8")
     assert "cmd_core_cli() {" in deck
-    assert "claims|message|relocate|resume-session|usage) cmd_core_cli" in deck
+    assert (
+        "claims|message|pr-closure|relocate|resume-session|usage) cmd_core_cli" in deck
+    )
     assert "cmd_settlements() {" in deck
     assert 'cmd_core_cli settlements "$@"' in deck
 

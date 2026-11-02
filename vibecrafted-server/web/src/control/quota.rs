@@ -63,6 +63,8 @@ struct QuotaDashboard {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaAgent {
+    #[serde(skip)]
+    native_windows: bool,
     pub id: &'static str,
     /// Same value as `id`, under the key the dispatch doctor reads.
     pub agent: &'static str,
@@ -99,15 +101,33 @@ pub struct QuotaScope {
     pub pool: Option<String>,
     pub account: Option<String>,
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct QuotaBar {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: String,
+    pub label: String,
     pub ratio: Option<f64>,
     pub text: String,
     pub level: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<QuotaScope>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }
 
 struct Provider {
@@ -201,7 +221,7 @@ pub async fn quota(
     let home = plane.home();
     let mut agents = PROVIDERS
         .iter()
-        .map(|provider| read_provider(provider, &home))
+        .filter_map(|provider| read_provider(provider, &home, &query))
         .collect::<Vec<_>>();
 
     if let Some(expected_agent) = query
@@ -243,6 +263,9 @@ pub async fn quota(
     {
         let wanted = expected_model.to_ascii_lowercase();
         agents.retain(|a| {
+            if a.native_windows {
+                return true;
+            }
             [a.scope.model.as_deref(), a.model.as_deref()]
                 .into_iter()
                 .flatten()
@@ -255,6 +278,9 @@ pub async fn quota(
         .filter(|s| !s.is_empty() && *s != "all")
     {
         agents.retain(|a| {
+            if a.native_windows {
+                return true;
+            }
             a.account
                 .as_deref()
                 .is_some_and(|acc| acc.eq_ignore_ascii_case(expected_account))
@@ -307,7 +333,7 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn read_provider(provider: &Provider, home: &Path) -> QuotaAgent {
+fn read_provider(provider: &Provider, home: &Path, query: &QuotaQuery) -> Option<QuotaAgent> {
     let env_name = format!(
         "VIBECRAFTED_{}_QUOTA_JSON",
         provider.id.to_ascii_uppercase()
@@ -325,6 +351,7 @@ fn read_provider(provider: &Provider, home: &Path) -> QuotaAgent {
         &env_name,
         &candidates,
         provider.parse,
+        query,
     )
 }
 
@@ -353,10 +380,12 @@ fn project(
     env_name: &str,
     candidates: &[(PathBuf, String)],
     parse: fn(&'static str, &Value) -> QuotaFields,
-) -> QuotaAgent {
-    match load_source(env_name, candidates) {
+    query: &QuotaQuery,
+) -> Option<QuotaAgent> {
+    let agent = match load_source(env_name, candidates) {
         Source::Missing { label } => absent(id, name, label, default_pool_for(id)),
         Source::Unreadable { label, error } => QuotaAgent {
+            native_windows: false,
             id,
             agent: id,
             name,
@@ -383,6 +412,20 @@ fn project(
         },
         Source::Json { label, value } => {
             let mut fields = parse(id, &value);
+            let native = value.pointer("/quota/windows").is_some();
+            if let Some((mut window_fields, applicable)) = native_windows(id, &value, query) {
+                if !applicable
+                    && (active_filter(&query.model).is_some()
+                        || active_filter(&query.account).is_some())
+                {
+                    return None;
+                }
+                window_fields.tokens = fields.tokens;
+                window_fields.cost_usd = fields.cost_usd;
+                // Usage's last-session model is not the quota's scope.
+                window_fields.model.clone_from(&window_fields.scope_model);
+                fields = window_fields;
+            }
             // AGY rewrites snapshot time when it re-reads an old conversation.
             // Only the matching status event can establish its observation age.
             let observed_ts = if id == "agy" {
@@ -396,7 +439,7 @@ fn project(
                 })
             };
             let age_s = observed_ts.map(age_secs);
-            let stale = age_s.is_some_and(|age| age > STALE_SECS);
+            let stale = fields.force_stale || age_s.is_some_and(|age| age > STALE_SECS);
             let state = observation_state(fields.status, stale, observed_ts.is_some());
             if stale || observed_ts.is_none() {
                 if fields.status == "blocked" {
@@ -415,6 +458,7 @@ fn project(
             }
             let pool = fields.pool.or_else(|| default_pool_for(id));
             QuotaAgent {
+                native_windows: native,
                 id,
                 agent: id,
                 name,
@@ -441,10 +485,13 @@ fn project(
                     pool,
                     account: fields.account,
                     model: fields.scope_model,
+                    limit_id: fields.limit_id,
+                    plan_type: fields.plan_type,
                 },
             }
         }
-    }
+    };
+    Some(agent)
 }
 
 #[derive(Default)]
@@ -463,6 +510,9 @@ struct QuotaFields {
     observed_ts: Option<u64>,
     /// Model the quota is scoped to (None = the whole pool).
     scope_model: Option<String>,
+    limit_id: Option<String>,
+    plan_type: Option<String>,
+    force_stale: bool,
 }
 
 enum Source {
@@ -547,6 +597,7 @@ fn absent(
     pool: Option<String>,
 ) -> QuotaAgent {
     QuotaAgent {
+        native_windows: false,
         id,
         agent: id,
         name,
@@ -642,6 +693,7 @@ fn parse_agy(id: &'static str, value: &Value) -> QuotaFields {
         .map(|millis| millis / 1000)
         .filter(|seconds| *seconds > 0),
         scope_model: model_for_scope,
+        ..QuotaFields::default()
     }
 }
 
@@ -897,12 +949,157 @@ fn ratio_bar(value: &Value, key: &'static str) -> Option<QuotaBar> {
         _ => key,
     };
     Some(QuotaBar {
-        id: key,
-        label,
+        id: key.to_string(),
+        label: label.to_string(),
         ratio,
         level: ratio.map(ratio_level).unwrap_or("unknown"),
         text,
+        ..QuotaBar::default()
     })
+}
+
+/// Native windows carry their own observation time and scope. A collector
+/// timestamp cannot freshen them, and expired windows cannot remain blocked.
+fn active_filter(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty() && *value != "all")
+}
+
+fn native_windows(id: &str, value: &Value, query: &QuotaQuery) -> Option<(QuotaFields, bool)> {
+    let quota = value.get("quota")?;
+    let windows = quota.get("windows")?;
+    let pool = default_pool_for(id);
+    let now = Utc::now().timestamp().max(0) as u64;
+    let mut bars = Vec::new();
+    let mut applicable = false;
+    for window in windows.as_array().into_iter().flatten() {
+        let scope = window.get("scope").or_else(|| quota.get("scope"));
+        let field = |key| scope.and_then(|scope| text_field(scope, key));
+        if field("pool")
+            .as_ref()
+            .is_some_and(|scope| Some(scope) != pool.as_ref())
+        {
+            continue;
+        }
+        if active_filter(&query.model).is_some_and(|wanted| {
+            field("model").is_some_and(|model| {
+                !model
+                    .to_ascii_lowercase()
+                    .contains(&wanted.to_ascii_lowercase())
+            })
+        }) || active_filter(&query.account).is_some_and(|wanted| {
+            !field("account").is_some_and(|account| account.eq_ignore_ascii_case(wanted))
+        }) {
+            continue;
+        }
+        applicable = true;
+        let ratio = window
+            .get("used_ratio")
+            .and_then(Value::as_f64)
+            .filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio));
+        let minutes = window
+            .get("window_minutes")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0);
+        let timestamp = window
+            .get("observed_at")
+            .and_then(Value::as_str)
+            .and_then(iso_to_ts)
+            .filter(|timestamp| *timestamp <= now.saturating_add(60));
+        let reset = window.get("resets_at").and_then(Value::as_u64);
+        let (Some(ratio), Some(minutes), Some(timestamp), Some(reset)) =
+            (ratio, minutes, timestamp, reset)
+        else {
+            continue;
+        };
+        if reset <= timestamp {
+            continue;
+        }
+        let remaining = window
+            .get("remaining_ratio")
+            .and_then(Value::as_f64)
+            .filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio));
+        if remaining.is_some_and(|remaining| (remaining + ratio - 1.0).abs() > 0.02) {
+            continue;
+        }
+        let stale = window.get("stale").and_then(Value::as_bool) == Some(true)
+            || now.saturating_sub(timestamp) > STALE_SECS
+            || reset <= now;
+        let label = if minutes % 1440 == 0 {
+            format!("{}d", minutes / 1440)
+        } else if minutes % 60 == 0 {
+            format!("{}h", minutes / 60)
+        } else {
+            format!("{minutes}m")
+        };
+        let source = text_field(window, "source").or_else(|| text_field(quota, "source"));
+        let scope = QuotaScope {
+            pool: pool.clone(),
+            account: field("account"),
+            model: field("model"),
+            limit_id: field("limit_id"),
+            plan_type: field("plan_type"),
+        };
+        bars.push(QuotaBar {
+            id: text_field(window, "id").unwrap_or_else(|| label.clone()),
+            label,
+            ratio: Some(ratio),
+            text: format!("{:.0}% used", ratio * 100.0),
+            level: if stale { "unknown" } else { ratio_level(ratio) },
+            remaining_ratio: remaining,
+            window_minutes: Some(minutes),
+            resets_at: Some(reset),
+            observed_at: text_field(window, "observed_at"),
+            source,
+            scope: Some(scope),
+            stale,
+        });
+    }
+    let actionable = bars.iter().filter(|bar| !bar.stale).max_by(|left, right| {
+        left.ratio
+            .partial_cmp(&right.ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let status = actionable.map(|bar| bar.level).unwrap_or("unknown");
+    let first = actionable.or_else(|| bars.first());
+    let scope = first.and_then(|bar| bar.scope.as_ref());
+    let headline = first
+        .map(|bar| match bar.remaining_ratio {
+            Some(remaining) => format!("{:.0}% remaining · {}", remaining * 100.0, bar.label),
+            None => format!("{} · {}", bar.label, bar.text),
+        })
+        .unwrap_or_else(|| "unmeasured quota".into());
+    let detail = if bars.is_empty() {
+        "No valid native quota-window observation".to_string()
+    } else if actionable.is_none() {
+        "Window is stale or has ended; refresh its native observation".to_string()
+    } else if bars.iter().any(|bar| bar.stale) {
+        "Some windows are stale; fresh applicable windows remain visible".to_string()
+    } else {
+        "Provider-native window; remaining subscription quota is separate from token usage"
+            .to_string()
+    };
+    Some((
+        QuotaFields {
+            status,
+            headline,
+            detail,
+            account: scope.and_then(|scope| scope.account.clone()),
+            scope_model: scope.and_then(|scope| scope.model.clone()),
+            limit_id: scope.and_then(|scope| scope.limit_id.clone()),
+            plan_type: scope.and_then(|scope| scope.plan_type.clone()),
+            pool,
+            provenance: text_field(quota, "provenance").or_else(|| text_field(quota, "source")),
+            observed_ts: first
+                .and_then(|bar| bar.observed_at.as_deref())
+                .and_then(iso_to_ts),
+            force_stale: actionable.is_none() && !bars.is_empty(),
+            bars,
+            ..QuotaFields::default()
+        },
+        applicable,
+    ))
 }
 
 fn ratio_level(ratio: f64) -> &'static str {

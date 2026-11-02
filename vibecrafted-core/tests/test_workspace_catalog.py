@@ -2308,3 +2308,134 @@ def test_workspace_return_attachment_ignores_superseded_stale_instance_without_i
         ).to_payload(),
     )
     assert wc.workspace_return_attachment(ws.workspace_id) is None
+
+
+def _two_historical_project_seats(root, monkeypatch):
+    physical = {"old-a": wc.new_uuid7(), "old-b": wc.new_uuid7()}
+    monkeypatch.setattr(
+        wc, "_frame_session_incarnation", lambda name, _socket: physical.get(name)
+    )
+    first = _destination_seat(root, "old-a", "/socket")
+    second = wc.materialize_instance(
+        workspace_id=first.workspace_id,
+        root=root,
+        vibecrafted_session_id=wc.new_uuid7(),
+        build_id=first.build_id,
+    )
+    wc.record_runtime_session_attachment(
+        workspace_id=second.workspace_id,
+        vibecrafted_session_id=second.vibecrafted_session_id,
+        workspace_instance_id=second.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="old-b",
+        state="live",
+        socket_dir="/socket",
+    )
+    return first, second, physical
+
+
+def test_destination_two_absent_historical_seats_can_open_requested(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    _two_historical_project_seats(root, monkeypatch)
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="project",
+        live_names=[],
+        occupied_names=[],
+        socket_dir="/socket",
+        env={},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "project"
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+def test_destination_live_seat_does_not_hide_busy_historical_seat(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    _, _, physical = _two_historical_project_seats(root, monkeypatch)
+    physical["old-b"] = None  # listed live, but its probe is busy or unavailable
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    with pytest.raises(
+        wc.WorkspaceCatalogError, match="(?i)(busy|unknown|unavailable)"
+    ):
+        wc.resolve_project_destination(
+            root=root,
+            requested="project",
+            live_names=["old-a", "old-b"],
+            occupied_names=["old-a", "old-b"],
+            socket_dir="/socket",
+            env={},
+        )
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize(
+    "case", ["one-live", "two-live", "unknown", "mismatch", "busy", "namespace"]
+)
+def test_destination_physical_census_preserves_history_and_fences(
+    home, tmp_path, monkeypatch, case
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    _, _, physical = _two_historical_project_seats(root, monkeypatch)
+    live, occupied, socket = [], [], "/socket"
+    if case == "one-live":
+        live = ["old-a"]
+    elif case == "two-live":
+        live = ["old-a", "old-b"]
+    elif case == "unknown":
+        physical["mystery"] = None
+        live = ["old-a", "mystery"]
+    elif case == "mismatch":
+        physical["old-a"] = wc.new_uuid7()
+        live = ["old-a"]
+    elif case == "busy":
+        physical["old-b"] = None
+        live = ["old-b"]
+        occupied = ["old-b"]
+    else:
+        socket = "/different"
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    kwargs = {
+        "root": root,
+        "requested": "project",
+        "live_names": live,
+        "occupied_names": occupied,
+        "socket_dir": socket,
+        "env": {},
+    }
+    if case in {"two-live", "unknown", "busy", "namespace"}:
+        with pytest.raises(wc.WorkspaceCatalogError):
+            wc.resolve_project_destination(**kwargs)
+    else:
+        route = wc.resolve_project_destination(**kwargs)
+        assert route["VIBECRAFTED_OPERATOR_SESSION"] == (
+            "old-a" if case == "one-live" else "project"
+        )
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before
+
+
+def test_destination_preserves_exited_requested_seat_recovery(
+    home, tmp_path, monkeypatch
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    _two_historical_project_seats(root, monkeypatch)
+    before = {p: p.read_bytes() for p in home.rglob("*.json")}
+    route = wc.resolve_project_destination(
+        root=root,
+        requested="old-a",
+        live_names=[],
+        occupied_names=["old-a"],
+        socket_dir="/socket",
+        env={},
+    )
+    assert route["VIBECRAFTED_OPERATOR_SESSION"] == "old-a"
+    assert route["VIBECRAFTED_FRAME_DESTINATION_REASON"] == "restore-or-create"
+    assert {p: p.read_bytes() for p in home.rglob("*.json")} == before

@@ -18,6 +18,26 @@ import pytest
 
 from scripts import vetcoders_install as installer
 
+_RETIREMENT_LEDGERS = (
+    "retirement_generations",
+    "retirement_copies",
+    "retirement_pending",
+)
+
+
+def _retirement_ledgers() -> dict:
+    inventory = {
+        f"file-{number}": {"sha256": "a" * 64, "size": 123, "mode": 420}
+        for number in range(500)
+    }
+    return {
+        key: {
+            f"/retired/{key}/{number}": {"files": copy.deepcopy(inventory)}
+            for number in range(4)
+        }
+        for key in _RETIREMENT_LEDGERS
+    }
+
 
 def _previous_receipt() -> dict:
     ledger = {f"/skills/file-{i}.md": [f"/backups/{i}"] for i in range(5000)}
@@ -30,6 +50,7 @@ def _previous_receipt() -> dict:
         },
         "owned_dirs": ["/tmp/rt/releases/4.3.3+gaaaaaaaa"],
         "drift_backup_history": dict(ledger),
+        **_retirement_ledgers(),
         "retirement_rollback": {
             "generation": "/tmp/rt/releases/old",
             "publication": "/tmp/rt/.installer-backups/pub",
@@ -64,6 +85,20 @@ def test_recovery_snapshot_does_not_mutate_the_live_previous():
     assert (
         len(previous["retirement_rollback"]["receipt"]["drift_backup_history"]) == 5000
     )
+    assert all(previous[key] for key in _RETIREMENT_LEDGERS)
+
+
+def test_recovery_snapshot_keeps_retirement_ledgers_only_in_the_live_layer():
+    previous = _previous_receipt()
+    original = copy.deepcopy(previous)
+    snapshot = installer._recovery_receipt_snapshot(previous)
+    assert not any(key in snapshot for key in _RETIREMENT_LEDGERS)
+    assert snapshot["retirement_rollback"] == {
+        key: value
+        for key, value in previous["retirement_rollback"].items()
+        if key != "receipt"
+    } | {"receipt": {"owned_dirs": ["/tmp/rt/releases/old"]}}
+    assert previous == original
 
 
 def test_recovery_snapshot_drops_a_stale_nested_snapshot_instead_of_matryoshka():
@@ -135,10 +170,6 @@ def _receipt_publication_scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     previous = installer._compact_legacy_receipt_layers(_previous_receipt())
     previous["roots"] = {key: str(value) for key, value in paths.items()}
     previous["owned_dirs"] = [str(paths["runtime_home"] / "releases/old")]
-    previous["retirement_generations"] = {
-        "archived": {"files": {"fixture": {"sha256": "a" * 64}}}
-    }
-    previous["retirement_copies"] = {"captured": {"digest": "b" * 64}}
     return paths, destination, selector, previous
 
 
@@ -150,7 +181,9 @@ def test_config_transaction_checkpoint_peak_stays_bounded(
         tmp_path, monkeypatch
     )
     original_history = copy.deepcopy(previous["drift_backup_history"])
-    original_retirement = copy.deepcopy(previous["retirement_generations"])
+    original_retirement = {
+        key: copy.deepcopy(previous[key]) for key in _RETIREMENT_LEDGERS
+    }
     peaks = []
     checkpoint = installer._checkpoint_runtime_install_receipt
 
@@ -163,7 +196,7 @@ def test_config_transaction_checkpoint_peak_stays_bounded(
             assert saved["schema"] == previous["schema"]
             assert saved["version"] == previous["version"]
             assert saved["roots"] == previous["roots"]
-            assert saved["retirement_generations"] == original_retirement
+            assert not any(key in saved for key in _RETIREMENT_LEDGERS)
         checkpoint(runtime_home, receipt)
 
     monkeypatch.setattr(installer, "_checkpoint_runtime_install_receipt", observe)
@@ -201,7 +234,7 @@ def test_config_transaction_checkpoint_peak_stays_bounded(
             receipt["drift_backup_history"][key] == value
             for key, value in original_history.items()
         )
-        assert receipt["retirement_generations"] == original_retirement
+        assert all(receipt[key] == value for key, value in original_retirement.items())
         receipt.pop("install_pending")
         receipt.pop("install_phase")
         installer._checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
@@ -220,6 +253,8 @@ def test_config_transaction_failure_preserves_live_history(
     receipt = copy.deepcopy(previous)
     staged_generation = str(paths["runtime_home"] / "releases/new")
     receipt["owned_dirs"].append(staged_generation)
+    for key in _RETIREMENT_LEDGERS:
+        receipt[key][staged_generation] = {"captured_after_previous": key}
     receipt.update(
         version="4.4.0+gnew",
         install_pending=True,
@@ -289,8 +324,10 @@ def test_config_transaction_failure_preserves_live_history(
     )
     assert history[str(destination)] == [str(staging / "before-0")]
     assert history[str(selector)] == [str(staging / "before-1")]
-    assert receipt["retirement_generations"] == previous["retirement_generations"]
-    assert receipt["retirement_copies"] == previous["retirement_copies"]
+    for key in _RETIREMENT_LEDGERS:
+        assert receipt[key] == previous[key] | {
+            staged_generation: {"captured_after_previous": key}
+        }
     assert "config_transaction" not in receipt
     assert "install_pending" not in receipt
     assert _receipt_bytes(previous) == previous_bytes
@@ -323,6 +360,88 @@ def test_loader_compacts_legacy_config_transaction_history_idempotently(
     compacted = _receipt_bytes(loaded)
     assert _receipt_bytes(installer._compact_legacy_receipt_layers(loaded)) == compacted
     assert path.read_bytes() == original
+
+
+def test_loader_compacts_all_legacy_recovery_retirement_duplicates(
+    tmp_path: Path,
+) -> None:
+    previous = _previous_receipt()
+    receipt = copy.deepcopy(previous)
+    receipt["preparing_previous_receipt"] = copy.deepcopy(previous)
+    receipt["config_transaction"] = {
+        "schema": "vibecrafted.config-publication.v1",
+        "entries": [{"before_digest": "b" * 64, "phase": "prepared"}],
+        "previous_receipt": copy.deepcopy(previous),
+    }
+    path = tmp_path / "install-receipt.json"
+    original = _receipt_bytes(receipt)
+    path.write_bytes(original)
+    loaded = installer._load_runtime_install_receipt(path)
+    for saved in (
+        loaded["preparing_previous_receipt"],
+        loaded["config_transaction"]["previous_receipt"],
+    ):
+        assert not any(key in saved for key in _RETIREMENT_LEDGERS)
+    assert all(loaded[key] == previous[key] for key in _RETIREMENT_LEDGERS)
+    assert len(_receipt_bytes(loaded)) < len(original) // 2
+    assert installer._compact_legacy_receipt_layers(copy.deepcopy(loaded)) == loaded
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("key", _RETIREMENT_LEDGERS)
+@pytest.mark.parametrize(
+    "location",
+    ["preparing", "transaction", "rollback", "deep-preparing", "deep-rollback"],
+)
+def test_loader_refuses_to_discard_snapshot_only_retirement_proof(
+    tmp_path: Path, key: str, location: str
+) -> None:
+    receipt = {"schema": installer.RUNTIME_INSTALL_SCHEMA, "roots": {}}
+    snapshot = {key: {"legacy": {"sha256": "a" * 64}}}
+    if location == "preparing":
+        receipt["preparing_previous_receipt"] = snapshot
+    elif location == "transaction":
+        receipt["config_transaction"] = {"previous_receipt": snapshot}
+    elif location == "rollback":
+        receipt["retirement_rollback"] = {"receipt": snapshot}
+    elif location == "deep-preparing":
+        receipt["preparing_previous_receipt"] = {"preparing_previous_receipt": snapshot}
+    else:
+        receipt["preparing_previous_receipt"] = {
+            "retirement_rollback": {"receipt": snapshot}
+        }
+    path = tmp_path / "install-receipt.json"
+    original = _receipt_bytes(receipt)
+    path.write_bytes(original)
+    with pytest.raises(
+        installer.RuntimeInstallRefusal, match="only in a recovery snapshot"
+    ):
+        installer._load_runtime_install_receipt(path)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("live_present", [False, True])
+def test_restore_preserves_snapshot_only_proof_but_live_empty_maps_win(
+    tmp_path: Path, live_present: bool
+) -> None:
+    paths = {"runtime_home": tmp_path}
+    receipt = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {"runtime_home": str(tmp_path)},
+    }
+    proof = {key: {"legacy": {"sha256": "a" * 64}} for key in _RETIREMENT_LEDGERS}
+    restored = {**receipt, "version": "old", **copy.deepcopy(proof)}
+    if live_present:
+        receipt.update({key: {} for key in _RETIREMENT_LEDGERS})
+    installer._restore_runtime_publication_receipt(paths, receipt, restored)
+    assert all(
+        receipt[key] == ({} if live_present else proof[key])
+        for key in _RETIREMENT_LEDGERS
+    )
+    loaded = installer._load_runtime_install_receipt(
+        installer._runtime_receipt_path(tmp_path)
+    )
+    assert all(loaded[key] == receipt[key] for key in _RETIREMENT_LEDGERS)
 
 
 @pytest.mark.parametrize("published", [False, True], ids=["prepared", "replaced"])

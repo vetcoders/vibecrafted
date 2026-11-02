@@ -2555,16 +2555,45 @@ def _mounted_release_dmg(dmg: Path):
     hdiutil = _required_tool("hdiutil", failure_code=E_PROOF)
     with tempfile.TemporaryDirectory(prefix="vibecrafted-release-mount-") as directory:
         mount = Path(directory)
+        command = [
+            hdiutil,
+            "attach",
+            "-readonly",
+            "-nobrowse",
+            "-mountpoint",
+            str(mount),
+            str(dmg),
+        ]
+        diskutil = shutil.which("diskutil")
+        if diskutil is not None:
+            try:
+                capability = subprocess.run(
+                    [diskutil, "image", "attach", "--help"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                _fail(
+                    E_PROOF, f"disk image attach capability could not be checked: {exc}"
+                )
+            if capability.returncode == 0 and all(
+                option in capability.stdout
+                for option in ("--readOnly", "--nobrowse", "--mountPoint")
+            ):
+                command = [
+                    diskutil,
+                    "image",
+                    "attach",
+                    "--readOnly",
+                    "--nobrowse",
+                    "--mountPoint",
+                    str(mount),
+                    str(dmg),
+                ]
         _run_tool(
-            [
-                hdiutil,
-                "attach",
-                "-readonly",
-                "-nobrowse",
-                "-mountpoint",
-                str(mount),
-                str(dmg),
-            ],
+            command,
             failure_code=E_PROOF,
             context="signed release DMG could not be mounted",
         )
@@ -4105,8 +4134,14 @@ def _scenario_workshop_typography(
         typography = session.await_screen(
             "Step 2: Terminal Typography", deadline=deadline
         )
-        if "Glyph sample:" not in typography:
-            raise RuntimeError("installed Workshop typography has no glyph preview")
+        # PTY reads may split one curses repaint between the heading and glyph
+        # row. Wait for both using the same bounded route deadline.
+        try:
+            typography = session.await_screen("Glyph sample:", deadline=deadline)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "installed Workshop typography has no glyph preview"
+            ) from error
         # Esc: Step 2 -> Step 1, Esc: close setup, Ctrl+Q: leave the launcher,
         # discarding the probe's private in-memory draft without applying it.
         session.send(b"\x1b")

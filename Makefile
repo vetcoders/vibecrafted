@@ -104,6 +104,10 @@ RUNTIME_PACK_SIGNATURE ?=
 RUNTIME_PACK_CARRIER_BASENAME ?=
 RUNTIME_PACK_BOOTSTRAP_INSTALLER ?=
 RUNTIME_PACK_BOOTSTRAP_SHA256 ?=
+RUNTIME_PACK_RESOLVE_PREFERENCE ?=
+RUNTIME_PACK_PREFERENCE_CURRENT_SHA256 ?=
+RUNTIME_PACK_PREFERENCE_INCOMING_SHA256 ?=
+RUNTIME_PACK_PREFERENCE_PATH ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
 # detached worktrees at each donor HEAD instead of refusing a dirty donor.
@@ -474,7 +478,7 @@ install:
 			$(MAKE) --no-print-directory runtime-pack; \
 		fi; \
 	fi
-	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)") $(if $(RUNTIME_PACK_CHECKSUM),--checksum "$(RUNTIME_PACK_CHECKSUM)") $(if $(RUNTIME_PACK_SIGNATURE),--signature "$(RUNTIME_PACK_SIGNATURE)") $(if $(RUNTIME_PACK_CARRIER_BASENAME),--carrier-basename "$(RUNTIME_PACK_CARRIER_BASENAME)") $(if $(RUNTIME_PACK_BOOTSTRAP_INSTALLER),--bootstrap-installer "$(RUNTIME_PACK_BOOTSTRAP_INSTALLER)") $(if $(RUNTIME_PACK_BOOTSTRAP_SHA256),--bootstrap-installer-sha256 "$(RUNTIME_PACK_BOOTSTRAP_SHA256)")
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)") $(if $(RUNTIME_PACK_CHECKSUM),--checksum "$(RUNTIME_PACK_CHECKSUM)") $(if $(RUNTIME_PACK_SIGNATURE),--signature "$(RUNTIME_PACK_SIGNATURE)") $(if $(RUNTIME_PACK_CARRIER_BASENAME),--carrier-basename "$(RUNTIME_PACK_CARRIER_BASENAME)") $(if $(RUNTIME_PACK_BOOTSTRAP_INSTALLER),--bootstrap-installer "$(RUNTIME_PACK_BOOTSTRAP_INSTALLER)") $(if $(RUNTIME_PACK_BOOTSTRAP_SHA256),--bootstrap-installer-sha256 "$(RUNTIME_PACK_BOOTSTRAP_SHA256)") $(if $(RUNTIME_PACK_RESOLVE_PREFERENCE),--resolve-preference "$(RUNTIME_PACK_RESOLVE_PREFERENCE)") $(if $(RUNTIME_PACK_PREFERENCE_CURRENT_SHA256),--preference-current-sha256 "$(RUNTIME_PACK_PREFERENCE_CURRENT_SHA256)") $(if $(RUNTIME_PACK_PREFERENCE_INCOMING_SHA256),--preference-incoming-sha256 "$(RUNTIME_PACK_PREFERENCE_INCOMING_SHA256)") $(if $(RUNTIME_PACK_PREFERENCE_PATH),--preference-path "$(RUNTIME_PACK_PREFERENCE_PATH)")
 	@bash scripts/install-foundations.sh loctree aicx prview screenscribe
 	@$(MAKE) --no-print-directory reconcile-server-service
 
@@ -919,7 +923,7 @@ init-hooks:
 		git config core.hooksPath scripts/hooks >/dev/null; \
 		chmod +x scripts/hooks/pre-commit scripts/hooks/pre-push scripts/hooks/commit-msg; \
 		command -v uv >/dev/null 2>&1 || { echo "bootstrapping uv..."; curl -LsSf https://astral.sh/uv/install.sh | sh; }; \
-		uvx ruff --version >/dev/null 2>&1 || echo "  [warn] ruff unavailable via uvx"; \
+		uvx "$$(bash scripts/lib/ruff-spec.sh)" --version >/dev/null 2>&1 || echo "  [warn] pinned ruff unavailable via uvx"; \
 		command -v semgrep >/dev/null 2>&1 || uvx semgrep --version >/dev/null 2>&1 || echo "  [warn] semgrep unavailable"; \
 		npx --yes prettier --version >/dev/null 2>&1 || echo "  [warn] prettier unavailable via npx"; \
 	else \

@@ -136,6 +136,12 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
     plugin_manifest = tmp_path / "plugin.json"
     pyprojects = (
         tmp_path / "vibecrafted-core" / "pyproject.toml",
+        tmp_path
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "container-python"
+        / "pyproject.toml",
         tmp_path / "vibecrafted-mcp" / "pyproject.toml",
     )
     packaged_versions = (
@@ -193,7 +199,7 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
             '[project]\nname = "fixture"\nversion = "1.4.1"\n', encoding="utf-8"
         )
     for packaged in packaged_versions:
-        packaged.parent.mkdir(parents=True)
+        packaged.parent.mkdir(parents=True, exist_ok=True)
         packaged.write_text("1.4.1\n", encoding="utf-8")
     for cargo in cargo_manifests:
         cargo.parent.mkdir(parents=True)
@@ -265,6 +271,7 @@ def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
         "VERSION",
         "plugin.json",
         "vibecrafted-core/pyproject.toml",
+        "vibecrafted-core/vibecrafted_core/runtime/container-python/pyproject.toml",
         "vibecrafted-core/vibecrafted_core/VERSION",
         "vibecrafted-mcp/pyproject.toml",
         "vibecrafted-mcp/vibecrafted_mcp/VERSION",
@@ -355,6 +362,12 @@ def test_version_bump_rejects_drift_without_partial_writes(tmp_path: Path) -> No
     version_file = tmp_path / "VERSION"
     pyprojects = (
         tmp_path / "vibecrafted-core" / "pyproject.toml",
+        tmp_path
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "container-python"
+        / "pyproject.toml",
         tmp_path / "vibecrafted-mcp" / "pyproject.toml",
     )
     packaged_versions = (
@@ -374,7 +387,7 @@ def test_version_bump_rejects_drift_without_partial_writes(tmp_path: Path) -> No
             encoding="utf-8",
         )
     for packaged in packaged_versions:
-        packaged.parent.mkdir(parents=True)
+        packaged.parent.mkdir(parents=True, exist_ok=True)
         packaged.write_text("1.4.1\n", encoding="utf-8")
     for cargo in cargo_manifests:
         cargo.parent.mkdir(parents=True)

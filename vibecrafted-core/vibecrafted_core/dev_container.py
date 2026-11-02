@@ -21,11 +21,15 @@ Ownership split:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -84,6 +88,17 @@ class ContainerCancelled(ContainerError):
         super().__init__(message, stage="cancelled")
 
 
+def require_host_message_bridge() -> None:
+    """Refuse until guest receive and ACK reach the host run owner."""
+    raise ContainerError(
+        "the host run inbox and acknowledgements have no verified container "
+        "transport; a guest-local Vibecrafted installation is not the host "
+        "control plane. Local container agent launch is unavailable until a "
+        "run-scoped bridge and matching runtime/skill staging are delivered.",
+        stage="message_bridge",
+    )
+
+
 @dataclass(frozen=True)
 class EngineStatus:
     available: bool
@@ -134,6 +149,32 @@ class ContainerTarget:
             "recipe_digest": self.recipe_digest,
             "host_root": self.host_root,
             "workdir": self.workdir,
+        }
+
+
+@dataclass(frozen=True)
+class ContainerRuntime:
+    """Private guest runtime and exact selected-skill path translations."""
+
+    bin_dir: str
+    skill_paths: dict[str, str]
+    version: str
+    source_revision: str
+    source_dirty: bool | None
+    snapshot_sha256: str
+    wheel_sha256: str
+    skills_sha256: str
+
+    def receipt(self) -> dict[str, Any]:
+        return {
+            "bin_dir": self.bin_dir,
+            "version": self.version,
+            "source_revision": self.source_revision,
+            "source_dirty": self.source_dirty,
+            "snapshot_sha256": self.snapshot_sha256,
+            "wheel_sha256": self.wheel_sha256,
+            "skills_sha256": self.skills_sha256,
+            "skill_paths": self.skill_paths,
         }
 
 
@@ -535,14 +576,26 @@ def _host_sample(root: Path) -> list[str]:
 
 
 def _visibility_error(root: Path, context: str) -> ContainerError:
-    home = Path.home()
     if context.startswith("colima"):
         profile = _colima_profile(context)
-        suffix = f" --profile {profile}" if profile else ""
+        command = ["colima", "start"]
+        if profile:
+            command.append(f"--profile={profile}")
+        command.append("--edit")
+        editor_command = shlex.join(command)
+        location = json.dumps(str(root), ensure_ascii=True)
         how = (
-            f"Colima shares only {home} by default. Add this path as a mount "
-            f"(`colima stop{suffix} && colima start{suffix} --mount {root}:w`, or "
-            f"`mounts:` in ~/.colima/{profile or 'default'}/colima.yaml)"
+            "Colima's --mount flag replaces the configured mounts. First verify "
+            "the profile configuration and its current VM shares; if you cannot "
+            "verify them, do not restart. When it is safe to restart the VM and "
+            f"its containers, edit the profile with `{editor_command}`. In mounts, "
+            "preserve all existing mounts, including their mount points and access "
+            "modes, and add this entry under mounts:\n"
+            f"  - location: {location}\n    writable: true\n"
+            "If the configuration has mounts: [], "
+            "the implicit writable HOME share must also be added explicitly "
+            '(location: "~", writable: true) when adding the first mount. '
+            "Check for overlapping mounts before applying the edit"
         )
     else:
         how = "Share this path with the Docker VM (Docker Desktop: Settings → Resources → File sharing)"
@@ -806,6 +859,411 @@ def _run_dir(run_id: str) -> str:
             f"unsafe run id for container staging: {run_id!r}", stage="stage"
         )
     return f"{RUN_STAGING_ROOT}/{run_id}"
+
+
+def _copy_runtime_tree(source: Path, destination: Path) -> None:
+    """Snapshot regular files and relative links that stay inside this tree."""
+    source = source.resolve(strict=True)
+    if not source.is_dir():
+        raise ContainerError(f"not a directory: {source}", stage="runtime")
+    for directory, subdirs, files in os.walk(source, followlinks=False):
+        subdirs[:] = [item for item in subdirs if item != "__pycache__"]
+        for name in [*subdirs, *files]:
+            item = Path(directory) / name
+            if item.is_symlink():
+                target = os.readlink(item)
+                try:
+                    resolved = item.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    raise ContainerError(
+                        f"invalid resource link: {item}", stage="runtime"
+                    ) from exc
+                if os.path.isabs(target) or not resolved.is_relative_to(source):
+                    raise ContainerError(
+                        f"resource link escapes its tree: {item}", stage="runtime"
+                    )
+            elif not item.is_file() and not item.is_dir():
+                raise ContainerError(f"unsupported resource: {item}", stage="runtime")
+    shutil.copytree(
+        source,
+        destination,
+        symlinks=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+    )
+
+
+def _tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(root.rglob("*")):
+        if (
+            "__pycache__" in item.relative_to(root).parts
+            or item.name == ".DS_Store"
+            or item.name.endswith(".pyc")
+        ):
+            continue
+        relative = item.relative_to(root).as_posix().encode()
+        if item.is_symlink():
+            kind, data = b"link", os.readlink(item).encode()
+        elif item.is_file():
+            kind, data = b"file", item.read_bytes()
+        elif item.is_dir():
+            kind, data = b"dir", b""
+        else:
+            raise ContainerError(f"unsupported snapshot entry: {item}", stage="runtime")
+        digest.update(len(relative).to_bytes(8, "big") + relative + kind)
+        digest.update(len(data).to_bytes(8, "big") + data)
+        # Symlink permissions are not portable (macOS and Linux report
+        # different mode bits); its literal target is the meaningful content.
+        mode = 0 if item.is_symlink() else item.lstat().st_mode & 0o777
+        digest.update(mode.to_bytes(2, "big"))
+    return digest.hexdigest()
+
+
+def _package_identity(package: Path) -> tuple[str, str, bool | None]:
+    """Bind a package to its own source tree or installed provenance."""
+    from .runtime_paths import read_version_file, version_is_stamped
+
+    version = read_version_file(package)
+    if version == "unknown":
+        raise ContainerError("package VERSION is missing", stage="runtime")
+    # The launcher can inherit Git's repository-routing variables from a hook
+    # in an unrelated checkout. `git -C` alone does not override those.
+    # These probes are read-only and need no inherited Git process state.
+    git_env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    git_env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        git = subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(package),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if git.returncode == 0:
+            root = Path(git.stdout.strip()).resolve()
+            expected = (root / "vibecrafted-core" / "vibecrafted_core").resolve()
+            standalone = (root / "vibecrafted_core").resolve()
+            if package.resolve() not in {expected, standalone}:
+                # An installed package may itself be located under an
+                # unrelated checkout; that checkout is not its source owner.
+                git = None
+        if git is not None and git.returncode == 0:
+            revision = subprocess.run(
+                ["git", "--no-replace-objects", "-C", str(root), "rev-parse", "HEAD"],
+                env=git_env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            dirty = (
+                subprocess.run(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(root),
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                        "--",
+                        str(package),
+                    ],
+                    capture_output=True,
+                    env=git_env,
+                    text=True,
+                    timeout=10,
+                    check=True,
+                ).stdout
+                != ""
+            )
+            if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                raise ContainerError("invalid source revision", stage="runtime")
+            suffix = ".dirty" if dirty else ""
+            return (
+                f"{version.split('+', 1)[0]}+g{revision[:8]}{suffix}",
+                revision,
+                dirty,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ContainerError(
+            f"cannot inspect package provenance: {exc}", stage="runtime"
+        ) from exc
+    # Installed runtime packs carry their package and source provenance together.
+    provenance_path = package.parent.parent / "source-provenance.json"
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        revision = provenance["source_revision"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ContainerError(
+            "installed package has no source provenance", stage="runtime"
+        ) from exc
+    if (
+        not version_is_stamped(version)
+        or not isinstance(revision, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", revision)
+        or not revision.startswith(version.split("+g", 1)[1])
+    ):
+        raise ContainerError(
+            "installed version does not match source provenance", stage="runtime"
+        )
+    return version, revision, None
+
+
+def _skill_name(path: Path) -> str:
+    if path.name != "SKILL.md" or not path.is_file():
+        raise ContainerError(f"selected SKILL.md is missing: {path}", stage="runtime")
+    for part in reversed(path.parts[:-1]):
+        if re.fullmatch(r"(?:vc|vetcoders)-[A-Za-z0-9_-]+", part):
+            return part
+    raise ContainerError(
+        f"selected skill has no safe identity: {path}", stage="runtime"
+    )
+
+
+def prepare_agent_runtime(
+    target: ContainerTarget,
+    run_id: str,
+    *,
+    selected_skills: Mapping[str, Path],
+    env: Mapping[str, str] | None = None,
+) -> ContainerRuntime:
+    """Build the executing core package into a private Linux guest environment.
+
+    A staged project descriptor ships with the package so a Runtime Pack does
+    not need a source checkout. Each immutable local selection retains its
+    complete skills/runtime tree, including version-specific sibling resources.
+    """
+    from .package_resources import package_root
+
+    package = package_root().resolve(strict=True)
+    version, revision, dirty = _package_identity(package)
+    descriptor = package / "runtime" / "container-python"
+    if (
+        not (descriptor / "pyproject.toml").is_file()
+        or not (descriptor / "README.md").is_file()
+    ):
+        raise ContainerError("package lacks guest build metadata", stage="runtime")
+    with tempfile.TemporaryDirectory(prefix="vc-guest-runtime-") as scratch:
+        work = Path(scratch)
+        project = work / "project"
+        project.mkdir()
+        source_digest = _tree_digest(package)
+        _copy_runtime_tree(package, project / "vibecrafted_core")
+        if (
+            _tree_digest(project / "vibecrafted_core") != source_digest
+            or _tree_digest(package) != source_digest
+            or _package_identity(package) != (version, revision, dirty)
+        ):
+            raise ContainerError("package changed while snapshotting", stage="runtime")
+        (project / "vibecrafted_core" / "VERSION").write_text(
+            version + "\n", encoding="utf-8"
+        )
+        shutil.copy2(descriptor / "pyproject.toml", project / "pyproject.toml")
+        shutil.copy2(descriptor / "README.md", project / "README.md")
+        snapshot_hash = _tree_digest(project)
+        skill_projections = work / "skills"
+        bundled = skill_projections / "bundled"
+        bundled.mkdir(parents=True)
+        _copy_runtime_tree(project / "vibecrafted_core" / "skills", bundled / "skills")
+        _copy_runtime_tree(
+            project / "vibecrafted_core" / "runtime", bundled / "runtime"
+        )
+        mapped_paths: dict[str, str] = {}
+        seen_paths: dict[Path, str] = {}
+        for host_name, path in selected_skills.items():
+            path = Path(path)
+            name = _skill_name(path)
+            resolved = path.resolve(strict=True)
+            if resolved in seen_paths:
+                mapped_paths[str(host_name)] = seen_paths[resolved]
+                continue
+            bundled_source = package / "skills" / name / "SKILL.md"
+            if bundled_source.is_file() and resolved == bundled_source.resolve():
+                relative = f"bundled/skills/{name}/SKILL.md"
+            else:
+                projection_name = f"selection-{len(seen_paths)}"
+                destination = skill_projections / projection_name
+                # The local skill owner snapshots a complete version under
+                # <version>/tree/{skills,runtime}; preserve it as one unit.
+                selection_tree = resolved.parent.parent.parent
+                local_tree = (
+                    resolved.parent.parent.name == "skills"
+                    and selection_tree.name == "tree"
+                )
+                if local_tree:
+                    if not (selection_tree / "runtime").is_dir():
+                        raise ContainerError(
+                            f"local skill version has no runtime tree: {name}",
+                            stage="runtime",
+                        )
+                    selected_digest = _tree_digest(selection_tree)
+                    _copy_runtime_tree(selection_tree, destination)
+                    selected_source = selection_tree
+                else:
+                    # Explicit external skill files have no version tree; give
+                    # them a private bundled companion context, never alter
+                    # the bundled projection or another selected version.
+                    _copy_runtime_tree(bundled, destination)
+                    chosen_dir = destination / "skills" / name
+                    if chosen_dir.exists():
+                        shutil.rmtree(chosen_dir)
+                    selected_digest = _tree_digest(resolved.parent)
+                    _copy_runtime_tree(resolved.parent, chosen_dir)
+                    selected_source = resolved.parent
+                if (
+                    _tree_digest(destination if local_tree else chosen_dir)
+                    != selected_digest
+                    or _tree_digest(selected_source) != selected_digest
+                ):
+                    raise ContainerError(
+                        f"selected skill changed while snapshotting: {name}",
+                        stage="runtime",
+                    )
+                relative = f"{projection_name}/skills/{name}/SKILL.md"
+            seen_paths[resolved] = relative
+            mapped_paths[str(host_name)] = relative
+        skills_hash = _tree_digest(work / "skills")
+        runtime_dir = (
+            f"{_run_dir(run_id)}/runtime-{snapshot_hash[:16]}-{skills_hash[:16]}"
+        )
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+            archive.add(project, arcname="project")
+            archive.add(work / "skills", arcname="skills")
+        command = [
+            target.cli,
+            "exec",
+            "-i",
+            target.container_id,
+            "sh",
+            "-c",
+            _INSTALL_AGENT_RUNTIME,
+            "sh",
+            runtime_dir,
+            version,
+            snapshot_hash,
+            skills_hash,
+            *sorted(set(mapped_paths.values())),
+        ]
+        try:
+            result = _run(command, env, timeout=300, input_bytes=payload.getvalue())
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ContainerError(
+                f"guest runtime staging failed: {exc}", stage="runtime"
+            ) from exc
+        if result.returncode:
+            raise ContainerError(
+                f"guest runtime preparation failed: {_text(result.stderr)[-2000:]}",
+                stage="runtime",
+            )
+        wheel_hash = (
+            _text(result.stdout).splitlines()[-1] if _text(result.stdout) else ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", wheel_hash):
+            raise ContainerError("guest wheel digest receipt missing", stage="runtime")
+    return ContainerRuntime(
+        bin_dir=f"{runtime_dir}/venv/bin",
+        skill_paths={
+            key: f"{runtime_dir}/skills/{path}" for key, path in mapped_paths.items()
+        },
+        version=version,
+        source_revision=revision,
+        source_dirty=dirty,
+        snapshot_sha256=snapshot_hash,
+        wheel_sha256=wheel_hash,
+        skills_sha256=skills_hash,
+    )
+
+
+_INSTALL_AGENT_RUNTIME = r"""set -eu
+r=$1; expected=$2; snapshot_hash=$3; skills_hash=$4; shift 4
+umask 077
+mkdir -p "$(dirname "$r")"
+created=0
+if mkdir "$r" 2>/dev/null; then
+  created=1
+  tmp=$(mktemp -d /tmp/vc-agent-build.XXXXXXXX)
+  trap 'rm -rf "$r" "$tmp"' EXIT HUP INT TERM
+  tar -xpzf - -C "$tmp"
+  uv build --wheel --out-dir "$tmp/dist" "$tmp/project" >&2
+  set -- "$tmp"/dist/*.whl "$@"
+  wheel=$1; shift
+  [ -f "$wheel" ] || { echo "guest wheel not built" >&2; exit 1; }
+  python3 - "$wheel" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    required = {"vibecrafted_core/cli.py", "vibecrafted_core/dev_container.py", "vibecrafted_core/VERSION", "vibecrafted_core/skills/vc-init/SKILL.md"}
+    if not required <= set(z.namelist()):
+        raise SystemExit("guest wheel is missing core modules or skills")
+PY
+  cp "$wheel" "$r/$(basename "$wheel")"
+  mv "$tmp/project" "$r/source"
+  mv "$tmp/skills" "$r/skills"
+  wheel="$r/$(basename "$wheel")"
+  uv venv "$r/venv" >&2
+  UV_LINK_MODE=copy uv pip install --python "$r/venv/bin/python" "$wheel" >&2
+  sha256sum "$wheel" | cut -d ' ' -f 1 > "$r/.wheel-sha256"
+else
+  # Consume stdin before retrying; never replace an active run's runtime.
+  cat >/dev/null
+  [ -f "$r/.ready" ] || { echo "guest runtime already exists but is incomplete" >&2; exit 1; }
+fi
+set -- "$r"/*.whl "$@"
+wheel=$1; shift
+[ -f "$wheel" ] || { echo "guest wheel missing" >&2; exit 1; }
+expected_hash=$(cat "$r/.wheel-sha256")
+[ "$(sha256sum "$wheel" | cut -d ' ' -f 1)" = "$expected_hash" ] || { echo "guest wheel digest mismatch" >&2; exit 1; }
+[ "$("$r/venv/bin/python" -c 'import sys; from pathlib import Path; from vibecrafted_core.dev_container import _tree_digest; print(_tree_digest(Path(sys.argv[1])))' "$r/source")" = "$snapshot_hash" ] || { echo "guest package snapshot mismatch" >&2; exit 1; }
+[ "$("$r/venv/bin/python" -c 'import sys; from pathlib import Path; from vibecrafted_core.dev_container import _tree_digest; print(_tree_digest(Path(sys.argv[1])))' "$r/skills")" = "$skills_hash" ] || { echo "guest skill digest mismatch" >&2; exit 1; }
+actual=$("$r/venv/bin/vibecrafted" --version)
+[ "$actual" = "vibecrafted $expected" ] || { echo "guest version mismatch: $actual" >&2; exit 1; }
+"$r/venv/bin/vibecrafted" capabilities --json >/dev/null
+"$r/venv/bin/vibecrafted" message --help >/dev/null
+"$r/venv/bin/python" - "$r/venv/bin" "$wheel" <<'PY'
+import hashlib
+import importlib.metadata
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+from vibecrafted_core.package_resources import package_root
+package = package_root()
+with zipfile.ZipFile(sys.argv[2]) as archive:
+    for name in archive.namelist():
+        if not name.startswith("vibecrafted_core/") or name.endswith("/"):
+            continue
+        installed = package.parent / name
+        if installed.is_symlink() or not installed.is_file() or hashlib.sha256(installed.read_bytes()).digest() != hashlib.sha256(archive.read(name)).digest():
+            raise SystemExit(f"guest installed package differs from wheel: {name}")
+names = sorted(entry.name for entry in importlib.metadata.distribution("vibecrafted").entry_points if entry.group == "console_scripts")
+if not names:
+    raise SystemExit("guest package has no CLI entrypoints")
+for name in names:
+    result = subprocess.run([str(Path(sys.argv[1]) / name), "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=False)
+    if result.returncode:
+        raise SystemExit(f"guest entrypoint {name} --help failed ({result.returncode}): {result.stderr.decode(errors='replace')[-500:]}")
+PY
+for skill in "$@"; do
+  [ -r "$r/skills/$skill" ] || { echo "selected skill is unreadable: $skill" >&2; exit 1; }
+done
+if [ "$created" -eq 1 ]; then
+  : > "$r/.ready"
+  rm -rf "$tmp"
+  trap - EXIT HUP INT TERM
+fi
+printf '%s\n' "$expected_hash"
+"""
 
 
 def stage_text(

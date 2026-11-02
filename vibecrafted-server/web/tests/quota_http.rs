@@ -8,7 +8,7 @@
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,33 +30,49 @@ const CONTRACT: &str = concat!(
 );
 
 fn isolate_host() -> PathBuf {
-    static ONCE: Once = Once::new();
-    let host = std::env::temp_dir().join(format!("vc-quota-host-{}", std::process::id()));
-    ONCE.call_once(|| {
-        fs::create_dir_all(&host).expect("host dir");
+    static HOST: OnceLock<PathBuf> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let host = private_dir("host");
         // SAFETY: runs once, before any request of this binary reads the environment.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- every test request passes through this OnceLock before reading HOME/overrides; no mutation after initialization.
         unsafe {
             std::env::set_var("HOME", &host);
             for id in PROVIDERS {
                 std::env::remove_var(format!("VIBECRAFTED_{}_QUOTA_JSON", id.to_uppercase()));
             }
         }
-    });
-    host
+        host
+    })
+    .clone()
+}
+
+fn private_dir(label: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir -- create is atomic and rejects existing paths/symlinks; mode0700 is applied before Unix creation.
+    let path = std::env::temp_dir().join(format!(
+        "vc-quota-{label}-{}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .expect("exclusive private quota fixture");
+    path
 }
 
 struct TestHome(PathBuf);
 
 impl TestHome {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
         isolate_host();
-        let path = std::env::temp_dir().join(format!(
-            "vc-quota-http-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).expect("home");
+        let path = private_dir("http");
         Self(path)
     }
 
@@ -88,6 +104,161 @@ fn iso(seconds_ago: u64) -> String {
     chrono::DateTime::from_timestamp((now_s() - seconds_ago) as i64, 0)
         .expect("ts")
         .to_rfc3339()
+}
+
+fn native_window(observed: &str, reset: u64) -> Value {
+    json!({
+        "ts":now_s(),"generated_at":iso(0),
+        "metrics":{"processed_total":999999},
+        "quota":{"status":"observed","source":"codex.native.token_count.rate_limits",
+          "provenance":"native_local_rate_limits","observed_at":observed,
+          "scope":{"pool":"openai","limit_id":"codex","plan_type":"pro"},
+          "windows":[{"id":"primary","used_ratio":0.39,"remaining_ratio":0.61,
+            "window_minutes":10080,"resets_at":reset,"observed_at":observed,
+            "source":"codex.native.token_count.rate_limits",
+            "scope":{"pool":"openai","limit_id":"codex","plan_type":"pro"}}]}
+    })
+}
+
+#[tokio::test]
+async fn native_weekly_window_preserves_duration_reset_source_and_scope() {
+    let home = TestHome::new();
+    let observed = iso(2);
+    let reset = now_s() + 3600;
+    home.write_json("codex", &native_window(&observed, reset));
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    let codex = &board["agents"][0];
+    assert_eq!(codex["state"], "ok");
+    assert_eq!(codex["bars"][0]["label"], "7d");
+    assert_eq!(codex["bars"][0]["window_minutes"], 10080);
+    assert_eq!(codex["bars"][0]["ratio"], 0.39);
+    assert_eq!(codex["bars"][0]["remaining_ratio"], 0.61);
+    assert_eq!(codex["bars"][0]["resets_at"], reset);
+    assert_eq!(
+        codex["bars"][0]["source"],
+        "codex.native.token_count.rate_limits"
+    );
+    assert_eq!(codex["observed_at"], observed);
+    assert_eq!(codex["scope"]["limit_id"], "codex");
+    assert_eq!(codex["scope"]["plan_type"], "pro");
+    assert!(codex["scope"].get("account").is_none_or(Value::is_null));
+}
+
+#[tokio::test]
+async fn fresh_native_exhaustion_survives_an_unrelated_stale_window() {
+    let home = TestHome::new();
+    let mut value = native_window(&iso(0), now_s() + 3600);
+    value["quota"]["windows"][0]["used_ratio"] = json!(1.0);
+    value["quota"]["windows"][0]["remaining_ratio"] = json!(0.0);
+    let mut stale = value["quota"]["windows"][0].clone();
+    stale["id"] = json!("secondary");
+    stale["observed_at"] = json!(iso(600));
+    value["quota"]["windows"]
+        .as_array_mut()
+        .unwrap()
+        .push(stale);
+    home.write_json("codex", &value);
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    let codex = &board["agents"][0];
+    assert_eq!(codex["state"], "exhausted");
+    assert_eq!(codex["stale"], false);
+    assert_eq!(codex["bars"][1]["stale"], true);
+    assert!(codex["age_s"].as_u64().unwrap() < 10);
+}
+
+#[tokio::test]
+async fn native_model_scope_is_filtered_before_aggregation_and_unscoped_means_pool_wide() {
+    let home = TestHome::new();
+    let mut value = native_window(&iso(0), now_s() + 3600);
+    value["last_session"] = json!({"model":"model-b"});
+    value["quota"]["windows"][0]["scope"]["model"] = json!("model-a");
+    value["quota"]["windows"][0]["used_ratio"] = json!(0.2);
+    value["quota"]["windows"][0]["remaining_ratio"] = json!(0.8);
+    let mut other = value["quota"]["windows"][0].clone();
+    other["id"] = json!("model-b-limit");
+    other["scope"]["model"] = json!("model-b");
+    other["used_ratio"] = json!(1.0);
+    other["remaining_ratio"] = json!(0.0);
+    value["quota"]["windows"]
+        .as_array_mut()
+        .unwrap()
+        .push(other);
+    home.write_json("codex", &value);
+    let (_, _, all) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    assert_eq!(all["agents"][0]["state"], "exhausted");
+    assert_eq!(all["agents"][0]["scope"]["model"], "model-b");
+    let (_, _, selected) = get(&home.0, "/api/usage/quota?agent=codex&model=model-a").await;
+    assert_eq!(selected["agents"][0]["state"], "ok");
+    assert_eq!(selected["agents"][0]["bars"].as_array().unwrap().len(), 1);
+    assert_eq!(selected["agents"][0]["scope"]["model"], "model-a");
+    value["quota"]["windows"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    value["quota"]["windows"][0]["scope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("model");
+    home.write_json("codex", &value);
+    let (_, _, global) = get(&home.0, "/api/usage/quota?agent=codex&model=terra").await;
+    assert_eq!(global["agents"][0]["state"], "ok");
+    assert_eq!(global["agents"][0]["scope"]["model"], Value::Null);
+    assert_eq!(
+        global["agents"][0]["model"],
+        Value::Null,
+        "last usage model cannot narrow an account-wide quota"
+    );
+}
+
+#[tokio::test]
+async fn native_account_filter_excludes_other_accounts_before_severity() {
+    let home = TestHome::new();
+    let mut value = native_window(&iso(0), now_s() + 3600);
+    value["quota"]["windows"][0]["scope"]["account"] = json!("account-a");
+    let mut other = value["quota"]["windows"][0].clone();
+    other["scope"]["account"] = json!("account-b");
+    other["used_ratio"] = json!(1.0);
+    other["remaining_ratio"] = json!(0.0);
+    value["quota"]["windows"]
+        .as_array_mut()
+        .unwrap()
+        .push(other);
+    home.write_json("codex", &value);
+    let (_, _, selected) = get(&home.0, "/api/usage/quota?agent=codex&account=account-a").await;
+    assert_eq!(selected["agents"][0]["state"], "ok");
+    assert_eq!(selected["agents"][0]["scope"]["account"], "account-a");
+    assert_eq!(selected["agents"][0]["bars"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn collecting_old_or_expired_native_windows_does_not_freshen_quota() {
+    let home = TestHome::new();
+    home.write_json("codex", &native_window(&iso(600), now_s() + 3600));
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    assert_eq!(board["agents"][0]["state"], "stale");
+    assert!(board["agents"][0]["age_s"].as_u64().unwrap() >= 600);
+    home.write_json("codex", &native_window(&iso(10), now_s() - 1));
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    assert_eq!(
+        board["agents"][0]["state"], "stale",
+        "an ended window is not a fresh limit"
+    );
+    assert_eq!(board["agents"][0]["bars"][0]["stale"], true);
+}
+
+#[tokio::test]
+async fn native_window_rejects_foreign_scope_and_never_invents_a_limit_from_tokens() {
+    let home = TestHome::new();
+    let mut value = native_window(&iso(0), now_s() + 3600);
+    value["quota"]["windows"][0]["scope"]["pool"] = json!("anthropic");
+    home.write_json("codex", &value);
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    assert_eq!(board["agents"][0]["state"], "unknown");
+    assert!(board["agents"][0]["bars"].as_array().unwrap().is_empty());
+    home.write_json("codex", &json!({"ts":now_s(),"metrics":{"processed_total":999999},"quota":{"status":"observed","fleet_native":{"total_tokens":999999}}}));
+    let (_, _, board) = get(&home.0, "/api/usage/quota?agent=codex").await;
+    assert_eq!(board["agents"][0]["state"], "unknown");
+    assert!(board["agents"][0]["bars"].as_array().unwrap().is_empty());
 }
 
 async fn get(home: &Path, uri: &str) -> (StatusCode, String, Value) {

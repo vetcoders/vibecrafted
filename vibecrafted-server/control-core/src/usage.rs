@@ -7,16 +7,18 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::usage_local::{LocalSource, VcSessions, read_local_usage};
+use crate::usage_local::{LocalSource, VcSessions, project_local_usage};
 use crate::{ControlPlane, is_safe_run_id};
+
+#[path = "usage_recovery.rs"]
+mod recovery;
 
 pub const USAGE_REPORT_SCHEMA: &str = "vibecrafted.usage-report.v1";
 /// Every provider launcher currently supported by Vibecrafted has a dedicated
@@ -75,6 +77,23 @@ pub struct UsageReport {
     /// VC run, what is unavailable. Unknown stays visible here.
     #[serde(default)]
     pub local_sources: Vec<LocalSource>,
+    /// Process-local transcript recovery. Recorded measurements are available
+    /// immediately; legacy recovery never blocks the projection or writes runs.
+    #[serde(default)]
+    pub recovery: UsageRecovery,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageRecovery {
+    pub refreshing: bool,
+    pub pending_runs: usize,
+    pub cached_runs: usize,
+    pub stale_runs: usize,
+    pub stale_fields: BTreeMap<String, Vec<String>>,
+    pub unavailable_runs: usize,
+    pub failure_reasons: BTreeMap<String, usize>,
+    pub refreshed_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,11 +187,10 @@ impl ControlPlane {
     /// Aggregate structured telemetry recorded by the runtime, newest first.
     ///
     /// A run whose `meta.json` has no structured `usage` block stays unknown
-    /// until the same Python transcript recovery the CLI uses
-    /// (`run_telemetry_from_meta`) can read `transcript.log`. This projection
-    /// does not invent a second parser and does not turn a missing total into
-    /// zero. A recovered number is a measurement; a still-missing one stays
-    /// unknown.
+    /// until the same Python recovery the CLI uses can read `transcript.log`
+    /// in the background. Its bounded, single-flight read model is keyed by
+    /// the source files. No request waits on Python, and no missing total is
+    /// turned into zero. A later projection carries recovered measurements.
     pub fn usage_report(&self, now: DateTime<Utc>, filter: UsageFilter) -> UsageReport {
         let runtime_runs = self.control_plane_home().join("runtime_runs");
         let cutoff = filter.since.map(|duration| now - duration);
@@ -201,11 +219,11 @@ impl ControlPlane {
                 .cmp(&left.recorded_at)
                 .then_with(|| left.run_id.cmp(&right.run_id))
         });
-        recover_lazy_transcripts(&runtime_runs, &mut runs);
+        let recovery = recovery::project(&runtime_runs, &mut runs);
 
         // Local activity of every provider, deduplicated against the runs the
         // runtime already accounts for (those keep origin `vc`).
-        let local = read_local_usage(
+        let local = project_local_usage(
             &self.home().join("telemetry"),
             &vc_sessions,
             cutoff,
@@ -244,6 +262,7 @@ impl ControlPlane {
             totals,
             dimensions,
             local_sources: local.sources,
+            recovery,
         }
     }
 }
@@ -531,72 +550,6 @@ fn round_six(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
-const LAZY_TELEMETRY_SCRIPT: &str = r#"
-import json, sys
-from pathlib import Path
-from vibecrafted_core.telemetry import run_telemetry_from_meta
-
-items = json.load(sys.stdin)
-out = []
-for item in items:
-    run_id = str(item.get("run_id") or "")
-    try:
-        meta = json.loads(Path(item["meta"]).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        continue
-    if not isinstance(meta, dict):
-        continue
-    transcript = Path(item["transcript"])
-    row = run_telemetry_from_meta(
-        meta, transcript=transcript if transcript.is_file() else None
-    )
-    out.append({"run_id": run_id, "telemetry": row})
-json.dump(out, sys.stdout)
-"#;
-
-/// Fill legacy rows from `transcript.log` using the CLI's Python recovery.
-///
-/// Missing measurements, including recorded unknowns, use the same Python
-/// harness fallback as settle. If recovery is unavailable they stay unknown.
-fn recover_lazy_transcripts(runtime_runs: &Path, runs: &mut [UsageRun]) {
-    let mut jobs = Vec::new();
-    for run in runs.iter() {
-        if run.tokens.tokens_total.as_u64().is_some() && run.cost.amount.as_f64().is_some() {
-            continue;
-        }
-        let meta = runtime_runs.join(&run.run_id).join("meta.json");
-        let transcript = runtime_runs.join(&run.run_id).join("transcript.log");
-        if !regular_file(&meta) {
-            continue;
-        }
-        jobs.push(json!({
-            "run_id": run.run_id,
-            "meta": meta,
-            "transcript": transcript,
-        }));
-    }
-    if jobs.is_empty() {
-        return;
-    }
-    let Some(recovered) = lazy_telemetry(&jobs) else {
-        return;
-    };
-    for run in runs.iter_mut() {
-        let Some(telemetry) = recovered.get(&run.run_id).and_then(Value::as_object) else {
-            continue;
-        };
-        if telemetry
-            .get("usage")
-            .and_then(|usage| usage.get("tokens_total"))
-            .and_then(Value::as_u64)
-            .is_none()
-        {
-            continue;
-        }
-        apply_lazy_telemetry(run, telemetry);
-    }
-}
-
 fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
     if let Some(models) = telemetry.get("unpricedModels").and_then(Value::as_array) {
         run.unpriced_models = models
@@ -605,10 +558,14 @@ fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
             .map(str::to_string)
             .collect();
     }
-    if let Some(usage) = telemetry.get("usage").and_then(Value::as_object) {
+    if run.tokens.tokens_total.as_u64().is_none()
+        && let Some(usage) = telemetry.get("usage").and_then(Value::as_object)
+    {
         run.tokens = usage_from(Some(usage));
     }
-    if let Some(cost) = telemetry.get("cost").and_then(Value::as_object) {
+    if run.cost.amount.as_f64().is_none()
+        && let Some(cost) = telemetry.get("cost").and_then(Value::as_object)
+    {
         run.cost = cost_from(Some(cost));
     }
     if let Some(source) = telemetry
@@ -625,38 +582,6 @@ fn apply_lazy_telemetry(run: &mut UsageRun, telemetry: &Map<String, Value>) {
             run.model = model.clone();
         }
     }
-}
-
-fn lazy_telemetry(jobs: &[Value]) -> Option<BTreeMap<String, Value>> {
-    let payload = serde_json::to_vec(jobs).ok()?;
-    let mut command = telemetry_python()?;
-    command
-        .arg("-c")
-        .arg(LAZY_TELEMETRY_SCRIPT)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().ok()?;
-    {
-        let mut stdin = child.stdin.take()?;
-        stdin.write_all(&payload).ok()?;
-    }
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let rows = serde_json::from_slice::<Vec<Value>>(&output.stdout).ok()?;
-    let mut by_id = BTreeMap::new();
-    for row in rows {
-        let Some(run_id) = row.get("run_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(telemetry) = row.get("telemetry").cloned() else {
-            continue;
-        };
-        by_id.insert(run_id.to_string(), telemetry);
-    }
-    Some(by_id)
 }
 
 pub(crate) fn telemetry_python() -> Option<Command> {

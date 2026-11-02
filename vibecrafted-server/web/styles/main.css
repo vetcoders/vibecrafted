@@ -786,9 +786,9 @@ button:hover > .icon-box {
 .quota-board {
   display: grid;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
-  border: 1px solid var(--border);
-  background: var(--surface-card);
+  margin: 0 16px 16px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-page);
 }
 
 .quota-board > .control-panel-head,
@@ -806,8 +806,8 @@ button:hover > .icon-box {
 
 .quota-agents {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3);
   padding: 0 var(--space-4);
 }
 
@@ -815,7 +815,7 @@ button:hover > .icon-box {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-4);
+  padding: var(--space-3);
   border: 1px solid var(--border);
   background: var(--surface-page);
 }
@@ -853,7 +853,7 @@ button:hover > .icon-box {
 .quota-headline {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: clamp(1.4rem, 2.4vw, 2rem);
+  font-size: 1.25rem;
   line-height: 1.1;
 }
 
@@ -870,6 +870,53 @@ button:hover > .icon-box {
   overflow-wrap: anywhere;
 }
 
+.quota-empty,
+.quota-unavailable,
+.usage-source-details {
+  margin: 0;
+  padding: 0 16px 12px;
+  color: var(--text-muted);
+  font: 12px/1.5 var(--font-body);
+}
+
+.quota-unavailable summary,
+.quota-source-details summary,
+.usage-source-details summary {
+  cursor: pointer;
+}
+
+.quota-unmeasured {
+  display: grid;
+  margin-top: 8px;
+}
+
+.quota-card-compact {
+  grid-template-columns: minmax(10rem, 0.8fr) minmax(0, 2fr) auto;
+  align-items: baseline;
+  padding: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.quota-card-compact p {
+  margin: 0;
+}
+
+.quota-source-details {
+  min-width: 0;
+  color: var(--text-muted);
+  font: 11px/1.5 var(--font-body);
+}
+
+.quota-source-details .quota-meta {
+  margin: 6px 0 0;
+}
+
+.quota-reset {
+  color: var(--text-muted);
+  font: 11px/1.4 var(--font-body);
+}
+
 .quota-bars {
   display: grid;
   gap: var(--space-2);
@@ -877,7 +924,7 @@ button:hover > .icon-box {
 
 .quota-bar {
   display: grid;
-  grid-template-columns: 3.5rem minmax(0, 1fr) 3rem;
+  grid-template-columns: 3.5rem minmax(0, 1fr) minmax(4rem, auto);
   align-items: center;
   gap: var(--space-2);
   font-family: var(--font-mono);
@@ -908,11 +955,19 @@ button:hover > .icon-box {
 
 .usage-charts {
   display: grid;
-  grid-template-columns: minmax(12rem, 0.7fr) minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 16px 28px;
   align-items: end;
   margin: 0;
   padding: 18px 16px 22px;
+}
+
+.usage-hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: baseline;
+  grid-column: 1 / -1;
 }
 
 .usage-hero-kicker,
@@ -1091,8 +1146,20 @@ button:hover > .icon-box {
   color: var(--text-muted);
 }
 
+.usage-runs-table [data-stale="true"] {
+  color: var(--status-warning);
+  text-decoration: underline dotted;
+}
+
 @media (max-width: 1100px) {
   .quota-agents {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 800px) {
+  .usage-charts,
+  .quota-card-compact {
     grid-template-columns: 1fr;
   }
 }

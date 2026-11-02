@@ -980,7 +980,8 @@ def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(installed, ca
     repaired = zshrc.read_text(encoding="utf-8")
     assert "alias keep-me=true" in repaired
     assert installer._shell_source_line() not in repaired
-    assert installer._launcher_path_line() in repaired
+    assert installer._user_rc_guest_line() in repaired
+    assert installer._launcher_path_line() not in repaired
     unclosed = Path.home() / ".zprofile"
     unclosed.write_text(
         "# user login\n# >>> vibecrafted >>>\n"
@@ -2353,7 +2354,7 @@ def test_private_paired_host_refuses_drift_and_preserves_prior_runtime(
         if damage in {"missing", "malformed", "symlink"}
         else "main app and terminal signing owners differ"
         if damage == "main-team"
-        else "fixed host differs from candidate signed terminal code"
+        else "differs from this Runtime Pack's signed terminal"
     )
     with pytest.raises(installer.RuntimeInstallRefusal, match=reason):
         installer.cmd_runtime_install(_ns(payload))

@@ -80,6 +80,11 @@ def _git_repo(path: Path) -> Path:
     (path / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://fixture.invalid/forensics/fork"],
+        cwd=path,
+        check=True,
+    )
     return path
 
 
@@ -117,6 +122,7 @@ class _World:
             ("claude", "codex", "grok", "cursor-agent", "agy", "junie"),
             body=(
                 'printf "%s\\n" "$@" > "$VIBECRAFTED_TEST_FORK_ARGV.$(basename "$0")"\n'
+                'pwd > "$VIBECRAFTED_TEST_FORK_ARGV.$(basename "$0").cwd"\n'
                 'cat > "$VIBECRAFTED_TEST_FORK_ARGV.$(basename "$0").stdin"\n'
                 "exit 0\n"
             ),
@@ -744,12 +750,17 @@ def test_repo_root_conflict_invalid_path_and_worktree_flag(world: _World) -> Non
     assert legacy_invalid.returncode == 2
     assert "--root is not an existing directory" in legacy_invalid.stderr
 
-    # 36614036 made `--worktree [true|false]` a declared fork execution
-    # selector (help: `--execution-runtime living-tree|local-worktrees`), so
-    # "fork has no --worktree" is gone. A worktree on the living-tree bare fork
-    # is still refused -- by the launch-spec owner (5b25a6cd), before any
-    # admission or pane exists.
-    worktree = world.fork("claude", "--session", PROVIDER_SESSION, "--worktree", "true")
+    # Two explicitly contradictory selectors remain an actual conflict;
+    # --worktree by itself is a supported isolation request.
+    worktree = world.fork(
+        "claude",
+        "--session",
+        PROVIDER_SESSION,
+        "--execution-runtime",
+        "living-tree",
+        "--worktree",
+        "true",
+    )
     assert worktree.returncode != 0, worktree.stdout
     assert "--worktree conflicts with execution runtime" in worktree.stderr
     assert not world.capture.exists()
@@ -760,6 +771,92 @@ def test_repo_root_conflict_invalid_path_and_worktree_flag(world: _World) -> Non
     )
     assert codex_edits.returncode == 2
     assert "no native accept-edits policy" in codex_edits.stderr
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+@pytest.mark.parametrize("placement", ["right", "floating"])
+def test_interactive_fork_worktree_is_prepared_before_pane_projection(
+    world: _World, agent: str, placement: str
+) -> None:
+    parent_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=world.repo, text=True
+    ).strip()
+    result = world.fork(
+        agent,
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--worktree",
+        "true",
+        "--placement",
+        placement,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    inner, admission = _fixtures.script_handoff(world.command())
+    _assert_bare_fork(inner, admission, agent, OTHER_SESSION)
+    worker_root = Path(admission["root"])
+    assert worker_root.resolve() != world.repo.resolve()
+    assert worker_root.is_dir()
+    assert admission["runtime_class"] == "local-worktrees"
+    assert Path(admission["parent_root"]).resolve() == world.repo.resolve()
+    assert admission["baseline_sha"] == parent_head
+    assert (
+        subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worker_root, text=True
+        ).strip()
+        == parent_head
+    )
+    pane = world.pane()
+    assert Path(pane[pane.index("--cwd") + 1]).resolve() == worker_root.resolve()
+    assert ("--floating" in pane) == (placement == "floating")
+    if placement == "right":
+        assert pane[pane.index("--direction") + 1] == "right"
+    assert (
+        subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=world.repo,
+            text=True,
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+@pytest.mark.parametrize("runtime", ["local-worktrees", "living-tree"])
+def test_task_fork_execution_runtime_controls_actual_provider_cwd(
+    world: _World, agent: str, runtime: str
+) -> None:
+    result = world.fork(
+        agent,
+        "--session",
+        OTHER_SESSION,
+        "--repo",
+        str(world.repo),
+        "--execution-runtime",
+        runtime,
+        "--prompt",
+        "inspect without edits",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    run = world.task_fork_run()
+    assert run["runtime_class"] == runtime, run
+    worker_root = Path(run["root"]).resolve()
+    actual_cwd = Path(
+        Path(f"{world.provider_argv_prefix}.{agent}.cwd").read_text().strip()
+    ).resolve()
+    assert actual_cwd == worker_root
+    assert (worker_root != world.repo.resolve()) == (runtime == "local-worktrees")
+    assert run["fork_source_session_id"] == OTHER_SESSION
+    assert not world.capture.exists(), "a task fork opened an interactive pane"
+    assert (
+        subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=world.repo,
+            text=True,
+        )
+        == ""
+    )
 
 
 def test_help_documents_the_real_contract(world: _World) -> None:

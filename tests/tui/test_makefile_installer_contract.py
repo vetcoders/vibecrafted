@@ -1298,6 +1298,58 @@ def test_make_version_bump_updates_configured_version_file(tmp_path: Path) -> No
     assert version_file.read_text(encoding="utf-8") == "1.5.0\n"
 
 
+def test_version_bump_synchronizes_and_checks_guest_pyproject(tmp_path: Path) -> None:
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n", encoding="utf-8")
+    pyproject_paths = (
+        tmp_path / "vibecrafted-core/pyproject.toml",
+        tmp_path
+        / "vibecrafted-core/vibecrafted_core/runtime/container-python/pyproject.toml",
+        tmp_path / "vibecrafted-mcp/pyproject.toml",
+    )
+    for path in pyproject_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '[project]\nname = "vibecrafted"\nversion = "1.2.3"\n',
+            encoding="utf-8",
+        )
+    for relative in (
+        "vibecrafted-core/vibecrafted_core/VERSION",
+        "vibecrafted-mcp/vibecrafted_mcp/VERSION",
+    ):
+        packaged_version = tmp_path / relative
+        packaged_version.parent.mkdir(parents=True, exist_ok=True)
+        packaged_version.write_text("1.2.3\n", encoding="utf-8")
+
+    script = REPO_ROOT / "scripts/version_bump.py"
+    bump = subprocess.run(
+        [sys.executable, str(script), "1.2.4", "--file", str(version_file)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert bump.returncode == 0, bump.stderr
+    assert pyproject_paths[0].read_bytes() == pyproject_paths[1].read_bytes()
+    assert 'version = "1.2.4"' in pyproject_paths[1].read_text(encoding="utf-8")
+
+    pyproject_paths[1].write_text(
+        pyproject_paths[1].read_text(encoding="utf-8").replace("1.2.4", "1.2.3"),
+        encoding="utf-8",
+    )
+    check = subprocess.run(
+        [sys.executable, str(script), "--check", "--file", str(version_file)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert check.returncode == 2
+    assert str(pyproject_paths[1]) in check.stderr
+
+
 def test_foundations_product_binaries_come_from_npm_only() -> None:
     # Founder, 2026-09-25: "npm dla loctree i aicx". The product binaries come
     # from their npm packages; never crates, local checkouts or pinned copies.
@@ -2037,7 +2089,13 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
             line for line in gate.splitlines() if line.startswith("SEMGREP_ARGS=(")
         )
         args = shlex.split(command.removeprefix("SEMGREP_ARGS=(").removesuffix(")"))
-    assert args[args.index("--config") + 1] == "auto"
+    config_indices = {index for index, arg in enumerate(args) if arg == "--config"}
+    configs = [args[index + 1] for index in sorted(config_indices)]
+    if gate_path == "scripts/hooks/pre-commit":
+        assert configs == ["p/ci", "p/rust"]
+        assert args[args.index("--metrics") + 1] == "off"
+    else:
+        assert configs == ["auto"]
     assert "--error" in args
     assert args[args.index("--exclude-rule") + 1] == (
         "html.security.audit.missing-integrity.missing-integrity"
@@ -2057,7 +2115,11 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
         "# padding to exceed the default limit\n" * 30_000 + "dangerous_call()\n"
     )
     assert 1_000_000 < source.stat().st_size < 3_000_000
-    args[args.index("--config") + 1] = str(rules)
+    config_parts = config_indices | {index + 1 for index in config_indices}
+    args = [arg for index, arg in enumerate(args) if index not in config_parts]
+    args[1:1] = ["--config", str(rules)]
+    if "--metrics" not in args:
+        args.extend(["--metrics", "off"])
     env = {
         key: value
         for key, value in os.environ.items()
@@ -2070,8 +2132,6 @@ def test_semgrep_gates_scan_large_installer_and_refuse_large_source_finding(
             semgrep,
             *args,
             "--json",
-            "--metrics",
-            "off",
             "--disable-version-check",
             *map(str, targets),
         ],

@@ -83,6 +83,7 @@ AGENTS_REQUIRED=0
 REQUIRE_FOUNDATIONS_WAS_SET="${REQUIRE_FOUNDATIONS+1}"
 REQUIRE_FOUNDATIONS="${REQUIRE_FOUNDATIONS:-1}"
 TARGETS=()
+FOUNDATION_PRIVATE_BIN=""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,12 +136,28 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 is_interactive() { [[ -t 0 && -t 1 ]]; }
 
-# Verify a binary actually runs (catches dyld / missing shared lib issues).
-binary_runs() {
-  local bin="$1"
-  has_cmd "$bin" || return 1
-  "$bin" --version >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1
+# Resolve a working user command first, then this install's private npm fallback.
+binary_path() {
+  local bin="$1" candidate entry remaining="${PATH}:"
+  while [[ "$remaining" == *:* ]]; do
+    entry="${remaining%%:*}"
+    remaining="${remaining#*:}"
+    candidate="${entry:-.}/$bin"
+    [[ -x "$candidate" ]] || continue
+    if "$candidate" --version >/dev/null 2>&1 ||
+      "$candidate" --help >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  [[ -n "$FOUNDATION_PRIVATE_BIN" ]] || return 1
+  candidate="$FOUNDATION_PRIVATE_BIN/$bin"
+  [[ -x "$candidate" ]] || return 1
+  "$candidate" --version >/dev/null 2>&1 || "$candidate" --help >/dev/null 2>&1
+  printf '%s\n' "$candidate"
 }
+
+binary_runs() { binary_path "$1" >/dev/null; }
 
 # Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
@@ -350,11 +367,25 @@ ensure_node() {
   return 1
 }
 
+npm_prefix_writable() {
+  local prefix="$1" candidate
+  [[ "$prefix" == /* ]] || return 1
+  # npm needs both the global package directory and its executable links.
+  # A missing directory is creatable only through a writable parent.
+  for candidate in "$prefix" "$prefix/bin" "$prefix/lib/node_modules"; do
+    while [[ ! -e "$candidate" && ! -L "$candidate" ]]; do
+      candidate="${candidate%/*}"
+      [[ -n "$candidate" ]] || candidate="/"
+    done
+    [[ -d "$candidate" && -w "$candidate" && -x "$candidate" ]] || return 1
+  done
+}
+
 install_from_npm() {
   local package="$1" binary="${2:-$1}"
 
   if binary_runs "$binary"; then
-    ok "$binary already installed: $(command -v "$binary")"
+    ok "$binary already installed: $(binary_path "$binary")"
     return 0
   fi
 
@@ -363,7 +394,20 @@ install_from_npm() {
     return 1
   }
 
+  local npm_prefix private_prefix=""
   local npm_args=(install -g "$package")
+  npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+  if ! npm_prefix_writable "$npm_prefix"; then
+    # Reuse the private Node prefix already searched by the command deck.
+    # Override this invocation only; leave the user's npm configuration alone.
+    private_prefix="$VIBECRAFTED_HOME/tools/node"
+    if ! mkdir -p "$private_prefix/bin" || ! npm_prefix_writable "$private_prefix"; then
+      warn "No writable npm prefix for $package: $private_prefix"
+      return 1
+    fi
+    npm_args+=(--prefix "$private_prefix")
+    info "Using user-writable npm prefix: $private_prefix"
+  fi
   case "$package" in
     "$LOCTREE_NPM_PACKAGE"|"$AICX_NPM_PACKAGE")
       # An ambient or scoped registry must not redirect public foundations.
@@ -377,6 +421,12 @@ install_from_npm() {
     return 1
   }
 
+  if [[ -n "$private_prefix" ]]; then
+    FOUNDATION_PRIVATE_BIN="$private_prefix/bin"
+  fi
+  # Earlier readiness probes can cache an obsolete shim. npm may have put its
+  # replacement earlier on PATH without changing PATH in this Bash process.
+  hash -r
   binary_runs "$binary"
 }
 
@@ -394,7 +444,7 @@ install_loctree() {
   }
 
   if loctree_suite_ready; then
-    ok "loctree suite already installed: loct=$(command -v loct), loctree-mcp=$(command -v loctree-mcp)"
+    ok "loctree suite already installed: loct=$(binary_path loct), loctree-mcp=$(binary_path loctree-mcp)"
     return 0
   fi
 
@@ -405,7 +455,7 @@ install_loctree() {
 
   install_from_npm "$LOCTREE_NPM_PACKAGE" loct || true
   if loctree_suite_ready; then
-    ok "Loctree from npm: loct=$(command -v loct), loctree-mcp=$(command -v loctree-mcp)"
+    ok "Loctree from npm: loct=$(binary_path loct), loctree-mcp=$(binary_path loctree-mcp)"
     return 0
   fi
   warn "Install Loctree from its channel, then rerun this check:"
@@ -538,7 +588,7 @@ install_aicx() {
   aicx_ready() { binary_runs aicx && binary_runs aicx-mcp; }
 
   if aicx_ready; then
-    ok "aicx already installed: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
+    ok "aicx already installed: aicx=$(binary_path aicx), aicx-mcp=$(binary_path aicx-mcp)"
     return 0
   fi
 
@@ -549,7 +599,7 @@ install_aicx() {
 
   install_from_npm "$AICX_NPM_PACKAGE" aicx || true
   if aicx_ready; then
-    ok "AICX from npm: aicx=$(command -v aicx), aicx-mcp=$(command -v aicx-mcp)"
+    ok "AICX from npm: aicx=$(binary_path aicx), aicx-mcp=$(binary_path aicx-mcp)"
     return 0
   fi
   warn "Install AICX from its channel, then rerun this check:"

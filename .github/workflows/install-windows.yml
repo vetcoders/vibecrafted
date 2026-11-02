@@ -1,4 +1,5 @@
 name: Install (Windows Matrix)
+run-name: Windows · ${{ inputs.request_id || github.sha }}
 
 # Windows native Runtime Pack gate: build the win32-x64 carrier once, cold-install
 # into an isolated LOCALAPPDATA, run `vibecrafted doctor` expecting 0 fail, and
@@ -12,6 +13,29 @@ name: Install (Windows Matrix)
 # documented trust model for this channel).
 
 on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Immutable product source Git SHA (may differ from workflow SHA)
+        required: true
+        type: string
+      terminal_revision:
+        description: Exact vc-terminal source Git SHA
+        required: true
+        type: string
+      frame_revision:
+        description: Exact vc-frame source Git SHA
+        required: true
+        type: string
+      request_id:
+        description: Unique 24-hex site-release request identity
+        required: true
+        type: string
+      release_signing:
+        description: Use the configured product key and emit the tested release artifact
+        required: true
+        default: true
+        type: boolean
   push:
     branches:
       - main
@@ -34,8 +58,61 @@ jobs:
   windows-runtime-pack:
     name: build Windows x64 Runtime Pack
     runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      terminal_sha: ${{ steps.request.outputs.terminal_sha }}
+      frame_sha: ${{ steps.request.outputs.frame_sha }}
+      request_id: ${{ steps.request.outputs.request_id }}
+      release_signing: ${{ steps.request.outputs.release_signing }}
     steps:
+      - name: Validate immutable release request
+        id: request
+        shell: pwsh
+        env:
+          VC_REQUEST_SOURCE: ${{ inputs.source_ref || github.sha }}
+          VC_REQUEST_TERMINAL: ${{ inputs.terminal_revision }}
+          VC_REQUEST_FRAME: ${{ inputs.frame_revision }}
+          VC_REQUEST_ID: ${{ inputs.request_id }}
+          VC_REQUEST_SIGNING: ${{ inputs.release_signing || false }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = [string]$env:VC_REQUEST_SOURCE
+          $terminal = [string]$env:VC_REQUEST_TERMINAL
+          $frame = [string]$env:VC_REQUEST_FRAME
+          $request = [string]$env:VC_REQUEST_ID
+          if ($source -cnotmatch '\A[0-9a-f]{40}\z') { throw "source_ref must be a full immutable Git SHA" }
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            if ($terminal -cnotmatch '\A[0-9a-f]{40}\z') { throw "terminal_revision must be a full Git SHA" }
+            if ($frame -cnotmatch '\A[0-9a-f]{40}\z') { throw "frame_revision must be a full Git SHA" }
+            if ($request -cnotmatch '\A[0-9a-f]{24}\z') { throw "request_id must be 24 lowercase hex characters" }
+          }
+          $sign = ($env:GITHUB_REF_TYPE -eq "tag") -or
+            (($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") -and ($env:VC_REQUEST_SIGNING -eq "true"))
+          "source_sha=$source" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "terminal_sha=$terminal" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "frame_sha=$frame" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "request_id=$request" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_signing=$($sign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.request.outputs.source_sha }}
+
+      - name: Verify checked-out product source
+        shell: pwsh
+        env:
+          VC_EXPECTED_SOURCE: ${{ steps.request.outputs.source_sha }}
+        run: |
+          $actual = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:VC_EXPECTED_SOURCE) {
+            throw "checkout did not resolve to the requested product source"
+          }
+
+      - name: Setup patched build Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.4"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -61,14 +138,19 @@ jobs:
         env:
           # Atomic pair: distribution_manifest rejects a half-set environment.
           VIBECRAFTED_SOURCE_OWNER_REPO: ${{ github.repository }}
-          VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}
-          VC_RELEASE_SIGNING_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.VC_SIGNING_KEY || '' }}
+          VIBECRAFTED_SOURCE_REVISION: ${{ steps.request.outputs.source_sha }}
+          VIBECRAFTED_TERMINAL_REVISION: ${{ steps.request.outputs.terminal_sha }}
+          VIBECRAFTED_FRAME_REVISION: ${{ steps.request.outputs.frame_sha }}
+          VC_RELEASE_MODE: ${{ steps.request.outputs.release_signing }}
+          VC_RELEASE_SIGNING_KEY: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_signing)) && secrets.VC_SIGNING_KEY || '' }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF_TYPE -eq "tag") {
-            if (-not $env:VC_RELEASE_SIGNING_KEY) { throw "tag builds require VC_SIGNING_KEY" }
             $version = (Get-Content VERSION -Raw).Trim()
             if ($env:GITHUB_REF_NAME -ne "v$version") { throw "tag does not match VERSION" }
+          }
+          if ($env:VC_RELEASE_MODE -eq "true") {
+            if (-not $env:VC_RELEASE_SIGNING_KEY) { throw "production builds require the configured VC_SIGNING_KEY" }
             $releaseKey = Join-Path $env:RUNNER_TEMP "vibecrafted-release-signing.key"
             [IO.File]::WriteAllText($releaseKey, $env:VC_RELEASE_SIGNING_KEY, [Text.Encoding]::ASCII)
             $env:VIBECRAFTED_SIGNING_KEY = $releaseKey
@@ -85,10 +167,13 @@ jobs:
           if (-not (Test-Path -LiteralPath "$($pack.FullName).sig")) {
             throw "missing $($pack.Name).sig"
           }
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
+          if ($env:VC_RELEASE_MODE -eq "true") {
+            if ((Test-Path "$($pack.FullName).rehearsal.pub") -or (Test-Path "$($pack.FullName).rehearsal.key")) {
+              throw "production build emitted rehearsal signing material"
+            }
             $productPublicKey = Join-Path $PWD "vibecrafted-core\vibecrafted_core\trust\vibecrafted-signing-v1.pub"
             & openssl dgst -sha256 -verify $productPublicKey -signature "$($pack.FullName).sig" $pack.FullName
-            if ($LASTEXITCODE -ne 0) { throw "tag carrier is not signed by the product key" }
+            if ($LASTEXITCODE -ne 0) { throw "production carrier is not signed by the product key" }
           }
           "WINDOWS_PACK_NAME=$($pack.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Copy-Item $pack.FullName "$env:RUNNER_TEMP\$($pack.Name)"
@@ -120,8 +205,11 @@ jobs:
     name: install.ps1 + doctor (windows-latest)
     needs: windows-runtime-pack
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.windows-runtime-pack.outputs.source_sha }}
 
       - name: Download Windows Runtime Pack
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -204,9 +292,14 @@ jobs:
   windows-installers:
     name: build Windows x64 MSI/EXE (unsigned)
     needs: windows-runtime-pack
+    outputs:
+      source_sha: ${{ needs.windows-runtime-pack.outputs.source_sha }}
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.windows-runtime-pack.outputs.source_sha }}
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -222,7 +315,7 @@ jobs:
       - name: Build MSI/EXE from downloaded pack (no second pack build; out under packaging/windows/out)
         shell: pwsh
         env:
-          VIBECRAFTED_SOURCE_REVISION: ${{ github.sha }}
+          VIBECRAFTED_SOURCE_REVISION: ${{ needs.windows-runtime-pack.outputs.source_sha }}
         run: |
           $ErrorActionPreference = "Stop"
           $pack = Get-ChildItem -LiteralPath build -Filter "Vibecrafted_RuntimePack_*-win32-x64.tar.gz" |
@@ -276,8 +369,11 @@ jobs:
     name: MSI silent install + doctor + uninstall
     needs: windows-installers
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.windows-installers.outputs.source_sha }}
 
       - name: Download windows-x64-installers
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -558,8 +654,11 @@ jobs:
     name: EXE silent install + doctor + uninstall
     needs: windows-installers
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.windows-installers.outputs.source_sha }}
 
       - name: Download windows-x64-installers
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -909,3 +1008,96 @@ jobs:
           name: windows-x64-exe-install-logs
           path: ${{ runner.temp }}/vc-exe-logs/
           if-no-files-found: warn
+
+  windows-release:
+    name: Collect product-signed tested Windows release
+    if: github.event_name == 'workflow_dispatch' && inputs.release_signing
+    needs:
+      - windows-runtime-pack
+      - windows-cold-install
+      - windows-installers
+      - windows-msi-install
+      - windows-exe-install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Receipt tooling belongs to the workflow controller; all product builders
+      # and native tests above checked out the explicitly requested source SHA.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-runtime-pack
+          path: release
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-installers
+          path: release
+
+      - name: Bind and product-sign the successful native release
+        shell: bash
+        env:
+          VC_SOURCE_SHA: ${{ needs.windows-runtime-pack.outputs.source_sha }}
+          VC_TERMINAL_SHA: ${{ needs.windows-runtime-pack.outputs.terminal_sha }}
+          VC_FRAME_SHA: ${{ needs.windows-runtime-pack.outputs.frame_sha }}
+          VC_REQUEST_ID: ${{ needs.windows-runtime-pack.outputs.request_id }}
+          VC_CONTROLLER_SHA: ${{ github.sha }}
+          VC_REPOSITORY: ${{ github.repository }}
+          VC_COLD_RESULT: ${{ needs.windows-cold-install.result }}
+          VC_MSI_RESULT: ${{ needs.windows-msi-install.result }}
+          VC_EXE_RESULT: ${{ needs.windows-exe-install.result }}
+          VC_RELEASE_SIGNING_KEY: ${{ secrets.VC_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export VC_RELEASE_KEY
+          VC_RELEASE_KEY="$(mktemp "$RUNNER_TEMP/windows-release-key.XXXXXX")"
+          trap 'rm -f "$VC_RELEASE_KEY"' EXIT
+          python - <<'PY_KEY'
+          import os
+          from pathlib import Path
+          secret = os.environ.get("VC_RELEASE_SIGNING_KEY", "")
+          if not secret:
+              raise SystemExit("configured product signing key is unavailable")
+          Path(os.environ["VC_RELEASE_KEY"]).write_text(secret, encoding="ascii")
+          PY_KEY
+          unset VC_RELEASE_SIGNING_KEY
+          python scripts/windows_release_manifest.py \
+            --directory release \
+            --public-key vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub \
+            --source-sha "$VC_SOURCE_SHA" --terminal-sha "$VC_TERMINAL_SHA" \
+            --frame-sha "$VC_FRAME_SHA" --controller-sha "$VC_CONTROLLER_SHA" \
+            --repository "$VC_REPOSITORY" --request-id "$VC_REQUEST_ID" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --cold-install "$VC_COLD_RESULT" --msi-install "$VC_MSI_RESULT" \
+            --exe-install "$VC_EXE_RESULT"
+          openssl dgst -sha256 -sign "$VC_RELEASE_KEY" \
+            -out release/windows-release.json.sig release/windows-release.json
+          openssl dgst -sha256 \
+            -verify vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub \
+            -signature release/windows-release.json.sig release/windows-release.json
+
+      - name: Upload verified native Windows release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-release
+          compression-level: 0
+          retention-days: 7
+          path: |
+            release/Vibecrafted_RuntimePack_*-win32-x64.tar.gz
+            release/Vibecrafted_RuntimePack_*-win32-x64.tar.gz.sig
+            release/Vibecrafted_RuntimePack_*-win32-x64.tar.gz.sha256
+            release/Vibecrafted_*-windows-x64.msi
+            release/Vibecrafted_*-windows-x64.msi.sha256
+            release/Vibecrafted_*-windows-x64.exe
+            release/Vibecrafted_*-windows-x64.exe.sha256
+            release/windows-release.json
+            release/windows-release.json.sig
+          if-no-files-found: error

@@ -461,7 +461,9 @@ def test_omp_agent_interactive_unavailability_and_cycling(
     assert form.error
 
 
-def test_stale_launch_failure_invalidation_on_config_change(tmp_path: Path) -> None:
+def test_stale_launch_failure_invalidation_on_config_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Changing agent or path immediately clears stale failed launch result."""
     workshop = _load()
     form = workshop.Workshop(RecordingWindow(), mode="launcher")
@@ -482,6 +484,8 @@ def test_stale_launch_failure_invalidation_on_config_change(tmp_path: Path) -> N
     form.error = "Previous launch failed"
     form.error_stage = "Workspace preparation"
 
+    # Provider discovery is separate; make a selectable replacement available.
+    monkeypatch.setattr(workshop, "_provider_available", lambda _agent: True)
     # User changes configuration: changes agent
     form.row = 0
     form._cycle_agent(1)
@@ -631,7 +635,7 @@ def test_launch_stage_progress_and_enter_mouse_parity(
     form.draw_launcher()
     drawn_texts = [text for _, _, text, _ in window.drawn]
     assert any("[Opening claude tab]" in t for t in drawn_texts)
-    assert any("1 codex: opened" in t for t in drawn_texts)
+    assert any("1 codex: tab created" in t for t in drawn_texts)
     assert any("2 claude: failed" in t for t in drawn_texts)
 
 
@@ -1030,7 +1034,7 @@ def test_onboarding_font_apply_malformed_toml_error_and_recovery(
     )
     form.handle_launcher_key(10)
     assert form.error == ""
-    assert form.onboarding_active is False
+    assert form.onboarding_active is True
     content = policy_path.read_text(encoding="utf-8")
     assert "[font.normal]" in content
     assert "[font.bold]" in content
@@ -1151,7 +1155,7 @@ def test_onboarding_font_apply_oserror_and_recovery_or_dismiss(
         )
         form.handle_mouse()
         assert form.error == ""
-        assert form.onboarding_active is False
+        assert form.onboarding_active is True
         content = policy_path.read_text(encoding="utf-8")
         assert "[font.normal]" in content
         assert "[font.bold]" in content
@@ -1363,6 +1367,129 @@ def test_font_viewport_keyboard_mouse_and_resize(
     assert not policy.exists()
 
 
+@pytest.mark.parametrize("font_only", [False, True])
+def test_font_apply_stays_open_for_repeated_selection_and_close(
+    font_only: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc-home"))
+    policy = tmp_path / "terminal-policy.toml"
+    policy.write_text('[font.normal]\nfamily = "Family 000"\n')
+    families = [f"Family {index:03}" for index in range(30)]
+
+    def catalogue(**kwargs: Any) -> list[Any]:
+        active = cbo.read_configured_font_family(policy)
+        return [
+            cbo.FontVariantStatus(
+                family, family, "Fixed width", True, active=family == active
+            )
+            for family in families
+        ]
+
+    monkeypatch.setattr(cbo, "inspect_font_variants", catalogue)
+    window = RecordingWindow(height=16)
+    form = workshop.Workshop(
+        window,
+        mode="launcher",
+        font=font_only,
+        onboarding_policy_path=policy,
+        onboarding_home=tmp_path / "onboarding",
+    )
+    if not font_only:
+        form.open_onboarding(step=2)
+    form.onboarding_font_idx = 15
+    form.draw()
+    initial_scroll = form.onboarding_font_scroll
+    assert initial_scroll > 0
+    form.handle_onboarding_key(10)
+    assert form.onboarding_active and form.onboarding_step == 2
+    assert (
+        form.onboarding_font_idx == 15 and form.onboarding_font_scroll == initial_scroll
+    )
+    assert (
+        form.configured_font_family
+        == cbo.read_configured_font_family(policy)
+        == families[15]
+    )
+    assert "Saved terminal font" in form.notice
+
+    form.handle_onboarding_key(curses.KEY_DOWN)
+    form.draw()
+    second_scroll = form.onboarding_font_scroll
+    form.handle_onboarding_key(10)
+    assert form.onboarding_active and form.onboarding_step == 2
+    assert (
+        form.onboarding_font_idx == 16 and form.onboarding_font_scroll == second_scroll
+    )
+    assert (
+        form.configured_font_family
+        == cbo.read_configured_font_family(policy)
+        == families[16]
+    )
+
+    before = policy.read_bytes()
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(cbo, "select_font_family", fail)
+    form.handle_onboarding_key(10)
+    assert form.onboarding_active and form.onboarding_font_idx == 16
+    assert form.onboarding_font_scroll == second_scroll
+    assert form.configured_font_family == families[16] and policy.read_bytes() == before
+    assert "synthetic write failure" in form.error and not form.notice
+
+    form.draw()
+    close_target = next(
+        target for target in form.mouse_targets if target[4] == "onboarding_close"
+    )
+    row, start, _, _, _ = close_target
+    monkeypatch.setattr(
+        workshop.curses, "getmouse", lambda: (0, start, row, 0, curses.BUTTON1_CLICKED)
+    )
+    if font_only:
+        with pytest.raises(SystemExit) as closed:
+            form.handle_mouse()
+        assert closed.value.code == 0
+    else:
+        form.handle_mouse()
+        assert not form.onboarding_active
+    assert policy.read_bytes() == before
+
+
+def test_font_apply_retains_selected_family_after_catalogue_reorders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc-home"))
+    policy = tmp_path / "policy.toml"
+    policy.write_text('[font.normal]\nfamily = "Alpha"\n')
+
+    def catalogue(**kwargs: Any) -> list[Any]:
+        active = cbo.read_configured_font_family(policy)
+        names = (
+            ["Alpha", "Beta", "Gamma"]
+            if active == "Alpha"
+            else ["Gamma", "Beta", "Alpha"]
+        )
+        return [
+            cbo.FontVariantStatus(
+                name, name, "Fixed width", True, active=name == active
+            )
+            for name in names
+        ]
+
+    monkeypatch.setattr(cbo, "inspect_font_variants", catalogue)
+    form = workshop.Workshop(
+        RecordingWindow(), mode="launcher", font=True, onboarding_policy_path=policy
+    )
+    form.onboarding_font_idx = 2
+    form.handle_onboarding_key(10)
+    assert form.onboarding_active
+    assert form.onboarding_variants[form.onboarding_font_idx].family == "Gamma"
+    assert cbo.read_configured_font_family(policy) == "Gamma"
+
+
 def test_font_catalogue_error_keeps_current_and_can_cancel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1438,7 +1565,7 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
         TERM="xterm-256color",
     )
 
-    def run(keys: bytes, name: str) -> None:
+    def run(steps: list[tuple[bytes, str | None]], name: str) -> None:
         before = policy.read_bytes()
         master, slave = pty.openpty()
         attributes = termios.tcgetattr(slave)
@@ -1457,7 +1584,7 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
         )
         os.close(slave)
         output = bytearray()
-        sent = False
+        sent = 0
         deadline = time.monotonic() + 20
         try:
             while time.monotonic() < deadline:
@@ -1471,11 +1598,19 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
                     output.extend(chunk)
                 if not sent and b"Enter apply" in output:
                     assert policy.read_bytes() == before
-                    os.write(master, keys)
-                    sent = True
+                    os.write(master, steps[0][0])
+                    sent = 1
+                elif sent and sent < len(steps):
+                    expected = steps[sent - 1][1]
+                    if expected and cbo.read_configured_font_family(policy) == expected:
+                        assert child.poll() is None, (
+                            "picker exited immediately after apply"
+                        )
+                        os.write(master, steps[sent][0])
+                        sent += 1
                 if child.poll() is not None:
                     break
-            assert sent, output.decode(errors="replace")
+            assert sent == len(steps), output.decode(errors="replace")
             assert child.wait(timeout=3) == 0, output.decode(errors="replace")
         finally:
             if child.poll() is None:
@@ -1485,25 +1620,33 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
             (tmp_path / f"{name}.ansi").write_bytes(output)
 
     policy.write_text(original)
-    run(b"\x1b", "cancel")
+    run([(b"\x1b", None)], "cancel")
     assert policy.read_text() == original
-    run(b"\x1b[6~\r", "page-and-apply")
+    run(
+        [
+            (b"\x1b[6~\r", variants[page_size].family),
+            (b"\x1b[5~\r", variants[0].family),
+            (b"\x1b", None),
+        ],
+        "page-apply-twice-and-close",
+    )
     result = tomllib.loads(policy.read_text())
-    chosen = variants[page_size]  # next page in the real terminal viewport
+    chosen = variants[0]
     assert result["font"]["size"] == 16.5
     assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
         {"family": chosen.family, "style": style} for style in chosen.face_styles
     ]
     invalid = b'[font.normal]\nfamily = "Broken\xff"\n'
     policy.write_bytes(invalid)
-    run(b"\x1b", "invalid-utf8-cancel")
+    run([(b"\x1b", None)], "invalid-utf8-cancel")
     assert policy.read_bytes() == invalid
     assert not list((tmp_path / "vc-home").rglob("command_bridge_onboarding*"))
     receipt = {
         "eligible_families": len(variants),
         "families": [v.family for v in variants],
         "excluded_proportional_families": len(proportional),
-        "selected_index": page_size,
+        "selected_index": 0,
+        "first_selected_index": page_size,
         "terminal_height": terminal_height,
         "selected_family": chosen.family,
         "selected_styles": chosen.face_styles,

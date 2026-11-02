@@ -726,6 +726,8 @@ def test_windows_ci_installs_exe_then_doctor_then_uninstall() -> None:
     marker = "\n  windows-exe-install:"
     assert marker in workflow
     exe_job = workflow.split(marker, 1)[1]
+    if "\n  windows-release:" in exe_job:
+        exe_job = exe_job.split("\n  windows-release:", 1)[0]
     assert "windows-msi-install:" not in exe_job
     assert "needs: windows-installers" in exe_job
     assert "runs-on: windows-latest" in exe_job

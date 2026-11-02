@@ -237,6 +237,9 @@ if rest[:1] == ["action"]:
     if not target or target not in live_sessions():
         not_found(target or "")
     verb = rest[1] if len(rest) > 1 else ""
+    if verb == "dump-layout":
+        print("layout { frame_host true; pane; }" if target == "vc-host" else "layout { pane; }")
+        sys.exit(0)
     if verb == "new-tab":
         print("1")
         sys.exit(0)
@@ -321,7 +324,7 @@ def _root_aware_owner_cli(path: Path) -> Path:
         '  echo "VIBECRAFTED_WORKSPACE_ID=ws-$tag"\n'
         '  echo "VIBECRAFTED_SESSION_ID=sess-$tag"\n'
         '  echo "VIBECRAFTED_WORKSPACE_INSTANCE_ID=inst-$tag"\n'
-        '  echo "VIBECRAFTED_OPERATOR_SESSION=session-$tag"\n'
+        '  echo "VIBECRAFTED_OPERATOR_SESSION=session-${tag:0:16}"\n'
         '  echo "VIBECRAFTED_WORKSPACE_ROOT=$root"\n'
         "  exit 0\n"
         "fi\n"
@@ -384,12 +387,19 @@ class Scene:
             / "operator.kdl",
             "layout {\n}\n",
         )
+        shutil.copyfile(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl",
+            self.home / ".config/vibecrafted/vc-frame/config.kdl",
+        )
         self.terminal_capture = tmp_path / "terminal-launch.json"
         self.generation = _generation(tmp_path, self.terminal_capture)
         self.owner = _root_aware_owner_cli(tmp_path / "owner-cli")
         self.frame_log = tmp_path / "frame.log"
         self.live_file = tmp_path / "live-sessions.txt"
-        self.live_file.write_text("".join(f"{n}\n" for n in live), encoding="utf-8")
+        # The shared chrome already exists; assertions below count project creation.
+        self.live_file.write_text(
+            "".join(f"{n}\n" for n in ["vc-host", *live]), encoding="utf-8"
+        )
         # None: every live session is watched (older-engine shape); a list:
         # exactly these live sessions have an attached client.
         self.clients_file: Path | None = None
@@ -536,7 +546,7 @@ def _assert_selected_resume_handoff(hosted: list[str], scene: Scene, flag: str) 
 
 def _expected_place(scene: Scene) -> str:
     tag = "".join(ch if ch.isalnum() else "-" for ch in scene.root.name)
-    return f"session-{tag}"
+    return f"session-{tag[:16]}"
 
 
 def _creates(calls: list[dict]) -> list[dict]:
@@ -1198,7 +1208,7 @@ def test_failed_workspace_creation_is_reported_and_launches_nothing_elsewhere(
     calls = scene.calls()
 
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
-    assert "could not create the workspace session session-project-b" in result.stderr
+    assert "vc-frame refused to create workspace session-project-b" in result.stderr
     assert "could not read the layout file" in result.stderr, result.stderr
     assert "Resume launched" not in result.stdout, result.stdout
     assert not _interactive_surfaces(calls), calls

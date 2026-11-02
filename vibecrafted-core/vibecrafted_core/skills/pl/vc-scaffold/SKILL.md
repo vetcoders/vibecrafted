@@ -259,11 +259,19 @@ plan_id: <plan_id>
 run_id: <scaffold run id, when running under a lifecycle>
 session_id: <agent session_id from `aicx sessions current` or raw `.jsonl` filename read>
 role: driver | wave-atlas | brief | tracker | falsification | design-doc | mission | other
-agent: <author agent>
+author: <autor artefaktu>
+agent: <agent/provider wykonawczy, jeśli przypisany>
 date: YYYY-MM-DD
 project: <org>/<repo>
 ---
 ```
+
+`author` zapisuje autora artefaktu; nigdy nie wybiera wykonawcy. W wykonywalnym
+briefie `agent` przypisuje docelowego agenta/providera wykonawczego, który może
+być inny niż autor. Pole można pominąć, gdy wykonawcę określa launcher lub
+typowany plan dispatch. Przy ponownym użyciu briefu z `agent` upewnij się, że
+przypisanie odpowiada wybranemu wykonawcy: konflikt jest odrzucany. Nigdy nie
+wyprowadzaj wykonawcy z `author`.
 
 To hard-gate, nie dekoracja: reguła 6 kontraktu settlementu („bez gołego
 markdownu — artefakt bez run_id trafia do needs-attention”), retrieval (wyszukiwarki

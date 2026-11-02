@@ -322,6 +322,22 @@ docker run --rm -it -v "$PWD:/workspace" vetcoders/vibecrafted:local version
 See [Docker Runtime](DOCKER.md) for the full topology, volume layout and
 control-plane wiring.
 
+Local-container agents use their host run's inbox; installing a CLI inside the
+container does not copy or replace that control plane. New launches connect
+automatically. To reconnect an already running session created by an older
+launcher, run this on its host:
+
+```bash
+vibecrafted message --run-id <run-id> --connect-container
+```
+
+Keep this foreground connection open while the legacy session needs its inbox.
+It verifies the recorded host and container process identities before reporting
+`connected`, and closes when those identities end or change. The guest's usual
+`message --run-id <run-id> --receive`, `--ack`, and `--inspect` commands then use
+the same host owner, including when the agent predates the connection. No host
+home or control-plane mount is required. Use the updated CLI in both places.
+
 ---
 
 ## Build from source (power users)
@@ -338,6 +354,29 @@ make install
 
 To install an existing carrier without rebuilding, pass
 `RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz` to `make install`.
+Before compiling, `python3 scripts/build-source-runtime-pack.py --check` shows
+the selected immutable revision and the available donor checkout HEAD for each
+component. A different HEAD is informational: it never changes the selection.
+Edit `config/source-components.json` deliberately to change the pin.
+
+If installation reports a preference conflict, the JSON envelope contains the
+exact file path and the current and incoming SHA-256 hashes. A retry of the
+same completed carrier can pass the explicit choice to the existing installer:
+
+```bash
+make install RUNTIME_PACK=/absolute/path/to/completed-RuntimePack.tar.gz \
+  RUNTIME_PACK_RESOLVE_PREFERENCE=keep-current \
+  RUNTIME_PACK_PREFERENCE_PATH=/absolute/path/from/conflict \
+  RUNTIME_PACK_PREFERENCE_CURRENT_SHA256="CURRENT_SHA256_FROM_CONFLICT" \
+  RUNTIME_PACK_PREFERENCE_INCOMING_SHA256="INCOMING_SHA256_FROM_CONFLICT"
+```
+
+Use the exact carrier from `build/runtime-pack-selection.json` and retain its
+checksum and signature sidecars. `keep-current` preserves the whole KDL file,
+including nested edits, rather than merging in changed defaults. Review those
+defaults separately. A retry refuses changed current or incoming bytes; an
+already-applied choice can be repeated only for its receipted exact postimage.
+The normal structural-conflict refusal is unchanged.
 
 Source: `Makefile` → `runtime-pack`, `install`, `install-source`.
 The Linux local build lane requires a clean tracked tree and the product release

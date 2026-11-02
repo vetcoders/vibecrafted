@@ -912,45 +912,43 @@ def test_reused_pid_with_foreign_start_token_is_stale(fx: Fixture) -> None:
     assert inert.poll() is None
     assert json.loads((fx.state / "host.json").read_text())["pid"] == host.pid
 
+
+@pytest.mark.parametrize(
+    ("age_offset", "expected"),
+    [(-0.5, "starting"), (0.0, "stale"), (0.5, "stale")],
+    ids=["young-wrapper", "startup-boundary", "aged-wrapper"],
+)
 def test_stale_wrapper_record_older_than_startup_wait_is_not_starting(
-    fx: Fixture,
+    fx: Fixture, monkeypatch, age_offset: float, expected: str
 ) -> None:
-    """2026-10-22: a host.json whose pid is a live *wrapper* process (the
-    recorded pid was reused by an unrelated process, or the wrapper crashed
-    before exec) and whose start is older than STARTUP_WAIT_SECONDS must
-    classify as stale, not starting. A younger wrapper stays "starting" so
-    two concurrent first launches cannot both exec a host (the race
-    test_concurrent_first_launch pins that). The Founder symptom was
-    'Terminal exited with status 75' on every launch: the stale record pinned
-    state as starting until the admission deadline, then refused EX_TEMPFAIL.
-    The live wrapper is never signalled; the new launch becomes the fresh host.
+    """A matching live wrapper starts only within the bounded startup window.
+
+    Kernel identity must match before the age check is reached: a fabricated
+    start token would classify as stale even if age recovery were removed.
+    Freeze the wall clock around that real token, without sleeping or changing
+    the process identity probe. No listener is bound, and the wrapper survives.
     """
+    module = _helper_module()
     inert = subprocess.Popen(["/bin/sleep", "30"])
     fx.processes.append(inert)
-    (fx.state / "host.json").write_text(
-        json.dumps(
-            {
-                "schema": "vibecrafted.terminal-host.v1",
-                "pid": inert.pid,
-                "start": "1.000000",
-                "uid": os.getuid(),
-                "executable": str(fx.host),
-                "executable_file": [0, 0],
-                "code_cdhash": "0" * 40,
-                "wrapper_executable": "/bin/sleep",
-                # No listener is ever bound to this socket path.
-                "socket": str(fx.state / "host-never.sock"),
-            }
-        )
-    )
-    (fx.state / "host.json").chmod(0o600)
-    host = fx.launch()
-    fx.wait_for(lambda: any(r[0].startswith("start") for r in fx.records()))
-    assert inert.poll() is None  # the inert wrapper is untouched
-    record = json.loads((fx.state / "host.json").read_text())
-    assert record["pid"] == host.pid
-    assert record["pid"] != inert.pid
-
+    identity = module.process_identity(inert.pid)
+    assert identity is not None
+    record = {
+        "schema": "vibecrafted.terminal-host.v1",
+        "pid": inert.pid,
+        "start": identity.start,
+        "uid": identity.uid,
+        "executable": str(fx.host),
+        "executable_file": [0, 0],
+        "code_cdhash": "0" * 40,
+        "wrapper_executable": identity.executable,
+        "socket": str(fx.state / "host-never.sock"),
+    }
+    clock = float(identity.start) + module.STARTUP_WAIT_SECONDS + age_offset
+    monkeypatch.setattr(module.time, "time", lambda: clock)
+    code = module.CodeIdentity(cdhash="0" * 40, team=None, adhoc=True)
+    assert module.host_state(record, str(fx.host), code) == expected
+    assert inert.poll() is None
 
 
 @pytest.mark.parametrize("damage", ["mode", "symlink", "record-symlink", "record-mode"])

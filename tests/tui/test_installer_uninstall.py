@@ -11,6 +11,8 @@ import time
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 from _runtime_pack_fixture import (
@@ -23,6 +25,30 @@ from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_test_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy writer tests must never inherit host runtime or XDG roots."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData/Local"))
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_INSTALL_LEASE_FD",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -366,8 +392,17 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
         frame_helper=str(frame_helper),
     )
 
-    assert installer.cmd_runtime_install(install_args) == 0
+    original_skill_bytes = operator_skill.read_bytes()
+    assert installer.cmd_runtime_install(install_args) == 1
     installed = json.loads(capsys.readouterr().out)
+    assert installed["skill_projection_status"] == "partial"
+    assert installed["skill_projection_conflicts"] == [str(operator_skill)]
+    assert installed["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        installed["attempted_runtime_views"].split(",")
+        == installer.STANDARD_VIEW_RUNTIMES
+    )
+    assert operator_skill.read_bytes() == original_skill_bytes
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
     assert Path(installed["frame"]) == generation / "libexec/vc-frame"
@@ -428,6 +463,10 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"
+            if view == operator_skill:
+                assert view.is_file() and not view.is_symlink()
+                assert view.read_bytes() == original_skill_bytes
+                continue
             assert view.is_symlink()
             assert view.resolve() == (
                 generation / "vibecrafted-core/vibecrafted_core/skills" / skill_name
@@ -447,8 +486,16 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
 
     # An explicit repeated install must retain first-install ownership so
     # a later uninstall restores the original collisions and keeps recovery.
-    assert installer.cmd_runtime_install(install_args) == 0
-    capsys.readouterr()
+    assert installer.cmd_runtime_install(install_args) == 1
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["skill_projection_status"] == "partial"
+    assert repeated["skill_projection_conflicts"] == [str(operator_skill)]
+    assert repeated["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        repeated["attempted_runtime_views"].split(",")
+        == installer.STANDARD_VIEW_RUNTIMES
+    )
+    assert operator_skill.read_bytes() == original_skill_bytes
 
     (crafted_home / "runtime-created-state").write_text("owned\n", encoding="utf-8")
     assert (
@@ -471,7 +518,8 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert original_launcher.read_text(encoding="utf-8") == "operator-owned\n"
     assert original_screenscribe.is_symlink()
     assert original_screenscribe.readlink() == original_screenscribe_target
-    assert operator_skill.read_text(encoding="utf-8") == "operator-owned skill\n"
+    assert operator_skill.is_file() and not operator_skill.is_symlink()
+    assert operator_skill.read_bytes() == original_skill_bytes
     assert unrelated_skill.read_text(encoding="utf-8") == "preserve me\n"
     assert not (home / ".agents").exists()
     assert not (home / ".claude").exists()
@@ -1308,7 +1356,7 @@ def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(
     assert (home / "runtime" / installer.RUNTIME_INSTALL_RECEIPT).is_file()
 
 
-def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
+def test_runtime_pack_reinstall_preserves_retargeted_skill_view(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
@@ -1328,8 +1376,8 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
     assert installer.cmd_runtime_install(args) == 0
     capsys.readouterr()
 
-    # An operator tweaks their terminal config and retargets a projection;
-    # the next (repair/upgrade) install must reclaim both instead of dying.
+    # A user tweaks terminal config and retargets a skill projection. The
+    # installer reconciles the config but must not take over the foreign view.
     terminal_entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     canonical_entry = terminal_entry.read_text(encoding="utf-8")
     drifted_entry = canonical_entry + "# operator font tweak\n"
@@ -1339,15 +1387,14 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
     projection.unlink()
     projection.symlink_to(home / "operator-owned-target")
 
-    assert installer.cmd_runtime_install(args) == 0
-    capsys.readouterr()
+    assert installer.cmd_runtime_install(args) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["skill_projection_status"] == "partial"
+    assert str(projection) in result["skill_projection_conflicts"]
 
     assert terminal_entry.read_text(encoding="utf-8") == canonical_entry
     assert projection.is_symlink()
-    assert projection.resolve() == (
-        runtime_home
-        / "releases/9.9.9+g12345678/vibecrafted-core/vibecrafted_core/skills/vc-audit"
-    )
+    assert projection.readlink() == home / "operator-owned-target"
     receipt = json.loads(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
     )
@@ -1359,11 +1406,470 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
         for raw in history[str(terminal_entry)]
         if Path(raw).is_file()
     )
-    assert any(
-        Path(raw).is_symlink()
-        and Path(raw).readlink() == home / "operator-owned-target"
-        for raw in history[str(projection)]
+    assert str(projection) not in history
+
+
+def test_runtime_pack_install_preserves_foreign_skill_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    projection = home / ".codex/skills/vc-audit"
+    projection.mkdir(parents=True)
+    (projection / "SKILL.md").write_text("foreign", encoding="utf-8")
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
     )
+
+    assert installer.cmd_runtime_install(args) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["skill_projection_status"] == "partial"
+    assert str(projection) in result["skill_projection_conflicts"]
+    assert result["runtime_views"].split(",") == ["agents", "claude"]
+    assert (
+        result["attempted_runtime_views"].split(",") == installer.STANDARD_VIEW_RUNTIMES
+    )
+    assert (projection / "SKILL.md").read_text(encoding="utf-8") == "foreign"
+    receipt = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
+    )
+    assert str(projection) not in receipt["owned_symlinks"]
+
+
+def test_local_skill_publication_receipts_views_and_preserves_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    state = home / "state"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    current = runtime_home / "tools/vibecrafted-current"
+    generation = current.resolve()
+    foreign = home / ".codex/skills/vc-audit"
+    foreign.unlink()
+    foreign.symlink_to(home / "foreign")
+    optional = home / ".grok/skills/vc-audit"
+    optional.parent.mkdir(parents=True)
+    optional.symlink_to(home / "optional-foreign")
+    (home / ".cursor/skills").mkdir(parents=True)
+
+    class Proof(NamedTuple):
+        name: str
+        directory: Path
+        version_id: str
+        content_sha256: str
+        tree_sha256: str
+
+    class OwnerError(RuntimeError):
+        pass
+
+    version = "1" * 32
+    directory = (
+        state / "local-skills/vc-audit/versions" / version / "tree/skills/vc-audit"
+    )
+    selector = state / "local-skills/vc-audit/selected.json"
+
+    def prepare(name, text, revision, *, lease_held):
+        assert lease_held and revision == "0" * 64
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(text, encoding="utf-8")
+        return Proof(name, directory, version, "a" * 64, "b" * 64)
+
+    owner = SimpleNamespace(
+        LocalSkillProjection=Proof,
+        LocalSkillError=OwnerError,
+        prepare_skill=prepare,
+        validated_local_skill=lambda *args, **kwargs: None,
+        read_skill=lambda *args, **kwargs: {"revision": "0" * 64},
+        validate_candidate=lambda proof: proof,
+        local_skill_selector_path=lambda name: selector,
+        selected_bytes=lambda proof: b"selected version\n",
+    )
+    monkeypatch.setattr(
+        installer, "__file__", str(generation / "scripts/vetcoders_install.py")
+    )
+    monkeypatch.setattr(installer, "_load_local_skill_owner", lambda: owner)
+    monkeypatch.setattr(installer, "_runtime_generation_payload_errors", lambda _: [])
+    result = installer.publish_local_skill("vc-audit", "edited", "0" * 64)
+    assert result["activation"] == "partial"
+    assert result["views"]["codex"] == "conflict"
+    assert result["views"]["grok"] == "unmanaged"
+    assert result["views"]["cursor"] == "published"
+    assert optional.readlink() == home / "optional-foreign"
+    assert foreign.readlink() == home / "foreign"
+    assert selector.read_bytes() == b"selected version\n"
+    receipt = json.loads((runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text())
+    cursor_view = home / ".cursor/skills/vc-audit"
+    assert cursor_view.resolve() == directory
+    assert receipt["local_skill_projections"][str(cursor_view)]["version_id"] == version
+    for runtime in installer.STANDARD_VIEW_RUNTIMES:
+        view = home / f".{runtime}/skills/vc-audit"
+        if runtime != "codex":
+            assert view.resolve() == directory
+            assert (
+                receipt["local_skill_projections"][str(view)]["version_id"] == version
+            )
+            assert str(view) not in receipt["owned_symlinks"]
+
+
+def test_local_publication_rolls_back_when_candidate_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    paths = installer._runtime_install_paths()
+    view = installer.runtime_skills_dir("codex") / "vc-audit"
+    view.parent.mkdir(parents=True)
+    old, new = home / "old", home / "new"
+    old.mkdir()
+    new.mkdir()
+    view.symlink_to(old)
+    selector = paths["crafted_home"] / "local-skills/vc-audit/selected.json"
+    selector.parent.mkdir(parents=True)
+    selector.write_bytes(b"old")
+    staging = runtime_home / ".installer-backups/publication-test"
+    staging.mkdir(parents=True)
+    staged_view, staged_selector = staging / "view", staging / "selector"
+    staged_view.symlink_to(new)
+    staged_selector.write_bytes(b"new")
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "owned_symlinks": {str(view): str(old)},
+    }
+    receipt = json.loads(json.dumps(previous))
+    calls = 0
+
+    def validate():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("candidate changed")
+
+    with pytest.raises(RuntimeError, match="candidate changed"):
+        installer._publish_runtime_config_transaction(
+            paths,
+            receipt,
+            previous,
+            [(view, staged_view), (selector, staged_selector)],
+            staging,
+            None,
+            validate_publication=validate,
+        )
+    assert view.resolve() == old
+    assert selector.read_bytes() == b"old"
+    persisted = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    assert "config_transaction" not in persisted
+    assert persisted["owned_symlinks"][str(view)] == str(old)
+
+
+def test_local_publication_preimage_race_does_not_checkpoint_candidate_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    paths = installer._runtime_install_paths()
+    view = installer.runtime_skills_dir("codex") / "vc-audit"
+    view.parent.mkdir(parents=True)
+    old, foreign, candidate = home / "old", home / "foreign", home / "candidate"
+    for path in (old, foreign, candidate):
+        path.mkdir()
+    view.symlink_to(old)
+    staging = runtime_home / ".installer-backups/publication-race"
+    staging.mkdir(parents=True)
+    staged = staging / "view"
+    staged.symlink_to(candidate)
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "owned_symlinks": {str(view): str(old)},
+    }
+    installer._checkpoint_runtime_install_receipt(runtime_home, previous)
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    before_receipt = receipt_path.read_bytes()
+    expected = installer._runtime_config_digest(view)
+    receipt = json.loads(json.dumps(previous))
+    receipt["owned_symlinks"].pop(str(view))
+    receipt["local_skill_projections"] = {str(view): {"candidate": "not yet published"}}
+    original_copy = installer._copy_path_to_backup
+
+    def race(source, destination):
+        if source == view:
+            view.unlink()
+            view.symlink_to(foreign)
+        return original_copy(source, destination)
+
+    monkeypatch.setattr(installer, "_copy_path_to_backup", race)
+    with pytest.raises(RuntimeError, match="projection changed after ownership check"):
+        installer._publish_runtime_config_transaction(
+            paths,
+            receipt,
+            previous,
+            [(view, staged)],
+            staging,
+            None,
+            expected_preimages={view: expected},
+        )
+    assert view.readlink() == foreign
+    assert receipt_path.read_bytes() == before_receipt
+
+
+def test_interrupted_local_publication_recovers_previous_receipt_and_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, runtime = tmp_path / "home", tmp_path / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    paths = installer._runtime_install_paths()
+    view = installer.runtime_skills_dir("codex") / "vc-audit"
+    view.parent.mkdir(parents=True)
+    old, new = home / "old", home / "new"
+    old.mkdir()
+    new.mkdir()
+    view.symlink_to(old)
+    selector = paths["crafted_home"] / "local-skills/vc-audit/selected.json"
+    selector.parent.mkdir(parents=True)
+    selector.write_bytes(b"old")
+    staging = runtime / ".installer-backups/publication-interrupted"
+    staging.mkdir(parents=True)
+    staged_view, staged_selector = staging / "view", staging / "selector"
+    staged_view.symlink_to(new)
+    staged_selector.write_bytes(b"new")
+    previous = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "roots": {key: str(value) for key, value in paths.items()},
+        "owned_symlinks": {str(view): str(old)},
+    }
+    installer._checkpoint_runtime_install_receipt(runtime, previous)
+    receipt = json.loads(json.dumps(previous))
+    original_replace = installer._replace_runtime_transaction_entry
+    original_rollback = installer._rollback_runtime_config_transaction
+
+    def interrupt(entry, source):
+        if Path(entry["path"]) == selector:
+            raise RuntimeError("interrupted")
+        return original_replace(entry, source)
+
+    def simulate_lost_process(*_args):
+        raise RuntimeError("process lost before rollback")
+
+    monkeypatch.setattr(installer, "_replace_runtime_transaction_entry", interrupt)
+    monkeypatch.setattr(
+        installer, "_rollback_runtime_config_transaction", simulate_lost_process
+    )
+    with pytest.raises(RuntimeError, match="process lost before rollback"):
+        installer._publish_runtime_config_transaction(
+            paths,
+            receipt,
+            previous,
+            [(view, staged_view), (selector, staged_selector)],
+            staging,
+            None,
+            expected_preimages={
+                view: installer._runtime_config_digest(view),
+                selector: installer._runtime_config_digest(selector),
+            },
+        )
+    assert view.resolve() == new
+    pending = installer._load_runtime_install_receipt(
+        runtime / installer.RUNTIME_INSTALL_RECEIPT
+    )
+    assert "config_transaction" in pending
+    monkeypatch.setattr(
+        installer, "_replace_runtime_transaction_entry", original_replace
+    )
+    monkeypatch.setattr(
+        installer, "_rollback_runtime_config_transaction", original_rollback
+    )
+    original_rollback(paths, pending)
+    assert view.resolve() == old
+    assert selector.read_bytes() == b"old"
+    recovered = installer._load_runtime_install_receipt(
+        runtime / installer.RUNTIME_INSTALL_RECEIPT
+    )
+    assert "config_transaction" not in recovered
+    assert recovered["owned_symlinks"][str(view)] == str(old)
+
+
+def test_local_projection_receipt_rejects_foreign_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(home / "runtime"))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    paths = installer._runtime_install_paths()
+    view = installer.runtime_skills_dir("codex") / "vc-audit"
+    value = {
+        "schema": "vibecrafted.local-skill-projection.v1",
+        "name": "vc-audit",
+        "directory": str(home / "foreign"),
+        "version_id": "1" * 32,
+        "content_sha256": "a" * 64,
+        "tree_sha256": "b" * 64,
+    }
+    # The attacker-controlled receipt must be rejected before a store callback
+    # or any deletion can confer ownership on the foreign target.
+    with pytest.raises(RuntimeError, match="escapes its owner"):
+        installer._validate_local_skill_receipt(view, value, paths, None)
+
+
+def test_local_publication_refuses_installer_outside_selected_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    state = home / "state"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(state))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    with pytest.raises(RuntimeError, match="selected runtime identity"):
+        installer.publish_local_skill("vc-audit", "edited", "0" * 64)
+    assert not (state / "local-skills").exists()
+
+
+def test_real_local_skill_survives_upgrade_retirement_and_uninstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home, state, runtime_home = (
+        tmp_path / "home",
+        tmp_path / "state",
+        tmp_path / "runtime",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(state))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        installer,
+        "_unregister_runtime_bundles",
+        lambda *_args, **_kwargs: {"residuals": []},
+    )
+
+    def add_owner(payload: Path, *, retire: bool = False) -> None:
+        package = payload / "vibecrafted-core/vibecrafted_core"
+        for filename in ("local_skills.py", "portable_lock.py"):
+            shutil.copy2(
+                REPO_ROOT / "vibecrafted-core/vibecrafted_core" / filename,
+                package / filename,
+            )
+        if retire:
+            shutil.rmtree(package / "skills/vc-audit")
+
+    first = seed_runtime_pack(
+        tmp_path / "first",
+        version="9.9.8+g12345678",
+        before_source_seal=add_owner,
+    )
+    second = seed_runtime_pack(
+        tmp_path / "second",
+        version="9.9.9+g12345678",
+        before_source_seal=lambda payload: add_owner(payload, retire=True),
+    )
+    terminal_host = tmp_path / "Vibecrafted.app/Contents/Helpers/vc-terminal"
+    frame_helper = tmp_path / "Vibecrafted.app/Contents/Helpers/vc-frame"
+    _write_executable(terminal_host)
+    _write_executable(frame_helper)
+
+    def args(payload):
+        return Namespace(
+            payload_root=str(payload),
+            app_root=str(terminal_host.parents[2]),
+            terminal_host=str(terminal_host),
+            frame_helper=str(frame_helper),
+        )
+
+    assert installer.cmd_runtime_install(args(first)) == 0
+    capsys.readouterr()
+    first_generation = (runtime_home / "tools/vibecrafted-current").resolve()
+    monkeypatch.setattr(
+        installer, "__file__", str(first_generation / "scripts/vetcoders_install.py")
+    )
+    owner = installer._load_local_skill_owner()
+    original = owner.read_skill("vc-audit")
+    (home / ".cursor/skills").mkdir(parents=True)
+    saved = installer.publish_local_skill(
+        "vc-audit", "# local one\n", original["revision"]
+    )
+    assert saved["activation"] == "published"
+    assert installer.cmd_runtime_install(args(second)) == 0
+    capsys.readouterr()
+    second_generation = (runtime_home / "tools/vibecrafted-current").resolve()
+    monkeypatch.setattr(
+        installer, "__file__", str(second_generation / "scripts/vetcoders_install.py")
+    )
+    owner = installer._load_local_skill_owner()
+    assert owner.read_skill("vc-audit")["text"] == "# local one\n"
+    edited = installer.publish_local_skill(
+        "vc-audit", "# local two\n", saved["revision"]
+    )
+    assert edited["activation"] == "published"
+    for runtime in (*installer.STANDARD_VIEW_RUNTIMES, "cursor"):
+        assert (
+            installer.runtime_skills_dir(runtime) / "vc-audit/SKILL.md"
+        ).read_text() == "# local two\n"
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    capsys.readouterr()
+    selection = json.loads((state / "local-skills/vc-audit/selected.json").read_text())
+    retained = (
+        state
+        / "local-skills/vc-audit/versions"
+        / selection["version_id"]
+        / "tree/skills/vc-audit/SKILL.md"
+    )
+    assert retained.read_text() == "# local two\n"
+    assert not (home / ".cursor/skills/vc-audit").exists()
 
 
 def test_runtime_pack_uninstall_refuses_modified_agent_projection(

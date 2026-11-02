@@ -77,7 +77,7 @@ Examples:
     }
 
     fn consume_cli_meta() -> Option<i32> {
-        let mut args = std::env::args().skip(1);
+        let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args -- parse caller-supplied flags; argv[0] is discarded, not trusted.
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" | "help" => {
@@ -132,11 +132,11 @@ Examples:
     }
 
     fn configured_addr() -> SocketAddr {
-        let cli_addr = std::env::args()
+        let cli_addr = std::env::args() // nosemgrep: rust.lang.security.args.args -- parse caller-selected bind; argv[0] is discarded.
             .skip(1)
             .find_map(|arg| arg.strip_prefix("--addr=").map(ToOwned::to_owned))
             .or_else(|| {
-                let mut args = std::env::args().skip(1);
+                let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args -- parse caller-selected bind; argv[0] is discarded.
                 while let Some(arg) = args.next() {
                     if arg == "--addr" {
                         return args.next();
@@ -170,7 +170,7 @@ Examples:
             return PathBuf::from(root).to_string_lossy().into_owned();
         }
 
-        let exe_dir = std::env::current_exe()
+        let exe_dir = std::env::current_exe() // nosemgrep: rust.lang.security.current-exe.current-exe -- locate adjacent site assets, not authenticate the executable.
             .ok()
             .and_then(|path| path.parent().map(PathBuf::from));
         let mut candidates = Vec::new();
@@ -233,6 +233,10 @@ Examples:
         .merge(mcp_routes())
         .merge(bus_routes())
         .fallback(leptos_axum::file_and_error_handler(shell))
+        .layer(axum::middleware::from_fn_with_state(
+            leptos_options.clone(),
+            vibecrafted_server_web::skills_access::skills_access_guard,
+        ))
         .with_state(leptos_options);
 
     // vc-server owns local usage collection: one scheduled one-shot, no

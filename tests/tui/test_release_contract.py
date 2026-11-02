@@ -331,6 +331,77 @@ def test_darwin_linker_wrapper_uses_measured_xcode_pair_without_ld_classic(
         assert not captured.exists()
 
 
+@pytest.mark.parametrize("profile", ["local", "local-xcode27"])
+@pytest.mark.parametrize(
+    ("clang", "ld", "accepted"),
+    [
+        ("2100.3.34.2", "27037.1", True),
+        ("2100.4.1.1", "27106.1", True),
+        ("2100.3.34.2", "27106.1", False),
+        ("2100.4.1.1", "27037.1", False),
+        ("2100.3.27.1", "27036.1", False),  # observed Xcode beta
+        ("2100.4.1.2", "27106.1", False),
+        ("2100.4.1.1", "27106.2", False),
+    ],
+)
+def test_xcode_stable_versions_are_admitted_as_exact_pairs(
+    tmp_path: Path, profile: str, clang: str, ld: str, accepted: bool
+) -> None:
+    """Execute the real contract and shim; only tool paths are fabricated."""
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    captured = tmp_path / "clang-arguments"
+    (tools / "clang").write_text(
+        '#!/bin/sh\nif [ "${1:-}" = --version ]; then\n'
+        'printf "%s\\n" "$FAKE_CLANG_VERSION"; exit 0; fi\n'
+        'printf "%s\\n" "$@" > "$CAPTURED"\n'
+    )
+    (tools / "ld").write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_LD_VERSION"\n')
+    (tools / "xcrun").write_text(
+        '#!/bin/sh\ncase "$2" in\n'
+        'clang|ld) printf "%s/%s\\n" "$FAKE_BIN" "$2" ;;\n'
+        "*) exit 1 ;;\nesac\n"
+    )
+    for tool in tools.iterdir():
+        tool.chmod(0o755)
+    contract = (REPO_ROOT / "scripts/lib/release-toolchain-contract.sh").read_text()
+    contract = contract.replace(
+        "/Library/Developer/CommandLineTools/usr/bin/ld-classic",
+        str(tmp_path / "absent-ld-classic"),
+    )
+    candidate = tmp_path / "contract.sh"
+    candidate.write_text(contract)
+    env = {
+        **os.environ,
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "FAKE_BIN": str(tools),
+        "CAPTURED": str(captured),
+        "FAKE_CLANG_VERSION": f"Apple clang version 21.0.0 (clang-{clang})",
+        "FAKE_LD_VERSION": f"@(#)PROGRAM:ld PROJECT:ld-{ld}",
+        "VIBECRAFTED_RELEASE_TOOLCHAIN_CONTRACT": str(candidate),
+        "VIBECRAFTED_RELEASE_TOOLCHAIN_PROFILE": profile,
+    }
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts/lib/rust-linker-darwin-classic.sh"),
+            "object.o",
+            "-o",
+            "product",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        assert captured.read_text().splitlines() == ["object.o", "-o", "product"]
+    else:
+        assert result.returncode != 0
+        assert "release xcode" in result.stderr and "drift" in result.stderr
+        assert not captured.exists(), "a refused pair must never execute the linker"
+
+
 def _release_contract_make() -> str:
     # Both Apple make entry points are shims. Resolve gnumake before
     # applying a fixture DEVELOPER_DIR, so the recipe exercises the contract.

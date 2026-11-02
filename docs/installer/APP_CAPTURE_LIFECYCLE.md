@@ -5,6 +5,14 @@ rollback App while the matching Runtime Pack is pending. Settlement uses the
 same `.vc-update.lock/held` inode and requires the installer's actual
 `active.json` and `install-receipt.json`, a matching generation/source/module
 tuple, no pending rescue/configuration/publication, strict codesign validity, and the exact replacement transaction. The signed carrier's existing read-only `runtime-resolve` validates destination hashes, selectors, native helpers, configuration and launcher lineage before disposal.
+When that resolver returns exactly the canonical `runtime installation is in
+progress` refusal (a relaunched App adopting the runtime under the exclusive
+install lease), settlement waits up to 60 seconds for the shared
+`tools/.vibecrafted-install.lock` lease, asks the resolver once more and keeps
+the shared lease until it exits, so no publication starts between observation
+and disposal. Any other refusal, a lease identity change or an expired budget
+fails as before and keeps the capture. Every caller — `install.sh`,
+`make install-app` and the App — inherits this from the helper.
 
 UI replacement and `make install-app` save unique receipt, admission, journal,
 and capture creation records under

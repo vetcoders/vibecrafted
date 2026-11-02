@@ -350,8 +350,11 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
 
 
 def agents_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted agents`."""
-    return supervised_skill_main("agents", argv)
+    """Render the shared native help for ``vc-agents`` on every platform."""
+    from .help_surface import render_agents_help
+
+    print(render_agents_help(), end="")
+    return 0
 
 
 def followup_main(argv: Sequence[str] | None = None) -> int:
