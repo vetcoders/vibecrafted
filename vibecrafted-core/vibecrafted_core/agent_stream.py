@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .telemetry import estimate_cost_usd
+from .telemetry import estimate_cost_usd, is_model_name
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 SESSION_PATTERN = re.compile(
@@ -24,7 +24,11 @@ TOKEN_PATTERN = re.compile(
     r"tokens:\s*([0-9]+)\s+in(?:\s*\(([0-9]+)\s+cached\))?\s*/\s*([0-9]+)\s+out",
     re.IGNORECASE,
 )
-MODEL_PATTERN = re.compile(r"model:\s*([^\s]+)", re.IGNORECASE)
+# Plain `model: X` is prose. Only a timestamped provider header names the model.
+TIMESTAMPED_MODEL_PATTERN = re.compile(
+    r"\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]\s+model:\s*([^\r\n]*)",
+    re.IGNORECASE,
+)
 MODEL_ENV_VARS = (
     "VIBECRAFTED_PARENT_MODEL",
     "CLAUDE_MODEL",
@@ -37,11 +41,6 @@ MODEL_ENV_VARS = (
     "COPILOT_MODEL",
     "CURSOR_MODEL",
     "OMP_MODEL",
-)
-MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
-COST_PATTERNS = (
-    re.compile(r"cost(?:_usd)?\s*[:=]\s*\$?([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
-    re.compile(r"\$([0-9]+\.[0-9]+)\s*(?:usd)?", re.IGNORECASE),
 )
 GROK_IGNORABLE_TRANSPORT_ERROR = "worker quit with fatal: Transport channel closed"
 # Every provider spelling of a token count. A usage dict carrying none of these
@@ -291,9 +290,9 @@ def _as_float(value: Any) -> float | None:
 
 
 def _clean_model(value: object) -> str:
-    """Stringify ``value`` and blank out known placeholder tokens (e.g. "none", "unknown")."""
+    """Return a real model label, or "" when ``value`` is missing or not a model."""
     raw = str(value or "").strip()
-    return "" if raw.lower() in MODEL_PLACEHOLDERS else raw
+    return raw if is_model_name(raw) else ""
 
 
 def _command_model(command: Sequence[str] | None) -> str:
@@ -416,8 +415,8 @@ class AgentStreamParser:
     def feed_line(self, chunk: bytes) -> str:
         """Decode one line of agent output and render it to human-readable text.
 
-        Non-JSON lines fall through to plain-text scanning for session/token/
-        model/cost markers; JSON lines dispatch to the agent-specific formatter.
+        Non-JSON lines fall through to plain-text scanning for session, token,
+        and timestamped model headers. A cost is read only from a JSON event.
         """
         text = chunk.decode("utf-8", errors="replace")
         if self.agent == "grok" and is_grok_ignorable_transport_error(text):
@@ -462,7 +461,12 @@ class AgentStreamParser:
         return f"cd {root_text} && vc-resume --session {session}"
 
     def _scan_text(self, text: str) -> None:
-        """Regex-scan a plain-text (non-JSON) line for session id, tokens, model, cost."""
+        """Scan a plain-text line for session id, tokens, and a timestamped model.
+
+        Cost is never taken from prose. A model is taken only from
+        ``[HH:MM:SS] model: X`` after ANSI stripping, and only when X is a
+        real model name. A later invalid header does not clear a known model.
+        """
         clean = ANSI_PATTERN.sub("", text or "")
         session_matches = SESSION_PATTERN.findall(clean)
         if session_matches:
@@ -472,46 +476,50 @@ class AgentStreamParser:
             self.tokens_cached_input += int(raw_cached or 0)
             self.tokens_output += int(raw_out)
             self.usage_events += 1
-        model_matches = MODEL_PATTERN.findall(clean)
-        if model_matches:
-            self.model_id = model_matches[-1]
-        for pattern in COST_PATTERNS:
-            matches = pattern.findall(clean)
-            if matches:
-                self.cost_usd = _as_float(matches[-1])
-                if self.cost_usd is not None:
-                    self.cost_source = "provider_reported"
+        for match in TIMESTAMPED_MODEL_PATTERN.finditer(clean):
+            candidate = match.group(1).strip()
+            if is_model_name(candidate):
+                self.model_id = candidate
+
+    def _take_model(self, value: object) -> bool:
+        """Store ``value`` when it is a real model name. Invalid text does not stick."""
+        if not isinstance(value, str):
+            return False
+        text = value.strip()
+        if not is_model_name(text):
+            return False
+        self.model_id = text
+        return True
 
     def _record_model(self, event: dict[str, Any]) -> None:
-        """Capture the first model id found in ``event`` (recursing into nested dicts).
+        """Capture the first real model id in ``event`` (recursing into nested dicts).
 
-        No-op once ``self.model_id`` is already set — first sighting wins.
+        No-op once ``self.model_id`` is already set — first valid sighting wins.
+        An invalid string does not occupy the slot, so a later valid field can.
         """
         if self.model_id:
             return
         for key in ("model", "model_id", "modelId", "model_name", "modelName"):
-            value = event.get(key)
-            if isinstance(value, str) and value.strip():
-                self.model_id = value.strip()
+            if self._take_model(event.get(key)):
                 return
         message = event.get("message")
         if isinstance(message, dict):
             for key in ("model", "model_id", "modelId", "model_name", "modelName"):
-                value = message.get(key)
-                if isinstance(value, str) and value.strip():
-                    self.model_id = value.strip()
+                if self._take_model(message.get(key)):
                     return
         model_usage = event.get("modelUsage") or event.get("model_usage")
-        if isinstance(model_usage, dict) and model_usage:
-            self.model_id = str(next(iter(model_usage)))
+        if (
+            isinstance(model_usage, dict)
+            and model_usage
+            and self._take_model(next(iter(model_usage)))
+        ):
             return
         if isinstance(model_usage, list):
             for item in model_usage:
-                if isinstance(item, dict):
-                    value = item.get("model") or item.get("model_id")
-                    if isinstance(value, str) and value.strip():
-                        self.model_id = value.strip()
-                        return
+                if isinstance(item, dict) and self._take_model(
+                    item.get("model") or item.get("model_id")
+                ):
+                    return
         for value in event.values():
             if isinstance(value, dict):
                 self._record_model(value)
@@ -672,10 +680,12 @@ class AgentStreamParser:
             message = event.get("message")
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 return ""
-            provider = str(message.get("provider") or "")
-            model = str(message.get("model") or "")
+            provider = str(message.get("provider") or "").strip()
+            model = str(message.get("model") or "").strip()
             if model:
-                self.model_id = f"{provider}/{model}" if provider else model
+                candidate = f"{provider}/{model}" if provider else model
+                if is_model_name(candidate):
+                    self.model_id = candidate
             if event_type == "message_start":
                 self._omp_text_buffer = ""
                 self._omp_text_streamed = False
@@ -761,7 +771,7 @@ class AgentStreamParser:
         if not isinstance(data, dict):
             data = event
         if kind == "session.start":
-            self.model_id = str(data.get("selectedModel") or self.model_id)
+            self._take_model(data.get("selectedModel"))
             session = str(data.get("sessionId") or "")
             return self._session_banner(session)
         if kind == "result":
@@ -770,10 +780,10 @@ class AgentStreamParser:
             # but is not emitted on stdout by Copilot CLI 1.0.89-7.
             return self._session_banner(str(event.get("sessionId") or ""))
         if kind == "session.model_change":
-            self.model_id = str(data.get("newModel") or self.model_id)
+            self._take_model(data.get("newModel"))
             return ""
         if kind == "assistant.message":
-            self.model_id = str(data.get("model") or self.model_id)
+            self._take_model(data.get("model"))
             content = data.get("content")
             if isinstance(content, str) and content.strip():
                 self.final_response = content
@@ -793,7 +803,7 @@ class AgentStreamParser:
                 for model, metric in metrics.items():
                     if not isinstance(metric, dict):
                         continue
-                    self.model_id = str(model)
+                    self._take_model(model)
             # modelMetrics is cumulative over the native session. A resumed
             # run cannot attribute that total to this invocation. The
             # harness-usage adapter checks the full session window first.
