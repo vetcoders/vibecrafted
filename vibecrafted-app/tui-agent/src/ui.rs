@@ -11,7 +11,7 @@ use crate::mission_control::{
 };
 use crate::observe::{self, ConsoleView, ObserveHealth};
 use crate::state::RunKind;
-use crate::usage::UsageCost;
+use crate::usage::display_cost;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -957,18 +957,27 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::raw(format!("   {} token unknown", usage.runs_tokens_unknown)),
             ]),
-            Line::from(vec![
-                Span::styled(
+            Line::from({
+                let mut spans = vec![Span::styled(
                     format!("${:.4} USD", usage.usd_total),
                     Style::default().fg(Color::Green),
-                ),
-                Span::raw("   "),
-                Span::styled(
-                    format!("{:.2} credits", usage.credits_total),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(format!("   {} cost unknown", usage.runs_cost_unknown)),
-            ]),
+                )];
+                if usage.usd_estimated != 0.0 {
+                    spans.push(Span::styled(
+                        format!(" · ~${:.4} estimated", usage.usd_estimated),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                spans.extend([
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("{:.2} credits", usage.credits_total),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(format!("   {} cost unknown", usage.runs_cost_unknown)),
+                ]);
+                spans
+            }),
             Line::from(vec![
                 Span::styled(
                     format!("{} failures", usage.failures),
@@ -1019,13 +1028,7 @@ fn usage_run_item(run: &crate::usage::UsageRun) -> ListItem<'static> {
         .tokens_total
         .map(format_count)
         .unwrap_or_else(|| "unknown".to_string());
-    let cost = match &run.cost {
-        UsageCost::Known { amount, unit } if unit.eq_ignore_ascii_case("USD") => {
-            format!("${amount:.4} USD")
-        }
-        UsageCost::Known { amount, unit } => format!("{amount:.2} {unit}"),
-        UsageCost::Unknown => "unknown".to_string(),
-    };
+    let cost = display_cost(run);
     let failed = run.failure.as_deref().unwrap_or_else(|| {
         if run.status.eq_ignore_ascii_case("failed") {
             "unknown"
