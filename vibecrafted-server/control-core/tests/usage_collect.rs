@@ -96,6 +96,15 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         "every provider is collected by the one owner"
     );
 
+    // The quota board reads the scanner's projection and the report reads the
+    // measured one, so one collection refreshes both.
+    assert!(vc_home.join("telemetry/claude/quota.json").is_file());
+    assert!(
+        vc_home
+            .join("telemetry/claude/ccusage-sessions.json")
+            .is_file()
+    );
+
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let report = loop {
         let report = plane.usage_report(Utc::now(), UsageFilter::default());
@@ -123,6 +132,17 @@ fn collector_fills_the_projections_the_report_reads_without_resident_children() 
         .find(|r| r.agent == "kimi")
         .expect("kimi row");
     assert_eq!(kimi.tokens.tokens_total.as_u64(), Some(11));
+    // An adapter that recognizes none of a store's sessions must not hide what
+    // the older scanner measured there.
+    assert_eq!(
+        report
+            .local_sources
+            .iter()
+            .find(|source| source.agent == "kimi")
+            .map(|source| source.source.as_str()),
+        Some("scan_cache")
+    );
+    assert_eq!(claude.telemetry_source, "ccusage:claude");
     let omp = report
         .runs
         .iter()

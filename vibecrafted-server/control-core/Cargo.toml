@@ -6,7 +6,7 @@
 name = "control-core"
 version = "4.5.2"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.97.0"
 license = "BUSL-1.1"
 authors = ["Vetcoders <agents@vetcoders.io>"]
 repository = "https://github.com/vetcoders/vibecrafted"
@@ -22,3 +22,10 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 sha2 = "0.10"
 libc = "0.2"
+ccusage-core = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-antigravity = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-claude = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-codex = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-copilot = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-grok = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
+ccusage-adapter-kimi = { git = "https://github.com/ccusage/ccusage", rev = "c4177eeb6f037bcfcdfe948c78699fb437399b41" }
