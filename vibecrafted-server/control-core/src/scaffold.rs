@@ -1345,10 +1345,10 @@ fn collect_baseline_shas_from_line(line: &str, shas: &mut BTreeSet<String>) {
             offset += idx + marker.len();
         }
     }
-    if starts.is_empty() {
-        if let Some(idx) = word_index(&lower, "baseline") {
-            starts.push(idx + "baseline".len());
-        }
+    if starts.is_empty()
+        && let Some(idx) = word_index(&lower, "baseline")
+    {
+        starts.push(idx + "baseline".len());
     }
     for start in starts {
         if start <= line.len() {
@@ -1565,10 +1565,10 @@ fn resolve_geometry_repo(
         return git_toplevel(explicit);
     }
     for (_, content) in &sources.mission_driver {
-        if let Some(declared) = parse_declared_repo_root(content) {
-            if let Some(top) = git_toplevel(&declared) {
-                return Some(top);
-            }
+        if let Some(declared) = parse_declared_repo_root(content)
+            && let Some(top) = git_toplevel(&declared)
+        {
+            return Some(top);
         }
         for absolute in extract_absolute_fs_paths(content) {
             if absolute.contains("/.vibecrafted/") {
@@ -1580,10 +1580,10 @@ fn resolve_geometry_repo(
             } else {
                 Some(candidate)
             };
-            if let Some(start) = start {
-                if let Some(top) = git_toplevel(&start) {
-                    return Some(top);
-                }
+            if let Some(start) = start
+                && let Some(top) = git_toplevel(&start)
+            {
+                return Some(top);
             }
         }
     }
@@ -1926,17 +1926,17 @@ fn validate_manifest_plan(root: &Path, manifest: &ScaffoldManifest) -> ScaffoldD
     let mut briefs_on_disk = Vec::new();
     collect_markdown(&root.join("briefs"), &mut briefs_on_disk);
     for path in briefs_on_disk {
-        if let Ok(relative) = relative_string(root, &path) {
-            if !paths.contains(&relative) {
-                doctor_error(
-                    &mut errors,
-                    "brief_absent_from_manifest",
-                    Some("R5"),
-                    None,
-                    Some(&relative),
-                    &format!("brief on disk is not declared in manifest: {relative}"),
-                );
-            }
+        if let Ok(relative) = relative_string(root, &path)
+            && !paths.contains(&relative)
+        {
+            doctor_error(
+                &mut errors,
+                "brief_absent_from_manifest",
+                Some("R5"),
+                None,
+                Some(&relative),
+                &format!("brief on disk is not declared in manifest: {relative}"),
+            );
         }
     }
 
@@ -2066,17 +2066,17 @@ fn validate_frontmatter(
         }
     }
     for key in ["id", "artifact_id"] {
-        if let Some(value) = frontmatter.get(key) {
-            if value != &artifact.id {
-                doctor_error(
-                    errors,
-                    "frontmatter_drift",
-                    Some("R11"),
-                    Some(&artifact.id),
-                    Some(&artifact.path),
-                    &format!("frontmatter {key} does not match manifest id"),
-                );
-            }
+        if let Some(value) = frontmatter.get(key)
+            && value != &artifact.id
+        {
+            doctor_error(
+                errors,
+                "frontmatter_drift",
+                Some("R11"),
+                Some(&artifact.id),
+                Some(&artifact.path),
+                &format!("frontmatter {key} does not match manifest id"),
+            );
         }
     }
 }
@@ -2484,13 +2484,12 @@ fn section_body(content: &str, needle: &str) -> Option<String> {
 }
 
 fn brief_needs_design(content: &str) -> bool {
-    if let Some(frontmatter) = parse_frontmatter(content) {
-        if frontmatter
+    if let Some(frontmatter) = parse_frontmatter(content)
+        && frontmatter
             .get("needs_design")
             .is_some_and(|value| matches!(value.as_str(), "true" | "yes" | "1"))
-        {
-            return true;
-        }
+    {
+        return true;
     }
     content.lines().any(|line| {
         let t = line.trim().to_ascii_lowercase();
@@ -2879,17 +2878,16 @@ fn update_markdown_status(
                 (None, None) => true,
             };
 
-            if is_match {
-                if let Some(s) = line.find('[') {
-                    if let Some(rel_e) = line[s..].find(']') {
-                        let e = s + rel_e;
-                        if e == s + 2 {
-                            line.replace_range(s + 1..e, new_symbol);
-                            updated = true;
-                            if item_id.is_none() && item_index.is_none() {
-                                break;
-                            }
-                        }
+            if is_match
+                && let Some(s) = line.find('[')
+                && let Some(rel_e) = line[s..].find(']')
+            {
+                let e = s + rel_e;
+                if e == s + 2 {
+                    line.replace_range(s + 1..e, new_symbol);
+                    updated = true;
+                    if item_id.is_none() && item_index.is_none() {
+                        break;
                     }
                 }
             }
@@ -2897,10 +2895,8 @@ fn update_markdown_status(
         }
     }
 
-    if !updated {
-        if let Some(id) = item_id {
-            lines.push(format!("- [{new_symbol}] {id}"));
-        }
+    if !updated && let Some(id) = item_id {
+        lines.push(format!("- [{new_symbol}] {id}"));
     }
 
     let mut result = lines.join("\n");
