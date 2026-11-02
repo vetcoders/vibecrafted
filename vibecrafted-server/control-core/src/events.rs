@@ -289,6 +289,7 @@ fn open_archive_child_no_follow(directory: &File, name: &Path) -> io::Result<Fil
     // SAFETY: `directory` is an open, canonical archive directory. `name` was
     // validated as one normal component. `openat` returns a fresh owned fd or
     // a negative errno; O_NOFOLLOW rejects a last-component symlink.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- openat returns one fresh fd or an errno
     let raw = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -301,6 +302,7 @@ fn open_archive_child_no_follow(directory: &File, name: &Path) -> io::Result<Fil
     }
     // SAFETY: a successful `openat` returned one fresh descriptor, transferred
     // exactly once into `OwnedFd` and then `File`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- from_raw_fd takes that one fresh fd
     let owned = unsafe { OwnedFd::from_raw_fd(raw) };
     Ok(File::from(owned))
 }
@@ -941,10 +943,10 @@ impl EventStream {
             return Ok(Vec::new());
         }
         let mut segments = self.ordered_unique_segments()?;
-        if segments.is_empty() {
-            if let Some(active) = self.headerless_active()? {
-                segments.push(active);
-            }
+        if segments.is_empty()
+            && let Some(active) = self.headerless_active()?
+        {
+            segments.push(active);
         }
         let mut events = Vec::new();
         for segment in segments.iter().rev() {
@@ -1044,15 +1046,14 @@ fn read_segment_tail(mut file: File, segment: &Segment, limit: usize) -> io::Res
     let mut events = Vec::new();
     for line in raw.split(|byte| *byte == b'\n').rev() {
         let bytes = line.len().saturating_add(1);
-        if line.len() <= STREAM_LINE_MAX_BYTES {
-            if let Ok(mut event) = serde_json::from_slice::<Event>(line) {
-                if event.kind != "stream.segment" {
-                    event.cursor = line_end;
-                    events.push(event);
-                    if events.len() >= limit {
-                        break;
-                    }
-                }
+        if line.len() <= STREAM_LINE_MAX_BYTES
+            && let Ok(mut event) = serde_json::from_slice::<Event>(line)
+            && event.kind != "stream.segment"
+        {
+            event.cursor = line_end;
+            events.push(event);
+            if events.len() >= limit {
+                break;
             }
         }
         line_end = line_end.saturating_sub(u64::try_from(bytes).unwrap_or(u64::MAX));
@@ -1314,6 +1315,7 @@ mod tests {
     };
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch under a name unique to this process
         std::env::temp_dir().join(format!(
             "vc-control-events-{label}-{}-{}",
             std::process::id(),

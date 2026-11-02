@@ -464,10 +464,11 @@ impl RuntimeSessionAttachment {
     fn owner_freshness(&self) -> Option<(i64, &str)> {
         if let Some(identity) = &self.worker_identity {
             let token = identity.start_token.trim();
-            if let Some(pid) = identity.pid {
-                if pid > 0 && !token.is_empty() {
-                    return Some((pid, token));
-                }
+            if let Some(pid) = identity.pid
+                && pid > 0
+                && !token.is_empty()
+            {
+                return Some((pid, token));
             }
         }
         let token = self.start_token.trim();
@@ -613,6 +614,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch under a name unique to this process
         std::env::temp_dir().join(format!(
             "vc-workspace-projection-{}-{nonce}-{unique}",
             std::process::id()
