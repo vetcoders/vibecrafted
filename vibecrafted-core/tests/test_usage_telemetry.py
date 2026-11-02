@@ -152,11 +152,11 @@ def test_junie_top_level_usage_is_counted_once() -> None:
     assert parser.usage_events == 1
 
 
-def test_plain_text_cost_carries_its_source() -> None:
+def test_plain_text_is_never_a_provider_cost() -> None:
     parser = AgentStreamParser("agy")
     parser.feed_line(b"cost: $0.25\n")
-    assert parser.cost_usd == 0.25
-    assert parser.cost_source == "provider_reported"
+    assert parser.cost_usd is None
+    assert parser.cost_source != "provider_reported"
 
 
 # --------------------------------------------------------------------------
