@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::usage::{
     USAGE_PROVIDER_ADAPTERS, UsageCost, UsageFilter, UsageRun, UsageTokens, matches_filter,
-    regular_file, unknown,
+    regular_file, unknown, valid_model_name,
 };
 use crate::usage_ccusage::{LoadedProjection, PROJECTION_FILE, ProjectedSession, read_projection};
 
@@ -255,10 +255,10 @@ fn read_ccusage_sessions(
         if cutoff.is_some_and(|cutoff| recorded < cutoff) {
             continue;
         }
-        let model = if session.model.is_empty() {
-            unknown("ccusage session carried no model")
-        } else {
+        let model = if valid_model_name(&session.model) {
             json!(session.model)
+        } else {
+            unknown("ccusage session carried no model")
         };
         let session_id = if session.id.is_empty() {
             unknown("ccusage session carried no id")
