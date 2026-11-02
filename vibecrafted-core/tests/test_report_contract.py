@@ -119,6 +119,85 @@ def test_launcher_claim_digest_overrides_worker_copy(tmp_path: Path) -> None:
     assert fields["claim_digest"] == digest
 
 
+def test_stamp_leaves_legacy_omitted_finalized_absent(tmp_path: Path) -> None:
+    """A worker report that predates the key must not gain an explicit veto.
+
+    Core run 41509769072 failed terminal liveness because the close stamp
+    inserted ``finalized: false`` into a completed report that had omitted
+    the key. Process evidence then lost to an invented denial.
+    """
+    report = tmp_path / "legacy.md"
+    report.write_text(
+        "---\nstatus: completed\nnext_stage: polarize\n"
+        "next_agent: codex\ndou_index: 3\n---\nbody\n",
+        encoding="utf-8",
+    )
+    assert stamp_launcher_report_identity(
+        report,
+        run_id="legacy-run",
+        session_id="pending-unset",
+        agent="claude",
+        skill="workflow",
+        status="completed",
+    )
+    fields, body, _ = parse_report_text(report.read_text(encoding="utf-8"))
+    assert "finalized" not in fields
+    assert fields["status"] == "completed"
+    assert fields["claim_status"] == "completed"
+    assert fields["run_id"] == "legacy-run"
+    assert body.strip() == "body"
+
+
+def test_stamp_still_vetoes_unauthored_and_explicit_false(tmp_path: Path) -> None:
+    untouched = tmp_path / "template.md"
+    assert materialize_launcher_report_template(
+        untouched,
+        run_id="shell-run",
+        agent="claude",
+        skill="workflow",
+    )
+    stamp_launcher_report_identity(
+        untouched,
+        run_id="shell-run",
+        session_id="pending-unset",
+        agent="claude",
+        skill="workflow",
+        status="completed",
+    )
+    template_fields, _, _ = parse_report_text(untouched.read_text(encoding="utf-8"))
+    assert template_fields["finalized"] == "false"
+    assert template_fields["launcher_template"] == "true"
+
+    explicit = tmp_path / "explicit.md"
+    explicit.write_text(
+        "---\nstatus: completed\nfinalized: false\nclaim: \n---\nstill open\n",
+        encoding="utf-8",
+    )
+    stamp_launcher_report_identity(
+        explicit,
+        run_id="explicit-run",
+        session_id="pending-unset",
+        agent="claude",
+        skill="workflow",
+        status="completed",
+    )
+    explicit_fields, _, _ = parse_report_text(explicit.read_text(encoding="utf-8"))
+    assert explicit_fields["finalized"] == "false"
+
+    empty = tmp_path / "empty.md"
+    empty.write_text("", encoding="utf-8")
+    stamp_launcher_report_identity(
+        empty,
+        run_id="empty-run",
+        session_id="pending-unset",
+        agent="claude",
+        skill="workflow",
+        status="completed",
+    )
+    empty_fields, _, _ = parse_report_text(empty.read_text(encoding="utf-8"))
+    assert empty_fields["finalized"] == "false"
+
+
 def test_classify_exit_0_claim_failed_is_attention() -> None:
     verdict = classify_run(
         0,
