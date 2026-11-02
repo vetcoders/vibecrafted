@@ -1,0 +1,6 @@
+{"model":"kimi-code/k3","time":1791997507075,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":1024,"inputOther":33725,"output":639},"usageScope":"turn"}
+{"model":"kimi-code/k3","time":1791997517268,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":34560,"inputOther":1257,"output":248},"usageScope":"turn"}
+{"model":"kimi-code/k3","time":1791997533216,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":35584,"inputOther":647,"output":469},"usageScope":"turn"}
+{"model":"kimi-code/k3","time":1791997547150,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":36096,"inputOther":10979,"output":258},"usageScope":"turn"}
+{"model":"kimi-code/k3","time":1791997561411,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":46848,"inputOther":15897,"output":88},"usageScope":"turn"}
+{"model":"kimi-code/k3","time":1791997576989,"type":"usage.record","usage":{"inputCacheCreation":0,"inputCacheRead":62720,"inputOther":2337,"output":552},"usageScope":"turn"}

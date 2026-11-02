@@ -1,0 +1,38 @@
+{
+  "sessions": [
+    {
+      "cacheCreationTokens": 184842,
+      "cacheReadTokens": 8847878,
+      "firstActivity": "2026-10-25T07:48:34.725Z",
+      "inputTokens": 219,
+      "lastActivity": "2026-10-25T07:48:34.725Z",
+      "messageCount": 73,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 184842,
+          "cacheReadTokens": 8847878,
+          "cost": 3.1941316000000004,
+          "inputTokens": 219,
+          "modelName": "gpt-6.1-sol",
+          "outputTokens": 33298
+        }
+      ],
+      "modelsUsed": [
+        "gpt-6.1-sol"
+      ],
+      "outputTokens": 33298,
+      "projectPath": "GitHub Copilot CLI",
+      "sessionId": "01a0de00-0000-4000-8000-000000000005",
+      "totalCost": 3.1941316000000004,
+      "totalTokens": 9066237
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 184842,
+    "cacheReadTokens": 8847878,
+    "inputTokens": 219,
+    "outputTokens": 33298,
+    "totalCost": 3.1941316000000004,
+    "totalTokens": 9066237
+  }
+}
