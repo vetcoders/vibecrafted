@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from vibecrafted_core import spawn, usage_reporting
 from vibecrafted_core.agent_stream import AgentStreamParser
-from vibecrafted_core.spawn import _extract_cost, _resolve_model
+from vibecrafted_core.spawn import _extract_cost, _extract_tokens, _resolve_model
 from vibecrafted_core.telemetry import run_telemetry_from_meta
 
 AGENTS = ("agy", "claude", "codex", "copilot", "cursor", "grok", "junie", "kimi", "omp")
@@ -41,6 +41,10 @@ NOT_A_MODEL = (
     "None",
     "unknown",
     "pending",
+    "foo<bar>",
+    "model>",
+    "Codex-CLI-DEFAULT",
+    "Grok_SOURCE:x",
 )
 
 
@@ -276,6 +280,32 @@ def test_the_first_json_event_names_the_model() -> None:
     assert _resolve_model({"agent": "codex"}, text) == "first-model"
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        '{"type":"tool_use","input":{"inputTokens":999,"outputTokens":9}}\n',
+        '{"type":"tool_call","arguments":{"input_tokens":999}}\n',
+        '{"type":"assistant","text":"\\"inputTokens\\": 999"}\n',
+        'the log said "inputTokens": 999\n',
+    ),
+)
+def test_tokens_are_not_read_from_tool_arguments_or_prose(text: str) -> None:
+    tokens = _extract_tokens(text)
+    assert tokens["events"] == 0
+    assert tokens["total"] == 0
+
+
+def test_tokens_still_sum_provider_usage_events() -> None:
+    tokens = _extract_tokens(
+        '{"usage":{"input_tokens":10,"output_tokens":5}}\n'
+        '{"usage":{"input_tokens":1,"cache_read_input_tokens":2,"output_tokens":1}}\n'
+    )
+    assert tokens["input"] == 11
+    assert tokens["cached_input"] == 2
+    assert tokens["output"] == 6
+    assert tokens["events"] == 2
+
+
 @pytest.mark.parametrize("value", NOT_A_MODEL)
 def test_resolve_model_rejects_a_recorded_non_model(value: str) -> None:
     resolved = _resolve_model(
@@ -421,6 +451,18 @@ def test_measured_usage_of_an_unpriced_model_keeps_an_unknown_cost() -> None:
     assert telemetry["usage"]["tokens_total"] == 446231222
     assert telemetry["cost"]["amount"]["value"] == "unknown"
     assert telemetry["unpricedModels"] == ["vendor-unreleased-99"]
+
+
+def test_a_partial_measurement_stays_partial() -> None:
+    telemetry = run_telemetry_from_meta(
+        _measured_meta(measured={"output_tokens": 1000}), transcript=None
+    )
+    usage = telemetry["usage"]
+    assert usage["tokens_output"] == 1000
+    assert usage["tokens_input"]["value"] == "unknown"
+    assert usage["tokens_cached_input"]["value"] == "unknown"
+    assert usage["tokens_total"]["value"] == "unknown"
+    assert telemetry["cost"]["amount"]["value"] == "unknown"
 
 
 def test_a_whole_run_aggregate_is_priced_at_base_rates() -> None:

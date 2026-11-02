@@ -657,6 +657,18 @@ fn model_names_are_validated_before_they_reach_a_report() {
             json!({"agent_model": "gemini-cli-default"}),
             None,
         ),
+        ("angle-inside", json!({"agent_model": "foo<bar>"}), None),
+        ("angle-trailing", json!({"agent_model": "model>"}), None),
+        (
+            "default-in-any-case",
+            json!({"agent_model": "Codex-CLI-DEFAULT"}),
+            None,
+        ),
+        (
+            "glue-in-any-case",
+            json!({"agent_model": "Grok_SOURCE:x"}),
+            None,
+        ),
         ("placeholder", json!({"model": "pending"}), None),
         ("python-none", json!({"model": "None"}), None),
         ("empty", json!({"model": ""}), None),
@@ -798,6 +810,53 @@ fn measured_usage_of_an_unpriced_model_keeps_an_unknown_cost() {
     assert_eq!(row.unpriced_models, vec![UNPRICED_MODEL.to_string()]);
     assert_eq!(report.totals.runs_cost_unknown, 1);
     assert_eq!(report.totals.cost_by_unit.get("USD"), None);
+}
+
+#[test]
+fn a_partial_measurement_is_not_priced_as_if_the_rest_were_zero() {
+    let home = fresh_home("measured-partial");
+    write_meta(
+        &home,
+        "measured",
+        measured_meta(
+            "measured",
+            "claude",
+            "claude-opus-5-5",
+            json!({"output_tokens": 1000}),
+        ),
+    );
+
+    let report = ControlPlane::new(&home).usage_report(Utc::now(), UsageFilter::default());
+
+    let row = &report.runs[0];
+    assert_eq!(row.tokens.tokens_output.as_u64(), Some(1000));
+    assert_eq!(row.tokens.tokens_input["value"], "unknown");
+    assert_eq!(row.tokens.tokens_total["value"], "unknown");
+    assert_eq!(row.cost.amount["value"], "unknown", "{}", row.cost.amount);
+    assert!(row.unpriced_models.is_empty(), "the model has a price");
+    assert_eq!(report.totals.runs_cost_unknown, 1);
+}
+
+#[test]
+fn a_projection_cannot_carry_a_model_name_the_report_would_refuse() {
+    let home = fresh_home("projection-model");
+    collect(&home);
+    let path = home.join("telemetry").join("claude").join(PROJECTION);
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(&path).expect("projection")).expect("json");
+    for session in value["sessions"].as_array_mut().expect("sessions") {
+        session["model"] = json!("<synthetic>");
+    }
+    write_projection(
+        &home,
+        "claude",
+        &serde_json::to_vec(&value).expect("encode"),
+    );
+
+    let report = settled(&home);
+
+    let row = local_row(&report, "claude", EXPECTED[0].session);
+    assert_eq!(row.model["value"], "unknown", "{}", row.model);
 }
 
 #[test]
