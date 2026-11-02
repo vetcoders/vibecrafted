@@ -383,22 +383,20 @@ fn recorded_model(object: &Map<String, Value>) -> Value {
     unknown("model not reported by provider stream")
 }
 
+/// Same acceptance rule as `is_model_name` in `vibecrafted_core.telemetry`.
 pub(crate) fn valid_model_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return false;
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if matches!(lower.as_str(), "none" | "null" | "unknown" | "pending") {
+    let folded = trimmed.to_ascii_lowercase();
+    if matches!(folded.as_str(), "none" | "null" | "unknown" | "pending")
+        || folded.ends_with("-cli-default")
+        || folded.contains("_source:")
+    {
         return false;
     }
-    if trimmed.starts_with('<') && trimmed.ends_with('>') {
-        return false;
-    }
-    if trimmed.ends_with("-cli-default") || trimmed.contains("_source:") {
-        return false;
-    }
-    !trimmed.contains(['&', '(', ')', '{', '}'])
+    !trimmed.contains(['<', '>', '&', '(', ')', '{', '}'])
 }
 
 fn tokens_from_measured(meta: &Map<String, Value>, measured: &Map<String, Value>) -> UsageTokens {
@@ -443,14 +441,25 @@ fn price_measured(model: &Value, tokens: &UsageTokens) -> (UsageCost, Vec<String
             Vec::new(),
         );
     };
-    let count = |value: &Value| value.as_u64().unwrap_or(0);
-    match crate::usage_ccusage::price_base(
-        name,
-        count(&tokens.tokens_input),
-        count(&tokens.tokens_cached_input),
-        count(&tokens.tokens_cache_write),
-        count(&tokens.tokens_output),
-    ) {
+    // A field that is not a count is not zero. Pricing the other fields
+    // would publish a dollar amount beside an unmeasured input.
+    let (Some(input), Some(cache_read), Some(cache_write), Some(output)) = (
+        tokens.tokens_input.as_u64(),
+        tokens.tokens_cached_input.as_u64(),
+        tokens.tokens_cache_write.as_u64(),
+        tokens.tokens_output.as_u64(),
+    ) else {
+        return (
+            UsageCost {
+                amount: unknown("measured usage omitted a priced token field"),
+                currency: None,
+                unit: Some("USD".to_string()),
+                source: "estimated:ccusage".to_string(),
+            },
+            Vec::new(),
+        );
+    };
+    match crate::usage_ccusage::price_base(name, input, cache_read, cache_write, output) {
         Some(amount) => (
             UsageCost {
                 amount: json!(amount),

@@ -396,12 +396,16 @@ fn session_cost(
     copilot: bool,
 ) -> (Option<f64>, String, Vec<String>) {
     let mut unpriced = BTreeSet::new();
+    let mut price_missing = false;
     for entry in entries {
         if let Some(model) = &entry.missing_pricing_model {
-            unpriced.insert(model.clone());
+            price_missing = true;
+            if crate::usage::valid_model_name(model) {
+                unpriced.insert(model.clone());
+            }
         }
     }
-    if !unpriced.is_empty() {
+    if price_missing {
         return (
             None,
             "estimated:ccusage".to_string(),
@@ -428,6 +432,7 @@ fn copilot_cost(
     let mut amount = 0.0;
     let mut estimated = false;
     let mut unpriced = BTreeSet::new();
+    let mut unnamed = false;
     for entry in entries {
         if let Some(stored) = entry.stored_cost {
             amount += stored;
@@ -436,12 +441,15 @@ fn copilot_cost(
         estimated = true;
         match base_from_entry(entry, pricing) {
             Some(cost) => amount += cost,
-            None => {
-                unpriced.insert(entry_model(entry));
-            }
+            None => match entry_model(entry) {
+                Some(model) => {
+                    unpriced.insert(model);
+                }
+                None => unnamed = true,
+            },
         }
     }
-    if !unpriced.is_empty() {
+    if unnamed || !unpriced.is_empty() {
         return (
             None,
             "estimated:ccusage".to_string(),
@@ -481,18 +489,18 @@ fn priced(input: u64, output: u64, cache_read: u64, cache_write: u64, price: &Pr
         + cache_write as f64 * price.cache_creation_input_token_cost()
 }
 
-fn entry_model(entry: &LoadedEntry) -> String {
+fn entry_model(entry: &LoadedEntry) -> Option<String> {
     entry
         .model
         .clone()
         .or(entry.data.message.model.clone())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+        .filter(|model| crate::usage::valid_model_name(model))
 }
 
 fn dominant(tokens: &BTreeMap<String, u64>) -> String {
     tokens
         .iter()
+        .filter(|(model, _)| crate::usage::valid_model_name(model))
         .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
         .map(|(model, _)| model.clone())
         .unwrap_or_default()
@@ -553,7 +561,7 @@ fn write_atomic(dir: &Path, bytes: &[u8]) -> bool {
         return false;
     }
     let target = dir.join(PROJECTION_FILE);
-    let temporary = dir.join(".ccusage-sessions.json.tmp");
+    let temporary = dir.join(format!(".ccusage-sessions.json.{}.tmp", std::process::id()));
     if fs::write(&temporary, bytes).is_err() {
         return false;
     }
