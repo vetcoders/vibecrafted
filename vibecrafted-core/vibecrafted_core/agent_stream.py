@@ -24,9 +24,11 @@ TOKEN_PATTERN = re.compile(
     r"tokens:\s*([0-9]+)\s+in(?:\s*\(([0-9]+)\s+cached\))?\s*/\s*([0-9]+)\s+out",
     re.IGNORECASE,
 )
-# Plain `model: X` is prose. Only a timestamped provider header names the model.
+# Plain `model: X` is prose. Only a timestamped provider header names the model,
+# and only when it starts a line after ANSI stripping and leading whitespace.
+# A header quoted mid-sentence, or after `>`, is prose. Same anchor as spawn.py.
 TIMESTAMPED_MODEL_PATTERN = re.compile(
-    r"\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]\s+model:\s*([^\r\n]*)",
+    r"(?m)^[^\S\r\n]*\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]\s+model:[ \t]*([^\r\n]*)$",
     re.IGNORECASE,
 )
 MODEL_ENV_VARS = (
@@ -63,6 +65,35 @@ _USAGE_KEYS = (
     "outputTokens",
     "completion_tokens",
 )
+# A tool payload is the agent's own text. Nothing inside it is telemetry.
+# Same set as spawn._TOOL_PAYLOAD_KEYS; kept here so the two modules do not import each other.
+_TOOL_PAYLOAD_KEYS = frozenset(
+    {
+        "input",
+        "arguments",
+        "args",
+        "parameters",
+        "tool_input",
+        "tool_call",
+        "toolCall",
+    }
+)
+_MODEL_USAGE_KEYS = frozenset({"modelUsage", "model_usage"})
+
+
+def _telemetry_children(key: str, value: object) -> tuple[dict[str, Any], ...]:
+    """Dicts under ``key`` that may still carry a model or a cost.
+
+    Walk dicts. Enter a list only under ``modelUsage`` / ``model_usage``.
+    Never enter a tool payload.
+    """
+    if key in _TOOL_PAYLOAD_KEYS:
+        return ()
+    if key in _MODEL_USAGE_KEYS and isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, dict))
+    if isinstance(value, dict):
+        return (value,)
+    return ()
 
 
 def stamp() -> str:
@@ -492,12 +523,13 @@ class AgentStreamParser:
         return True
 
     def _record_model(self, event: dict[str, Any]) -> None:
-        """Capture the first real model id in ``event`` (recursing into nested dicts).
+        """Capture the first real model id in ``event``.
 
         No-op once ``self.model_id`` is already set — first valid sighting wins.
         An invalid string does not occupy the slot, so a later valid field can.
+        Tool payloads are not entered. A list is entered only under modelUsage.
         """
-        if self.model_id:
+        if self.model_id or not isinstance(event, dict):
             return
         for key in ("model", "model_id", "modelId", "model_name", "modelName"):
             if self._take_model(event.get(key)):
@@ -520,9 +552,9 @@ class AgentStreamParser:
                     item.get("model") or item.get("model_id")
                 ):
                     return
-        for value in event.values():
-            if isinstance(value, dict):
-                self._record_model(value)
+        for key, value in event.items():
+            for child in _telemetry_children(key, value):
+                self._record_model(child)
                 if self.model_id:
                     return
 
@@ -581,10 +613,12 @@ class AgentStreamParser:
             self.cost_source = "provider_reported"
 
     def _record_nested_telemetry(self, event: dict[str, Any]) -> None:
-        """Walk ``event`` for modelUsage/usage/cost at any nesting depth (junie/grok shapes).
+        """Walk ``event`` for modelUsage/usage/cost (junie/grok shapes).
 
-        Falls back to :func:`estimate_cost_usd` when no provider-reported
-        cost was found, so telemetry never stays silently unset.
+        Dicts are walked. A list is entered only under modelUsage, and only
+        by the list arm above — those items are not queued again. Tool
+        payloads are not entered. Falls back to :func:`estimate_cost_usd`
+        when no provider-reported cost was found.
         """
         self._record_model(event)
         pending: list[dict[str, Any]] = [event]
@@ -603,9 +637,10 @@ class AgentStreamParser:
             if isinstance(usage, dict):
                 self._record_usage(usage)
             self._record_cost(current)
-            for value in current.values():
-                if isinstance(value, dict):
-                    pending.append(value)
+            for key, value in current.items():
+                if key in _MODEL_USAGE_KEYS and isinstance(value, list):
+                    continue
+                pending.extend(_telemetry_children(key, value))
         if self.cost_usd is None or (self.cost_source or "").startswith("estimated:"):
             self.cost_usd, self.cost_source = estimate_cost_usd(
                 self.model_id,
