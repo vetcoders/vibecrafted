@@ -520,7 +520,8 @@ fn serve(
                 // Whatever the child left on the physical screen is not the
                 // frame Ratatui diffs against: drop that frame so the next draw
                 // writes every cell instead of only the ones that changed.
-                LoopControl::Repaint => terminal.clear()?,
+                // Not `clear`: that reads the cursor, and a silent terminal ends the console.
+                LoopControl::Repaint => terminal.resize(terminal.size()?.into())?,
                 LoopControl::Continue => {}
             }
         }
