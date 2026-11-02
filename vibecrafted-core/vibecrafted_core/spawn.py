@@ -5290,6 +5290,36 @@ _MODEL_OBJECT_KEYS = ("model", "model_id", "modelId", "model_name", "modelName")
 # `cost_usd` is a total only when it is a JSON key. The YAML footer this
 # runtime writes (`cost_usd: 0.03`) is not a provider cost.
 _COST_TOTAL_KEYS = ("total_cost_usd", "totalCostUsd", "total_cost", "cost_usd")
+# A tool payload is the agent's own text. Nothing inside it is telemetry.
+# Same set as agent_stream._TOOL_PAYLOAD_KEYS; kept here so the two modules
+# do not import each other.
+_TOOL_PAYLOAD_KEYS = frozenset(
+    {
+        "input",
+        "arguments",
+        "args",
+        "parameters",
+        "tool_input",
+        "tool_call",
+        "toolCall",
+    }
+)
+_MODEL_USAGE_KEYS = frozenset({"modelUsage", "model_usage"})
+
+
+def _telemetry_descendants(key: str, value: object) -> tuple[dict[str, Any], ...]:
+    """Dicts under ``key`` that may still carry a model or a cost.
+
+    Walk dicts. Enter a list only under ``modelUsage`` / ``model_usage``.
+    Never enter a tool payload.
+    """
+    if key in _TOOL_PAYLOAD_KEYS:
+        return ()
+    if key in _MODEL_USAGE_KEYS and isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, dict))
+    if isinstance(value, dict):
+        return (value,)
+    return ()
 
 
 @dataclass
@@ -5822,19 +5852,21 @@ def _json_object_line(line: str) -> dict[str, Any] | None:
 def _collect_structured_costs(
     node: object, totals: list[float], costs: list[float]
 ) -> None:
-    """Walk parsed JSON. Never read text inside a string."""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in _COST_TOTAL_KEYS and _is_number(value):
-                totals.append(float(value))
-            elif key == "cost" and _is_number(value):
-                costs.append(float(value))
-            if isinstance(value, (dict, list)):
-                _collect_structured_costs(value, totals, costs)
-    elif isinstance(node, list):
-        for item in node:
-            if isinstance(item, (dict, list)):
-                _collect_structured_costs(item, totals, costs)
+    """Walk parsed JSON. Never read text inside a string or a tool payload.
+
+    Dicts are walked. A list is entered only under modelUsage / model_usage.
+    """
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if key in _TOOL_PAYLOAD_KEYS:
+            continue
+        if key in _COST_TOTAL_KEYS and _is_number(value):
+            totals.append(float(value))
+        elif key == "cost" and _is_number(value):
+            costs.append(float(value))
+        for child in _telemetry_descendants(key, value):
+            _collect_structured_costs(child, totals, costs)
 
 
 def _extract_cost(text: str) -> float | None:
@@ -5874,24 +5906,29 @@ def _fallback_model(agent: object) -> str:
     return f"{agent_name}-cli-default"
 
 
-def _collect_model_names(node: object, found: list[str]) -> None:
-    """Model labels from parsed JSON keys, in document order. Strings are not parsed."""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in _MODEL_OBJECT_KEYS and isinstance(value, str):
-                model = _clean_model(value)
-                if model:
-                    found.append(model)
-            if key == "modelUsage" and isinstance(value, dict) and value:
-                model = _clean_model(next(iter(value)))
-                if model:
-                    found.append(model)
-            if isinstance(value, (dict, list)):
-                _collect_model_names(value, found)
-    elif isinstance(node, list):
-        for item in node:
-            if isinstance(item, (dict, list)):
-                _collect_model_names(item, found)
+def _collect_model_names(
+    node: object, fields: list[str], usage_keys: list[str]
+) -> None:
+    """Split model fields from modelUsage map keys. Strings are not parsed.
+
+    Tool payloads are not entered. A list is entered only under modelUsage.
+    A map contributes its first key, once. Fields stay in document order.
+    """
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if key in _TOOL_PAYLOAD_KEYS:
+            continue
+        if key in _MODEL_OBJECT_KEYS and isinstance(value, str):
+            model = _clean_model(value)
+            if model:
+                fields.append(model)
+        elif key in _MODEL_USAGE_KEYS and isinstance(value, dict) and value:
+            model = _clean_model(next(iter(value)))
+            if model:
+                usage_keys.append(model)
+        for child in _telemetry_descendants(key, value):
+            _collect_model_names(child, fields, usage_keys)
 
 
 def _match_inside_json_object(text: str, index: int) -> bool:
@@ -5904,36 +5941,45 @@ def _match_inside_json_object(text: str, index: int) -> bool:
 
 
 def _extract_model_from_text(text: str) -> str:
-    """Last real model from frontmatter, a timestamped header, or a JSON object.
+    """Model from one ordered set of sources. Position is not a rank.
 
+    The last valid frontmatter footer wins, wherever it stands. Otherwise the
+    last valid timestamped header. Otherwise the first valid model field of a
+    JSON event. Otherwise the first key of the last ``modelUsage`` map.
     Bare ``model: X`` and a quoted ``"model"`` inside prose are not sources.
-    Text inside a JSON string is not read. An invalid name does not count, so
-    a later valid source can.
+    Text inside a JSON string or a tool payload is not read.
     """
     clean = _clean_text(text or "")
-    found: list[tuple[float, int, str]] = []
-    for pattern in (_FRONTMATTER_MODEL_PATTERN, _TIMESTAMPED_MODEL_PATTERN):
-        for match in pattern.finditer(clean):
-            if _match_inside_json_object(clean, match.start()):
-                continue
-            model = _clean_model(match.group(1))
-            if model:
-                found.append((float(match.start()), len(found), model))
-    offset = 0
-    for raw_line in clean.splitlines(keepends=True):
-        line_start = offset
-        offset += len(raw_line)
+    footer = ""
+    for match in _FRONTMATTER_MODEL_PATTERN.finditer(clean):
+        if _match_inside_json_object(clean, match.start()):
+            continue
+        model = _clean_model(match.group(1))
+        if model:
+            footer = model
+    if footer:
+        return footer
+    header = ""
+    for match in _TIMESTAMPED_MODEL_PATTERN.finditer(clean):
+        if _match_inside_json_object(clean, match.start()):
+            continue
+        model = _clean_model(match.group(1))
+        if model:
+            header = model
+    if header:
+        return header
+    fields: list[str] = []
+    usage_keys: list[str] = []
+    for raw_line in clean.splitlines():
         parsed = _json_object_line(raw_line)
         if parsed is None:
             continue
-        names: list[str] = []
-        _collect_model_names(parsed, names)
-        for index, model in enumerate(names):
-            found.append((line_start + (index + 1) / 1000.0, len(found), model))
-    if not found:
-        return ""
-    found.sort()
-    return found[-1][2]
+        _collect_model_names(parsed, fields, usage_keys)
+    if fields:
+        return fields[0]
+    if usage_keys:
+        return usage_keys[-1]
+    return ""
 
 
 def _resolve_model(payload: dict[str, Any], combined_text: str) -> str:
