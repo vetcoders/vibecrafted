@@ -13,11 +13,16 @@ use std::sync::OnceLock;
 use ccusage_core::LoadedEntry;
 use ccusage_core::cli::{AgentReportKind, CodexSpeed, CostMode, PricingOverride, SharedArgs};
 use ccusage_core::pricing::{EmbeddedSnapshots, Pricing, PricingMap};
-use chrono::{DateTime, SecondsFormat};
+use chrono::{DateTime, Datelike, Days, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const PROJECTION_FILE: &str = "ccusage-sessions.json";
 const SCHEMA: &str = "vibecrafted.ccusage-sessions.v1";
+const SEALED_FILE: &str = "ccusage-sealed.json";
+const SEALED_SCHEMA: &str = "vibecrafted.ccusage-sealed.v1";
+// CodexGroup has no event count. Readers only check that it is greater
+// than zero, so skip the second full parse and keep one across merges.
+const CODEX_EVENTS: u64 = 1;
 
 #[derive(Clone, Copy)]
 enum Provider {
@@ -78,6 +83,39 @@ pub(crate) struct ProjectedSession {
 struct ProjectionFile {
     schema: String,
     sessions: Vec<ProjectedSession>,
+}
+
+/// One window's row, plus the per-model tokens a later window needs to
+/// choose the dominant model. The projection file stores only `projected`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WindowSession {
+    #[serde(flatten)]
+    projected: ProjectedSession,
+    #[serde(default)]
+    model_tokens: BTreeMap<String, u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SealedFile {
+    schema: String,
+    sealed_through: String,
+    sessions: Vec<WindowSession>,
+}
+
+#[derive(Clone, Copy)]
+struct ScanWindow {
+    since: Option<NaiveDate>,
+    until: Option<NaiveDate>,
+}
+
+enum PriorSeal {
+    /// `since` is the first day still to close. `None` reads from the beginning.
+    Resume {
+        sessions: Vec<WindowSession>,
+        since: Option<NaiveDate>,
+    },
+    /// `sealed_through` is already today minus two days.
+    Current { sessions: Vec<WindowSession> },
 }
 
 pub(crate) enum LoadedProjection {
@@ -159,11 +197,12 @@ fn collect_provider(
             detail: format!("no {agent} session store"),
         };
     }
+    let dir = home.join("telemetry").join(agent);
     let loaded = catch_unwind(AssertUnwindSafe(|| {
-        load_provider(provider, shared, pricing)
+        assemble(provider, shared, pricing, &dir.join(SEALED_FILE))
     }));
-    let sessions = match loaded {
-        Ok(Ok(sessions)) => sessions,
+    let (sealed, sessions) = match loaded {
+        Ok(Ok(assembled)) => assembled,
         _ => {
             return ProviderRow {
                 agent,
@@ -177,18 +216,29 @@ fn collect_provider(
     } else {
         String::new()
     };
-    let file = ProjectionFile {
-        schema: SCHEMA.to_string(),
-        sessions,
-    };
-    let Ok(bytes) = serde_json::to_vec(&file) else {
+    let Ok(sealed_bytes) = serde_json::to_vec(&sealed) else {
         return ProviderRow {
             agent,
             status: "error".to_string(),
             detail: "ccusage projection could not be encoded".to_string(),
         };
     };
-    if !write_atomic(&home.join("telemetry").join(agent), &bytes) {
+    let projection = ProjectionFile {
+        schema: SCHEMA.to_string(),
+        sessions,
+    };
+    let Ok(projection_bytes) = serde_json::to_vec(&projection) else {
+        return ProviderRow {
+            agent,
+            status: "error".to_string(),
+            detail: "ccusage projection could not be encoded".to_string(),
+        };
+    };
+    // Sealed days land first. A projection write that then fails leaves the
+    // next run to repeat only the open window, not the closed history.
+    if !write_atomic(&dir, SEALED_FILE, &sealed_bytes)
+        || !write_atomic(&dir, PROJECTION_FILE, &projection_bytes)
+    {
         return ProviderRow {
             agent,
             status: "error".to_string(),
@@ -202,53 +252,139 @@ fn collect_provider(
     }
 }
 
-fn load_provider(
+fn assemble(
     provider: Provider,
     shared: &SharedArgs,
     pricing: &PricingMap,
-) -> Result<Vec<ProjectedSession>, ()> {
+    sealed_path: &Path,
+) -> Result<(SealedFile, Vec<ProjectedSession>), ()> {
+    let today = Utc::now().date_naive();
+    let seal_to = today.checked_sub_days(Days::new(2)).ok_or(())?;
+    let open_from = today.checked_sub_days(Days::new(1)).ok_or(())?;
+    let codex = matches!(provider, Provider::Codex);
+    let sealed_sessions = match prior_seal(sealed_path, seal_to) {
+        PriorSeal::Current { sessions } => sessions,
+        PriorSeal::Resume { sessions, since } => {
+            let closed = load_window(
+                provider,
+                shared,
+                pricing,
+                ScanWindow {
+                    since,
+                    until: Some(seal_to),
+                },
+            )?;
+            merge_sessions(sessions, closed, codex)
+        }
+    };
+    let open = load_window(
+        provider,
+        shared,
+        pricing,
+        ScanWindow {
+            since: Some(open_from),
+            until: None,
+        },
+    )?;
+    let projected = merge_sessions(sealed_sessions.clone(), open, codex)
+        .into_iter()
+        .map(|session| session.projected)
+        .collect();
+    Ok((
+        SealedFile {
+            schema: SEALED_SCHEMA.to_string(),
+            sealed_through: yyyymmdd(seal_to),
+            sessions: sealed_sessions,
+        },
+        projected,
+    ))
+}
+
+/// A missing, unreadable, foreign, or future seal starts over with no lower bound.
+fn prior_seal(path: &Path, seal_to: NaiveDate) -> PriorSeal {
+    let reset = PriorSeal::Resume {
+        sessions: Vec::new(),
+        since: None,
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return reset;
+    };
+    let Ok(file) = serde_json::from_slice::<SealedFile>(&bytes) else {
+        return reset;
+    };
+    if file.schema != SEALED_SCHEMA {
+        return reset;
+    }
+    let Some(through) = parse_yyyymmdd(&file.sealed_through) else {
+        return reset;
+    };
+    if through > seal_to {
+        return reset;
+    }
+    if through == seal_to {
+        return PriorSeal::Current {
+            sessions: file.sessions,
+        };
+    }
+    let Some(since) = through.checked_add_days(Days::new(1)) else {
+        return reset;
+    };
+    PriorSeal::Resume {
+        sessions: file.sessions,
+        since: Some(since),
+    }
+}
+
+fn load_window(
+    provider: Provider,
+    shared: &SharedArgs,
+    pricing: &PricingMap,
+    window: ScanWindow,
+) -> Result<Vec<WindowSession>, ()> {
+    let shared = scoped_args(shared, window);
     match provider {
         Provider::Claude => {
-            let entries = ccusage_adapter_claude::load_entries(shared, None).map_err(|_| ())?;
-            Ok(sessions_from_entries("claude", &entries, pricing, false))
+            let entries =
+                ccusage_adapter_claude::load_entries_since(&shared, None).map_err(|_| ())?;
+            Ok(sessions_from_entries(
+                "claude", &entries, pricing, false, window,
+            ))
         }
-        Provider::Codex => load_codex(shared, pricing),
+        Provider::Codex => load_codex(&shared, pricing),
         Provider::Grok => {
-            let entries = ccusage_adapter_grok::load_entries(shared, pricing).map_err(|_| ())?;
-            Ok(sessions_from_entries("grok", &entries, pricing, false))
+            let entries = ccusage_adapter_grok::load_entries(&shared, pricing).map_err(|_| ())?;
+            Ok(sessions_from_entries(
+                "grok", &entries, pricing, false, window,
+            ))
         }
         Provider::Kimi => {
-            let entries = ccusage_adapter_kimi::load_entries(shared, pricing).map_err(|_| ())?;
-            Ok(sessions_from_entries("kimi", &entries, pricing, false))
+            let entries = ccusage_adapter_kimi::load_entries(&shared, pricing).map_err(|_| ())?;
+            Ok(sessions_from_entries(
+                "kimi", &entries, pricing, false, window,
+            ))
         }
         Provider::Copilot => {
-            let entries = ccusage_adapter_copilot::load_entries(shared, pricing).map_err(|_| ())?;
-            Ok(sessions_from_entries("copilot", &entries, pricing, true))
+            let entries =
+                ccusage_adapter_copilot::load_entries(&shared, pricing).map_err(|_| ())?;
+            Ok(sessions_from_entries(
+                "copilot", &entries, pricing, true, window,
+            ))
         }
         Provider::Agy => {
             let (entries, _) =
-                ccusage_adapter_antigravity::load_entries_with_warnings(shared, pricing)
+                ccusage_adapter_antigravity::load_entries_with_warnings(&shared, pricing)
                     .map_err(|_| ())?;
-            Ok(sessions_from_entries("agy", &entries, pricing, false))
+            Ok(sessions_from_entries(
+                "agy", &entries, pricing, false, window,
+            ))
         }
     }
 }
 
-fn load_codex(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<ProjectedSession>, ()> {
+fn load_codex(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<WindowSession>, ()> {
     let groups =
         ccusage_adapter_codex::load_groups(shared, AgentReportKind::Session).map_err(|_| ())?;
     let speed = ccusage_adapter_codex::resolve_codex_speed(CodexSpeed::Auto);
-    let event_counts = catch_unwind(AssertUnwindSafe(|| {
-        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-        if let Ok((events, _)) = ccusage_adapter_codex::load_codex_events_with_detection(shared) {
-            for event in events {
-                let id = session_key("codex", &event.session_id);
-                *counts.entry(id).or_default() += 1;
-            }
-        }
-        counts
-    }))
-    .unwrap_or_default();
     let mut sessions = Vec::new();
     for (raw_id, group) in groups {
         let id = session_key("codex", &raw_id);
@@ -292,23 +428,146 @@ fn load_codex(shared: &SharedArgs, pricing: &PricingMap) -> Result<Vec<Projected
             (None, "estimated:ccusage".to_string())
         };
         let recorded_at = group.last_activity.unwrap_or_default();
-        let events = event_counts.get(&id).copied().unwrap_or(0).max(1);
-        sessions.push(ProjectedSession {
-            id,
-            model: dominant(&model_tokens),
-            recorded_at: stamp_text(&recorded_at, 0),
-            events,
-            input,
-            cache_read,
-            cache_write,
-            output,
-            total,
-            cost_amount,
-            cost_source,
-            unpriced_models: unpriced,
+        sessions.push(WindowSession {
+            projected: ProjectedSession {
+                id,
+                model: dominant(&model_tokens),
+                recorded_at: stamp_text(&recorded_at, 0),
+                events: CODEX_EVENTS,
+                input,
+                cache_read,
+                cache_write,
+                output,
+                total,
+                cost_amount,
+                cost_source,
+                unpriced_models: unpriced,
+            },
+            model_tokens,
         });
     }
     Ok(sessions)
+}
+
+fn merge_sessions(
+    base: Vec<WindowSession>,
+    extra: Vec<WindowSession>,
+    codex: bool,
+) -> Vec<WindowSession> {
+    let mut merged: BTreeMap<String, WindowSession> = BTreeMap::new();
+    for session in base {
+        merged.insert(session.projected.id.clone(), session);
+    }
+    for session in extra {
+        let id = session.projected.id.clone();
+        if let Some(existing) = merged.remove(&id) {
+            merged.insert(id, merge_pair(existing, session, codex));
+        } else {
+            merged.insert(id, session);
+        }
+    }
+    merged.into_values().collect()
+}
+
+fn merge_pair(mut left: WindowSession, right: WindowSession, codex: bool) -> WindowSession {
+    let WindowSession {
+        projected: right_row,
+        model_tokens: right_tokens,
+    } = right;
+    for (model, tokens) in right_tokens {
+        let total = left.model_tokens.entry(model).or_default();
+        *total = total.saturating_add(tokens);
+    }
+    left.projected.input = left.projected.input.saturating_add(right_row.input);
+    left.projected.cache_read = left
+        .projected
+        .cache_read
+        .saturating_add(right_row.cache_read);
+    left.projected.cache_write = left
+        .projected
+        .cache_write
+        .saturating_add(right_row.cache_write);
+    left.projected.output = left.projected.output.saturating_add(right_row.output);
+    left.projected.total = left
+        .projected
+        .input
+        .saturating_add(left.projected.cache_read)
+        .saturating_add(left.projected.cache_write)
+        .saturating_add(left.projected.output);
+    left.projected.events = if codex {
+        CODEX_EVENTS
+    } else {
+        left.projected.events.saturating_add(right_row.events)
+    };
+    left.projected.recorded_at = later_stamp(&left.projected.recorded_at, &right_row.recorded_at);
+    left.projected.cost_amount = match (left.projected.cost_amount, right_row.cost_amount) {
+        (Some(left_cost), Some(right_cost)) => Some(left_cost + right_cost),
+        _ => None,
+    };
+    if left.projected.cost_source != right_row.cost_source {
+        left.projected.cost_source = "estimated:ccusage".to_string();
+    }
+    let mut unpriced = BTreeSet::new();
+    unpriced.extend(left.projected.unpriced_models.iter().cloned());
+    unpriced.extend(right_row.unpriced_models);
+    left.projected.unpriced_models = unpriced.into_iter().collect();
+    let model = dominant(&left.model_tokens);
+    left.projected.model = model;
+    left
+}
+
+fn later_stamp(left: &str, right: &str) -> String {
+    match (
+        DateTime::parse_from_rfc3339(left),
+        DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left_at), Ok(right_at)) => {
+            if right_at > left_at {
+                right
+            } else {
+                left
+            }
+        }
+        (Ok(_), Err(_)) => left,
+        (Err(_), Ok(_)) => right,
+        (Err(_), Err(_)) => {
+            if right > left {
+                right
+            } else {
+                left
+            }
+        }
+    }
+    .to_string()
+}
+
+fn scoped_args(shared: &SharedArgs, window: ScanWindow) -> SharedArgs {
+    let mut scoped = shared.clone();
+    scoped.since = window.since.map(yyyymmdd);
+    scoped.until = window.until.map(yyyymmdd);
+    scoped
+}
+
+fn yyyymmdd(date: NaiveDate) -> String {
+    format!("{:04}{:02}{:02}", date.year(), date.month(), date.day())
+}
+
+fn parse_yyyymmdd(value: &str) -> Option<NaiveDate> {
+    if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let year = value[..4].parse().ok()?;
+    let month = value[4..6].parse().ok()?;
+    let day = value[6..].parse().ok()?;
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn entry_in_window(entry: &LoadedEntry, window: ScanWindow) -> bool {
+    let Some(date) = DateTime::<Utc>::from_timestamp_millis(entry.timestamp.as_millis()) else {
+        return false;
+    };
+    let date = date.date_naive();
+    window.since.is_none_or(|since| date >= since) && window.until.is_none_or(|until| date <= until)
 }
 
 fn sessions_from_entries(
@@ -316,9 +575,16 @@ fn sessions_from_entries(
     entries: &[LoadedEntry],
     pricing: &PricingMap,
     copilot: bool,
-) -> Vec<ProjectedSession> {
+    window: ScanWindow,
+) -> Vec<WindowSession> {
     let mut grouped: BTreeMap<String, Vec<&LoadedEntry>> = BTreeMap::new();
     for entry in entries {
+        // Claude prunes files by mtime and leaves every parsed entry. Grok,
+        // Kimi, and Agy do not look at the bounds at all. Keep the UTC day
+        // here so an entry is counted in exactly one of the two scans.
+        if !entry_in_window(entry, window) {
+            continue;
+        }
         let id = session_key(agent, entry.session_id.as_ref());
         grouped.entry(id).or_default().push(entry);
     }
@@ -333,7 +599,7 @@ fn project_session(
     entries: &[&LoadedEntry],
     pricing: &PricingMap,
     copilot: bool,
-) -> ProjectedSession {
+) -> WindowSession {
     let mut input = 0_u64;
     let mut cache_read = 0_u64;
     let mut cache_write = 0_u64;
@@ -371,22 +637,25 @@ fn project_session(
         }
     }
     let (cost_amount, cost_source, unpriced_models) = session_cost(entries, pricing, copilot);
-    ProjectedSession {
-        id,
-        model: dominant(&model_tokens),
-        recorded_at: stamp_text(&best_text, best_ms),
-        events: events.max(1),
-        input,
-        cache_read,
-        cache_write,
-        output,
-        total: input
-            .saturating_add(cache_read)
-            .saturating_add(cache_write)
-            .saturating_add(output),
-        cost_amount,
-        cost_source,
-        unpriced_models,
+    WindowSession {
+        projected: ProjectedSession {
+            id,
+            model: dominant(&model_tokens),
+            recorded_at: stamp_text(&best_text, best_ms),
+            events: events.max(1),
+            input,
+            cache_read,
+            cache_write,
+            output,
+            total: input
+                .saturating_add(cache_read)
+                .saturating_add(cache_write)
+                .saturating_add(output),
+            cost_amount,
+            cost_source,
+            unpriced_models,
+        },
+        model_tokens,
     }
 }
 
@@ -556,12 +825,12 @@ fn stamp_text(text: &str, millis: i64) -> String {
     stamp.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn write_atomic(dir: &Path, bytes: &[u8]) -> bool {
+fn write_atomic(dir: &Path, file_name: &str, bytes: &[u8]) -> bool {
     if fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let target = dir.join(PROJECTION_FILE);
-    let temporary = dir.join(format!(".ccusage-sessions.json.{}.tmp", std::process::id()));
+    let target = dir.join(file_name);
+    let temporary = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
     if fs::write(&temporary, bytes).is_err() {
         return false;
     }
@@ -600,6 +869,7 @@ fn shared_args() -> SharedArgs {
     shared.offline = true;
     shared.single_thread = true;
     shared.mode = CostMode::Auto;
+    shared.timezone = Some("UTC".to_string());
     let rate = k3_rate();
     // `k3` is tried after `moonshot/k3` and `kimi/k3`. An exact override on
     // each of those ids stops the fuzzy fallthrough to `kimi-k3-fast`.
