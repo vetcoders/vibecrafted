@@ -117,6 +117,40 @@ def test_a_structured_result_is_still_a_provider_cost() -> None:
     assert parser.model_id == "claude-opus-5-5"
 
 
+# What an agent passes to its tools is its own text, even inside a JSON event: a
+# subagent launched with {"model": "sonnet"} says nothing about the running model.
+TOOL_EVENTS = (
+    b'{"type":"tool_use","name":"Agent","input":{"model":"sonnet","cost":5,"total_cost_usd":5}}\n',
+    b'{"type":"tool_call","arguments":{"model":"sonnet","cost":5}}\n',
+    b'{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"model":"sonnet","cost":5}}]}}\n',
+)
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("line", TOOL_EVENTS)
+def test_tool_arguments_are_not_telemetry_in_the_live_parser(
+    agent: str, line: bytes
+) -> None:
+    parser = AgentStreamParser(agent)
+    parser.feed_line(line)
+    assert parser.cost_source != "provider_reported"
+    assert parser.cost_usd != 5
+    assert parser.model_id != "sonnet"
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        b"see the line [12:00:00] model: gpt-9 in that log\n",
+        b"> [12:00:00] model: gpt-9\n",
+    ),
+)
+def test_a_quoted_header_is_prose(line: bytes) -> None:
+    parser = AgentStreamParser("agy")
+    parser.feed_line(line)
+    assert not parser.model_id
+
+
 # --------------------------------------------------------------------------
 # Close path: transcript + report text
 # --------------------------------------------------------------------------
@@ -192,6 +226,54 @@ def test_resolve_model_falls_back_when_text_only_has_prose(text: str) -> None:
 )
 def test_resolve_model_reads_structured_sources(text: str, expected: str) -> None:
     assert _resolve_model({"agent": "codex"}, text) == expected
+
+
+@pytest.mark.parametrize("line", TOOL_EVENTS)
+def test_the_close_path_does_not_read_tool_arguments(line: bytes) -> None:
+    text = line.decode()
+    assert _extract_cost(text) is None
+    assert _resolve_model({"agent": "codex"}, text) == "codex-cli-default"
+
+
+def test_a_tool_argument_does_not_replace_the_running_model() -> None:
+    text = (
+        '{"type":"system","model":"claude-opus-5-5"}\n'
+        '{"type":"assistant","message":{"model":"claude-opus-5-5","content":'
+        '[{"type":"tool_use","name":"Agent","input":{"model":"sonnet"}}]}}\n'
+    )
+    assert _resolve_model({"agent": "claude"}, text) == "claude-opus-5-5"
+
+
+def test_a_usage_map_does_not_outrank_the_model_events_name() -> None:
+    # A result lists every model the session touched, a helper model first.
+    text = (
+        '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n'
+        '{"type":"result","modelUsage":{"claude-haiku-4-5":{"inputTokens":1},'
+        '"claude-opus-5-5":{"inputTokens":9}}}\n'
+    )
+    assert _resolve_model({"agent": "claude"}, text) == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        '{"model":"json-model"}\n---\nrunner: vibecrafted\nmodel: footer-model\n',
+        '---\nrunner: vibecrafted\nmodel: footer-model\n{"model":"json-model"}\n',
+        "[12:00:00] model: header-model\n---\nrunner: vibecrafted\nmodel: footer-model\n",
+    ),
+)
+def test_the_runner_footer_outranks_what_the_transcript_says(text: str) -> None:
+    assert _resolve_model({"agent": "codex"}, text) == "footer-model"
+
+
+def test_a_timestamped_header_outranks_json_events() -> None:
+    text = '[12:00:00] model: header-model\n{"model":"json-model"}\n'
+    assert _resolve_model({"agent": "codex"}, text) == "header-model"
+
+
+def test_the_first_json_event_names_the_model() -> None:
+    text = '{"model":"first-model"}\n{"model":"later-model"}\n'
+    assert _resolve_model({"agent": "codex"}, text) == "first-model"
 
 
 @pytest.mark.parametrize("value", NOT_A_MODEL)
