@@ -1283,7 +1283,13 @@ fn usage_dashboard_script() -> &'static str {
   const reason = (value) => unknown(value) && value.reason ? value.reason : '';
   const costText = (cost) => {
     if (!cost || unknown(cost.amount)) return 'unknown';
-    return label(cost.amount) + ' ' + (cost.unit || cost.currency || 'USD');
+    const text = label(cost.amount) + ' ' + (cost.unit || cost.currency || 'USD');
+    return String(cost.source || '').startsWith('estimated') ? '~' + text : text;
+  };
+  const costTitle = (cost) => {
+    if (!cost || unknown(cost.amount)) return cost ? reason(cost.amount) : '';
+    if (String(cost.source || '').startsWith('estimated')) return 'Estimated from list prices, not a provider bill';
+    return reason(cost.amount);
   };
   const costsText = (values) => {
     const entries = Object.entries(values || {});
@@ -1319,7 +1325,7 @@ fn usage_dashboard_script() -> &'static str {
   let lastChartReport = null, availableSnapshot = null;
   const renderLocalSources = (sources, failureReasons) => {
     const bits = (sources || []).map((item) => {
-      const detail = item.source === 'scan_cache' || item.source === 'archive'
+      const detail = item.source === 'ccusage' || item.source === 'scan_cache' || item.source === 'archive'
         ? item.counted + ' local' + (item.matched_vc ? ' · ' + item.matched_vc + ' already in VC runs' : '') + (item.withheld_days ? ' · ' + item.withheld_days + ' day(s) withheld' : '')
         : item.source + (item.note ? ' (' + item.note + ')' : '');
       const state = (item.refreshing ? ' · updating' : '') + (item.stale ? ' · previous measurements' : '') + (item.error ? ' · ' + item.error : '');
@@ -1421,7 +1427,7 @@ fn usage_dashboard_script() -> &'static str {
       text(identity, label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : ''));
       text(model, label(run.model)); attribute(model, 'title', reason(run.model));
       text(tokens, label(run.tokens && run.tokens.tokens_total)); attribute(tokens, 'title', run.tokens && reason(run.tokens.tokens_total));
-      text(cost, costText(run.cost)); attribute(cost, 'title', run.cost && reason(run.cost.amount));
+      text(cost, costText(run.cost)); attribute(cost, 'title', costTitle(run.cost));
       attribute(tokens, 'data-stale', previousFields.includes('usage') ? 'true' : null); attribute(cost, 'data-stale', previousFields.includes('cost') ? 'true' : null);
       if (previousFields.includes('usage')) attribute(tokens, 'title', 'Previous measured tokens; current transcript evidence is incomplete or updating');
       if (previousFields.includes('cost')) attribute(cost, 'title', 'Previous measured cost; current transcript evidence is incomplete or updating');

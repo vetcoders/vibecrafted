@@ -1,6 +1,6 @@
 # Vibecrafted telemetry and usage-reporting surface
 
-Snapshot: `feat/telemetry-dashboard@f61c5d61c3edbcaebf274192daf54bf60d7511d8`
+Snapshot: `cut/grok-work-261102-133013-07759` — one usage report, read by the web dashboard and the VOC Usage tab.
 
 Loctree coverage: 1459 of 1459 indexed files. Ten `loct` calls were used. The
 first failed on the sandboxed global cache; the remaining calls used a fresh,
@@ -14,10 +14,10 @@ captures provider usage, cost, model, provider session identity and failure
 attribution; writes them into run metadata and report frontmatter; and can
 aggregate them through a Python CLI report.
 
-At the baseline there was no usage dashboard. The web server, native app and
-VOC did not consume the usage schema or its token/cost fields. The public shell
-command deck also did not route `vibecrafted usage` to the Python
-implementation.
+The web `/usage` dashboard and the VOC Usage tab both read the control-core
+usage report. A cost whose source starts with `estimated` is prefixed with
+`~` and does not read as a provider bill. An unknown cost stays `unknown`.
+The public shell still routes `vibecrafted usage` to the Python report.
 
 `telemetry smoke` is a separate marbles runtime smoke test. It neither reports
 product usage nor feeds a dashboard.
@@ -32,12 +32,16 @@ flowchart LR
     RT --> R[Report frontmatter and artifact footer]
     M --> O[observe: one-run projection]
     M --> U[Python usage report]
+    CC[ccusage adapters] --> PROJ[telemetry/agent/ccusage-sessions.json]
+    PROJ --> REP[control-core usage report]
+    M --> REP
     LT -. lazy read only fallback .-> O
     LT -. lazy read only fallback .-> U
-    U --> API[Server /api/usage]
+    U --> CLI[vibecrafted usage]
+    REP --> API[Server /api/usage]
     API --> WEB[Web /usage]
     API --> APP[Native Usage & Costs tab]
-    M --> VOC[VOC Usage tab via control-core]
+    REP --> VOC[VOC Usage tab]
 ```
 
 ## Implemented cut
@@ -50,39 +54,80 @@ flowchart LR
   than a second parser.
 - VibecraftedApp registers `Usage & Costs` as a runtime-scoped native
   destination at `/usage`.
-- Every supported provider has a separate read-only analytical adapter:
-  `agy`, `claude`, `codex`, `cursor`, `grok`, `junie`, and `kimi`. Each parser
-  follows its provider's actual evidence shape, preserves reported token/cost
-  truth, and labels fallback calculations as estimates. No adapter discovers
-  provider homes, writes provider state, starts a daemon, or sends data.
+- Local sessions for claude, codex, grok, kimi, copilot and agy are measured
+  in process by the `ccusage` adapters and projected by `usage_local`. See
+  [ccusage collection](#ccusage-collection).
+- The web dashboard and the VOC Usage tab label an estimate with `~`. Totals
+  still sum the numeric amounts. The VOC summary names the estimated part of
+  the USD total only when that part is not zero.
 
-The live dashboard continues to read canonical Vibecrafted run metadata. The
-provider adapters are explicit analytical entry points for callers that supply
-paths, identities, timestamps, and price tables; they do not silently enrich
-or rewrite run metadata.
+The live dashboard continues to read canonical Vibecrafted run metadata plus
+the local projection. Neither surface rewrites run metadata.
+
+## ccusage collection
+
+Measured sessions for claude, codex, grok, kimi, copilot and agy come from the
+in-process adapters in `vibecrafted-server/control-core/src/usage_ccusage.rs`.
+Each adapter reads that provider's host session store. The projection is
+`<telemetry>/<agent>/ccusage-sessions.json`
+(`vibecrafted.ccusage-sessions.v1`). When that file has sessions it is the
+only local source for the provider.
+
+`vibecrafted-server/control-core/src/usage_local.rs` turns those rows into the
+same `vibecrafted.usage-report.v1` that `/api/usage`, the web dashboard and
+the VOC Usage tab read. A local session already carried by a Vibecrafted run
+is not counted again.
+
+Python still runs on the same collection flight. It writes
+`telemetry/<agent>/quota.json` and still scans junie and omp. The same flight
+reads claude, codex, grok, kimi, copilot and agy in process, and that
+measurement replaces Python's session row for those providers when
+`<agent>/ccusage-sessions.json` has sessions. `scan-cache.json` (written by
+`fleet_engine`, and by the kimi harvest for kimi) and
+`archive/<agent>.jsonl` are the fallback when that projection is absent or
+empty.
+
+A provider with no store is not reported as zero. agy, when it has only
+estimated transcripts and no token ledger, is `unavailable`. cursor, whose
+usage lives in the Cursor cloud, is `unavailable`. Any other provider with
+nothing collected yet stays `absent`.
+
+A cost is labelled from `cost.source`. A source that starts with `estimated`
+is an estimate: the web cell is prefixed with `~` and titled
+`Estimated from list prices, not a provider bill`; the VOC row uses the same
+`~` (`~$0.6496 USD`, or `~$0.6496` on the home receipt). A reported USD cost
+is `$11.0899 USD` on the VOC row and the amount plus unit on the web. Another
+unit stays its own unit (`7.00 credits`). An unknown amount stays `unknown`
+and keeps its reason. Totals and charts still sum the numeric amounts. The
+web total is not given a separate estimate label. The VOC USD line adds how
+much of that total is estimated only when the estimated part is not zero, so
+a fully reported total looks the same as before.
+
+The report differs from `npx ccusage` in the three places named in
+[pricing/SOURCE.md](../vibecrafted-server/control-core/pricing/SOURCE.md):
+
+- Kimi `k3` is not resolved fuzzily to `kimi-k3-fast` (upstream applies 1.5 times Moonshot's price).
+- Copilot shutdown aggregates test a whole session's sum against the context
+  tier, not one request.
+- A session whose model has no list price is unknown, not zero.
 
 ## Ownership map
 
-| Layer                 | Owner                                                  | Responsibility                                                                                            | Runtime status                     |
-| --------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| Provider parsing      | `vibecrafted_core/agent_stream.py`                     | Normalizes provider-specific session, model, token and cost events                                        | Wired into live stream supervision |
-| Neutral contract      | `vibecrafted_core/telemetry.py`                        | `UsageRecord`, `CostRecord`, `FailureAttribution`, `RunTelemetry`; preserves unknown versus measured zero | Canonical per-run schema           |
-| Async close writer    | `vibecrafted_core/supervisor_async.py`                 | Builds telemetry from provider-stream counters; writes meta and report frontmatter                        | Live path                          |
-| Launcher close writer | `vibecrafted_core/spawn.py`                            | Derives telemetry from transcript/report, relocates artifacts, writes meta/frontmatter/footer             | Live compatibility path            |
-| Durable run truth     | `vibecrafted_core/control_plane.py`                    | Owns `<VIBECRAFTED_HOME>/control_plane/runtime_runs/<run-id>/meta.json`; resolves legacy artifacts second | Canonical read-follows-write path  |
-| One-run reporting     | `vibecrafted_core/cli.py::_observed_telemetry`         | `observe` projects recorded telemetry or lazily derives old runs from transcripts without rewriting them  | Public lifecycle path              |
-| Aggregate reporting   | `vibecrafted_core/usage_reporting.py`                  | Reusable builder with time/run/provider/agent/model filtering; emits `vibecrafted.usage-report.v1`        | Used by CLI and public deck        |
-| Public shell deck     | `scripts/vibecrafted` and packaged deck copy           | Routes both `usage` and the separate `telemetry smoke` command                                            | Reachable                          |
-| Server API and web    | `control-core::usage`, `web::control::usage`, `/usage` | Read-only canonical metadata projection and dashboard                                                     | Implemented                        |
-| VOC                   | `tui-agent::usage`                                     | Five-tab terminal dashboard using control-core                                                            | Implemented                        |
-| Native app            | `ToolDestinations.swift`                               | Runtime-scoped `Usage & Costs` destination                                                                | Implemented                        |
-| Kimi analysis         | `control-core::usage_kimi`                             | Exact injected wire usage and estimated API-equivalent USD                                                | Implemented library adapter        |
-| Agy analysis          | `control-core::usage_agy`                              | Injected transcript signals, estimated tokens and shadow price                                            | Implemented library adapter        |
-| Claude analysis       | `control-core::usage_claude`                           | Exact message usage with cache-create/read buckets and API-equivalent pricing                             | Implemented library adapter        |
-| Codex analysis        | `control-core::usage_codex`                            | Native cumulative token snapshots plus per-turn exec usage, cache-write/read and reasoning                | Implemented library adapter        |
-| Cursor analysis       | `control-core::usage_cursor`                           | Stream result usage, provider-reported cost when complete, otherwise explicit estimate                    | Implemented library adapter        |
-| Grok analysis         | `control-core::usage_grok`                             | Exact stream/model usage and provider cost; labelled estimates for cumulative session snapshots           | Implemented library adapter        |
-| Junie analysis        | `control-core::usage_junie`                            | Nested per-model usage, cache buckets, provider-reported and cost-only records                            | Implemented library adapter        |
+| Layer                 | Owner                                          | Responsibility                                                                                              | Runtime status                     |
+| --------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| Provider parsing      | `vibecrafted_core/agent_stream.py`             | Normalizes provider-specific session, model, token and cost events                                          | Wired into live stream supervision |
+| Neutral contract      | `vibecrafted_core/telemetry.py`                | `UsageRecord`, `CostRecord`, `FailureAttribution`, `RunTelemetry`; preserves unknown versus measured zero   | Canonical per-run schema           |
+| Async close writer    | `vibecrafted_core/supervisor_async.py`         | Builds telemetry from provider-stream counters; writes meta and report frontmatter                          | Live path                          |
+| Launcher close writer | `vibecrafted_core/spawn.py`                    | Derives telemetry from transcript/report, relocates artifacts, writes meta/frontmatter/footer               | Live compatibility path            |
+| Durable run truth     | `vibecrafted_core/control_plane.py`            | Owns `<VIBECRAFTED_HOME>/control_plane/runtime_runs/<run-id>/meta.json`; resolves legacy artifacts second   | Canonical read-follows-write path  |
+| One-run reporting     | `vibecrafted_core/cli.py::_observed_telemetry` | `observe` projects recorded telemetry or lazily derives old runs from transcripts without rewriting them    | Public lifecycle path              |
+| Aggregate reporting   | `vibecrafted_core/usage_reporting.py`          | Reusable builder with time/run/provider/agent/model filtering; emits `vibecrafted.usage-report.v1`          | Used by CLI and public deck        |
+| Public shell deck     | `scripts/vibecrafted` and packaged deck copy   | Routes both `usage` and the separate `telemetry smoke` command                                              | Reachable                          |
+| Server API and web    | `control-core::usage`, `web` `/usage`          | Read-only report. A `ccusage` source prints its counted local rows. An estimate is prefixed `~`             | Implemented                        |
+| VOC                   | `tui-agent::usage`                             | Same report. `display_cost` prefixes an estimate. The USD line names the estimated part when it is not zero | Implemented                        |
+| Native app            | `ToolDestinations.swift`                       | Runtime-scoped `Usage & Costs` destination                                                                  | Implemented                        |
+| Local sessions        | `control-core::usage_ccusage`, `usage_local`   | In-process measurement and the report projection described under ccusage collection                         | Implemented                        |
+| Quota, junie, omp     | Python collection flight                       | Writes `quota.json` and still scans junie and omp                                                           | Python                             |
 
 ## Data contract
 
@@ -99,6 +144,12 @@ Cost is one of:
 - an estimate tied to a named, dated price table;
 - an unknown value with a reason;
 - a provider-native unit such as credits, kept separate from USD.
+
+Dashboards label that cost the same way. A source that starts with
+`estimated` renders with a leading `~` and, on the web row, the title
+`Estimated from list prices, not a provider bill`. A known non-estimate is
+the amount and its unit. An unknown amount stays `unknown` and keeps its
+reason. Totals and charts keep summing the numeric amounts.
 
 The enclosing run telemetry also carries failure classification and evidence,
 plus provider session identity guarded against accidentally copying a parent
@@ -134,7 +185,7 @@ output. Parser-specific coverage also lives in `test_agent_stream.py`; close
 integration reaches `test_supervisor.py` and `test_supervisor_async.py`.
 
 The delivered contract tests cover Python reporting, public-deck parity,
-control-core aggregation, all seven provider adapters, HTTP projection, web
+control-core aggregation, the ccusage collection, HTTP projection, web
 render, VOC rendering, and native destination resolution.
 
 ## Dashboard seam and risks
@@ -153,7 +204,9 @@ Remaining scale and product decisions:
    paths and provider session IDs belong in drill-down only, not aggregate
    cards or any future remote export.
 3. Keep the price table provenance visible and refreshable; estimates are
-   dated fallback evidence, not billing truth.
+   dated fallback evidence, not billing truth. The dashboards prefix an
+   estimate. The web total stays the summed amount. The VOC USD line names
+   the estimated part only when that part is not zero.
 4. Rename or clearly separate `telemetry smoke`, whose current name collides
    with usage telemetry while testing a different subsystem.
 

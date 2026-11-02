@@ -527,11 +527,16 @@ fn resolved_cost(snapshot: &RunSnapshot, usage: Option<&UsageRun>) -> String {
 }
 
 fn receipt_cost(run: &UsageRun) -> Option<String> {
+    let prefix = if run.cost_source.starts_with("estimated") {
+        "~"
+    } else {
+        ""
+    };
     match &run.cost {
         UsageCost::Known { amount, unit } if unit.eq_ignore_ascii_case("USD") => {
-            Some(format!("${amount:.4}"))
+            Some(format!("{prefix}${amount:.4}"))
         }
-        UsageCost::Known { amount, unit } => Some(format!("{amount:.2} {unit}")),
+        UsageCost::Known { amount, unit } => Some(format!("{prefix}{amount:.2} {unit}")),
         UsageCost::Unknown => None,
     }
 }
@@ -1020,6 +1025,7 @@ mod tests {
                 amount: 0.25,
                 unit: "USD".into(),
             },
+            cost_source: "provider_reported".into(),
             failure: None,
         });
         let rows = project_home(&state, HomeScope::Global, Path::new("/tmp/ws-alpha"));
@@ -1051,6 +1057,7 @@ mod tests {
             timestamp: "2026-08-02T12:00:00Z".into(),
             tokens_total: None,
             cost: UsageCost::Unknown,
+            cost_source: String::new(),
             failure: None,
         });
         let quiet_rows = project_home(&quiet, HomeScope::Global, Path::new("/tmp/ws-alpha"));

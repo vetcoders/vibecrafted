@@ -48,6 +48,9 @@ pub struct UsageDashboard {
     pub tokens_total_known: u64,
     pub runs_tokens_unknown: usize,
     pub usd_total: f64,
+    /// USD already included in `usd_total` whose `cost.source` starts with
+    /// `estimated`. Zero means the summary line stays a bill total only.
+    pub usd_estimated: f64,
     pub credits_total: f64,
     pub runs_cost_unknown: usize,
     pub failures: usize,
@@ -66,6 +69,8 @@ pub struct UsageRun {
     pub timestamp: String,
     pub tokens_total: Option<u64>,
     pub cost: UsageCost,
+    /// Report `cost.source`. Empty when the report has none.
+    pub cost_source: String,
     pub failure: Option<String>,
 }
 
@@ -100,31 +105,36 @@ impl UsageDashboard {
             .get("credits")
             .copied()
             .unwrap_or(0.0);
+        let mut usd_estimated = 0.0;
         let runs = report
             .runs
             .into_iter()
-            .map(|run| UsageRun {
-                run_id: run.run_id,
-                provider: display_value(&run.provider),
-                agent: display_value(&run.agent),
-                model: display_value(&run.model),
-                status: run.status,
-                timestamp: run.recorded_at,
-                tokens_total: run.tokens.tokens_total.as_u64(),
-                cost: run
+            .map(|run| {
+                let cost_source = run.cost.source.clone();
+                let unit = run
                     .cost
-                    .amount
-                    .as_f64()
-                    .map(|amount| UsageCost::Known {
-                        amount,
-                        unit: run
-                            .cost
-                            .currency
-                            .or(run.cost.unit)
-                            .unwrap_or_else(|| "unknown unit".to_string()),
-                    })
-                    .unwrap_or(UsageCost::Unknown),
-                failure: run.failure_kind.or(run.failure),
+                    .currency
+                    .clone()
+                    .or(run.cost.unit.clone())
+                    .unwrap_or_else(|| "unknown unit".to_string());
+                let cost = run.cost.amount.as_f64().map(|amount| {
+                    if unit.eq_ignore_ascii_case("USD") && cost_source.starts_with("estimated") {
+                        usd_estimated += amount;
+                    }
+                    UsageCost::Known { amount, unit }
+                });
+                UsageRun {
+                    run_id: run.run_id,
+                    provider: display_value(&run.provider),
+                    agent: display_value(&run.agent),
+                    model: display_value(&run.model),
+                    status: run.status,
+                    timestamp: run.recorded_at,
+                    tokens_total: run.tokens.tokens_total.as_u64(),
+                    cost: cost.unwrap_or(UsageCost::Unknown),
+                    cost_source,
+                    failure: run.failure_kind.or(run.failure),
+                }
             })
             .collect();
         Ok(Self {
@@ -132,6 +142,7 @@ impl UsageDashboard {
             tokens_total_known: report.totals.tokens_total_known,
             runs_tokens_unknown: report.totals.runs_tokens_unknown,
             usd_total,
+            usd_estimated,
             credits_total,
             runs_cost_unknown: report.totals.runs_cost_unknown,
             failures: report.totals.runs_failed,
@@ -167,6 +178,23 @@ impl UsageDashboard {
             UsageRefreshState::Pending => format!("{window} · updating"),
             UsageRefreshState::Stale => format!("{window} · stale · retrying"),
         }
+    }
+}
+
+/// `$11.0899 USD` for a reported USD cost, `~$0.6496 USD` for an estimate,
+/// `7.00 credits` for another unit, `unknown` when the amount is unknown.
+pub fn display_cost(run: &UsageRun) -> String {
+    let prefix = if run.cost_source.starts_with("estimated") {
+        "~"
+    } else {
+        ""
+    };
+    match &run.cost {
+        UsageCost::Known { amount, unit } if unit.eq_ignore_ascii_case("USD") => {
+            format!("{prefix}${amount:.4} USD")
+        }
+        UsageCost::Known { amount, unit } => format!("{prefix}{amount:.2} {unit}"),
+        UsageCost::Unknown => "unknown".to_string(),
     }
 }
 
