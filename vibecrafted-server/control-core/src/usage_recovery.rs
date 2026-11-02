@@ -141,6 +141,9 @@ pub(super) fn project(root: &Path, runs: &mut [UsageRun]) -> UsageRecovery {
         })
         .filter_map(|(index, run)| {
             let meta = root.join(&run.run_id).join("meta.json");
+            if meta_measured_without_usage(&meta) {
+                return None;
+            }
             let transcript = root.join(&run.run_id).join("transcript.log");
             let version = Version {
                 meta: FileStamp::read(&meta)?,
@@ -307,6 +310,20 @@ fn refresh(shared: SharedCache, jobs: Vec<Job>) {
     }
     cache.refreshed_at = Some(Utc::now().to_rfc3339());
     cache.error = error;
+}
+
+fn meta_measured_without_usage(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("measured_usage").is_some_and(Value::is_object)
+        && !object.get("usage").is_some_and(Value::is_object)
 }
 
 fn known(row: &Map<String, Value>, field: &str) -> bool {
