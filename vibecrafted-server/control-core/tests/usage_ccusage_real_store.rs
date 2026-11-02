@@ -1,8 +1,9 @@
 //! What collection costs over this machine's real provider stores.
 //!
 //! Ignored by default because it reads the real home. It writes only under cargo's
-//! test scratch directory. Build first so the timing excludes compilation. A missing
-//! `VIBECRAFTED_PYTHON` measures the in-process adapters alone:
+//! test scratch directory, or under `VIBECRAFTED_REAL_STORE_HOME` when that is set.
+//! Build first so the timing excludes compilation. A missing `VIBECRAFTED_PYTHON`
+//! measures the in-process adapters alone:
 //!
 //! ```text
 //! cargo test --release -p control-core --test usage_ccusage_real_store --no-run
@@ -11,21 +12,40 @@
 //! ```
 //!
 //! The first collection closes every old day. The second reads what every later one
-//! reads, so its time is the recurring cost. Maximum RSS comes from the first.
+//! reads, so its time is the recurring cost. Maximum RSS belongs to the first. To get
+//! the recurring maximum, set `VIBECRAFTED_REAL_STORE_HOME` to a directory, run once to
+//! fill it, and run again: the second process closes nothing. That directory also
+//! keeps the projections for comparison with another reader of the same stores.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use control_core::ControlPlane;
 use serde_json::Value;
+
+fn resident_mb() -> u64 {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps");
+    let kilobytes = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .expect("resident size in kilobytes");
+    kilobytes / 1024
+}
 
 fn report_one_collection(home: &Path, label: &str) {
     let started = Instant::now();
     let outcome = ControlPlane::new(home).collect_local_usage(Duration::ZERO);
     let elapsed = started.elapsed();
 
-    eprintln!("{label} collection took {elapsed:?}");
+    eprintln!(
+        "{label} collection took {elapsed:?}, {} MB resident after it",
+        resident_mb()
+    );
     for row in &outcome.agents {
         let projection = home
             .join("telemetry")
@@ -50,12 +70,20 @@ fn report_one_collection(home: &Path, label: &str) {
 #[test]
 #[ignore = "reads this machine's real provider stores"]
 fn report_the_cost_of_collecting() {
-    let home =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ccusage-real-{}", std::process::id()));
+    let kept = std::env::var_os("VIBECRAFTED_REAL_STORE_HOME");
+    let home = kept.as_ref().map_or_else(
+        || {
+            Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("ccusage-real-{}", std::process::id()))
+        },
+        PathBuf::from,
+    );
     fs::create_dir_all(&home).expect("private home");
 
     report_one_collection(&home, "first");
-    report_one_collection(&home, "recurring");
+    report_one_collection(&home, "second");
 
-    fs::remove_dir_all(&home).ok();
+    if kept.is_none() {
+        fs::remove_dir_all(&home).ok();
+    }
 }
