@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use ccusage_core::LoadedEntry;
 use ccusage_core::cli::{AgentReportKind, CodexSpeed, CostMode, PricingOverride, SharedArgs};
 use ccusage_core::pricing::{EmbeddedSnapshots, Pricing, PricingMap};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const PROJECTION_FILE: &str = "ccusage-sessions.json";
