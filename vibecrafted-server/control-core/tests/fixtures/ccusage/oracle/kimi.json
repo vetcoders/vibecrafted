@@ -1,0 +1,34 @@
+{
+  "sessions": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 216832,
+      "inputTokens": 64842,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 216832,
+          "cost": 0.44007840000000004,
+          "inputTokens": 64842,
+          "modelName": "k3",
+          "outputTokens": 2254
+        }
+      ],
+      "modelsUsed": [
+        "k3"
+      ],
+      "outputTokens": 2254,
+      "sessionId": "session_01a0de00-0000-4000-8000-000000000004",
+      "totalCost": 0.44007840000000004,
+      "totalTokens": 283928
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 216832,
+    "inputTokens": 64842,
+    "outputTokens": 2254,
+    "totalCost": 0.44007840000000004,
+    "totalTokens": 283928
+  }
+}

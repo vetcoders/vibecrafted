@@ -1,0 +1,38 @@
+{
+  "sessions": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 7437056,
+      "firstActivity": "2026-11-02T10:09:38.000Z",
+      "inputTokens": 829274,
+      "lastActivity": "2026-11-02T10:49:28.000Z",
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 7437056,
+          "cost": 11.089948,
+          "inputTokens": 829274,
+          "modelName": "grok-4.7-build-fast",
+          "outputTokens": 27983,
+          "storedCost": 11.089948
+        }
+      ],
+      "modelsUsed": [
+        "grok-4.7-build-fast"
+      ],
+      "outputTokens": 27983,
+      "projectPath": "/fixture/project",
+      "sessionId": "01a0de00-0000-7000-8000-000000000003",
+      "totalCost": 11.089948,
+      "totalTokens": 8294313
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 7437056,
+    "inputTokens": 829274,
+    "outputTokens": 27983,
+    "totalCost": 11.089948,
+    "totalTokens": 8294313
+  }
+}
