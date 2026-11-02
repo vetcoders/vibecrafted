@@ -151,3 +151,52 @@ claim: ""
     assert control_plane._report_denies_success(run) == "report claim is empty"
     assert _run_succeeded(run) is False
     assert control_plane._has_success_evidence(run) is False
+
+
+def test_missing_report_file_leaves_process_evidence(tmp_path: Path) -> None:
+    """A path that is not on disk is absence, so process evidence still stands."""
+    run = _run(str(tmp_path / "absent-report.md"), state="completed")
+
+    assert control_plane._report_denies_success(run) == ""
+    assert control_plane._has_success_evidence(run) is True
+    assert control_plane._operator_state(run) == "completed"
+
+
+def test_launcher_template_is_not_success(tmp_path: Path) -> None:
+    """The canonical launcher shell is present and unfinalized.
+
+    ``validate_frontmatter_fields`` marks ``launcher_template: true`` with
+    ``report_missing``. That sentinel is not file absence, so an exit-0
+    completed record must not project as operator success.
+    """
+    from vibecrafted_core.report_contract import (
+        materialize_launcher_report_template,
+        validate_report_file,
+    )
+
+    report = tmp_path / "launcher-shell.md"
+    assert materialize_launcher_report_template(
+        report,
+        run_id="work-261029-114509-02831",
+        agent="agy",
+        skill="workflow",
+    )
+    verdict = validate_report_file(report, require_frontmatter=False)
+    assert verdict.has_frontmatter is True
+    assert "report_missing" in verdict.errors
+    assert verdict.finalized is False
+
+    run = _run(str(report), state="completed")
+    assert control_plane._report_denies_success(run) == "report finalized is false"
+    assert control_plane._has_success_evidence(run) is False
+    assert _run_succeeded(run) is False
+
+    projected = control_plane._artifact_projection(dict(run))
+    assert projected["operator_state"] == "blocked"
+    assert projected["state"] == "completed"
+    assert (
+        wrappers._completion_exit_code(
+            {"completed": True, "worker_alive": False, "run": projected}
+        )
+        == 3
+    )

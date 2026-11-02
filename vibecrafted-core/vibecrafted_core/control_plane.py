@@ -1431,12 +1431,17 @@ def _report_denies_success(run: dict[str, Any]) -> str:
     finalized claim that is not a completed attestation vetoes exit 0, state,
     and terminal liveness. The launcher shell (``finalized: false``, empty
     claim, ``claim_status: pending``) is the case this closes.
+
+    ``report_missing`` means two different things. A path that is not a file
+    is genuine absence, and process evidence stands. ``launcher_template:
+    true`` reuses that same error while the file is present, so the sentinel
+    does not bypass the veto.
     """
-    report = str(run.get("latest_report") or "").strip()
+    report = str(run.get("latest_report") or run.get("report") or "").strip()
     if not report:
         return ""
     verdict = validate_report_file(report, require_frontmatter=False)
-    if "report_missing" in verdict.errors:
+    if "report_missing" in verdict.errors and not verdict.has_frontmatter:
         return ""
     if _report_attests_completion(run):
         return ""
@@ -1503,6 +1508,8 @@ def _reconcile_repaired_report_terminal(run: dict[str, Any]) -> dict[str, Any]:
 
     A successful worker can only recover from report_missing/report_invalid.
     Execution failures and proof/delivery invalidation remain terminal failures.
+    Structural validity is not attestation: ``finalized: false`` or an empty
+    claim keeps the prior terminal and its recovery flags.
     """
     result = dict(run)
     if str(result.get("state") or "") not in {"report_invalid", "report_missing"}:
@@ -1529,6 +1536,8 @@ def _reconcile_repaired_report_terminal(run: dict[str, Any]) -> dict[str, Any]:
         return result
     errors = [str(item) for item in (result.get("artifact_errors") or []) if str(item)]
     if any(not item.startswith("report_") for item in errors):
+        return result
+    if _report_denies_success(result):
         return result
 
     completed_at = str(result.get("completed_at") or result.get("updated_at") or "")
