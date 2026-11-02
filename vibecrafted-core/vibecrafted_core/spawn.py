@@ -5258,17 +5258,22 @@ FOOTER_TOKEN_PATTERNS = {
         r"^\s*tokens_output:\s*([0-9]+)", re.IGNORECASE | re.MULTILINE
     ),
 }
-JSON_TOKEN_PATTERNS = {
-    "input": re.compile(r'"(?:input_tokens|inputTokens|prompt_tokens)"\s*:\s*([0-9]+)'),
-    "cached_input": re.compile(
-        r'"(?:cached_input_tokens|cached_prompt_tokens|cache_read_input_tokens|cacheReadInputTokens|cacheInputTokens)"\s*:\s*([0-9]+)'
+# Same key sets the old whole-text regex read. Counts now come from parsed
+# JSON objects (_collect_structured_tokens), not from a scan of the transcript.
+_JSON_TOKEN_KEYS: dict[str, tuple[str, ...]] = {
+    "input": ("input_tokens", "inputTokens", "prompt_tokens"),
+    "cached_input": (
+        "cached_input_tokens",
+        "cached_prompt_tokens",
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cacheInputTokens",
     ),
-    "cache_write": re.compile(
-        r'"(?:cache_creation_input_tokens|cacheCreateTokens)"\s*:\s*([0-9]+)'
-    ),
-    "output": re.compile(
-        r'"(?:output_tokens|outputTokens|completion_tokens)"\s*:\s*([0-9]+)'
-    ),
+    "cache_write": ("cache_creation_input_tokens", "cacheCreateTokens"),
+    "output": ("output_tokens", "outputTokens", "completion_tokens"),
+}
+_JSON_TOKEN_KEY_BUCKET = {
+    key: bucket for bucket, keys in _JSON_TOKEN_KEYS.items() for key in keys
 }
 MODEL_ENV_VARS = (
     "VIBECRAFTED_PARENT_MODEL",
@@ -5755,17 +5760,19 @@ def _extract_session(text: str) -> str:
 def _extract_tokens(text: str) -> dict[str, int | None]:
     """Parse token usage from combined transcript/report text.
 
-    Prefers the authoritative run-closure footer, then JSON usage fields,
-    then per-event ``tokens: N in / N out`` lines, in that priority order.
-    ``events`` counts the provider usage evidence found; 0 means the text
-    carries none (a seeded ``tokens_input: 0`` template is not evidence).
+    Prefers the run-closure footer (``FOOTER_TOKEN_PATTERNS``), then numeric
+    counts on JSON-object lines, then per-event ``TOKEN_PATTERN`` lines
+    (``tokens: N in / N out``). JSON counts use the same key sets and the
+    same descent as ``_extract_cost``: a line counts only when it parses as
+    a JSON object, text inside strings is not read, tool payloads are not
+    entered, and a bool is not a count. ``events`` for that tier is the
+    larger of the input and output occurrences. A seeded ``tokens_input: 0``
+    footer is not evidence.
     """
     clean = _clean_text(text)
     found = TOKEN_PATTERN.findall(clean)
-    json_tokens = {
-        key: sum(int(match) for match in pattern.findall(clean))
-        for key, pattern in JSON_TOKEN_PATTERNS.items()
-    }
+    json_hits = _structured_token_hits(clean)
+    json_tokens = {key: sum(hits) for key, hits in json_hits.items()}
     # Prefer the authoritative run-closure footer totals when present: they are
     # written for every agent and carry the final per-run usage, so they work
     # uniformly across providers and never sum partial streaming deltas.
@@ -5803,10 +5810,7 @@ def _extract_tokens(text: str) -> dict[str, int | None]:
                 json_tokens["cached_input"],
                 json_tokens["output"],
             ),
-            "events": max(
-                len(JSON_TOKEN_PATTERNS["input"].findall(clean)),
-                len(JSON_TOKEN_PATTERNS["output"].findall(clean)),
-            ),
+            "events": max(len(json_hits["input"]), len(json_hits["output"])),
         }
     if not found:
         return {
@@ -5847,6 +5851,49 @@ def _json_object_line(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _json_token_count(value: object) -> int | None:
+    """One non-negative whole-number count. A bool is not a count."""
+    if not _is_number(value):
+        return None
+    number = float(value)
+    if not number.is_integer() or number < 0:
+        return None
+    return int(number)
+
+
+def _collect_structured_tokens(node: object, found: dict[str, list[int]]) -> None:
+    """Walk parsed JSON for token counts. Strings and tool payloads are closed.
+
+    Dicts are walked. A list is entered only under ``modelUsage`` /
+    ``model_usage``, the same descent ``_collect_structured_costs`` uses.
+    A token key contributes its number and is not entered.
+    """
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if key in _TOOL_PAYLOAD_KEYS:
+            continue
+        bucket = _JSON_TOKEN_KEY_BUCKET.get(key)
+        if bucket is not None:
+            count = _json_token_count(value)
+            if count is not None:
+                found[bucket].append(count)
+            continue
+        for child in _telemetry_descendants(key, value):
+            _collect_structured_tokens(child, found)
+
+
+def _structured_token_hits(text: str) -> dict[str, list[int]]:
+    """Token counts from lines that parse as JSON objects."""
+    found = {bucket: [] for bucket in _JSON_TOKEN_KEYS}
+    for raw_line in (text or "").splitlines():
+        parsed = _json_object_line(raw_line)
+        if parsed is None:
+            continue
+        _collect_structured_tokens(parsed, found)
+    return found
 
 
 def _collect_structured_costs(
