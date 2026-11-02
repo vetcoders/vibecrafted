@@ -44,6 +44,7 @@ impl TempHome {
                 .unwrap_or(0)
         ));
         fs::create_dir_all(&path).expect("create temp home");
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only process environment
         unsafe {
             std::env::set_var("HOME", &path);
             std::env::set_var("VIBECRAFTED_HOME", &path);
@@ -451,6 +452,7 @@ impl PythonEnvGuard {
     fn pin(python: Option<&Path>) -> Self {
         let python_prev = std::env::var("VIBECRAFTED_PYTHON").ok();
         let runtime_prev = std::env::var("VIBECRAFTED_RUNTIME_ROOT").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only process environment
         unsafe {
             match python {
                 Some(path) => std::env::set_var("VIBECRAFTED_PYTHON", path),
@@ -467,6 +469,7 @@ impl PythonEnvGuard {
 
 impl Drop for PythonEnvGuard {
     fn drop(&mut self) {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only process environment
         unsafe {
             match &self.python {
                 Some(value) => std::env::set_var("VIBECRAFTED_PYTHON", value),
@@ -506,12 +509,14 @@ async fn post_json(
 
 fn write_dispatch_stub(home: &Path, fail_doctor: bool) -> PathBuf {
     let stub = home.join("generation-python");
+    // A shell stub: an env-python shebang resolves through this session's PATH,
+    // and the runtime pin refuses when PATH leads back to its own door.
     let body = format!(
-        "#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\nlog = Path(os.environ['DISPATCH_STUB_LOG'])\nprior = log.read_text(encoding='utf-8') if log.exists() else ''\nlog.write_text(prior + ' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')\nif '--doctor' in sys.argv:\n    {}\nraise SystemExit(0)\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DISPATCH_STUB_LOG\"\ncase \" $* \" in\n  *' --doctor '*) {} ;;\nesac\nexit 0\n",
         if fail_doctor {
-            "print('dispatch refused: fixture', file=sys.stderr)\n    raise SystemExit(1)"
+            "echo 'dispatch refused: fixture' >&2; exit 1"
         } else {
-            "raise SystemExit(0)"
+            "exit 0"
         }
     );
     fs::write(&stub, body).expect("write stub");
@@ -531,6 +536,7 @@ async fn dispatch_endpoint_uses_the_generation_python_door() {
     home.setup_dispatch_plan("vetcoders", "vibecrafted", "2026_0908", "dispatch-plan");
     let log = home.path.join("dispatch-stub.log");
     let stub = write_dispatch_stub(&home.path, false);
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only process environment
     unsafe {
         std::env::set_var("DISPATCH_STUB_LOG", &log);
     }
@@ -591,6 +597,7 @@ async fn dispatch_endpoint_surfaces_doctor_refusal() {
     home.setup_dispatch_plan("vetcoders", "vibecrafted", "2026_0908", "dispatch-plan");
     let log = home.path.join("dispatch-stub.log");
     let stub = write_dispatch_stub(&home.path, true);
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only process environment
     unsafe {
         std::env::set_var("DISPATCH_STUB_LOG", &log);
     }

@@ -2498,6 +2498,81 @@ def test_launch_workflow_artifact_paths_are_terminal_truth(
     assert truth["dou_index"] == 3
 
 
+@pytest.mark.parametrize(
+    ("report_text", "projected_gate", "expected_gate"),
+    [
+        pytest.param(
+            "---\nstatus: completed\nnext_stage: polarize\n"
+            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            None,
+            "validated",
+            id="projection-not-there-yet",
+        ),
+        pytest.param(
+            "---\nstatus: completed\nnext_stage: polarize\n"
+            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            "pending",
+            "validated",
+            id="projection-still-pending",
+        ),
+        pytest.param(
+            "---\nstatus: completed\nnext_stage: polarize\n"
+            "next_agent: codex\ndou_index: 3\n---\nbody\n",
+            "stopped",
+            "stopped",
+            id="operator-stop-stands",
+        ),
+        pytest.param(None, None, None, id="missing-report-is-not-validated"),
+    ],
+)
+def test_await_launch_truth_gates_a_run_the_projection_has_not_reached(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    report_text: str | None,
+    projected_gate: str | None,
+    expected_gate: str | None,
+) -> None:
+    """A terminal meta can outrun the projection, and this await validates by itself."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    report = tmp_path / "report.md"
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("worker output\n", encoding="utf-8")
+    if report_text is not None:
+        report.write_text(report_text, encoding="utf-8")
+    run = {"run_id": "lagging-run", "state": "completed", "liveness": "terminal"}
+    if projected_gate is not None:
+        run["artifact_gate"] = projected_gate
+    monkeypatch.setattr(
+        workflow,
+        "await_run",
+        lambda _run_id, **_kwargs: {
+            "found": True,
+            "completed": True,
+            "timed_out": False,
+            "reason": "terminal",
+            "worker_alive": False,
+            "attempts": 1,
+            "run": run,
+        },
+    )
+
+    truth = workflow.await_launch_truth(
+        {
+            "run_id": "lagging-run",
+            "report": str(report),
+            "transcript": str(transcript),
+            "meta": str(tmp_path / "meta.json"),
+        },
+        timeout_seconds=1,
+        interval_seconds=0.01,
+        require_transcript_output=True,
+    )
+
+    assert truth["terminal"] is True
+    assert truth["artifact_ok"] is (report_text is not None)
+    assert truth["run"].get("artifact_gate") == expected_gate
+
+
 def test_report_requested_next_stage_reads_report_frontmatter(
     tmp_path: Path,
 ) -> None:
