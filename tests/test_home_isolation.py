@@ -6,6 +6,7 @@ import os
 
 import pytest
 from _home_isolation import (
+    ISOLATED_CONFIG_DIRNAME,
     ISOLATED_HOME_DIRNAME,
     OperatorHomeIsolationError,
     fail_closed_isolated_home,
@@ -13,6 +14,7 @@ from _home_isolation import (
 )
 from vibecrafted_core.control_plane import control_plane_home
 from vibecrafted_core.runtime_paths import vibecrafted_home
+from vibecrafted_core.server_config import config_path
 
 
 def test_isolation_root_fixture_sets_tmp_vibecrafted_home() -> None:
@@ -27,6 +29,12 @@ def test_isolation_root_fixture_sets_tmp_vibecrafted_home() -> None:
 
 def test_isolation_root_pythonpath_is_unset() -> None:
     assert "PYTHONPATH" not in os.environ
+
+
+def test_isolation_root_hides_the_operator_config_from_the_suite() -> None:
+    config = config_path()
+    assert ISOLATED_CONFIG_DIRNAME in config.parts
+    assert not config.exists()
 
 
 def test_isolation_root_fail_closed_when_home_unset(

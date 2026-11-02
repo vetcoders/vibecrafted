@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 ISOLATED_HOME_DIRNAME = "isolated-vibecrafted-home"
+ISOLATED_CONFIG_DIRNAME = "isolated-xdg-config"
 
 
 class OperatorHomeIsolationError(RuntimeError):
@@ -67,6 +68,10 @@ def isolate_vibecrafted_test_env(
     and other tests treat ``tmp_path`` as a clean staging tree; nesting the
     control-plane home there leaked ``isolated-vibecrafted-home`` into archive
     inventories (C10 × GTM).
+
+    ``XDG_CONFIG_HOME`` is pinned beside it. ``config_path`` prefers that variable
+    over ``HOME``, and a shell profile commonly exports it, so the operator's
+    ``config.toml`` would otherwise replace product defaults inside the suite.
     """
     for key in [name for name in os.environ if name.startswith(strip_prefixes)]:
         monkeypatch.delenv(key, raising=False)
@@ -75,6 +80,9 @@ def isolate_vibecrafted_test_env(
 
     isolated_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("VIBECRAFTED_HOME", str(isolated_home))
+    isolated_config = isolated_home.parent / ISOLATED_CONFIG_DIRNAME
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_config))
     for key, value in (restore or {}).items():
         monkeypatch.setenv(key, value)
     fail_closed_isolated_home(os.environ.get("VIBECRAFTED_HOME"))
