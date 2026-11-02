@@ -1,11 +1,15 @@
 //! All-local provider activity for the usage report.
 //!
-//! The collector (see `usage_collect`) leaves two durable projections under
-//! `<home>/telemetry/` that already carry the providers' own parsed formats:
+//! The collector (see `usage_collect`) leaves durable projections under
+//! `<home>/telemetry/`:
 //!
+//! * `<agent>/ccusage-sessions.json` — one measured session per row, written
+//!   in process by the `ccusage` adapters. When it has sessions it is the only
+//!   source for that provider;
 //! * `<agent>/scan-cache.json` — `files{<path>: {days:[{day,model,<buckets>}],
 //!   record?:{id,mtime,..}}}`, written by `fleet_engine` for six providers and
-//!   by the kimi harvest for kimi;
+//!   by the kimi harvest for kimi. Used when the ccusage projection is absent
+//!   or empty;
 //! * `archive/<agent>.jsonl` — day/model aggregates, last-wins per key.
 //!
 //! This module only *reads* them. It never invents a measurement: a local
@@ -31,6 +35,7 @@ use crate::usage::{
     USAGE_PROVIDER_ADAPTERS, UsageCost, UsageFilter, UsageRun, UsageTokens, matches_filter,
     regular_file, unknown,
 };
+use crate::usage_ccusage::{LoadedProjection, PROJECTION_FILE, ProjectedSession, read_projection};
 
 #[path = "usage_local_cache.rs"]
 mod projection;
@@ -44,7 +49,7 @@ const LONG_SESSION_ID_LEN: usize = 16;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalSource {
     pub agent: String,
-    /// `scan_cache`, `archive`, `loading`, `unavailable` or `absent`.
+    /// `ccusage`, `scan_cache`, `archive`, `loading`, `unavailable` or `absent`.
     pub source: String,
     pub sessions_seen: usize,
     pub counted: usize,
@@ -163,6 +168,27 @@ pub fn read_local_usage(
             vc_without_session_id: vc.without_id(agent),
             ..LocalSource::default()
         };
+        let projection = telemetry_dir.join(agent).join(PROJECTION_FILE);
+        match read_projection(&projection) {
+            LoadedProjection::Sessions(sessions) => {
+                source.source = "ccusage".to_string();
+                read_ccusage_sessions(
+                    agent,
+                    &sessions,
+                    vc,
+                    cutoff,
+                    filter,
+                    &mut source,
+                    &mut usage.runs,
+                );
+                usage.sources.push(source);
+                continue;
+            }
+            LoadedProjection::Unreadable => {
+                source.error = Some("ccusage_unreadable".to_string());
+            }
+            LoadedProjection::Absent | LoadedProjection::Empty => {}
+        }
         let cache = telemetry_dir.join(agent).join("scan-cache.json");
         let archive = telemetry_dir.join("archive").join(format!("{agent}.jsonl"));
         let cached = read_scan_cache(&cache);
@@ -199,12 +225,93 @@ pub fn read_local_usage(
         } else {
             source.note = "no local projection collected yet".to_string();
         }
-        if cache_failed {
+        if cache_failed && source.error.is_none() {
             source.error = Some("scan_cache_unreadable".into());
         }
         usage.sources.push(source);
     }
     usage
+}
+
+fn read_ccusage_sessions(
+    agent: &str,
+    sessions: &[ProjectedSession],
+    vc: &VcSessions,
+    cutoff: Option<DateTime<Utc>>,
+    filter: &UsageFilter,
+    source: &mut LocalSource,
+    out: &mut Vec<UsageRun>,
+) {
+    for session in sessions {
+        source.sessions_seen += 1;
+        if vc.contains(agent, &session.id, &session.id) {
+            source.matched_vc += 1;
+            continue;
+        }
+        let Ok(recorded) = DateTime::parse_from_rfc3339(&session.recorded_at) else {
+            continue;
+        };
+        let recorded = recorded.with_timezone(&Utc);
+        if cutoff.is_some_and(|cutoff| recorded < cutoff) {
+            continue;
+        }
+        let model = if session.model.is_empty() {
+            unknown("ccusage session carried no model")
+        } else {
+            json!(session.model)
+        };
+        let session_id = if session.id.is_empty() {
+            unknown("ccusage session carried no id")
+        } else {
+            json!(session.id)
+        };
+        let (amount, currency) = match session.cost_amount {
+            Some(amount) => (json!(amount), Some("USD".to_string())),
+            None => (unknown("no price for this model"), None),
+        };
+        let telemetry = format!("ccusage:{agent}");
+        let run = UsageRun {
+            run_id: format!("ccusage-{agent}-{}", slug(&session.id, &session.id)),
+            provider: json!(agent),
+            agent: json!(agent),
+            model,
+            status: "observed".to_string(),
+            exit_code: None,
+            recorded_at: recorded.to_rfc3339(),
+            tokens: UsageTokens {
+                schema: "vibecrafted.usage.v1".to_string(),
+                unit: "tokens".to_string(),
+                source: telemetry.clone(),
+                events: session.events,
+                tokens_input: json!(session.input),
+                tokens_cached_input: json!(session.cache_read),
+                tokens_cache_write: json!(session.cache_write),
+                tokens_output: json!(session.output),
+                tokens_total: json!(session.total),
+                semantics: BTreeMap::new(),
+            },
+            cost: UsageCost {
+                amount,
+                currency,
+                unit: Some("USD".to_string()),
+                source: if session.cost_source.is_empty() {
+                    "estimated:ccusage".to_string()
+                } else {
+                    session.cost_source.clone()
+                },
+            },
+            failure_kind: None,
+            failure: None,
+            provider_session_id: session_id,
+            telemetry_source: telemetry,
+            origin: "local".to_string(),
+            unpriced_models: session.unpriced_models.clone(),
+        };
+        if matches_filter(&run, filter) {
+            source.counted += 1;
+            out.push(run);
+        }
+    }
 }
 
 fn read_scan_cache(path: &Path) -> Result<Option<Map<String, Value>>, ()> {
