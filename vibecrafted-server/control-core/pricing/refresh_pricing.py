@@ -6,22 +6,18 @@ own snapshot crate needs a network fetch or a build-time environment variable,
 so these bytes are committed and the build stays offline and reproducible.
 Compaction mirrors `compact_pricing_json` of ccusage-pricing-snapshots/build.rs.
 
-Usage: refresh_pricing.py <litellm-rev> <path to ccusage-pricing-snapshots/src>
+Usage: refresh_pricing.py <model_prices_and_context_window.json> <path to
+ccusage-pricing-snapshots/src>
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import urllib.request
 import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-LITELLM = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/{rev}/"
-    "model_prices_and_context_window.json"
-)
 FIELDS = (
     ("input_cost_per_token", "i"),
     ("output_cost_per_token", "o"),
@@ -82,11 +78,9 @@ def deflate(value: object) -> bytes:
     return packer.compress(text.encode()) + packer.flush()
 
 
-def main(rev: str, snapshots: Path) -> None:
-    with urllib.request.urlopen(LITELLM.format(rev=rev), timeout=60) as response:
-        litellm = compact(json.load(response))
+def main(litellm: Path, snapshots: Path) -> None:
     outputs = {
-        "litellm-pricing.json.deflate": litellm,
+        "litellm-pricing.json.deflate": compact(json.loads(litellm.read_text())),
         "models-dev-pricing.json.deflate": json.loads(
             (snapshots / "models-dev-pricing.json").read_text()
         ),
@@ -99,4 +93,4 @@ def main(rev: str, snapshots: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], Path(sys.argv[2]))
+    main(Path(sys.argv[1]), Path(sys.argv[2]))
