@@ -16,6 +16,8 @@
 //! the recurring maximum, set `VIBECRAFTED_REAL_STORE_HOME` to a directory, run once to
 //! fill it, and run again: the second process closes nothing. That directory also
 //! keeps the projections for comparison with another reader of the same stores.
+//! `VIBECRAFTED_REAL_STORE_RUNS` repeats the collection in one process, to show
+//! whether resident memory settles the way a long-lived server needs it to.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,8 +82,13 @@ fn report_the_cost_of_collecting() {
     );
     fs::create_dir_all(&home).expect("private home");
 
-    report_one_collection(&home, "first");
-    report_one_collection(&home, "second");
+    let runs = std::env::var("VIBECRAFTED_REAL_STORE_RUNS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(2);
+    for run in 1..=runs {
+        report_one_collection(&home, &format!("run {run}:"));
+    }
 
     if kept.is_none() {
         fs::remove_dir_all(&home).ok();
