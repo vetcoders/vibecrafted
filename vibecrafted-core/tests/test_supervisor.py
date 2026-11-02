@@ -166,7 +166,7 @@ def test_finalize_artifacts_python_owns_launcher_artifact_contract(
     transcript.write_text(
         "[12:40:43] session: codex-finalize-001\n"
         "tokens: 12 in (3 cached) / 7 out\n"
-        "cost_usd: $0.045\n",
+        '{"type":"result","total_cost_usd":0.045}\n',
         encoding="utf-8",
     )
     meta.write_text(

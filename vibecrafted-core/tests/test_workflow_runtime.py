@@ -32,7 +32,7 @@ def _fake_agent(bin_dir: Path, name: str, *, status: str = "completed") -> None:
         f"printf '[12:00:00] model: {name}-model\\n'\n"
         f"printf '[12:00:00] session: {name}-session\\n'\n"
         "printf '[12:00:01] tokens: 10 in (3 cached) / 5 out\\n'\n"
-        "printf 'cost_usd: $0.015\\n'\n"
+        """printf '{"type":"result","total_cost_usd":0.015}\\n'\n"""
         "printf 'fake worker ok\\n'\n" + report_writer,
         encoding="utf-8",
     )
