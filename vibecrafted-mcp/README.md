@@ -66,6 +66,19 @@ vibecrafted-mcp --help
 `vc_worktrees` delegates to the same core inventory as `vc-git worktrees list|triage`.
 Cleanup, pruning, merge preparation and apply endpoints are deferred and unavailable.
 
+Both launch aliases accept the same optional controls:
+
+- `model` is a provider model identifier string. Empty or omitted leaves model
+  selection to core (including prompt frontmatter and configured defaults).
+- `worktree` is a boolean or null. `true` requests an isolated Fleet Worktree;
+  explicit `false` selects the Living Tree. Null or omission preserves the core
+  default. Send JSON booleans rather than string values.
+
+These controls are independent of `runtime` (presentation) and `mode` (workflow
+label). Validation, provider refusal, worktree preparation and process creation
+remain in the canonical core runtime. Both aliases keep the same immediate
+receipt and `await_completion` behavior.
+
 MCP launch is experimental but real. The lifecycle tools are mutating:
 they can spawn agents, stop or retry runs, and write control-plane
 artifacts under `$VIBECRAFTED_HOME`. Operators should expose them only

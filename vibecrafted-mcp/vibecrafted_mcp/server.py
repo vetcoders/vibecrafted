@@ -668,6 +668,8 @@ def build_server() -> Any:
         mode: str | None = None,
         home: str | None = None,
         await_completion: bool = False,
+        model: str = "",
+        worktree: bool | None = None,
     ) -> dict[str, Any]:
         """Launch a workflow through the Vibecrafted core runtime.
 
@@ -686,6 +688,10 @@ def build_server() -> Any:
             payload["root"] = root
         if mode is not None:
             payload["mode"] = mode
+        if model:
+            payload["model"] = model
+        if worktree is not None:
+            payload["worktree"] = worktree
         with _override_vibecrafted_home(home):
             try:
                 _control_plane.ensure_launch_storage()
@@ -729,12 +735,18 @@ def build_server() -> Any:
         mode: str | None = None,
         home: str | None = None,
         await_completion: bool = False,
+        model: str = "",
+        worktree: bool | None = None,
     ) -> dict[str, Any]:
         """Mutating: launch a workflow through the Vibecrafted core runtime.
 
         With ``await_completion``, join the canonical monitor and return the
         launch receipt (including run_id/report), completion verdict and exit_code.
         Otherwise return the receipt immediately.
+
+        ``model`` optionally pins a provider model; empty keeps core selection.
+        ``worktree`` selects execution isolation; None keeps core defaults.
+        ``mode`` remains a workflow label, independent of both controls.
 
         This spawns an agent process and writes control-plane artifacts.
         Launch validation and process creation stay in
@@ -751,6 +763,8 @@ def build_server() -> Any:
             mode=mode,
             home=home,
             await_completion=await_completion,
+            model=model,
+            worktree=worktree,
         )
 
     @mcp.tool(
@@ -771,6 +785,8 @@ def build_server() -> Any:
         mode: str | None = None,
         home: str | None = None,
         await_completion: bool = False,
+        model: str = "",
+        worktree: bool | None = None,
     ) -> dict[str, Any]:
         """Mutating alias of ``vc_launch`` for run-lifecycle naming symmetry.
 
@@ -791,6 +807,8 @@ def build_server() -> Any:
             mode=mode,
             home=home,
             await_completion=await_completion,
+            model=model,
+            worktree=worktree,
         )
 
     @mcp.tool(annotations={"readOnlyHint": True})
