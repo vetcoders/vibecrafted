@@ -119,6 +119,13 @@ flags `truncated`.
 
 `sweep` writes chronological shards for extraction. Nothing has been read yet.
 
+A later day is `append`, not another `sweep`. `sweep` numbers shards from `s01` again. `append` copies only transcript files the shards do not already have, into the next shard, and extends `window.until`. The old shards, the catalog and the ledger stay. Then `plan --stage extract --shard sNN` reads that shard alone.
+
+```bash
+uv run "$CLI" "$W" append --until 2026-11-03
+uv run "$CLI" "$W" plan --stage extract --repo <repo> --shard s09
+```
+
 ### 2 · Extract — the fleet reads, verbatim
 
 ```bash

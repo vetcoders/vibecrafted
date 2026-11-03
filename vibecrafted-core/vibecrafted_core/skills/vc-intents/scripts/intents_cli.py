@@ -13,6 +13,8 @@ Commands, in procedure order:
 
     sweep          account for sources in a window: transcript dirs (shards
                    for extraction) and aicx (indexed intents); writes coverage
+    append         add transcript files that are not in the shards yet; the
+                   next shard only, the closed window stays
     verify-quotes  merge extraction shards, reject any quote that is not a
                    verbatim substring of its source file
     lanes          split the catalog into confrontation lanes by subject
@@ -350,6 +352,129 @@ def cmd_sweep(a: argparse.Namespace) -> None:
         )
 
 
+def _transcript_files(root: Path, since: str, until: str) -> list[tuple[str, Path]]:
+    files = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in (".txt", ".md"):
+            continue
+        rel = p.relative_to(root)
+        name = rel.name if len(rel.parts) == 1 else f"{rel.parts[0]}_{rel.name}"
+        m = SOURCE_DATE.match(name)
+        if not m or not (since <= m.group(1) <= until):
+            continue
+        files.append((name, p))
+    return files
+
+
+def _shard_filenames(work: Path) -> set[str]:
+    shards = work / "shards"
+    if not shards.is_dir():
+        return set()
+    return {
+        p.name
+        for p in shards.glob("s*/*")
+        if p.is_file() and p.suffix.lower() in (".txt", ".md")
+    }
+
+
+def _next_shard_index(work: Path) -> int:
+    highest = 0
+    shards = work / "shards"
+    if not shards.is_dir():
+        return 1
+    for p in shards.glob("s*"):
+        if p.is_dir() and p.name[1:].isdigit():
+            highest = max(highest, int(p.name[1:]))
+    return highest + 1
+
+
+def cmd_append(a: argparse.Namespace) -> None:
+    """Copy transcript files the shards do not have yet into the next shard."""
+    work: Path = a.workdir
+    sweep_path = work / "sweep.json"
+    if not sweep_path.is_file():
+        die("no sweep.json — run sweep before append")
+    sweep = read_json(sweep_path)
+    window = sweep.get("window") or {}
+    since = a.since or window.get("since") or "0000-00-00"
+    until = a.until or datetime.now().date().isoformat()
+    specs = a.source or [
+        s["source"]
+        for s in sweep.get("sources", [])
+        if str(s.get("source", "")).startswith("dir:")
+    ]
+    if not specs:
+        die("no dir: source on the sweep; pass --source dir:<path>")
+    have = _shard_filenames(work)
+    fresh: list[tuple[str, Path]] = []
+    for spec in specs:
+        if not str(spec).startswith("dir:"):
+            continue
+        root = Path(str(spec)[4:]).expanduser()
+        if not root.is_dir():
+            die(f"directory not found: {root}")
+        for name, path in _transcript_files(root, since, until):
+            if name in have:
+                continue
+            have.add(name)
+            fresh.append((name, path))
+    if not fresh:
+        print(f"append: nothing new in {since}..{until}")
+        return
+    shard_size = a.shard_size if a.shard_size else 120
+    start = _next_shard_index(work)
+    shards_dir = work / "shards"
+    shards_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for offset in range(0, len(fresh), shard_size):
+        chunk = fresh[offset : offset + shard_size]
+        sid = f"s{start + offset // shard_size:02d}"
+        dest = shards_dir / sid
+        if dest.exists():
+            die(f"shard {sid} already exists")
+        dest.mkdir()
+        for name, path in chunk:
+            shutil.copy2(path, dest / name)
+        (dest / "_manifest.json").write_text(
+            json.dumps(
+                {
+                    "shard": sid,
+                    "files": len(chunk),
+                    "from": chunk[0][0][:10],
+                    "to": chunk[-1][0][:10],
+                    "append": True,
+                },
+                ensure_ascii=False,
+                indent=1,
+            )
+        )
+        written.append(sid)
+        print(f"  {sid}  {len(chunk)} files  {chunk[0][0][:10]}..{chunk[-1][0][:10]}")
+    dates = [name[:10] for name, _ in fresh]
+    sweep["window"] = {
+        "since": window.get("since") or since,
+        "until": max(window.get("until") or until, max(dates)),
+    }
+    sweep["appended_at"] = now()
+    sweep.setdefault("appends", []).append(
+        {
+            "at": now(),
+            "since": since,
+            "until": until,
+            "files": len(fresh),
+            "first": min(dates),
+            "last": max(dates),
+            "shards": written,
+        }
+    )
+    sweep["shards"] = sorted(p.name for p in shards_dir.glob("s*") if p.is_dir())
+    write_json(sweep_path, sweep)
+    print(
+        f"append → {sweep_path}  +{len(fresh)} files in {', '.join(written)}"
+        f"  window {sweep['window']['since']}..{sweep['window']['until']}"
+    )
+
+
 # ----------------------------------------------------------------------------
 # verify-quotes — extraction shards → catalog, verbatim or rejected
 # ----------------------------------------------------------------------------
@@ -593,6 +718,9 @@ def cmd_plan(a: argparse.Namespace) -> None:
 
     if a.stage == "extract":
         shards = sorted(p for p in (work / "shards").glob("s*") if p.is_dir())
+        only = set(getattr(a, "shard", None) or [])
+        if only:
+            shards = [p for p in shards if p.name in only]
         if not shards:
             die("no shards — run `sweep --source dir:<path> --shard-size N` first")
         out = work / "extractions"
@@ -1376,6 +1504,26 @@ def main() -> None:
     p.set_defaults(fn=cmd_sweep)
 
     p = sub.add_parser(
+        "append",
+        help="copy transcript files the shards do not have yet into the next shard",
+    )
+    p.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="dir:<path>; default = dir sources already recorded in sweep.json",
+    )
+    p.add_argument("--since", help="YYYY-MM-DD inclusive; default = the sweep window")
+    p.add_argument("--until", help="YYYY-MM-DD inclusive; default = today")
+    p.add_argument(
+        "--shard-size",
+        type=int,
+        default=120,
+        help="files per new shard",
+    )
+    p.set_defaults(fn=cmd_append)
+
+    p = sub.add_parser(
         "verify-quotes", help="merge extraction shards; reject non-verbatim quotes"
     )
     p.add_argument(
@@ -1428,6 +1576,12 @@ def main() -> None:
     p.add_argument("--gate", help="implement: verifier command per cut (repo gates)")
     p.add_argument(
         "--gate-expect", help="implement: expected substring of the gate output"
+    )
+    p.add_argument(
+        "--shard",
+        action="append",
+        default=[],
+        help="extract: only these shard ids (repeatable); default = every shard",
     )
     p.set_defaults(fn=cmd_plan)
 

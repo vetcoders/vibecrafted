@@ -23,12 +23,13 @@ flowchart TD
 
 ## Routes
 
-| Entry                                     | Args                                             | Produces                                                  | Exit                  |
-| ----------------------------------------- | ------------------------------------------------ | --------------------------------------------------------- | --------------------- |
-| `/vc-intents`                             | window (`--since/--until` or theme), repo by cwd | workdir with ledger, queue, plans, review page            | interactive           |
-| `vibecrafted intents <agent>`             | one lane: shard or lane JSON, brief path         | `<shard>.json` or `<lane>.verdicts.json`, report          | `0` on dispatch       |
-| `intents_cli.py <workdir> plan --stage …` | `extract` · `confront` · `implement`             | `vibecrafted.dispatch.v1` plan under `<artifacts>/plans/` | `0`                   |
-| `intents_cli.py <workdir> status`         | —                                                | counts, open reasons                                      | `0` CLOSED · `1` OPEN |
+| Entry                                     | Args                                                                | Produces                                                  | Exit                                           |
+| ----------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------- |
+| `/vc-intents`                             | window (`--since/--until` or theme), repo by cwd                    | workdir with ledger, queue, plans, review page            | interactive                                    |
+| `vibecrafted intents <agent>`             | one lane: shard or lane JSON, brief path                            | `<shard>.json` or `<lane>.verdicts.json`, report          | `0` on dispatch                                |
+| `intents_cli.py <workdir> plan --stage …` | `extract` · `confront` · `implement`; extract accepts `--shard sNN` | `vibecrafted.dispatch.v1` plan under `<artifacts>/plans/` | `0`                                            |
+| `intents_cli.py <workdir> append`         | `--until` a later day                                               | the next shard only; `sweep.json` window extended         | `0`; `nothing new` when that day is already in |
+| `intents_cli.py <workdir> status`         | —                                                                   | counts, open reasons                                      | `0` CLOSED · `1` OPEN                          |
 
 ### Escalation edges
 
@@ -50,4 +51,6 @@ flowchart TD
 ### Re-entry after a cut or a compaction
 
 `status` → read `LEDGER.md` → `queue` → `plan --stage implement`. Do not re-run
-the sweep or the extraction; both are on disk and expensive.
+the sweep or the extraction; both are on disk and expensive. A day that arrived
+after the sweep is `append`, then `plan --stage extract --shard` for the new
+shard only.
