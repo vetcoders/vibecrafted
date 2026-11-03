@@ -23,8 +23,8 @@ For the long-form answer bank, see [FAQ-ANSWERED.md](FAQ-ANSWERED.md).
 
 - **Which version does `curl -fsSL https://vibecrafted.io/install.sh | bash` install?**
   The one named by `https://vibecrafted.io/channel/main.json`. The website publishes that channel separately from
-  GitHub Releases, so it can lag the newest release; on 2026-10-14 it named `4.1.0`. Read the manifest before you
-  run the bootstrap, and confirm the result with `vibecrafted --version`.
+  this repo's `VERSION` and from GitHub Releases. `vc-dou --floor` fails when those disagree. Read the manifest
+  before you run the bootstrap, and confirm the result with `vibecrafted --version`.
 
 - **What does `make doctor` check?**
   The doctor verifies the central store, helper availability, symlink health, required foundations (`loctree-mcp` and

@@ -115,6 +115,8 @@ Default doctor does **not** ask GitHub anything. That is why VERSION could sit a
 
 Mismatch, a missing release, or a non-success source-gate conclusion is **red** and names the operator button: **tag/publish**. Missing `gh` is a loud **warn**, never a silent skip and never a fake green. The probe is off the public network in unit tests; it only talks to GitHub when you actually run `--release`.
 
+Doctor's release valve is Vibecrafted-only and stops at GitHub. The pipeline floor is wider: `vc-dou --floor` compares every configured public surface (registries, installer channel, site metadata, Homebrew, README install path, brand spelling, tags without a Release) for any product in `packaging/public-surfaces/`. A green `doctor --release` does not mean those surfaces agree.
+
 ## Reading the output
 
 - **Pass (green / ok)** — the install is bound, hashed, and checkout-free. A healthy install reports on the order of 100+ ok with 0 failures.
