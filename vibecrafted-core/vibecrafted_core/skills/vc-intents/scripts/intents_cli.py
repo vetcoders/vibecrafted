@@ -607,21 +607,28 @@ def cmd_append(a: argparse.Namespace) -> None:
     target_since = min(prior_since, since)
     target_until = max(prior_until, until)
     unselected_coverage = {}
-    if (target_since, target_until) != (prior_since, prior_until):
-        for item in sweep.get("sources", []):
-            if item.get("source") in specs:
-                continue
-            if "covered_ranges" in item:
-                ranges = item["covered_ranges"]
-            elif item.get("coverage"):
-                ranges = [item["coverage"]]
-            elif item.get("state") in ("read", "empty") and not sweep.get("appends"):
-                ranges = [
-                    {"since": prior_since, "until": prior_until, "state": item["state"]}
-                ]
-            else:
-                ranges = []
-            unselected_coverage[item["source"]] = ranges
+    window_expands = (target_since, target_until) != (prior_since, prior_until)
+    for item in sweep.get("sources", []):
+        if item.get("source") in specs:
+            continue
+        legacy_missing = (
+            item.get("state") in ("read", "empty")
+            and "covered_ranges" not in item
+            and not item.get("coverage")
+        )
+        if not window_expands and not legacy_missing:
+            continue
+        if "covered_ranges" in item:
+            ranges = item["covered_ranges"]
+        elif item.get("coverage"):
+            ranges = [item["coverage"]]
+        elif item.get("state") in ("read", "empty") and not sweep.get("appends"):
+            ranges = [
+                {"since": prior_since, "until": prior_until, "state": item["state"]}
+            ]
+        else:
+            ranges = []
+        unselected_coverage[item["source"]] = ranges
     for spec in dict.fromkeys(specs):
         if not str(spec).startswith("dir:"):
             die(f"append requires dir: source, got {spec!r}")
@@ -1746,6 +1753,15 @@ def cmd_status(a: argparse.Namespace) -> None:
             if s["state"] == "unavailable":
                 reasons.append(
                     f"source unavailable: {s['source']} ({s.get('reason', '')})"
+                )
+            if (
+                coverage_sweep.get("appends")
+                and s.get("state") in ("read", "empty")
+                and "covered_ranges" not in s
+                and not s.get("coverage")
+            ):
+                reasons.append(
+                    f"source coverage unknown after legacy append: {s['source']}"
                 )
             if "covered_ranges" in s and not _covers_window(
                 s["covered_ranges"],

@@ -601,7 +601,10 @@ def test_append_adds_explicit_empty_source_without_touching_others(
     result = cli(work, "append", "--source", f"dir:{source}", "--until", "2026-11-03")
     assert result.returncode == 0, result.stderr
     sources = json.loads((work / "sweep.json").read_text())["sources"]
-    assert sources[0] == untouched
+    assert {k: sources[0][k] for k in untouched} == untouched
+    assert sources[0]["covered_ranges"] == [
+        {"since": "2026-11-01", "until": "2026-11-03", "state": "read"}
+    ]
     assert sources[1]["source"] == f"dir:{source}"
     assert sources[1]["state"] == "empty"
     assert sources[1]["files"] == 0 and sources[1]["first"] is None
@@ -1039,3 +1042,82 @@ def test_quote_verifier_accepts_empty_and_continues_valid_rows(
         cli(work, "verify-quotes", "--extractions", str(extract), "--strict").returncode
         == 0
     )
+
+
+def test_unselected_ambiguous_legacy_coverage_stays_open(
+    work: Path, tmp_path: Path
+) -> None:
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    sources = [
+        {"source": f"dir:{a}", "state": "read", "files": 1},
+        {"source": f"dir:{b}", "state": "read", "files": 7},
+    ]
+    sweep = {
+        "window": {"since": "2026-11-01", "until": "2026-11-04"},
+        "sources": sources,
+        "appends": [{"id": "legacy", "until": "2026-11-04"}],
+    }
+    (work / "sweep.json").write_text(json.dumps(sweep))
+    (work / "LEDGER.json").write_text(
+        json.dumps({"hosts": ["a"], "primary": "a", "intents": []})
+    )
+    status = cli(work, "status")
+    assert status.returncode == 1 and f"dir:{b}" in status.stdout
+    result = cli(
+        work,
+        "append",
+        "--source",
+        f"dir:{a}",
+        "--since",
+        "2026-11-01",
+        "--until",
+        "2026-11-04",
+    )
+    assert result.returncode == 0, result.stderr
+    entry = json.loads((work / "sweep.json").read_text())["sources"][1]
+    assert (
+        entry["state"] == "read"
+        and entry["files"] == 7
+        and entry["covered_ranges"] == []
+    )
+    status = cli(work, "status")
+    assert status.returncode == 1 and f"dir:{b}" in status.stdout
+
+
+def test_unselected_legacy_source_retains_proven_window_without_extension(
+    work: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    aicx = {"source": "aicx", "state": "read", "rows": 7}
+    (work / "sweep.json").write_text(
+        json.dumps(
+            {
+                "window": {"since": "2026-11-01", "until": "2026-11-04"},
+                "sources": [{"source": f"dir:{source}", "state": "unavailable"}, aicx],
+            }
+        )
+    )
+    assert (
+        cli(
+            work,
+            "append",
+            "--source",
+            f"dir:{source}",
+            "--since",
+            "2026-11-01",
+            "--until",
+            "2026-11-04",
+        ).returncode
+        == 0
+    )
+    entry = json.loads((work / "sweep.json").read_text())["sources"][1]
+    assert entry["rows"] == 7 and entry["covered_ranges"] == [
+        {"since": "2026-11-01", "until": "2026-11-04", "state": "read"}
+    ]
+    (work / "LEDGER.json").write_text(
+        json.dumps({"hosts": ["a"], "primary": "a", "intents": []})
+    )
+    assert cli(work, "status").returncode == 0
