@@ -13,7 +13,7 @@ flowchart TD
     G --> H[5 · lanes by subject → plan --stage confront on host A and host B]
     H --> I[merge: LEDGER.json + replication-report.json]
     I --> J[6 · reclassify: complaint∧landed, docs-only evidence → overrides.jsonl]
-    J --> K[7 · render --html → Founder reviews → decide --import-file]
+    J --> K[7 · render --html → user reviews → decide --import-file]
     K --> L[8 · queue: stable ∧ open ∧ strong, ordered]
     L --> M[plan --stage implement → vc-dispatch codex cuts]
     M --> N{status}
@@ -36,7 +36,7 @@ flowchart TD
 - Two modules compete for the truth an intent needs → `vibecrafted canary <agent>` (confirm in code; canary never refactors)
 - The queue is written → `vibecrafted dispatch <intents-implement.*.dispatch.toml>` (codex by default)
 - A worker claims a cut landed → `vibecrafted trust <agent>` before the ledger says `landed`
-- A contradiction between two Founder statements → `aicx clarify`, then the Founder
+- A contradiction between two source statements → `aicx clarify`, then ask the user if unresolved
 - A written plan rather than a corpus is the input → `vibecrafted audit <agent>`
 
 ### Session artifacts

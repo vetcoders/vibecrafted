@@ -80,7 +80,7 @@ Useful modifiers:
   widens the window. This is the right tool for "where in this conversation did
   they say it".
 - `--dialog` — renders delayed human speech as speech with its seals. Helps when
-  the Founder's words arrived through a queue and look like tool output.
+  source statements arrived through a queue and look like tool output.
 - `--result head=N|full` — shells out the body of `tool_call` hits, which are
   stubbed by default.
 - `--kind conversations|plans|reports|other` — the indexed document kind.
@@ -91,7 +91,7 @@ These apply to both commands unless noted.
 
 | Filter                                          | What it buys you in an intent hunt                                                                                                                                                                                                                                  |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--frame-kind user_msg`                         | **The Founder's own words.** The primary voice filter — but see the warning below: on `search` it returns zero.                                                                                                                                                     |
+| `--frame-kind user_msg`                         | **User-message frames; may contain quotes or pasted text.** A retrieval filter, not proof of speaker identity — but see the warning below: on `search` it returns zero.                                                                                             |
 | `--frame-kind agent_reply` / `internal_thought` | Agent proposals and reasoning — candidates, never requirements.                                                                                                                                                                                                     |
 | `--frame-kind tool_call`                        | Execution traces — audit targets, never delivery evidence.                                                                                                                                                                                                          |
 | `--kind decision\|intent\|outcome\|task`        | (intents) The entry type. `decision` is where reversals live.                                                                                                                                                                                                       |
@@ -109,7 +109,7 @@ These apply to both commands unless noted.
 ## Voice separation
 
 The lane pipeline exists because agents claim completion and those claims land
-in the same transcript as the Founder's requirements.
+in the same transcript as candidate requirements from source material.
 
 ```bash
 aicx sessions report <session-id> --repo "$PWD" --format markdown
@@ -200,6 +200,6 @@ persisted intent ids.
   20 is a different invocation, not a hard cap.
 - **`--collapse-session` hides reversals.** A session that changed its mind
   twice collapses to one entry.
-- **A high-score hit on an agent's own summary is not a Founder requirement.**
-  Score measures match quality, not authority. Voice is set by `--frame-kind`,
-  never by rank.
+- **A high-score hit on an agent's own summary is not a proven user requirement.**
+  Score measures match quality, not authority. `--frame-kind` selects frame
+  roles; authorship and intent still require source context.

@@ -2,16 +2,16 @@
 name: vc-intents
 version: 2.0.0
 description: >
-  Hunt the Founder's intents for one repository inside a chosen window, settle
+  Find candidate intents in source material for one repository inside a chosen window, settle
   every one of them against the live code with two independent fleets, and hand
   back a stable, dependency-ordered plan of cuts for vc-dispatch. Use whenever
-  the team asks "zbierz intencje", "rozlicz intencje", "czego chciał Founder",
+  the team asks "zbierz intencje", "rozlicz intencje", "co wynika ze źródeł",
   "co obiecaliśmy i nie dowieźliśmy", "co z planu siedzi w kodzie", "what did we
   agree to build", "what is still owed", "intent coverage", "planned vs code",
   "highest truth", "checklist from intents" — or when scattered decisions from
   transcripts and sessions must become an implementation queue that survives
   compactions and machines. Reach for this instead of a bare `aicx search`
-  whenever the Founder's own words must be separated from agent proposals and
+  whenever source statements must be distinguished from model classifications and
   agent completion claims, and the answer must end in a plan, not a catalogue.
 loctree_value: "structural questions decide whether a promise has a runtime shape"
 aicx_value: "indexed intents, session context; one source among several"
@@ -34,12 +34,12 @@ dogfooding: "required — this skill is the join between corpus, aicx, Loctree a
 
 <!-- /fleet-imperative -->
 
-# vc-intents — od tego, co powiedział Founder, do planu cięć
+# vc-intents — od materiału źródłowego do planu cięć
 
-Długo żyjący projekt gromadzi intencje szybciej niż kod. Founder mówi coś w
-marcu, poprawia w maju, agent proponuje inny kształt w czerwcu i twierdzi w
-lipcu, że dowiózł. We wrześniu nikt nie umie powiedzieć, które z tego jeszcze
-obowiązuje — a jedyna osoba, która by mogła, płaci za odpowiedź.
+Długo żyjący projekt gromadzi wypowiedzi szybciej niż kod. Materiał z marca może
+przeczyć materiałowi z maja; agent proponuje inny kształt w czerwcu i twierdzi w
+lipcu, że dowiózł. Odtwórz kontekst, zanim uznasz, co dotyczy tego repozytorium
+i aktywnego zadania użytkownika.
 
 Ten skill jest właścicielem całej ścieżki: **zebrać → rozdzielić głosy →
 katalog z dosłownymi cytatami → konfrontacja dwiema flotami → reklasyfikacja
@@ -51,7 +51,7 @@ przekazuje resztę jako cięcia.
 
 ## Cel
 
-`vc-intents` produkuje ledger, w którym każda intencja Foundera z wybranego okna
+`vc-intents` produkuje ledger, w którym każdy kandydat intencji z wybranego okna
 ma jedną jawną dyspozycję, wynik zgodności między dwiema niezależnymi flotami i
 warstwę korekt edytowalną przez człowieka — i jest gotowy, gdy
 `intents_cli.py <workdir> status` nazywa, co jest jeszcze otwarte, a
@@ -110,7 +110,7 @@ uv run "$CLI" "$W" sweep --since 2026-06-01 --until 2026-09-18 \
 ```
 
 Źródła są pierwszej klasy i nierówne. Wynik z pola (Codescribe, IX 2026): aicx
-miał **~10 %** głosu Foundera i **0 %** korpusu dyktowanego; katalog transkrypcji
+miał **~10 %** wypowiedzi źródłowych i **0 %** korpusu dyktowanego; katalog transkrypcji
 miał 2 842 pliki na dwu hostach. Katalog żyjący na innej maszynie ściągasz
 (`rsync` z tego hosta) przed sweepem, albo jest `unavailable` w pokryciu —
 znany nieznany, który trzyma cel otwarty. Obcięcie korpusu aicx raportuje
@@ -118,6 +118,15 @@ znany nieznany, który trzyma cel otwarty. Obcięcie korpusu aicx raportuje
 
 `sweep` pisze chronologiczne shardy do ekstrakcji. Nic jeszcze nie zostało
 przeczytane.
+
+Kolejny dzień dodawaj przez `append`, nie ponowny `sweep` numerujący shardy od `s01`. Append kopiuje nowe pliki do kolejnych shardów i rozszerza `window.until`. Powtórzenie tych samych plików jest no-op. Ta sama nazwa z innymi bajtami zatrzymuje operację: rozstrzygnij kolizję źródeł ręcznie przed ponowieniem, bez podmiany istniejących rekordów.
+
+Przerwany append zachowuje `.append-transaction.json` i nieopublikowane pliki w `.append-staging`; ponów tę samą komendę, aby wznowić. Używaj jednego zapisującego naraz. `verify-quotes` z samą nową ekstrakcją dopisuje kandydatów do katalogu i zachowuje ID; zmieniony kandydat z istniejącym ID zatrzymuje weryfikację. `merge` zachowuje wcześniejsze werdykty i overrides przy dostarczeniu tylko nowych shardów werdyktów.
+
+```bash
+uv run "$CLI" "$W" append --until 2026-11-03
+uv run "$CLI" "$W" plan --stage extract --repo <repo> --shard s09
+```
 
 ### 2 · Ekstrakcja — flota czyta, dosłownie
 
@@ -129,9 +138,8 @@ uv run "$CLI" "$W" verify-quotes --extractions "$W/extractions" --transcripts <d
 
 Brief to `references/extraction-brief.md`. Jedna twarda zasada: **`quote` jest
 dosłownym podciągiem pliku źródłowego.** `verify-quotes` odrzuca wszystko inne
-przez zawieranie ciągu — parafraza podana jako głos Foundera to najgorszy błąd
-tej roboty, bo przypisuje człowiekowi decyzję, której nie podjął. Przekręty
-Whispera zostają; normalizacja żyje w `topic`.
+przez zawieranie ciągu. To kontrola tekstu: nie ustala autora, projektu ani
+uprawnienia do wykonania. Przekręty Whispera zostają; normalizacja żyje w `topic`.
 
 Dobór agenta to **przepustowość**, nie ranking: masowe czytanie krótkich plików
 to robota na 375 tps (`junie`/`gemini-3.8-flash`), nie dla modelu z czołówki.
@@ -140,21 +148,20 @@ w minuty. Zobacz `references/replication.md`.
 
 ### 3 · Rozdziel głosy
 
-Wiążą tylko własne słowa Foundera. Propozycje agentów to kandydaci; claimy
-wykonania to cele audytu; dokumenty pisane przez agentów (CHANGELOG, ADR,
-roadmapa, raport) to claimy w przebraniu dokumentu. Korpus transkrypcji też nie
-jest z automatu czysty: agenci wklejali odpowiedzi modelu do plików dyktowania w
-~30 % plików jednego miesiąca. Brief ekstrakcji wylicza, co pomijać; pole
-`kind` zapisuje, co Founder robił (`complaint`, `task`, `constraint`,
-`decision`, `preference`, `question`).
+Każdy wydobyty wiersz jest kandydatem; `kind`, także `decision`, to klasyfikacja
+modelu. Korpus może mieszać rozmówców, odtwarzane nagrania, cytowane odpowiedzi
+modeli, treści prywatne i inne projekty. Ramka wiadomości użytkownika ani nazwa
+pliku nie dowodzi autorstwa, związku z projektem ani uprawnienia. Interpretuj
+tekst w kontekście; claimy wykonania pozostają celami audytu. Autoryzację wdrożenia
+daje aktywne zadanie użytkownika lub plan, nigdy sam cytat źródłowy.
 
 ### 4 · Chronologia
 
-Późniejsze słowa Foundera unieważniają wcześniejsze **tylko z nazwanym
+Późniejsze wypowiedzi źródłowe unieważniają wcześniejsze **tylko z nazwanym
 następcą** (`superseded_by`). Dwie wypowiedzi, które się wykluczają bez
 późniejszego rozstrzygnięcia, to `contradiction` — instrumentem jest
-`aicx clarify`, potem Founder. Deduplikuj wypowiedzi, nigdy proweniencję: jedna
-intencja, wiele cytatów.
+`aicx clarify`, potem pytanie do użytkownika, gdy kontekst nie rozstrzyga. Deduplikuj wypowiedzi, nigdy proweniencję: jedna
+intencja, wiele cytatów. Sama chronologia nie dowodzi wspólnej intencji rozmówców.
 
 ### 5 · Konfrontacja — dwie floty, dwa hosty
 
@@ -190,7 +197,7 @@ uv run "$CLI" "$W" reclassify
 ```
 
 Dwie reguły bez osądu, stosowane przed liczeniem czegokolwiek jako zamknięte:
-`kind = complaint ∧ landed → landed-contested` (Founder mówi, że nie działa;
+`kind = complaint ∧ landed → landed-contested` (źródło zawiera skargę, że nie działa;
 flota znalazła kod; runtime niezweryfikowany — skarga wygrywa do czasu sondy) i
 `dowód bez pliku kodu → landed-by-doc` (dokument dowodzi, że kontrakt spisano,
 nie że go dotrzymano). Wynik z pola: **43–45 % `landed` spadło** na obu hostach.
@@ -203,14 +210,14 @@ reguł: `references/ledger-schema.md`.
 ```bash
 uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base https://github.com/<o>/<r>/blob/<sha>/
 open "$W/intents.html"
-uv run "$CLI" "$W" decide --import-file decisions.jsonl --by founder      # albo --id … --to … --reason …
+uv run "$CLI" "$W" decide --import-file decisions.jsonl --by manual-review      # albo --id … --to … --reason …
 ```
 
 Strona pokazuje każdą intencję z dosłownym cytatem, szerszym wycinkiem
 transkrypcji, werdyktami obu hostów z dowodami podlinkowanymi do przypiętego
 commitu, korektami mechanicznymi i formularzem decyzji: zgadza się,
 reklasyfikuj, usuń jako fałszywy trop, komentarz. Decyzje eksportują się jako
-JSONL i wracają przez `decide`. To jest powierzchnia edycji Foundera — linia w
+JSONL i wracają przez `decide`. To jest powierzchnia przeglądu użytkownika — linia w
 `overrides.jsonl`, nigdy ręczna edycja pliku werdyktów. Opublikowana jako
 artefakt claude.ai z capability `db`, ta sama strona zapisuje decyzje na żywo;
 plik jest kanonem w obu przypadkach. Zobacz `references/review-surface.md`.
@@ -225,10 +232,11 @@ uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit 6 --gate 'cd {re
 Kolejka trzyma intencje **otwarte, stabilne między hostami albo rozstrzygnięte
 przez człowieka i wystarczająco mocne**, uporządkowane po zależności (`after`),
 potem ryzyku, potem wpływie na główny przepływ, potem sile i wieku. Plan
-implement daje każdej cięcie: cytat Foundera jako brief, dowód i lukę floty,
+implement daje każdej cięcie: cytat źródłowy jako kontekst briefu, dowód i lukę floty,
 bramkę repo jako verifier, `mode = write`, `require_commit = true`. `codex` jest
-domyślnym workerem. Wszystko, co wymaga guzika Foundera (merge, deploy, sekrety,
-kasowanie danych), jest w cucie opisane i nigdy nie naciskane.
+domyślnym workerem. Autoryzację daje aktywne zadanie użytkownika lub plan; sama
+kolejka i cytat jej nie dają. Czynności wymagające osobnej zgody użytkownika (merge, deploy, sekrety,
+kasowanie danych), są w cucie opisane i czekają na tę zgodę.
 
 ### 9 · Zamknięcie
 
@@ -242,14 +250,14 @@ wynik jest na dysku.
 
 1. **Pokrycie** — okno, źródła ze stanem (`read`/`empty`/`unavailable`/
    `truncated`), pliki i wiersze per źródło.
-2. **Katalog** — zweryfikowane intencje, odrzucone cytaty z powodami.
+2. **Katalog** — kandydaci z leksykalnie sprawdzonymi cytatami, odrzucone cytaty z powodami.
 3. **Ledger** — werdykty per host, zgodność per para, dyspozycja efektywna,
    korekty (reguła i człowiek), `runtime_verified`.
 4. **Kolejka** — stabilne otwarte intencje z uzasadnieniem porządku.
 5. **Plan** — `intents-implement.<host>.dispatch.toml`, czysty po doktorze.
 6. **Najwyższa prawda** — jedna nierozwiązana rzeczywistość, która powinna
-   trochę zaboleć. „43 % tego, co dwie floty nazwały landed, kwestionują własne
-   słowa Foundera" to najwyższa prawda; „część pozycji jest partial" nie.
+   trochę zaboleć. „43 % tego, co dwie floty nazwały landed, kwestionują
+   skargi w źródłach" to najwyższa prawda; „część pozycji jest partial" nie.
 
 ## Antywzorce
 

@@ -57,11 +57,11 @@ inherits the conversation, so you are not re-explaining a reconstruction that
 took an hour to build. Delivery (Phase 9) is usually this.
 
 **Cold-dispatch when the unit of work is self-describing**: "read session X,
-report every Founder statement about theme Y, with citations". Cheaper — and it
+report every source statement about theme Y, with citations". Cheaper — and it
 cannot inherit your bias about what the answer should be.
 
 That second point is not a cost argument, it is an evidence argument. When the
-question is _"did the Founder actually say this"_, inherited context is a
+question is _"does the source actually contain this statement"_, inherited context is a
 **defect**: the worker receives your hypothesis along with the task and has a
 ready-made track to confirm it. Phases 2–3 should therefore run **cold**, and
 Phase 9 should run **forked** — the opposite of the intuition that says
