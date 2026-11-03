@@ -51,7 +51,7 @@ The active user task or plan supplies authorization.
 `source` (`dir:<path>` or `aicx`), `state` (`read` · `empty` · `unavailable`),
 `files`/`rows`, `truncated` (aicx reports corpus truncation on stderr only; the
 script captures and flags it), `reason` for `unavailable`. An unreadable source
-keeps the goal open — a known unknown, not an absence.
+keeps the goal open — a known unknown, not an absence. After `append`, each selected directory's `coverage` records the scanned `since`, `until` and observed `state`; file counts, bytes and dates refer only to that range. `covered_ranges` preserves verified intervals, including a legacy complete sweep window where no intervening append makes that inference ambiguous. Overlapping or adjacent intervals can jointly cover the hunt window; gaps keep the source `unavailable` with a partial-coverage reason. Unselected sources, including aicx, retain their records and are not newly confirmed for an expanded window. Recovery applies the coverage checkpoint with the append transaction.
 
 ## Dispositions
 
@@ -153,7 +153,7 @@ stdout. `merge` preserves `after`, `risk`, `flow`, `notes` and
 `runtime_verified` from the previous ledger, so re-merging after a re-dispatched
 lane loses no human input.
 
-The workdir also holds `.append-transaction.json` and `.append-staging` for interrupted append recovery. Retry the same append with one writer. Exact replay is a no-op; same-name sources with different bytes require manual resolution. `verify-quotes` adds candidates without replacing earlier IDs and refuses a changed candidate under an existing ID. `merge` retains earlier per-host verdicts when new verdict shards omit them; the append-only overrides file is reapplied.
+The workdir also holds `.append-transaction.json` and `.append-staging` for interrupted append recovery. Retry the same append with one writer. If recovery cannot proceed, `append --abort` archives pending transaction metadata and unpublished staging inside the workdir; already published shards remain. New transactions use separate staging, and unexpected staging files block publication. Exact replay is a no-op; same-name sources with different bytes require manual resolution. `verify-quotes` adds candidates without replacing earlier IDs and refuses any changed field under an existing ID, including date, topic, subject and strength. Manual revisions require explicit resolution; the verifier never silently accepts metadata changes. `merge` retains the previous primary unless explicitly changed, validates the choice against all retained and incoming hosts, and retains earlier per-host verdicts when new verdict shards omit them; the append-only overrides file is reapplied.
 
 ## Re-entry after a cut or a compaction
 
@@ -163,6 +163,4 @@ The workdir also holds `.append-transaction.json` and `.append-staging` for inte
 4. `aicx continuity show -p <owner>/<repo> --hours <N> --for-inject` if other
    agents may have touched the repo since your last turn.
 
-**Do not re-run the sweep or the extraction on re-entry.** Both are expensive and
-their results are already on disk. Re-sweep only when new source material is supplied, or when
-the window has moved far enough that new sessions exist.
+**Do not re-run the sweep or extraction on re-entry.** Their results are already on disk. For later transcripts use `append`, then extract only the new shard. Run a full `sweep` only in a fresh workdir. The global window expands in both directions; unselected sources keep their previous counts and `status` treats any unconfirmed range as open.

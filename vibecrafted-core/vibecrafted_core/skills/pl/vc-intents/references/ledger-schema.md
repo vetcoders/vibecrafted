@@ -51,7 +51,7 @@ Autoryzację daje aktywne zadanie użytkownika lub plan.
 `source` (`dir:<path>` lub `aicx`), `state` (`read` · `empty` · `unavailable`),
 `files`/`rows`, `truncated` (aicx raportuje ucięcie korpusu tylko na stderr;
 skrypt przechwytuje i oznacza), `reason` dla `unavailable`. Nieczytelne źródło
-utrzymuje cel otwarty — znana niewiadoma, nie nieobecność.
+utrzymuje cel otwarty — znana niewiadoma, nie nieobecność. Po `append` pole `coverage` wybranego katalogu podaje zakres `since`, `until` i zaobserwowany `state`; liczby plików, bajty i daty dotyczą wyłącznie tego zakresu. `covered_ranges` zachowuje potwierdzone przedziały, w tym dawne pełne okno sweep, gdy późniejszy append nie czyni tego wnioskowania niepewnym. Nakładające się lub sąsiadujące przedziały mogą łącznie pokryć okno; luki pozostawiają źródło `unavailable` z powodem częściowego pokrycia. Niewybrane źródła, w tym aicx, zachowują swoje wpisy i nie są ponownie potwierdzane dla rozszerzonego okna. Wznowienie stosuje checkpoint pokrycia wraz z transakcją append.
 
 ## Dispositions
 
@@ -149,7 +149,7 @@ Każda komenda zapisuje pliki i wypisuje ścieżki oraz liczniki, nic dużego na
 `merge` zachowuje `after`, `risk`, `flow`, `notes`, `runtime_verified` z poprzedniego
 ledgera, więc powtórny merge po ponownym dispatchu toru nie gubi wkładu człowieka.
 
-Katalog roboczy zawiera też `.append-transaction.json` i `.append-staging` do wznowienia przerwanego append. Ponów tę samą komendę przy jednym zapisującym. Identyczne ponowienie jest no-op; źródła o tej samej nazwie i różnych bajtach wymagają ręcznego rozstrzygnięcia. `verify-quotes` dopisuje kandydatów bez zastępowania poprzednich ID i odmawia zmienionego kandydata pod istniejącym ID. `merge` zachowuje wcześniejsze werdykty hostów pominięte w nowych shardach i ponownie stosuje append-only overrides.
+Katalog roboczy zawiera też `.append-transaction.json` i `.append-staging` do wznowienia przerwanego append. Ponów tę samą komendę przy jednym zapisującym. Jeśli wznowienie nie jest możliwe, `append --abort` archiwizuje metadane oczekującej transakcji i nieopublikowany staging w katalogu roboczym; opublikowane shardy pozostają. Nowe transakcje mają oddzielny staging, a obce pliki blokują publikację. Identyczne ponowienie jest no-op; źródła o tej samej nazwie i różnych bajtach wymagają ręcznego rozstrzygnięcia. `verify-quotes` dopisuje kandydatów bez zastępowania poprzednich ID i odmawia każdej zmiany kandydata pod istniejącym ID, także date, topic, subject i strength. Ręczna rewizja wymaga jawnego rozstrzygnięcia; weryfikator nie akceptuje zmian metadanych po cichu. `merge` zachowuje dotychczasowy host główny, chyba że jawnie wybrano inny spośród wszystkich zachowanych i nowych hostów, oraz zachowuje wcześniejsze werdykty hostów pominięte w nowych shardach i ponownie stosuje append-only overrides.
 
 ## Re-entry after a cut or a compaction
 
@@ -159,6 +159,4 @@ Katalog roboczy zawiera też `.append-transaction.json` i `.append-staging` do w
 4. `aicx continuity show -p <owner>/<repo> --hours <N> --for-inject`, jeśli inni
    agenci mogli dotknąć repo od poprzedniej tury.
 
-**Nie powtarzaj sweep ani ekstrakcji przy re-entry.** Są kosztowne i już zapisane.
-Powtórz sweep dopiero po dodaniu nowych materiałów źródłowych lub gdy okno przesunęło się
-na tyle, że są nowe sesje.
+**Nie powtarzaj sweep ani ekstrakcji przy re-entry.** Wyniki są już na dysku. Późniejsze transkrypcje dodaj przez `append`, potem ekstrahuj tylko nowy shard. Pełny `sweep` wykonuj tylko w nowym katalogu roboczym. Globalne okno rozszerza się w obie strony; niewybrane źródła zachowują liczniki, a `status` traktuje niepotwierdzony zakres jako otwarty.

@@ -46,7 +46,7 @@ import tempfile
 import unicodedata
 import uuid
 from collections import Counter, defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 SCHEMA = "vc-intents.ledger.v2"
@@ -195,16 +195,7 @@ def cmd_sweep(a: argparse.Namespace) -> None:
                     }
                 )
                 continue
-            files = []
-            for p in sorted(root.rglob("*")):
-                if not p.is_file() or p.suffix.lower() not in (".txt", ".md"):
-                    continue
-                rel = p.relative_to(root)
-                name = rel.name if len(rel.parts) == 1 else f"{rel.parts[0]}_{rel.name}"
-                m = SOURCE_DATE.match(name)
-                if not m or not (since <= m.group(1) <= until):
-                    continue
-                files.append((name, p))
+            files = _transcript_files(root, since, until)
             total_files += len(files)
             chars = sum(p.stat().st_size for _, p in files)
             coverage.append(
@@ -332,7 +323,7 @@ def cmd_sweep(a: argparse.Namespace) -> None:
         "window": {"since": a.since, "until": a.until},
         "repo": a.repo,
         "sources": coverage,
-        "shards": sorted(p.name for p in shards_dir.glob("s*"))
+        "shards": [p.name for p in sorted(shards_dir.glob("s*"), key=_shard_key)]
         if shards_dir.exists()
         else [],
     }
@@ -368,15 +359,13 @@ def _transcript_files(root: Path, since: str, until: str) -> list[tuple[str, Pat
     return files
 
 
-def _shard_filenames(work: Path) -> set[str]:
-    shards = work / "shards"
-    if not shards.is_dir():
-        return set()
-    return {
-        p.name
-        for p in shards.glob("s*/*")
-        if p.is_file() and p.suffix.lower() in (".txt", ".md")
-    }
+def _shard_key(path: Path) -> tuple:
+    name = path.name
+    return (
+        (0, int(name[1:]), name)
+        if name.startswith("s") and name[1:].isdigit()
+        else (1, name)
+    )
 
 
 def _next_shard_index(work: Path) -> int:
@@ -400,8 +389,20 @@ def _digest(path: Path) -> str:
 
 def _finish_append(work: Path, transaction: dict) -> None:
     """Resume a recorded transaction, including a crash after shard publication."""
-    stage_root = work / ".append-staging"
-    stage_root.mkdir(exist_ok=True)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", str(transaction.get("id", ""))):
+        die("invalid append transaction id")
+    for shard in transaction.get("shards", []):
+        if not re.fullmatch(r"s[0-9]+", str(shard.get("id", ""))):
+            die("invalid append shard id")
+        if any(Path(item["name"]).name != item["name"] for item in shard["items"]):
+            die("invalid append transcript name")
+    staging = work / ".append-staging"
+    stage_root = (
+        staging / transaction["id"]
+        if transaction.get("stage_layout") == "transaction"
+        else staging
+    )
+    stage_root.mkdir(parents=True, exist_ok=True)
     shards_root = work / "shards"
     shards_root.mkdir(exist_ok=True)
     for shard in transaction["shards"]:
@@ -427,11 +428,16 @@ def _finish_append(work: Path, transaction: dict) -> None:
             # The temporary file is inside an unpublished shard. A crash can be
             # retried without mistaking partial bytes for a completed file.
             tmp = stage / (item["name"] + ".copying")
-            shutil.copyfile(source, tmp)
+            shutil.copy2(source, tmp)
             if _digest(tmp) != item["sha256"]:
                 die(f"append source changed during copy: {source}")
             os.replace(tmp, target)
         names = [item["name"] for item in shard["items"]]
+        unexpected = {p.name for p in stage.iterdir()} - set(names) - {"_manifest.json"}
+        if unexpected:
+            die(
+                f"append staging has unexpected entries in {stage}: {sorted(unexpected)}"
+            )
         write_json(
             stage / "_manifest.json",
             {
@@ -452,11 +458,29 @@ def _finish_append(work: Path, transaction: dict) -> None:
         ]
         window = sweep.get("window") or {}
         sweep["window"] = {
-            "since": window.get("since") or transaction["since"],
-            "until": max(
-                window.get("until") or transaction["until"], transaction["until"]
-            ),
+            "since": min(window["since"], transaction["since"])
+            if window.get("since")
+            else window.get("since"),
+            "until": max(window["until"], transaction["until"])
+            if window.get("until")
+            else window.get("until"),
         }
+        updates = {item["source"]: item for item in transaction.get("coverage", [])}
+        sources = sweep.get("sources", [])
+        existing_sources = {item.get("source") for item in sources}
+        unselected = transaction.get("unselected_coverage", {})
+        sweep["sources"] = [
+            updates.get(
+                item.get("source"),
+                {**item, "covered_ranges": unselected[item["source"]]}
+                if item.get("source") in unselected
+                else item,
+            )
+            for item in sources
+        ]
+        sweep["sources"].extend(
+            item for name, item in updates.items() if name not in existing_sources
+        )
         sweep["appended_at"] = now()
         sweep.setdefault("appends", []).append(
             {
@@ -470,14 +494,80 @@ def _finish_append(work: Path, transaction: dict) -> None:
                 "shards": [x["id"] for x in transaction["shards"]],
             }
         )
-        sweep["shards"] = sorted(p.name for p in shards_root.glob("s*") if p.is_dir())
+        sweep["shards"] = [
+            p.name
+            for p in sorted(
+                (p for p in shards_root.glob("s*") if p.is_dir()), key=_shard_key
+            )
+        ]
         write_json(sweep_path, sweep)
     transaction["complete"] = True
     write_json(work / ".append-transaction.json", transaction)
 
 
+def _covers_window(ranges: list[dict], since: str, until: str) -> bool:
+    """Join only overlapping or calendar-adjacent observed date ranges."""
+    end = None
+    for item in sorted(ranges, key=lambda item: (item["since"], item["until"])):
+        start, stop = item["since"], item["until"]
+        if stop < since:
+            continue
+        if end is None:
+            if start > since:
+                return False
+            end = stop
+        else:
+            adjacent = False
+            if start > end:
+                try:
+                    adjacent = date.fromisoformat(start) == date.fromisoformat(
+                        end
+                    ) + timedelta(days=1)
+                except (ValueError, OverflowError):
+                    pass
+                if not adjacent:
+                    return False
+            end = max(end, stop)
+        if end >= until:
+            return True
+    return False
+
+
+def _abort_append(work: Path) -> None:
+    tx_path = work / ".append-transaction.json"
+    if not tx_path.exists():
+        die("no append transaction to abort")
+    tx = read_json(tx_path)
+    if tx.get("complete"):
+        die("append transaction is already complete")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", str(tx.get("id", ""))) or any(
+        not re.fullmatch(r"s[0-9]+", str(shard.get("id", "")))
+        for shard in tx.get("shards", [])
+    ):
+        die("invalid append transaction identity")
+    archive = work / ".append-archive" / f"{tx['id']}-{uuid.uuid4().hex}"
+    archive.mkdir(parents=True)
+    staging = work / ".append-staging"
+    if tx.get("stage_layout") == "transaction":
+        stage = staging / tx["id"]
+        if stage.exists():
+            os.rename(stage, archive / "staging")
+    else:
+        for shard in tx.get("shards", []):
+            stage = staging / shard["id"]
+            if stage.exists():
+                target = archive / "staging"
+                target.mkdir(exist_ok=True)
+                os.rename(stage, target / shard["id"])
+    os.rename(tx_path, archive / "transaction.json")
+    print(f"append aborted; pending state archived at {archive}")
+
+
 def cmd_append(a: argparse.Namespace) -> None:
     work: Path = a.workdir
+    if getattr(a, "abort", False):
+        _abort_append(work)
+        return
     sweep_path = work / "sweep.json"
     if not sweep_path.is_file():
         die("no sweep.json — run sweep before append")
@@ -510,13 +600,77 @@ def cmd_append(a: argparse.Namespace) -> None:
                     die(f"append collision in existing shards: {path.name}")
                 known[path.name] = digest
     fresh = []
-    for spec in specs:
+    coverage = []
+    current_sources = {entry.get("source"): entry for entry in sweep.get("sources", [])}
+    prior_since = window.get("since") or "0000-00-00"
+    prior_until = window.get("until") or "9999-99-99"
+    target_since = min(prior_since, since)
+    target_until = max(prior_until, until)
+    unselected_coverage = {}
+    if (target_since, target_until) != (prior_since, prior_until):
+        for item in sweep.get("sources", []):
+            if item.get("source") in specs:
+                continue
+            if "covered_ranges" in item:
+                ranges = item["covered_ranges"]
+            elif item.get("coverage"):
+                ranges = [item["coverage"]]
+            elif item.get("state") in ("read", "empty") and not sweep.get("appends"):
+                ranges = [
+                    {"since": prior_since, "until": prior_until, "state": item["state"]}
+                ]
+            else:
+                ranges = []
+            unselected_coverage[item["source"]] = ranges
+    for spec in dict.fromkeys(specs):
         if not str(spec).startswith("dir:"):
             die(f"append requires dir: source, got {spec!r}")
         root = Path(str(spec)[4:]).expanduser()
         if not root.is_dir():
             die(f"directory not found: {root}")
-        for name, path in _transcript_files(root, since, until):
+        files = _transcript_files(root, since, until)
+        dates = [name[:10] for name, _ in files]
+        observed_state = "read" if files else "empty"
+        previous = current_sources.get(spec, {})
+        ranges = list(previous.get("covered_ranges", []))
+        if not ranges and previous.get("coverage"):
+            ranges = [previous["coverage"]]
+        elif (
+            not ranges
+            and previous.get("state") in ("read", "empty")
+            and not sweep.get("appends")
+        ):
+            ranges = [
+                {
+                    "since": prior_since,
+                    "until": prior_until,
+                    "state": previous["state"],
+                }
+            ]
+        observed = {"since": since, "until": until, "state": observed_state}
+        if observed not in ranges:
+            ranges.append(observed)
+        ranges.sort(key=lambda item: (item["since"], item["until"], item["state"]))
+        full = _covers_window(ranges, target_since, target_until)
+        window_state = (
+            "read" if any(item["state"] == "read" for item in ranges) else "empty"
+        )
+        entry = {
+            "source": spec,
+            "state": window_state if full else "unavailable",
+            "files": len(files),
+            "bytes": sum(path.stat().st_size for _, path in files),
+            "first": min(dates) if dates else None,
+            "last": max(dates) if dates else None,
+            "coverage": observed,
+            "covered_ranges": ranges,
+        }
+        if not full:
+            entry["reason"] = (
+                "partial coverage: requested scan does not cover the whole window"
+            )
+        coverage.append(entry)
+        for name, path in files:
             digest = _digest(path)
             if name in known:
                 if known[name] != digest:
@@ -524,7 +678,24 @@ def cmd_append(a: argparse.Namespace) -> None:
                 continue
             known[name] = digest
             fresh.append({"name": name, "path": str(path.resolve()), "sha256": digest})
-    if not fresh and window.get("until") and until <= window["until"]:
+    current_sources = {entry.get("source"): entry for entry in sweep.get("sources", [])}
+    unchanged_coverage = all(
+        current_sources.get(entry["source"]) == entry for entry in coverage
+    )
+    if (
+        not fresh
+        and unchanged_coverage
+        and not unselected_coverage
+        and since >= prior_since
+        and until <= prior_until
+        and sorted(sweep.get("shards", []), key=lambda name: _shard_key(Path(name)))
+        == [
+            p.name
+            for p in sorted(
+                (p for p in (work / "shards").glob("s*") if p.is_dir()), key=_shard_key
+            )
+        ]
+    ):
         print("append: nothing new")
         return
     shard_size = a.shard_size
@@ -540,6 +711,9 @@ def cmd_append(a: argparse.Namespace) -> None:
         "since": since,
         "until": until,
         "shards": shards,
+        "coverage": coverage,
+        "unselected_coverage": unselected_coverage,
+        "stage_layout": "transaction",
         "complete": False,
     }
     write_json(tx_path, transaction)
@@ -580,10 +754,30 @@ def cmd_verify_quotes(a: argparse.Namespace) -> None:
         except Exception as e:  # noqa: BLE001
             problems.append((shard, "-", f"UNPARSEABLE: {e}"))
             continue
-        if isinstance(data, dict):
-            data = data.get("intents", data.get("items", []))
+        if not isinstance(data, list):
+            problems.append((shard, "-", "UNPARSEABLE: expected an array"))
+            continue
         for n, e in enumerate(data, 1):
-            src = source_path(roots, e.get("source", ""))
+            if not isinstance(e, dict):
+                problems.append((shard, n, "UNPARSEABLE: expected an object"))
+                continue
+            if not all(isinstance(e.get(k), str) and e[k] for k in ("source", "quote")):
+                problems.append(
+                    (shard, n, "UNPARSEABLE: source and quote must be nonempty strings")
+                )
+                continue
+            if any(
+                k in e and not isinstance(e[k], str)
+                for k in ("id", "date", "topic", "subject")
+            ):
+                problems.append((shard, n, "UNPARSEABLE: invalid text field"))
+                continue
+            try:
+                strength = int(e.get("strength") or 3)
+            except (ValueError, TypeError, OverflowError):
+                problems.append((shard, n, "UNPARSEABLE: invalid strength"))
+                continue
+            src = source_path(roots, e["source"])
             if not src:
                 problems.append(
                     (shard, e.get("id") or n, f"source not found: {e.get('source')}")
@@ -608,7 +802,7 @@ def cmd_verify_quotes(a: argparse.Namespace) -> None:
                 "topic": e.get("topic", ""),
                 "kind": e["kind"],
                 "subject": e.get("subject", "inne"),
-                "strength": int(e.get("strength") or 3),
+                "strength": strength,
                 "_shard": shard,
             }
             if ident in by_id:
@@ -793,7 +987,9 @@ def cmd_plan(a: argparse.Namespace) -> None:
     body = ""
 
     if a.stage == "extract":
-        shards = sorted(p for p in (work / "shards").glob("s*") if p.is_dir())
+        shards = sorted(
+            (p for p in (work / "shards").glob("s*") if p.is_dir()), key=_shard_key
+        )
         only = set(getattr(a, "shard", None) or [])
         if only:
             shards = [p for p in shards if p.name in only]
@@ -998,11 +1194,15 @@ def cmd_merge(a: argparse.Namespace) -> None:
         if not d:
             die(f"--verdicts wants host=<dir>, got {spec!r}")
         hosts[host] = load_verdicts(Path(d).expanduser())
-    primary = a.primary or next(iter(hosts))
-    if primary not in hosts:
-        die(f"primary host {primary!r} not among {list(hosts)}")
-
     existing = read_json(ledger_path(work)) if ledger_path(work).exists() else {}
+    retained_hosts = {
+        host for row in existing.get("intents", []) for host in row.get("verdicts", {})
+    }
+    all_hosts = sorted(set(hosts) | set(existing.get("hosts", [])) | retained_hosts)
+    primary = a.primary or existing.get("primary") or next(iter(hosts))
+    if primary not in all_hosts:
+        die(f"primary host {primary!r} not among {all_hosts}")
+
     keep = {i["id"]: i for i in existing.get("intents", [])}
     rows = []
     for it in intents:
@@ -1033,9 +1233,10 @@ def cmd_merge(a: argparse.Namespace) -> None:
 
     present_ids = {row["id"] for row in rows}
     rows.extend(
-        row for row in existing.get("intents", []) if row["id"] not in present_ids
+        {**row, "primary": primary}
+        for row in existing.get("intents", [])
+        if row["id"] not in present_ids
     )
-    all_hosts = sorted(set(hosts) | set(existing.get("hosts", [])))
     ledger = {
         "schema": SCHEMA,
         "project": a.project or existing.get("project", ""),
@@ -1051,12 +1252,12 @@ def cmd_merge(a: argparse.Namespace) -> None:
     write_json(ledger_path(work), ledger)
 
     # Agreement report: the only cheap falsifier a single fleet cannot give you.
-    pairs = [
-        (h1, h2) for i, h1 in enumerate(sorted(hosts)) for h2 in sorted(hosts)[i + 1 :]
-    ]
+    pairs = [(h1, h2) for i, h1 in enumerate(all_hosts) for h2 in all_hosts[i + 1 :]]
     rep = {
-        "hosts": sorted(hosts),
-        "per_host_rows": {h: len(v) for h, v in hosts.items()},
+        "hosts": all_hosts,
+        "per_host_rows": {
+            h: sum(h in row["verdicts"] for row in rows) for h in all_hosts
+        },
         "pairs": {},
     }
     for h1, h2 in pairs:
@@ -1079,11 +1280,11 @@ def cmd_merge(a: argparse.Namespace) -> None:
         }
     write_json(work / "replication-report.json", rep)
     print(
-        f"ledger → {ledger_path(work)}  ({len(rows)} intents, hosts {sorted(hosts)}, primary {primary})"
+        f"ledger → {ledger_path(work)}  ({len(rows)} intents, hosts {all_hosts}, primary {primary})"
     )
     for k, v in rep["pairs"].items():
         print(f"  {k}: {v['agree']}/{v['compared']} agree ({v['agreement']})")
-    missing = [(h, len([r for r in rows if h not in r["verdicts"]])) for h in hosts]
+    missing = [(h, len([r for r in rows if h not in r["verdicts"]])) for h in all_hosts]
     for h, n in missing:
         if n:
             print(
@@ -1539,11 +1740,19 @@ def cmd_status(a: argparse.Namespace) -> None:
         reasons.append(f"{counts[None]} intent(s) without any verdict")
     sweep = work / "sweep.json"
     if sweep.exists():
-        for s in read_json(sweep)["sources"]:
+        coverage_sweep = read_json(sweep)
+        coverage_window = coverage_sweep.get("window") or {}
+        for s in coverage_sweep["sources"]:
             if s["state"] == "unavailable":
                 reasons.append(
                     f"source unavailable: {s['source']} ({s.get('reason', '')})"
                 )
+            if "covered_ranges" in s and not _covers_window(
+                s["covered_ranges"],
+                coverage_window.get("since") or "0000-00-00",
+                coverage_window.get("until") or "9999-99-99",
+            ):
+                reasons.append(f"source coverage incomplete: {s['source']}")
             if s.get("truncated"):
                 reasons.append(f"source truncated: {s['source']}")
     unverified = sum(
@@ -1605,6 +1814,11 @@ def main() -> None:
         action="append",
         default=[],
         help="dir:<path>; default = dir sources already recorded in sweep.json",
+    )
+    p.add_argument(
+        "--abort",
+        action="store_true",
+        help="archive an interrupted append without removing published shards",
     )
     p.add_argument("--since", help="YYYY-MM-DD inclusive; default = the sweep window")
     p.add_argument("--until", help="YYYY-MM-DD inclusive; default = today")
