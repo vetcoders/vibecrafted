@@ -13,14 +13,14 @@ Pick the channel that matches your platform, then verify the result with
 
 ## Channels
 
-| Channel                      | Platform             | What you get                                             | Status                                   |
-| ---------------------------- | -------------------- | -------------------------------------------------------- | ---------------------------------------- |
-| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server   | Build path complete; publication pending |
-| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built with the DMG; publication pending  |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, vc-server, Terminal, Frame    | Built from checkout; publication pending |
-| Bootstrap `install.sh`       | macOS, Linux, WSL2   | The version named in `vibecrafted.io/channel/main.json`  | Published; `4.1.0` channel on 2026-10-14 |
-| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack | Published                                |
-| Container                    | anywhere Docker runs | Isolated operator runtime                                | Published                                |
+| Channel                      | Platform             | What you get                                             | Status                                                 |
+| ---------------------------- | -------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
+| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server   | Build path complete; publication pending               |
+| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built with the DMG; publication pending                |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, vc-server, Terminal, Frame    | Built from checkout; publication pending               |
+| Bootstrap `install.sh`       | macOS, Linux, WSL2   | The version named in `vibecrafted.io/channel/main.json`  | Published; compare it to VERSION with `vc-dou --floor` |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack | Published                                              |
+| Container                    | anywhere Docker runs | Isolated operator runtime                                | Published                                              |
 
 On macOS and Linux, use the bootstrap today. On Windows, install the win32-x64
 Runtime Pack with `install.ps1 -Pack`.
@@ -42,9 +42,10 @@ curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
 
 The bootstrap installs the release bound by
-`https://vibecrafted.io/channel/main.json`; it does not follow a Git branch. On
-2026-10-14 that manifest named `4.1.0`. Confirm what you received with
-`vibecrafted --version`.
+`https://vibecrafted.io/channel/main.json`; it does not follow a Git branch.
+That channel is a different publisher from this checkout's `VERSION` and from
+GitHub Releases. `vc-dou --floor` fails when the three disagree. Confirm what
+you received with `vibecrafted --version`.
 
 The installer detects your platform and Linux distribution family first, reports
 every missing prerequisite in one pass instead of failing one tool at a time,

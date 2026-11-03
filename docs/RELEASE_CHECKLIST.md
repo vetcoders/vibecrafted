@@ -42,6 +42,8 @@ git rev-parse HEAD
 git -C ../vc-terminal status --porcelain
 git -C ../vc-frame status --porcelain
 python3 scripts/version_bump.py --check
+vc-dou --floor
+vc-release --floor
 make check
 make unified-product-contract-gate
 make test-core
@@ -228,16 +230,17 @@ each need their own receipt.
 `https://vibecrafted.io` is not published from this repository. The site,
 `install.sh`, `install.ps1`, `channel/main.json`, `SHA256SUMS`,
 `vibecrafted-signing.pub` and the `vibecrafted-v<version>.tar.gz` archive come
-from `VetCoders/vibecrafted-io` (`make site-release`, which rsyncs the built
+from `vetcoders/vibecrafted-io` (`make site-release`, which rsyncs the built
 site to the Caddy host). Its `scripts/sync-docs.sh` mirrors this repository's
 `docs/public/` into the site at build time. Here, `docs/index.html` is only a
 redirect stub, `docs/CNAME` is historical, and `.github/workflows/static.yml`
 is disabled; none of them serve the domain.
 
-`make publish-release` does not update the website. A GitHub Release can
-therefore be newer than what `curl -fsSL https://vibecrafted.io/install.sh | bash`
-installs. On 2026-10-14 the website channel named `4.1.0`, and its `install.sh`
-was byte-identical to the one at tag `v4.1.0`.
+`make publish-release` does not update the website, and it now refuses to
+start when `vc-release --floor` exits 1. A GitHub Release can therefore be
+a different version from what `curl -fsSL https://vibecrafted.io/install.sh | bash`
+installs. The floor compares `VERSION`, the channel, GitHub Releases, and the
+site metadata; a historical channel reading is not a current version.
 
 This tree's `install.sh` accepts a channel only when:
 

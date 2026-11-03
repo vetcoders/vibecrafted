@@ -1,6 +1,6 @@
 ---
 name: vc-hydrate
-version: 1.0.0
+version: 1.1.0
 description: >
   Packaging and go-to-market hydration skill. Takes DoU audit findings and
   executes the non-code work that bridges the gap between "it works" and
@@ -84,6 +84,22 @@ or misses a surface, append feedback to `~/.vibecrafted/loctree/loctree-fail.md`
 scaffold → init → workflow → followup → marbles → dou → decorate → [HYDRATE] → release
 ```
 
+## Public-surface floor
+
+Hydrate owns the checkout a packager can edit. It does not fetch registries.
+Run this before claiming the package is ready, and again after the edits:
+
+```bash
+vc-hydrate --floor
+```
+
+Exit `1` means the README has no install command, an install command pins a
+different version than the reference, in-repo version projections disagree,
+or the configured public files spell Vetcoders with a capital C. The canonical
+spelling is `Vetcoders`. Live channel, registry, and site drift stays with
+`vc-dou --floor`; hydrate does not get to mark that green by skipping it.
+Contract: [`../vc-dou/references/public-surface-floor.md`](../vc-dou/references/public-surface-floor.md).
+
 ## When To Use
 
 - After a `vc-dou` audit identifies packaging gaps
@@ -104,7 +120,7 @@ Fix repo governance gaps from DoU. Generate contextually appropriate content:
 - **SECURITY.md** — standard responsible disclosure template; GitHub Security Advisories preferred
 - **CI workflows** — language-detection driven (Rust: cargo check/clippy/test/fmt; Node: lint/test/build; Python: ruff/pytest); always include dependency audit + license check
 
-**Version sync:** `grep -rn "version" Cargo.toml package.json pyproject.toml` then compare to published versions (`cargo search`, `npm view`) and website badges/refs. Mismatch → P1 finding.
+**Version sync:** `vc-hydrate --floor` checks the checkout. The live comparison (`cargo search`, `npm view`, the site, the channel) is `vc-dou --floor`, and it must be redone after hydrate. A mismatch is a P1 finding; do not close hydrate on the grep alone.
 
 ### Domain 2 — Distribution Hydration
 

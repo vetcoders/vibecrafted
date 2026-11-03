@@ -84,6 +84,10 @@ scaffold → init → workflow → followup → marbles → dou → decorate →
 
 Release uruchamia się po tym, jak `vc-dou` zweryfikuje powierzchnię produktu, `vc-decorate` zapewni spójność wizualną, a `vc-hydrate` opakuje dystrybucję/SEO/onboarding. Release urealnia artefakty po hydrate: tagi, changelogi, publikację rejestru/binarek, topologię deploya, proxy/TLS, domenę/DNS/weryfikację, indeksowalność, bramki bezpieczeństwa, post-release smoke.
 
+## Podłoga powierzchni publicznej
+
+`vc-release --floor` jest bramką wydania. Sam tag bez obiektu GitHub Release nie kończy etapu; `--require-release` zostaje czerwone, dopóki Release nie istnieje. Kontrakt: [`../../vc-dou/references/public-surface-floor.md`](../../vc-dou/references/public-surface-floor.md).
+
 ## Główna zasada
 
 **Jeśli poniższy kanon release'u nie jest spełniony, release jest no-opem.** Nie myl „umiem to zdeployować" z „jest bezpieczne, widoczne i gotowe, by wyjść do obcych".

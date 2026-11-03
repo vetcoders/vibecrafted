@@ -1,6 +1,6 @@
 ---
 name: vc-dou
-version: 2.1.0
+version: 2.2.0
 description: >
   Definition of Undone audit skill. Runs a systematic gap analysis across the
   ENTIRE product surface — not just code. Crawls public URLs, audits repo
@@ -59,6 +59,24 @@ DoU is AUDIT-FIRST: it produces a gap inventory and remediation list
 that downstream WRITE steps (`vc-hydrate`, `vc-decorate`, `vc-release`)
 consume. Fixing the gaps belongs to those downstream skills, not to
 DoU itself.
+
+## Public-surface floor
+
+Before the prose audit, run the executable floor. It compares VERSION, git
+tags, GitHub Releases, npm, crates.io, PyPI, Homebrew, the installer channel,
+README install sections, site metadata, and brand spelling. A red floor is a
+red audit. Do not report the product as shippable, and do not recommend an
+install call to action, when the report says `install_cta: no` or `floor: FAIL`.
+
+```bash
+vc-dou --floor
+vc-dou --floor --product loctree
+vc-dou --floor --product aicx
+```
+
+Copy the report into the DoU findings. Warnings are part of the result; an
+`unproven` line is not a pass. Contract and per-product config:
+[`references/public-surface-floor.md`](references/public-surface-floor.md).
 
 ## Operator Entry
 
@@ -160,7 +178,9 @@ cycles (0 or documented), health score.
 
 ### Phase 2 — Install Path
 
-The "can a stranger use this" test.
+The "can a stranger use this" test starts with `vc-dou --floor` (see
+[the public-surface floor](references/public-surface-floor.md)). The checks
+below are the rest of the path, not a substitute for that probe.
 
 - **CLI:** published to registry, version badge matches, `cargo install`/`npm i -g`/`pip install` works,
   binary runs without dev toolchain, `--help` and `--version` work.

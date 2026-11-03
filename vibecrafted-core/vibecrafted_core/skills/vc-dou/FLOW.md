@@ -22,6 +22,7 @@ flowchart TD
 | ------------------------- | ---------------------- | ----------------------------------------- | --------------- |
 | `vibecrafted dou <agent>` | `--prompt` or `--file` | DoU audit report with transcript and meta | `0` on dispatch |
 | `vc-dou <agent>`          | same                   | same                                      | `0` on dispatch |
+| `vc-dou --floor`          | `--product`, `--json`  | public-surface report                     | `1` on drift    |
 
 ### Escalation edges
 

@@ -1,0 +1,99 @@
+# Public-surface floor for Vibecrafted.
+# Reference is this checkout's VERSION. Live surfaces are compared to it.
+# vc-dou fails when they disagree. vc-release warns on the GitHub Release
+# it is about to create, and fails on every other required surface.
+schema = 1
+product = "vibecrafted"
+expect = "file:VERSION"
+local_root_file = "VERSION"
+version_bump = true
+
+[readme]
+path = "README.md"
+require_install = true
+pin_commands = "fail"
+pin_prose = "warn"
+
+[brand]
+canonical = "Vetcoders"
+forbidden = ["VetCoders"]
+repo_globs = [
+  "README.md",
+  "docs/public/**/*.md",
+  "docs/INSTALL.md",
+  "docs/FAQ.md",
+  "docs/QUICK_START.md",
+]
+
+[[projection]]
+id = "pyproject"
+kind = "pyproject"
+path = "vibecrafted-core/pyproject.toml"
+
+[[projection]]
+id = "plugin"
+kind = "json_pointer"
+path = "plugin.json"
+pointer = "/version"
+
+[[projection]]
+id = "readme_badge"
+kind = "readme_badge"
+path = "README.md"
+
+[[surface]]
+id = "channel"
+kind = "json_url"
+url = "https://vibecrafted.io/channel/main.json"
+pointer = "/version"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_release"
+kind = "github_release"
+repo = "vetcoders/vibecrafted"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "orphan_tags"
+kind = "orphan_tags"
+repo = "vetcoders/vibecrafted"
+dou = "fail"
+release = "warn"
+
+[[surface]]
+id = "site_version"
+kind = "html_regex"
+url = "https://vibecrafted.io/en/"
+pattern = 'softwareVersion"\s*:\s*"v?(?P<version>\d+\.\d+\.\d+)'
+install = false
+dou = "fail"
+release = "warn"
+
+[[surface]]
+id = "site_brand"
+kind = "brand_html"
+url = "https://vibecrafted.io/en/"
+forbidden = ["VetCoders"]
+dou = "warn"
+release = "warn"
+
+[[surface]]
+id = "vetcoders_brand"
+kind = "brand_html"
+url = "https://vetcoders.io/"
+forbidden = ["VetCoders"]
+dou = "warn"
+release = "warn"
+
+[[surface]]
+id = "libraxis_brand"
+kind = "brand_html"
+url = "https://libraxis.com/"
+forbidden = ["VetCoders"]
+dou = "warn"
+release = "warn"
