@@ -61,7 +61,7 @@ PY
 assert_contains() {
   local file="$1"
   local pattern="$2"
-  grep -Fq "$pattern" "$file" || die "Expected '$pattern' in $file"
+  grep -Fq -- "$pattern" "$file" || die "Expected '$pattern' in $file"
 }
 
 assert_matches() {
@@ -74,7 +74,7 @@ assert_not_contains() {
   local file="$1"
   local pattern="$2"
   [[ -f "$file" ]] || die "assert_not_contains: file not found: $file"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     die "Did not expect '$pattern' in $file"
   fi
 }
@@ -311,12 +311,30 @@ if (( json_mode )); then
 else
   echo 'fake codex stdout'
 fi
-if [[ -n "$report" ]]; then
-  cat > "$report" <<EOF_REPORT
+# Resume does not pass --output-last-message. The supervisor seeds
+# VIBECRAFTED_REPORT_PATH and salvages the transcript when that file stays
+# the launcher template, and the salvage is an explicit finalized:false
+# shell. Spawn copies --output-last-message only when its report is empty.
+# Write one completed attestation to whichever of those channels is live.
+# A marker file is the negative control: the headless allowlist drops
+# custom environment switches, so the switch has to sit beside this stub.
+if [[ -f "${BASH_SOURCE[0]}.leave-unfinalized" ]]; then
+  exit 0
+fi
+write_attestation() {
+  local dest="$1"
+  [[ -n "$dest" ]] || return 0
+  cat > "$dest" <<EOF_ATTEST
 ---
 agent: codex
-run_id: ${SPAWN_RUN_ID:-missing-run-id}
+run_id: ${SPAWN_RUN_ID:-${VIBECRAFTED_RUN_ID:-missing-run-id}}
 prompt_id: ${SPAWN_PROMPT_ID:-missing-prompt-id}
+session_id: ${VIBECRAFTED_SESSION_ID:-pending-unset}
+skill: ${VIBECRAFTED_SKILL_NAME:-${VIBECRAFTED_SKILL:-workflow}}
+status: completed
+claim_status: completed
+finalized: true
+claim: "Fake Codex Report: spawn ok"
 started_at: 2026-03-27T17:47:00Z
 model: fake-codex
 ---
@@ -324,7 +342,11 @@ model: fake-codex
 # Fake Codex Report
 
 spawn ok
-EOF_REPORT
+EOF_ATTEST
+}
+write_attestation "$report"
+if [[ -n "${VIBECRAFTED_REPORT_PATH:-}" && "$VIBECRAFTED_REPORT_PATH" != "$report" ]]; then
+  write_attestation "$VIBECRAFTED_REPORT_PATH"
 fi
 EOF_CODEX
 
@@ -457,18 +479,83 @@ resume_run_id="$(
     tail -n 1
 )"
 [[ -n "$resume_run_id" ]] || die "resume receipt did not expose a run_id"
+resume_await_log="$workspace/resume-await.txt"
 env -u VIBECRAFTED_RUN_ID -u VIBECRAFTED_OPERATOR_SESSION \
   -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
   -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
   HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" \
   "$home_dir/.local/bin/vibecrafted" await codex \
-    --run-id "$resume_run_id" --timeout 20 --interval 0.1 --status-interval 20
+    --run-id "$resume_run_id" --timeout 20 --interval 0.1 --status-interval 20 \
+  | tee "$resume_await_log"
 require_file "$resume_capture"
 require_file "$resume_prompt_capture"
+require_file "$resume_await_log"
 assert_contains "$resume_capture" 'resume'
 assert_contains "$resume_capture" 'fake-session-001'
+assert_contains "$resume_capture" '--approve-for-me'
+assert_not_contains "$resume_capture" '--output-last-message'
 assert_contains "$resume_prompt_capture" 'resume smoke'
-rm -f "$fake_bin/codex.resume-capture"
+assert_contains "$resume_await_log" 'await: completed'
+resume_report="$(
+  sed -n 's/^report:[[:space:]]*//p' "$resume_await_log" | tail -n 1
+)"
+[[ -n "$resume_report" ]] || die "resume await did not expose a report"
+require_file "$resume_report"
+assert_contains "$resume_report" 'finalized: true'
+assert_contains "$resume_report" 'claim: Fake Codex Report: spawn ok'
+assert_contains "$resume_report" 'Fake Codex Report'
+assert_not_contains "$resume_report" 'finalized: false'
+
+log "launcher resume unfinalized negative control"
+neg_capture="$workspace/resume-codex-unfinalized.txt"
+neg_prompt_capture="$workspace/resume-codex-unfinalized-prompt.txt"
+printf '%s\n' "$neg_capture" "$neg_prompt_capture" > "$fake_bin/codex.resume-capture"
+touch "$fake_bin/codex.leave-unfinalized"
+neg_output="$(
+  env -u VIBECRAFTED_RUN_ID -u VIBECRAFTED_OPERATOR_SESSION \
+    -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" \
+    "$home_dir/.local/bin/vibecrafted" resume codex \
+      --repo "$work_repo" --session fake-session-002 --prompt "resume unfinalized"
+)"
+printf '%s\n' "$neg_output"
+neg_run_id="$(
+  printf '%s\n' "$neg_output" |
+    sed -n 's/^run_id:[[:space:]]*//p' |
+    tail -n 1
+)"
+[[ -n "$neg_run_id" ]] || die "unfinalized resume receipt did not expose a run_id"
+neg_await_log="$workspace/resume-unfinalized-await.txt"
+set +e
+env -u VIBECRAFTED_RUN_ID -u VIBECRAFTED_OPERATOR_SESSION \
+  -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+  -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+  HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" \
+  "$home_dir/.local/bin/vibecrafted" await codex \
+    --run-id "$neg_run_id" --timeout 20 --interval 0.1 --status-interval 20 \
+  | tee "$neg_await_log"
+neg_rc=${PIPESTATUS[0]}
+set -e
+[[ "$neg_rc" -ne 0 ]] || die "unfinalized resume await succeeded"
+require_file "$neg_await_log"
+assert_contains "$neg_await_log" 'await: terminal failure'
+assert_contains "$neg_await_log" 'report_validated'
+neg_report="$(
+  sed -n 's/^report:[[:space:]]*//p' "$neg_await_log" | tail -n 1
+)"
+[[ -n "$neg_report" ]] || die "unfinalized await did not expose a report"
+require_file "$neg_report"
+assert_contains "$neg_report" 'finalized: false'
+assert_not_contains "$neg_report" 'finalized: true'
+require_file "$neg_capture"
+require_file "$neg_prompt_capture"
+assert_contains "$neg_capture" 'resume'
+assert_contains "$neg_capture" 'fake-session-002'
+assert_contains "$neg_capture" '--approve-for-me'
+assert_not_contains "$neg_capture" '--output-last-message'
+assert_contains "$neg_prompt_capture" 'resume unfinalized'
+rm -f "$fake_bin/codex.resume-capture" "$fake_bin/codex.leave-unfinalized"
 
 log "helper bash smoke"
 # This value is literal source or output for a later shell, awk, or Xcode evaluator; expanding its
