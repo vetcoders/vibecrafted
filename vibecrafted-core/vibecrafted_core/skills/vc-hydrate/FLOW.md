@@ -21,6 +21,7 @@ flowchart TD
 | ----------------------------- | ---------------------- | --------------------------------------------------------- | --------------- |
 | `vibecrafted hydrate <agent>` | `--prompt` or `--file` | hydrated docs/package/report set plus transcript and meta | `0` on dispatch |
 | `vc-hydrate <agent>`          | same                   | same                                                      | `0` on dispatch |
+| `vc-hydrate --floor`          | `--product`, `--json`  | checkout version, README install, brand                   | `1` on drift    |
 
 ### Escalation edges
 

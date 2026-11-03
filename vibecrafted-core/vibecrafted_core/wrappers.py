@@ -396,13 +396,33 @@ def audit_main(argv: Sequence[str] | None = None) -> int:
     return _single_stage_main("audit", argv)
 
 
+def _floor_exit(stage: str, argv: Sequence[str] | None) -> int | None:
+    """Run the public-surface floor when the launcher is invoked as ``--floor``.
+
+    ``vc-dou --floor`` stays inside this process. It does not dispatch an agent
+    and it does not tag, publish, or deploy.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] != "--floor":
+        return None
+    from .public_surface import floor_main
+
+    return floor_main(stage, args[1:])
+
+
 def dou_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vc-dou` / `vibecrafted dou`."""
+    floor = _floor_exit("dou", argv)
+    if floor is not None:
+        return floor
     return _single_stage_main("dou", argv)
 
 
 def hydrate_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vc-hydrate` / `vibecrafted hydrate`."""
+    floor = _floor_exit("hydrate", argv)
+    if floor is not None:
+        return floor
     return _single_stage_main("hydrate", argv)
 
 
@@ -488,6 +508,9 @@ def partner_main(argv: Sequence[str] | None = None) -> int:
 
 def release_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vc-release` / `vibecrafted release`."""
+    floor = _floor_exit("release", argv)
+    if floor is not None:
+        return floor
     return _single_stage_main("release", argv)
 
 

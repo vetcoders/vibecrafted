@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-10-16",
+  "generated_at": "2026-11-03",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -1874,6 +1874,7 @@
         "35ed95fc2091fd653b02ee9a1f8413b59ded55a58dd64acb3848bedf00b6da20",
         "36a2b4b7729cc2127c438e6ac5a4b7e6aa6c555ff81303723039cc068f5b26d8",
         "37bb62368fd37dace4872c72ef7a392ff28e036823da7de4f18643d7064531b1",
+        "464a2e6c75801ee6af86ad692ea1bb443153f9b6becdedef71d461660db8543f",
         "47c5014a1cc14f5ac02e16fdce266ca4b9b85b1f75e30840f2152eceadc0c5cd",
         "4ec8f9c5505dc63377ff5a23faa3a6c5aec8dd07e1d79821d41d9eb28f964e64",
         "52a3dd82681b68db6511b722cebda7e30ec6769bbf2060d957ce5cb115c5cb82",
@@ -1895,7 +1896,8 @@
         "ddf38cb08c98c78700e89515c3da3603f58b96a42c4a8d3c2043c2ec31b87095",
         "e20237b65f0c901f605bdd1a103e6b394936509613dad5207e3af4a4400d449d",
         "e687729ff618eadbd5ac33d093b7a77db00aa83712fdda98e1a27fdef0ef3690",
-        "e7839f7182b8193051ee603b83c2359a6fdfb3f4aaf630ff35f4a1d4aefc7e79"
+        "e7839f7182b8193051ee603b83c2359a6fdfb3f4aaf630ff35f4a1d4aefc7e79",
+        "eb07a099d4087106b127c4346096e06b0b5b8b309efa33da7034fdba9dcf66a5"
       ],
       "files": {
         ".claude-plugin/plugin.json": [
@@ -1907,12 +1909,14 @@
         ],
         "FLOW.md": [
           "09326f243272841ee9eb6e446a912d17a4dcd907",
+          "10f9b74d46ba3caa903670d1c7401ba9f95dd626",
           "5a13208c8f9b2f7637d0d90f2e3d1a62cfd54006"
         ],
         "SKILL.md": [
           "03cae2ff6bc106f6f81c29d92da86e572df948cf",
           "08b813a239b5058909de325471d97c6f6987cfae",
           "25a3e3e293b9616a745cac60397a775244a3002f",
+          "2f585b0329291f51eeec6e25f0cedaefc2c1902e",
           "3d4bb918d6973ecf902f2a681946287f4539b090",
           "4613c4386ff6263eecd908b7f3793437fb1648bf",
           "49690060a516dec73cab186becaf2ea3ff16e41d",
@@ -1934,6 +1938,7 @@
           "a49ef7cb6019dca58faf15ba848f6d608ec79714",
           "ab723473a7423b1bcff8d195f95fbf897a8d5424",
           "ac848ed8123fc33a437b8a01970dadc31429c8a1",
+          "ac86e0195e356886d09b8845eaccfb5819d5a5fa",
           "b01effe635cf6190f01b4536ff63fa5fc7cebc09",
           "b2501dc0e36a862e5509a68c914449b821775a9f",
           "b43d77e6913f98bbc5c12b7e30d26a6a1a8b1de7",
@@ -1951,6 +1956,11 @@
         "agents/openai.yaml": [
           "aca6ea16683555cc47d5e6d078b1dd57fde74f43",
           "c00628869cef8661d001d5cb34be61fd5f04fb4b"
+        ],
+        "references/public-surface-floor.md": [
+          "7af53323dd6657b56847b6834174b7f36e342496",
+          "859a5ed3fe453ad0ec2b7928e4cb77bfc5a085dd",
+          "fc3d5dc315fe8929639cf6765f48e81af9442088"
         ]
       }
     },
@@ -2173,6 +2183,7 @@
         "13c4b13afdb1703f9cb07d60b9d219b867233e29dee45b818dc2b12ff1b9d181",
         "15af40fbbde153840fc278a14a5122ad7fecb6eab12a316ba7806a9cd0d21aaf",
         "1884eb5c9965b08a5ab9c00f107185230c1da12d12e0635fe2fc2f6544c85d7f",
+        "2719fd84e7a199db9d2c3026199bf8000be7294b1831139df932731935971cad",
         "351a86d1ffdaf422dc18109db5cd6ec71c50836893c2ef3743cd17088972e33e",
         "3876cd2f7fce47580116ebb43480675a3165c643b7b3037f3d87c831c850bde4",
         "438d8a98960c19d64f691fa253a7007573d65c7a90e80f4e61b464b1b51ad07c",
@@ -2184,6 +2195,7 @@
         "63c2fed2073c59ea5df9d38c4274bb0bc3afcb71424fd0efbda69144ad843c49",
         "6b2d270c182d87b9e1596d53467738fbd98ec7a27962bb617a3f63b95163dc8d",
         "7e66f2682f7419237aa3a5f324fb990cac61a6ed6422874c5ba14265ebcb369b",
+        "822e76c9761e7987abdea91422d9ebd81ae59b8a030542fdf98f03880d046fb9",
         "8a55ad875d74b18a51ae90107c85c19be67e53ec6cf119635c43accdc1914225",
         "a7873c6c84f499d41c94bc6390ba6becdc204adf367e224205c2fb6d3ef3ef2a",
         "a8b58197e05d1856e3c02bc514176539c67d77c6d1c2efa1e3c348152f588215",
@@ -2192,9 +2204,11 @@
         "d24da73621e75dcb974a996c3a9cc3a8af562c0a38723ce07c3c94ffb98e2cca",
         "dcc3afb7c23f6c39427bb0cdfa17d2c4e44343742a094a4bfb00484cf68a3874",
         "de197f929a6d4c07eb7374b975c4d07774b922b6bb74f07b4d0e66ccfeeecd58",
+        "e7ca4d571b8c5068b023fd541bbbf51d03a90ca873c226ba180f3df1b8604fb4",
         "e9c0d590ab1081ccc45a1c6b1005f43f04051d7584bb16965dabd6a1c924b02d",
         "ed960d6f69a821f0854062dea0450bfd18d47f3a7da4d216caf3ceea87255e0b",
         "f706e864e5d0f3c32d82350ef747fcf4c15bb62f2d566e942aaec03befe7e40f",
+        "fa2b09f7f75d9dcef2e903c39b7fe9cbb416999ffee133512a91b8faa3e5f908",
         "fd1d541a3f8c66a3826c6d4fa5292f874f335942e3b921eaab65645aba41dc94"
       ],
       "files": {
@@ -2206,6 +2220,7 @@
           "fdf91c0cf4bfc9d2b30a32416b07409da3d18930"
         ],
         "FLOW.md": [
+          "3b52109b058d6eb2d2fb753beb25fb197beccff0",
           "528099a31fe05a60c8655dc4fbc279ca00ad0fa1",
           "f0ce1297b0f741e6623c92d832ae1693d06c0752"
         ],
@@ -2215,6 +2230,7 @@
           "1e59b2946d0da606fb90a10f3471ef59522f859f",
           "28b8969bfa1c34f3385b18e5dd64c3daa7e5db1f",
           "2fa423b71f82bbf8e41bd16bb551797249c5d646",
+          "3b25edbf790e232bee500f8ee8db21cf6e991172",
           "40925f161464bf1266b7db7d27213d58911bf0f0",
           "4f183f3dfb29ecba1b565f0ae28c731db1d347da",
           "53c32b3ad24b2b903d7b1f513c08fd0087035224",
@@ -2231,6 +2247,7 @@
           "8acc80e50bc5bb96b3affb304ea604d492f6c2d9",
           "9810340219709b9f22246631a3d7015cbad164a7",
           "9917f52c2ae53782d50a73b1f68bfa9e3c2dcafb",
+          "a1e401756c76a0ad6643674fdef4070d92968b99",
           "a2e0694780f65142fcee58b64c42b7afe86285cc",
           "aa19b5df150aa0027f861d6ccbcf00cf2524c014",
           "b65c7dc845f319fe56f0d43f3e2fc9c1c51a1a80",
@@ -2238,6 +2255,8 @@
           "d2a86663f67039609f7f8a23fe4b7108fec8479a",
           "da4e5b026e4e35b888e06bd066fabaa88f85535e",
           "dd0e501f4c93355b2dad2ca99518fa04ace19d53",
+          "e24a7c3f541d028b353e446466c6667c575935ce",
+          "e505c867d3a8ce222a864a0c72c26286ed3924ad",
           "e8619927f885a0f45372167dfb5a920db109614b"
         ],
         "agents/openai.yaml": [
@@ -3814,6 +3833,7 @@
         "2f34ff086c5d38a77761c8fb42448a077e54ac9e2eb930204d5579eedc146663",
         "3305addcf5a7f4f29091611823d01d0a922bc9bd8a1684d6d213dee13a18c7c1",
         "3797c53ba9f601b4d219a51f2ac172fe2415179b4a97e5ac723a658ad879bda7",
+        "4304e34f2fce4cbbb7f6b6e0c4920062a629acefb20a4d206a77d26d7adfdcb0",
         "4c4b5b17fbbef3a353ea5b6a0457a5a387d501bae1c07eded4865bcbee33aa46",
         "546447cf4f39ce581d95a71f9384c258ea762e13dc7c7cb73812e71fe3588d22",
         "5dd759b8e70423a8bf7d1fe75fbeec0231549a82feec290171902f0d22c70ed7",
@@ -3837,7 +3857,8 @@
         "dba49d26b67dae0d49b0099b5d4b86c292106c4cd411cce2963ecb5249c0a8e7",
         "ddb06082501921057eba8dfb46e8990bc7d3cd150192c47bca92fbee4894bf02",
         "e00a4c2facf09b4ba4d73db272716cfb138efe297e19e7e6a0dc88fa7bb6c86d",
-        "e9c34c65f82f4ff814e5c604f2719bba8de6bd9083bffdf967a5dcfd00eca1c5"
+        "e9c34c65f82f4ff814e5c604f2719bba8de6bd9083bffdf967a5dcfd00eca1c5",
+        "f01bcc166f92600c388e586f4aedaa5e88ed75216b6e794a2748980866030b22"
       ],
       "files": {
         ".claude-plugin/plugin.json": [
@@ -3849,7 +3870,8 @@
         ],
         "FLOW.md": [
           "2c288bf2a5e70e7419bc433abf609bde15b141c4",
-          "b8f16800f97f38afcdff30cd8af3a09e9a606bcf"
+          "b8f16800f97f38afcdff30cd8af3a09e9a606bcf",
+          "c7d2e8c7000681c4341fc197d6fee56f15daeaa3"
         ],
         "SKILL.md": [
           "0c66415479c2143be9996d84076393f2a610e40c",
@@ -3858,6 +3880,7 @@
           "36d48645c3f26683521bcbd7ddadea518aceffde",
           "388f3ea3626c8e9be35b2669f95e12cf7362827c",
           "393158a8c6ad54727de8d07e677875adc27cfa9c",
+          "3a0960ea4796a4677a27cde811ba1c99da2b9aac",
           "3fbacb91706f6244b61ecb9645f7de623af319b6",
           "43001670bf88b02fdd29c7244ec6c78f566f8e6c",
           "4d29b82f9a93c7d0a958f7f3a9f798c2291b787b",
@@ -3875,6 +3898,7 @@
           "8d52e488b104949117e8ff7bd6724d4462a7f842",
           "92ff6d2164cb273552bdf04cbf94d5a335088642",
           "96675b3a90242fd38e5a7b4254f1e92602970ea7",
+          "99a6a8a96d6366a281db2f736eff3121075cb85e",
           "b48a9a117896126a20ba795046b5031b2b62d4e1",
           "b56541b41272144c76cd8079403c42bd1724e178",
           "bff761e67b457020f20398f909f90acafd69c18f",

@@ -59,6 +59,12 @@ DoU jest AUDIT-FIRST: produkuje inwentarz luk oraz listę remediacji, które
 konsumują dalsze kroki WRITE (`vc-hydrate`, `vc-decorate`, `vc-release`).
 Naprawa luk należy do tych dalszych skillów, nie do samego DoU.
 
+## Podłoga powierzchni publicznej
+
+Przed audytem prozą uruchom `vc-dou --floor` (albo `vc-dou --floor --product <nazwa>`).
+Czerwony wynik (`floor: FAIL` albo `install_cta: no`) jest czerwonym audytem.
+Kontrakt: [`../../vc-dou/references/public-surface-floor.md`](../../vc-dou/references/public-surface-floor.md).
+
 ## Wejście operatora
 
 ### Reguła Living Tree / Worktree

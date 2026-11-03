@@ -106,6 +106,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         ),
         (
             'vibecrafted dou codex --prompt "Audit launch readiness"',
+            "vc-dou --floor --product loctree",
             "vc-dou claude --file /path/to/product-scope.md",
         ),
     ),
@@ -132,6 +133,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         ),
         (
             'vibecrafted hydrate codex --prompt "Package this for first users"',
+            "vc-hydrate --floor",
             "vc-hydrate claude --file /path/to/dou-report.md",
         ),
     ),
@@ -275,6 +277,7 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         ),
         (
             'vibecrafted release codex --prompt "Prepare the release"',
+            "vc-release --floor --require-release",
             "vc-release claude --file /path/to/release-brief.md",
         ),
     ),

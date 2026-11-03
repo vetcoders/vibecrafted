@@ -17,6 +17,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 TAG="v$VERSION"
+
+# Public-surface floor, before any draft or upload. Read-only. A missing
+# GitHub Release for $TAG is a warning here because this script is what
+# creates it; channel, site, and registry disagreement still refuses the
+# publish. After the Release exists, `vc-release --floor --require-release`
+# is the "done" check. Re-run is the way past a known gap:
+#   --acknowledge <surface-id>
+uv run --project "$ROOT/vibecrafted-core" python -m vibecrafted_core.public_surface \
+  release --repo "$ROOT" --product vibecrafted \
+  --allow-missing-release "$TAG" \
+  || die "public-surface floor failed; refusing to publish"
 RELEASE_OUTPUT="$DIST/release-output.json"
 RELEASE_SIGNATURE="$DIST/release-output.json.sig"
 PORTABLE_OUTPUT="$DIST/portable-output.json"
