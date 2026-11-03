@@ -127,6 +127,7 @@ Przerwany append zachowuje `.append-transaction.json` i nieopublikowane pliki w 
 uv run "$CLI" "$W" append --until 2026-11-03
 uv run "$CLI" "$W" plan --stage extract --repo <repo> --shard s09
 ```
+
 Jeśli przerwanego append nie da się wznowić, użyj `append --abort`, aby zarchiwizować oczekującą transakcję i nieopublikowany staging w katalogu roboczym. Opublikowane shardy pozostają. Katalog obsługuje jednego zapisującego. Istniejące ID kandydata są fail-closed dla wszystkich pól; ręczna rewizja metadanych wymaga jawnego rozstrzygnięcia.
 
 ### 2 · Ekstrakcja — flota czyta, dosłownie

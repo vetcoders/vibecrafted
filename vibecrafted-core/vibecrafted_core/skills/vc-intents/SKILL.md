@@ -127,6 +127,7 @@ An interrupted append keeps `.append-transaction.json` and unpublished files in 
 uv run "$CLI" "$W" append --until 2026-11-03
 uv run "$CLI" "$W" plan --stage extract --repo <repo> --shard s09
 ```
+
 If an interrupted append cannot resume, use `append --abort` to archive its pending transaction and unpublished staging inside the workdir. Published shards remain. Only one writer may operate on the workdir. Existing candidate IDs are fail-closed for every field; manual metadata revisions require explicit resolution.
 
 ### 2 · Extract — the fleet reads, verbatim
