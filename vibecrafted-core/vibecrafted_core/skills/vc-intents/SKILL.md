@@ -79,6 +79,10 @@ recorded as _not in scope_, never as _absent_.
 
 ## The tool
 
+One shared CLI serves both variants. English is the default (`--lang en`).
+Use `<workdir> --lang pl <command>` to select Polish briefs, prompts, reports
+and review output. Source quotes always keep their original language.
+
 ```bash
 CLI=~/.claude/skills/vc-intents/scripts/intents_cli.py   # or the store path
 W=~/.vibecrafted/artifacts/<owner>/<repo>/intents         # one workdir per hunt

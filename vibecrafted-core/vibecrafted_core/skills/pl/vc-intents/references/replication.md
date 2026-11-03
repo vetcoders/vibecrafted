@@ -1,8 +1,8 @@
-# Replication — two fleets, two hosts, one input
+# Replikacja — dwie floty, dwa hosty, jeden wsad
 
 Przeczytaj przed `plan --stage confront` i zanim uznasz pojedynczy werdykt za fakt.
 
-## Why replicate
+## Po co replikować
 
 Pojedyncza flota zwraca wynik, którego stabilności nie ocenisz od środka.
 Najtańszym falsyfikatorem jest druga flota na drugim hoście z **identycznymi
@@ -24,7 +24,7 @@ Dominowała rozbieżność `partial ↔ landed` (76 z 206): granica „częścio
 jest semantyczna, nie faktyczna. Dlatego brief wymaga `path:line` dla `landed`
 i `gap` dla `partial`.
 
-## Contamination check
+## Sprawdzenie skażenia kontekstu
 
 Kopiując workdir na drugi host przez `rsync`, **wyklucz katalogi werdyktów**
 (`--exclude 'verdicts*/'`). Druga flota czytająca pierwsze odpowiedzi daje
@@ -32,13 +32,13 @@ bezsensowne 100 %. Przy 100 % sprawdź, że pliki są bajtowo różne, a transkr
 nie odwołują się do ścieżek werdyktów drugiego hosta. W sprawdzonym przypadku
 była to zbieżność, nie kopia.
 
-## Missing lanes
+## Brakujące tory
 
 Niedostarczony tor pozostawia swoje id bez werdyktu na tym hoście. `merge`
 raportuje liczbę na stderr; te id nie mogą być `stable`, więc nie wchodzą
 do kolejki. Wyślij tor ponownie; nie wypełniaj luki ręcznie.
 
-## Agent choice
+## Dobór agenta
 
 Dwie osie, żadna nie jest „rankingiem modelu”:
 
@@ -53,7 +53,7 @@ Dokładne identyfikatory modeli pochodzą od użytkownika lub z aktualnej listy
 (`agy models`, `junie --model <x>` wypisuje pulę przy złej nazwie).
 Nigdy nie zgaduj model id z pamięci.
 
-## Plans
+## Plany
 
 `plan --stage confront --host <name>` zapisuje jeden plik `vibecrafted.dispatch.v1`
 na host. Ścieżki w promptach i verifierach są zapisywane przez `{id}` — parser

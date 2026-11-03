@@ -1,6 +1,6 @@
 # Przepływ `vc-intents`
 
-## Flow
+## Przepływ
 
 ```mermaid
 flowchart TD
@@ -23,12 +23,12 @@ flowchart TD
 
 ## Trasy
 
-| Wejście                                   | Argumenty                                        | Produkuje                                               | Wyjście               |
-| ----------------------------------------- | ------------------------------------------------ | ------------------------------------------------------- | --------------------- |
-| `/vc-intents`                             | okno (`--since/--until` albo temat), repo z cwd  | workdir z ledgerem, kolejką, planami, stroną przeglądu  | interaktywnie         |
-| `vibecrafted intents <agent>`             | jeden tor: JSON sharda albo toru, ścieżka briefu | `<shard>.json` albo `<tor>.verdicts.json`, raport       | `0` po dispatchu      |
-| `intents_cli.py <workdir> plan --stage …` | `extract` · `confront` · `implement`             | plan `vibecrafted.dispatch.v1` pod `<artifacts>/plans/` | `0`                   |
-| `intents_cli.py <workdir> status`         | —                                                | liczniki, powody otwarcia                               | `0` CLOSED · `1` OPEN |
+| Wejście                                             | Argumenty                                        | Produkuje                                               | Wyjście               |
+| --------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------- | --------------------- |
+| `/vc-intents`                                       | okno (`--since/--until` albo temat), repo z cwd  | workdir z ledgerem, kolejką, planami, stroną przeglądu  | interaktywnie         |
+| `vibecrafted intents <agent>`                       | jeden tor: JSON sharda albo toru, ścieżka briefu | `<shard>.json` albo `<tor>.verdicts.json`, raport       | `0` po dispatchu      |
+| `intents_cli.py <workdir> --lang pl plan --stage …` | `extract` · `confront` · `implement`             | plan `vibecrafted.dispatch.v1` pod `<artifacts>/plans/` | `0`                   |
+| `intents_cli.py <workdir> --lang pl status`         | —                                                | liczniki, powody otwarcia                               | `0` CLOSED · `1` OPEN |
 
 ### Krawędzie eskalacji
 

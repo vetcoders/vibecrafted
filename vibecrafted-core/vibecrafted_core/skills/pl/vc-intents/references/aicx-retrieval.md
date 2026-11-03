@@ -1,23 +1,23 @@
-# AICX retrieval grammar for intent hunting
+# AICX: składnia pobierania materiału do polowania na intencje
 
 Przeczytaj przed fazą 1. Od tego zależy, czy sweep obejmie historię repo, czy jedną trzecią.
 
-## Contents
+## Spis treści
 
-- [Project identity — the highest-leverage filter](#project-identity)
-- [The two entry commands](#the-two-entry-commands)
-- [Filters that matter, and what each one is for](#filters)
-- [Voice separation and the lane pipeline](#voice-separation)
-- [Reading sources](#reading-sources)
-- [Continuity and the Loctree bridge](#continuity-and-the-loctree-bridge)
-- [Failure modes](#failure-modes)
+- [Tożsamość projektu — najważniejszy filtr](#tożsamość-projektu)
+- [Dwie komendy wejściowe](#dwie-komendy-wejściowe)
+- [Istotne filtry i ich zastosowania](#filtry)
+- [Rozdzielenie głosów i potok torów](#rozdzielenie-głosów)
+- [Czytanie źródeł](#czytanie-źródeł)
+- [Ciągłość i połączenie z Loctree](#ciągłość-i-połączenie-z-loctree)
+- [Tryby błędów](#tryby-błędów)
 
-## Project identity
+## Tożsamość projektu
 
 `-p` przyjmuje cztery formy, bez rozróżniania wielkości liter, powtarzalnie.
 Wiele flag `-p` lub lista z przecinkami tworzą sumę zbiorów.
 
-| Form            | Meaning                                      | Use for                               |
+| Forma           | Znaczenie                                    | Zastosowanie                          |
 | --------------- | -------------------------------------------- | ------------------------------------- |
 | `-p owner/repo` | ścisły slug                                  | jedna znana tożsamość                 |
 | `-p owner/`     | każde repo właściciela                       | sweep organizacji                     |
@@ -44,9 +44,9 @@ Trzy tożsamości, jedno zapytanie. `-p vetcoders/screenscribe` zwróciłoby jed
 pozornie zdrowo, pomijając dwie. Zawsze czytaj i zapisuj nagłówek `project:` —
 to mianownik pokrycia.
 
-## The two entry commands
+## Dwie komendy wejściowe
 
-### `aicx intents` — the roadmap surface
+### `aicx intents` — widok planowanych prac
 
 Ustrukturyzowane intencje z trwałego katalogu i allowlisty źródeł sesji.
 Domyślne okno 720h; **domyślnie bez limitu wyników** (pełna roadmap),
@@ -58,7 +58,7 @@ aicx intents -p /<repo> --hours 8764 --score 50 --sort newest --emit json
 
 `--emit json` zawiera `oracle_status`. Markdown łatwiej czytać; JSON zasila ledger.
 
-### `aicx search` — the topic probe
+### `aicx search` — sonda tematu
 
 Lexical-first w indeksie CURRENT, z preferencją świeżości. `--hours 0` oznacza
 całą historię (w `intents` 0 nie oznacza całości — użyj dużego okna, np. 8764).
@@ -80,11 +80,11 @@ Przydatne modyfikatory:
 - `--result head=N|full` — rozwija ciało trafień `tool_call`, domyślnie skróconych.
 - `--kind conversations|plans|reports|other` — rodzaj indeksowanego dokumentu.
 
-## Filters
+## Filtry
 
 Dotyczą obu komend, chyba że zaznaczono inaczej.
 
-| Filter                                          | What it buys you in an intent hunt                                                                                                                                                                             |
+| Filtr                                           | Co daje w polowaniu na intencje                                                                                                                                                                                |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--frame-kind user_msg`                         | **Ramki wiadomości użytkownika; mogą zawierać cytaty i wklejony tekst.** Filtr pobierania, nie dowód tożsamości autora; uwaga niżej: na `search` zwraca zero.                                                  |
 | `--frame-kind agent_reply` / `internal_thought` | Propozycje i rozumowanie agenta — kandydaci, nigdy wymagania.                                                                                                                                                  |
@@ -101,7 +101,7 @@ Dotyczą obu komend, chyba że zaznaczono inaczej.
 | `--limit`                                       | Ogranicza stronę; `intents` domyślnie jest bez limitu.                                                                                                                                                         |
 | `--live` / `--no-live`                          | Okna ≤48h automatycznie skanują live sources; wymuś lub wyłącz.                                                                                                                                                |
 
-## Voice separation
+## Rozdzielenie głosów
 
 Pipeline torów istnieje, bo twierdzenia agentów o ukończeniu trafiają do tego
 samego transkryptu co kandydaci wymagań ze źródeł.
@@ -130,7 +130,7 @@ artefakty repo wynikające z tych twierdzeń i nadaje statusy weryfikacji.
 Twierdzenie po `results collect` nadal dowodzi tylko _istnienia artefaktu_ —
 osiągalność należy do Loctree, nie aicx.
 
-## Reading sources
+## Czytanie źródeł
 
 Retrieval ustawia ranking, nie czyta. Otwórz źródło każdej intencji, na której zamierzasz działać.
 
@@ -151,7 +151,7 @@ Shell: `SESSION=$(aicx sessions current)` w osobnym wierszu lub inline
 `--session "$(aicx sessions current)"`. `SESSION=x aicx … --session
 $SESSION` nie działa: shell rozwija `$SESSION` przed procesem z tym przypisaniem.
 
-## Continuity and the Loctree bridge
+## Ciągłość i połączenie z Loctree
 
 ```bash
 aicx continuity show -p <owner>/<repo> --hours 168 --for-inject
@@ -172,7 +172,7 @@ aicx overlay --repo /path/to/repo --format json
 potem `aicx intents -p <owner/repo>` i ponownie overlay. `--rebuild` przelicza
 każde typowane twierdzenie, zachowując trwałe intent ids.
 
-## Failure modes
+## Tryby błędów
 
 - **Luka indeksu to blocker, nie wymówka.** Ścieżka naprawy: `aicx health`,
   `aicx doctor`, `aicx index`, `aicx catalog rebuild`. Jeśli przetrwa, oznacz

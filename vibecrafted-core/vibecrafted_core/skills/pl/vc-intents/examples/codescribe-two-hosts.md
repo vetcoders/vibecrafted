@@ -1,11 +1,11 @@
-# vc-intents — example: Codescribe, dictated corpus, two hosts
+# vc-intents — przykład: Codescribe, korpus dyktowany, dwa hosty
 
-## Trigger phrase
+## Fraza wywołująca
 
 > "Rozlicz intencje z transkrypcji Codescribe od stycznia — co obiecaliśmy i nie
 > dowieźliśmy? Chcę móc sam poprawiać klasyfikację."
 
-## Expected agent behavior
+## Oczekiwane zachowanie agenta
 
 1. `vc-init` w repo; `aicx intents -p /codescribe --limit 1` → nagłówek zawiera
    pięć tożsamości; najnowsza intencja 2026-09-18 i commit 2026-09-18 — zgodne.
@@ -28,7 +28,7 @@
 8. `queue --min-strength 4` → 199 stabilnych otwartych intencji → `plan --stage implement
 --limit 6 --gate 'cd {repo} && make check'` → doctor czysty → handoff.
 
-## Acceptance evidence
+## Dowody odbioru
 
 - `<workdir>/LEDGER.json` z `hosts: ["host-a","host-b"]`, `replication-report.json`
   z liczbą `agreement` dla każdej pary
@@ -38,7 +38,7 @@
 - Najwyższa prawda w raporcie: „43 % `landed` podważają skargi w źródłach;
   runtime_verified jest `unknown` dla wszystkich 974 — żadna flota nie uruchomiła produktu”.
 
-## Notes
+## Uwagi
 
 - Agentów do czytania wybiera przepustowość (junie/flash), do konfrontacji
   stabilność (junie 88–100 % powtarzalności, kimi 54 % w tym samym przebiegu).

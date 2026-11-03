@@ -1,4 +1,6 @@
-<title>Intencje __PROJECT__</title>
+<!doctype html>
+<html lang="__LANG_ATTR__">
+<title>__UI_intents__ __PROJECT__</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
 <style>
 :root{
@@ -67,8 +69,8 @@ select{padding:5px 8px;border:1px solid var(--line);border-radius:6px;background
 blockquote{margin:0;padding:12px 14px;border-left:3px solid var(--accent);background:var(--ground);border-radius:0 6px 6px 0;font-size:16px;line-height:1.45;font-style:italic}
 details{border:1px solid var(--line);border-radius:6px}
 details summary{padding:8px 12px;cursor:pointer;color:var(--muted);font-size:13px;list-style:none;display:flex;justify-content:space-between}
-details summary::after{content:"rozwiń";color:var(--accent)}
-details[open] summary::after{content:"zwiń"}
+details summary::after{content:attr(data-expand);color:var(--accent)}
+details[open] summary::after{content:attr(data-collapse)}
 .ctx{padding:0 14px 12px;white-space:pre-wrap;font-size:14px;line-height:1.5;max-height:420px;overflow:auto;color:var(--ink)}
 .ctx mark{background:var(--mark);color:inherit;padding:0 2px;border-radius:2px}
 .hostcards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -100,43 +102,43 @@ kbd{font-family:"JetBrains Mono",monospace;font-size:11px;border:1px solid var(-
 </style>
 
 <header>
-  <h1>Intencje __PROJECT__</h1>
+  <h1>__UI_intents__ __PROJECT__</h1>
   <span class="sub" id="sub"></span>
   <div class="stats" id="stats"></div>
 </header>
 
 <main>
 <aside>
-  <h2>Szukaj</h2>
-  <input type="search" id="q" placeholder="cytat, temat, id, plik…" autocomplete="off">
-  <h2>Twoja decyzja</h2>
+  <h2>__UI_search__</h2>
+  <input type="search" id="q" placeholder="__UI_quote_topic_id_file__" autocomplete="off">
+  <h2>__UI_your_review__</h2>
   <div class="chips" id="f-status"></div>
-  <h2>Dyspozycja (efektywna)</h2>
+  <h2>__UI_effective_disposition__</h2>
   <div class="chips" id="f-disp"></div>
-  <h2>Zgodność hostów</h2>
+  <h2>__UI_host_agreement__</h2>
   <div class="chips" id="f-agree"></div>
-  <h2>Siła wypowiedzi</h2>
+  <h2>__UI_statement_strength__</h2>
   <div class="chips" id="f-str"></div>
-  <h2>Rodzaj</h2>
+  <h2>__UI_kind__</h2>
   <div class="chips" id="f-kind"></div>
-  <h2>Obszar</h2>
+  <h2>__UI_area__</h2>
   <div class="chips" id="f-subj"></div>
-  <h2>Sortowanie</h2>
+  <h2>__UI_sort__</h2>
   <select id="sort">
-    <option value="date-desc">Data · najnowsze</option>
-    <option value="date-asc">Data · najstarsze</option>
-    <option value="str-desc">Siła · najmocniejsze</option>
+    <option value="date-desc">__UI_date_newest__</option>
+    <option value="date-asc">__UI_date_oldest__</option>
+    <option value="str-desc">__UI_strength_highest__</option>
     <option value="id">Id</option>
   </select>
-  <h2>Eksport</h2>
-  <button class="ghost" id="dl" hidden>Pobierz overrides.jsonl</button>
-  <div class="banner" id="dbstate">Łączę z zapisem decyzji…</div>
+  <h2>__UI_export__</h2>
+  <button class="ghost" id="dl" hidden>__UI_download_overrides_jsonl__</button>
+  <div class="banner" id="dbstate">__UI_connecting_to_review_storage__</div>
 </aside>
 
 <div class="content" id="content">
   <section class="list" id="list">
-    <div class="toolbar"><span><span class="n" id="count">0</span> pozycji</span><span id="filterdesc"></span><button class="ghost" id="clear" style="padding:2px 8px;font-size:12px">wyczyść filtry</button><span style="margin-left:auto">nawigacja <kbd>↑</kbd><kbd>↓</kbd> · zamknij <kbd>Esc</kbd></span></div>
-    <div class="row hdr"><span>id</span><span>data</span><span>temat · obszar</span><span id="hosthdr">hosty</span><span>siła</span><span></span></div>
+    <div class="toolbar"><span><span class="n" id="count">0</span> __UI_rows__</span><span id="filterdesc"></span><button class="ghost" id="clear" style="padding:2px 8px;font-size:12px">__UI_clear_filters__</button><span style="margin-left:auto">__UI_navigation__ <kbd>↑</kbd><kbd>↓</kbd> · __UI_close__ <kbd>Esc</kbd></span></div>
+    <div class="row hdr"><span>id</span><span>__UI_date__</span><span>__UI_topic_area__</span><span id="hosthdr">__UI_hosts__</span><span>__UI_strength__</span><span></span></div>
     <div id="rows"></div>
   </section>
   <section class="detail" id="detail"></section>
@@ -145,17 +147,19 @@ kbd{font-family:"JetBrains Mono",monospace;font-size:11px;border:1px solid var(-
 
 <script id="data" type="application/json">__DATA__</script>
 <script>
+const UI = __COPY_JSON__;
+const LANG = __LANG_JSON__;
 const DATA = JSON.parse(document.getElementById('data').textContent);
-const BASE = '__REPO_BLOB_BASE__';
-const HOST0 = '__HOST0__', HOST1 = '__HOST1__';
+const BASE = __REPO_BLOB_BASE_JSON__;
+const HOST0 = __HOST0_JSON__, HOST1 = __HOST1_JSON__;
 const DISP = {
-  'landed':['Wdrożone','c-landed'],'partial':['Częściowo','c-partial'],'absent':['Brak w kodzie','c-absent'],
-  'landed-contested':['W kodzie, skarga w źródle','c-contested'],'landed-by-doc':['Tylko w dokumencie','c-bydoc'],
-  'superseded':['Zastąpione późniejszą decyzją','c-superseded'],'unclear':['Niejasne','c-unclear'],'contradiction':['Sprzeczność','c-contradiction'],
-  'drop':['Do usunięcia (fałszywy trop)','c-none']
+  'landed':[UI.landed,'c-landed'],'partial':[UI.partial,'c-partial'],'absent':[UI.absent_from_code,'c-absent'],
+  'landed-contested':[UI.in_code_source_complaint,'c-contested'],'landed-by-doc':[UI.document_only,'c-bydoc'],
+  'superseded':[UI.superseded_by_a_later_statement,'c-superseded'],'unclear':[UI.unclear,'c-unclear'],'contradiction':[UI.contradiction,'c-contradiction'],
+  'drop':[UI.drop_false_lead,'c-none']
 };
-const KIND = {complaint:'skarga',task:'zadanie',constraint:'ograniczenie',decision:'decyzja',preference:'preferencja',question:'pytanie'};
-const STATUS = {todo:'do przejrzenia',ok:'zatwierdzone',chg:'zmienione',drop:'do usunięcia',note:'z komentarzem'};
+const KIND = {complaint:UI.complaint,task:UI.task,constraint:UI.constraint,decision:UI.decision,preference:UI.preference,question:UI.question};
+const STATUS = {todo:UI.to_review,ok:UI.reviewed,chg:UI.changed,drop:UI.dropped,note:UI.commented};
 const byId = Object.fromEntries(DATA.map(d=>[d.id,d]));
 
 // ---- state ----
@@ -181,8 +185,8 @@ const uniq=(k)=>[...new Set(DATA.map(d=>d[k]))].sort();
 function buildFilters(){
   chips(document.getElementById('f-status'),Object.keys(STATUS),'status',v=>STATUS[v]);
   chips(document.getElementById('f-disp'),Object.keys(DISP),'disp',v=>`<span class="dot" style="background:var(--${DISP[v][1]})"></span> ${DISP[v][0]}`);
-  chips(document.getElementById('f-agree'),['same','diff','nodragon'],'agree',v=>({same:'zgodne',diff:'rozjazd',nodragon:'brak drugiego hosta'})[v]);
-  chips(document.getElementById('f-str'),['5','4','3','2','1'],'str',v=>'siła '+v);
+  chips(document.getElementById('f-agree'),['same','diff','nodragon'],'agree',v=>({same:UI.agree,diff:UI.disagree,nodragon:UI.no_second_host})[v]);
+  chips(document.getElementById('f-str'),['5','4','3','2','1'],'str',v=>UI.strength+' '+v);
   chips(document.getElementById('f-kind'),Object.keys(KIND),'kind',v=>KIND[v]);
   chips(document.getElementById('f-subj'),uniq('subject'),'subj',v=>v);
   document.getElementById('q').value=F.q; document.getElementById('sort').value=F.sort;
@@ -216,7 +220,7 @@ function apply(){
   document.querySelectorAll('.chip').forEach(b=>{const key=b.parentElement.id.slice(2);b.classList.toggle('on',(F[key]||[]).includes(b.dataset.v))});
   renderRows(); renderStats();
 }
-function pip(v){return `<span class="pip" title="${v?esc(DISP[v][0]):'brak werdyktu'}" style="background:var(--${v?DISP[v][1]:'c-none'})"></span>`}
+function pip(v){return `<span class="pip" title="${v?esc(DISP[v][0]):UI.no_verdict}" style="background:var(--${v?DISP[v][1]:'c-none'})"></span>`}
 function stIcon(s){return {todo:'',ok:'✓',chg:'↺',drop:'✕',note:'✎'}[s]}
 function rowNode(d){
   const s=status(d),row=document.createElement('div');
@@ -226,16 +230,16 @@ function rowNode(d){
   const topic=document.createElement('span');topic.className='topic';topic.textContent=d.topic;
   const small=document.createElement('small');small.textContent=`${d.subject} · ${KIND[d.kind]||d.kind}`;topic.appendChild(small);
   const hosts=document.createElement('span');hosts.className='hosts';
-  const addPip=v=>{const p=document.createElement('span');p.className='pip';p.title=v?DISP[v][0]:'brak werdyktu';p.style.background=`var(--${v?DISP[v][1]:'c-none'})`;hosts.appendChild(p)};
+  const addPip=v=>{const p=document.createElement('span');p.className='pip';p.title=v?DISP[v][0]:UI.no_verdict;p.style.background=`var(--${v?DISP[v][1]:'c-none'})`;hosts.appendChild(p)};
   addPip(d.div0);addPip(d.dragon);if(decisions[d.id]&&decisions[d.id].disposition){hosts.append(' → ');addPip(decisions[d.id].disposition)}
-  const strength=document.createElement('span');strength.className='str';strength.title=`siła ${d.strength}/5`;
+  const strength=document.createElement('span');strength.className='str';strength.title=`${esc(UI.strength)} ${d.strength}/5`;
   for(const i of [1,2,3,4,5]){const mark=document.createElement('i');if(i<=d.strength)mark.className='f';strength.appendChild(mark)}
   const state=document.createElement('span');state.className=`st ${s}`;state.title=STATUS[s];state.textContent=stIcon(s);
   row.append(id,date,topic,hosts,strength,state);return row;
 }
 function renderRows(){
   const el=document.getElementById('rows');
-  if(!view.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Nic nie pasuje do filtrów.';el.replaceChildren(empty);return}
+  if(!view.length){const empty=document.createElement('div');empty.className='empty';empty.textContent=UI.no_rows_match_the_filters;el.replaceChildren(empty);return}
   el.replaceChildren(...view.map(rowNode));
 }
 document.getElementById('rows').onclick=e=>{const r=e.target.closest('.row');if(r)select(r.dataset.id)};
@@ -248,13 +252,13 @@ document.addEventListener('keydown',e=>{
 function renderStats(){
   const c={};for(const d of DATA){const e=effective(d);c[e]=(c[e]||0)+1}
   const done=DATA.filter(d=>status(d)!=='todo').length;
-  document.getElementById('stats').innerHTML=Object.keys(DISP).filter(k=>c[k]).map(k=>`<span class="stat${F.disp.length===1&&F.disp[0]===k?' on':''}" data-d="${k}"><span class="dot" style="background:var(--${DISP[k][1]})"></span>${DISP[k][0]} <b>${c[k]}</b></span>`).join('')+`<span class="stat" title="pozycje z Twoją decyzją">przejrzane <b>${done}</b>/${DATA.length}</span>`;
+  document.getElementById('stats').innerHTML=Object.keys(DISP).filter(k=>c[k]).map(k=>`<span class="stat${F.disp.length===1&&F.disp[0]===k?' on':''}" data-d="${k}"><span class="dot" style="background:var(--${DISP[k][1]})"></span>${DISP[k][0]} <b>${c[k]}</b></span>`).join('')+`<span class="stat" title="${esc(UI.rows_with_your_review)}">${esc(UI.reviewed_label)} <b>${done}</b>/${DATA.length}</span>`;
 }
 document.getElementById('stats').onclick=e=>{const s=e.target.closest('.stat[data-d]');if(!s)return;F.disp=F.disp.length===1&&F.disp[0]===s.dataset.d?[]:[s.dataset.d];apply()};
 
 // ---- detail ----
 function evLinks(ev){
-  if(!ev)return '<span style="color:var(--muted)">brak dowodu</span>';
+  if(!ev)return `<span style="color:var(--muted)">${esc(UI.no_evidence)}</span>`;
   return esc(ev).replace(/([\w@./+-]+\.(?:rs|swift|py|ts|js|toml|sh|md|json|yaml|yml|plist|h|m|c|txt|html|css))(?::(\d+)(?:-(\d+))?)?/g,(m,p,a,b)=>{
     const frag=a?('#L'+a+(b?'-L'+b:'')):'';return `<a class="mono" href="${BASE}${p}${frag}" target="_blank" rel="noopener">${m}</a>`});
 }
@@ -276,25 +280,25 @@ function select(id){
   const cur=dec.disposition||d.div0;
   el.innerHTML=`<div class="dwrap">
     <div class="dtop"><div><h2>${esc(d.topic)}</h2>
-      <div class="meta"><span class="mono">${d.id}</span><span>${d.date}</span><span>${esc(d.subject)}</span><span>${KIND[d.kind]||d.kind}</span><span>siła ${d.strength}/5</span>${d.stable?'<span title="oba hosty zgodne, siła ≥ 4">stabilne</span>':''}</div></div>
-      <button class="x" title="zamknij (Esc)" data-close>×</button></div>
-    <p class="saved">Klasyfikacja modelu · cytat nie ustala autora, projektu ani uprawnienia do wdrożenia.</p>
+      <div class="meta"><span class="mono">${d.id}</span><span>${d.date}</span><span>${esc(d.subject)}</span><span>${KIND[d.kind]||d.kind}</span><span>${esc(UI.strength)} ${d.strength}/5</span>${d.stable?`<span title="${esc(UI.stable_hint)}">${esc(UI.stable)}</span>`:''}</div></div>
+      <button class="x" title="${esc(UI.close_esc)}" data-close>×</button></div>
+    <p class="saved">${esc(UI.candidate_note)}</p>
     <blockquote>${esc(d.quote)}</blockquote>
-    <details><summary>Szerszy wycinek transkrypcji · <span class="mono">${esc(d.src)}</span></summary><div class="ctx">${ctxHtml(d)}</div></details>
+    <details><summary data-expand="${esc(UI.expand)}" data-collapse="${esc(UI.collapse)}">${esc(UI.wider_source_excerpt)} · <span class="mono">${esc(d.src)}</span></summary><div class="ctx">${ctxHtml(d)}</div></details>
     <div class="hostcards">
       <div class="hc"><h3>${HOST0} <span class="dsp"><span class="dot" style="background:var(--${DISP[d.div0]?DISP[d.div0][1]:'c-none'})"></span>${d.div0?DISP[d.div0][0]:'—'}</span></h3><div class="ev">${evLinks(d.ev0)}</div>${d.gap0?`<div class="gap">${esc(d.gap0)}</div>`:''}</div>
-      <div class="hc"><h3>${HOST1} <span class="dsp"><span class="dot" style="background:var(--${d.dragon&&DISP[d.dragon]?DISP[d.dragon][1]:'c-none'})"></span>${d.dragon?DISP[d.dragon][0]:'brak werdyktu na tym hoście'}</span></h3><div class="ev">${d.dragon?evLinks(d.ev1):''}</div>${d.gap1?`<div class="gap">${esc(d.gap1)}</div>`:''}</div>
+      <div class="hc"><h3>${HOST1} <span class="dsp"><span class="dot" style="background:var(--${d.dragon&&DISP[d.dragon]?DISP[d.dragon][1]:'c-none'})"></span>${d.dragon?DISP[d.dragon][0]:UI.no_verdict_from_this_host}</span></h3><div class="ev">${d.dragon?evLinks(d.ev1):''}</div>${d.gap1?`<div class="gap">${esc(d.gap1)}</div>`:''}</div>
     </div>
-    ${d.ov.length?`<div class="ov"><b>Reklasyfikacja mechaniczna</b>${d.ov.map(o=>`<span>${o.host}: ${DISP[o.from]?DISP[o.from][0]:o.from} → ${DISP[o.to]?DISP[o.to][0]:o.to} <span class="mono">(${esc(o.rule||o.by)})</span> — ${esc(o.reason||'')}</span>`).join('')}</div>`:''}
+    ${d.ov.length?`<div class="ov"><b>${esc(UI.mechanical_reclassification)}</b>${d.ov.map(o=>`<span>${o.host}: ${DISP[o.from]?DISP[o.from][0]:o.from} → ${DISP[o.to]?DISP[o.to][0]:o.to} <span class="mono">(${esc(o.rule||o.by)})</span> — ${esc(o.reason||'')}</span>`).join('')}</div>`:''}
     <div class="form" id="form">
-      <h3>Twoja decyzja${dec.at?` <span class="saved">· zapisano ${new Date(dec.at).toLocaleString('pl-PL')}${dec.by?' · '+esc(dec.by):''}</span>`:''}</h3>
-      <label>Werdykt<div class="seg" id="verdict">
-        <button data-v="ok" class="ok${dec.verdict==='ok'?' on':''}">✓ zgadza się</button>
-        <button data-v="wrong" class="${dec.verdict==='wrong'?' on':''}">↺ zmieniam dyspozycję</button>
-        <button data-v="drop" class="drop${dec.verdict==='drop'?' on':''}">✕ usuń (fałszywy trop)</button></div></label>
-      <label>Dyspozycja<select id="disp">${Object.keys(DISP).filter(k=>k!=='drop').map(k=>`<option value="${k}"${k===cur?' selected':''}>${DISP[k][0]}${k===d.div0?' (flota ${HOST0})':''}</option>`).join('')}</select></label>
-      <label>Komentarz<textarea id="note" placeholder="dlaczego, co naprawdę działa / nie działa, na której maszynie…">${esc(dec.note||'')}</textarea></label>
-      <div class="actions"><button class="primary" id="saveBtn"${canWrite?'':' disabled'}>Zapisz</button>${dec.at?'<button class="ghost" id="delBtn">Cofnij decyzję</button>':''}<span class="saved" id="savemsg">${canWrite?'':'tylko odczyt — brak uprawnień do zapisu'}</span></div>
+      <h3>${esc(UI.your_review)}${dec.at?` <span class="saved">· ${esc(UI.saved_label)} ${new Date(dec.at).toLocaleString(LANG)}${dec.by?' · '+esc(dec.by):''}</span>`:''}</h3>
+      <label>${esc(UI.verdict)}<div class="seg" id="verdict">
+        <button data-v="ok" class="ok${dec.verdict==='ok'?' on':''}">✓ ${esc(UI.agree_label)}</button>
+        <button data-v="wrong" class="${dec.verdict==='wrong'?' on':''}">↺ ${esc(UI.change_disposition)}</button>
+        <button data-v="drop" class="drop${dec.verdict==='drop'?' on':''}">✕ ${esc(UI.drop_false_lead_label)}</button></div></label>
+      <label>${esc(UI.disposition)}<select id="disp">${Object.keys(DISP).filter(k=>k!=='drop').map(k=>`<option value="${k}"${k===cur?' selected':''}>${DISP[k][0]}${k===d.div0?` (${esc(UI.fleet)} ${HOST0})`:''}</option>`).join('')}</select></label>
+      <label>${esc(UI.comment)}<textarea id="note" placeholder="${esc(UI.comment_placeholder)}">${esc(dec.note||'')}</textarea></label>
+      <div class="actions"><button class="primary" id="saveBtn"${canWrite?'':' disabled'}>${esc(UI.save)}</button>${dec.at?`<button class="ghost" id="delBtn">${esc(UI.undo_review)}</button>`:''}<span class="saved" id="savemsg">${canWrite?'':UI.read_only}</span></div>
     </div></div>`;
   el.querySelector('[data-close]').onclick=()=>select(null);
   const seg=el.querySelector('#verdict');let verdict=dec.verdict||'';
@@ -311,28 +315,28 @@ function select(id){
 
 // ---- persistence ----
 async function writeDecision(id,rec,msg){
-  msg.textContent='zapisuję…';
-  if(!db){decisions[id]={...rec};msg.textContent='zapisane tylko w tej karcie (baza niedostępna)';apply();select(id);return}
-  try{await db.doc('decisions/'+id).set(rec);msg.textContent='zapisane'}
-  catch(e){msg.textContent='nie zapisano: '+(e&&e.code||e);if(e&&e.code==='invalid_argument'){canWrite=false}}
+  msg.textContent=UI.saving;
+  if(!db){decisions[id]={...rec};msg.textContent=UI.saved_locally;apply();select(id);return}
+  try{await db.doc('decisions/'+id).set(rec);msg.textContent=UI.saved}
+  catch(e){msg.textContent=UI.not_saved+(e&&e.code||e);if(e&&e.code==='invalid_argument'){canWrite=false}}
 }
 async function deleteDecision(id,msg){
   if(!db){delete decisions[id];apply();select(id);return}
-  try{await db.doc('decisions/'+id).delete();msg.textContent='cofnięte'}catch(e){msg.textContent='nie udało się: '+(e&&e.code||e)}
+  try{await db.doc('decisions/'+id).delete();msg.textContent=UI.undone}catch(e){msg.textContent=UI.failed+(e&&e.code||e)}
 }
 function exportLines(){return Object.entries(decisions).map(([id,r])=>JSON.stringify({id,host:'*',from:r.from_div0||r.from||null,to:r.disposition,verdict:r.verdict||null,by:'manual-review',reason:r.note||'',at:r.at||new Date().toISOString()}))}
-function exportLocal(){const el=document.getElementById('detail');const c=document.getElementById('content');c.classList.add('open');el.classList.add('has');const txt=exportLines().join('\n');el.innerHTML=`<div class="dwrap"><div class="dtop"><h2>Eksport decyzji</h2><button class="x" data-close>×</button></div><p class="saved">${Object.keys(decisions).length} decyzji. Skopiuj do pliku <span class="mono">decisions.jsonl</span> i wczytaj: <span class="mono">intents_cli.py &lt;workdir&gt; decide --import-file decisions.jsonl --by manual-review</span></p><textarea id="exp" style="min-height:320px" readonly>${esc(txt)}</textarea><div class="actions"><button class="primary" id="cp">Kopiuj</button><span class="saved" id="cpmsg"></span></div></div>`;el.querySelector('[data-close]').onclick=()=>select(null);el.querySelector('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(txt);el.querySelector('#cpmsg').textContent='skopiowane'}catch(e){el.querySelector('#exp').select();el.querySelector('#cpmsg').textContent='zaznaczone — Cmd+C'}}}
+function exportLocal(){const el=document.getElementById('detail');const c=document.getElementById('content');c.classList.add('open');el.classList.add('has');const txt=exportLines().join('\n');el.innerHTML=`<div class="dwrap"><div class="dtop"><h2>${esc(UI.export_decisions)}</h2><button class="x" data-close>×</button></div><p class="saved">${Object.keys(decisions).length} ${esc(UI.decisions_copy_to_file)} <span class="mono">decisions.jsonl</span> ${esc(UI.and_import)} <span class="mono">intents_cli.py &lt;workdir&gt;${LANG==='pl'?' --lang pl':''} decide --import-file decisions.jsonl --by manual-review</span></p><textarea id="exp" style="min-height:320px" readonly>${esc(txt)}</textarea><div class="actions"><button class="primary" id="cp">${esc(UI.copy)}</button><span class="saved" id="cpmsg"></span></div></div>`;el.querySelector('[data-close]').onclick=()=>select(null);el.querySelector('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(txt);el.querySelector('#cpmsg').textContent=UI.copied}catch(e){el.querySelector('#exp').select();el.querySelector('#cpmsg').textContent=UI.selected_cmd_c}}}
 function setDbState(t){document.getElementById('dbstate').textContent=t}
 async function boot(){
   buildFilters();apply();if(selected)select(selected);
-  document.getElementById('sub').textContent=`${DATA.length} kandydatów z korpusu · hosty ${HOST0}${HOST1&&HOST1!=='—'?' / '+HOST1:''} · linki do kodu ${BASE?'pod commitem bazowym':'wyłączone'}`;
+  document.getElementById('sub').textContent=`${DATA.length} ${esc(UI.source_candidates)} · ${esc(UI.hosts)} ${HOST0}${HOST1&&HOST1!=='—'?' / '+HOST1:''} · ${esc(UI.code_links)} ${BASE?UI.at_the_baseline_commit:UI.disabled}`;
   document.getElementById('hosthdr').textContent=HOST1&&HOST1!=='—'?`${HOST0} / ${HOST1}`:HOST0;
-  if(!window.claude||!window.claude.use){setDbState('Plik lokalny: decyzje zostają w tej karcie. Eksportuj je przyciskiem i wczytaj: intents_cli.py <workdir> decide --import-file.');const b=document.getElementById('dl');b.hidden=false;b.textContent='Eksportuj decyzje (JSONL)';b.onclick=()=>exportLocal();return}
+  if(!window.claude||!window.claude.use){setDbState(UI.local_file_notice);const b=document.getElementById('dl');b.hidden=false;b.textContent=UI.export_decisions_jsonl;b.onclick=()=>exportLocal();return}
   const [_db,_dl,_user]=await Promise.all([claude.use('db'),claude.use('downloads'),claude.use('user')]);
   db=_db;dlcap=_dl;
   if(_user){const w=await _user.can('data.write');if(w===false){canWrite=false}}
-  if(!db){setDbState('Baza decyzji niedostępna w tym widoku. Zmiany zostają tylko w tej karcie.');return}
-  setDbState('Decyzje zapisują się w bazie artefaktu i są widoczne dla wszystkich, którzy mają tę stronę.');
+  if(!db){setDbState(UI.database_unavailable);return}
+  setDbState(UI.database_shared);
   db.collection('decisions').onSnapshot(snap=>{
     const next={};
     const docs=snap.docs||snap;
@@ -346,3 +350,5 @@ async function boot(){
 }
 boot();
 </script>
+
+</html>

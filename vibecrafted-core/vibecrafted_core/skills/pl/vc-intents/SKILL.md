@@ -2,20 +2,17 @@
 name: vc-intents
 version: 2.0.0
 description: >
-  Find candidate intents in source material for one repository inside a chosen window, settle
-  every one of them against the live code with two independent fleets, and hand
-  back a stable, dependency-ordered plan of cuts for vc-dispatch. Use whenever
-  the team asks "zbierz intencje", "rozlicz intencje", "co wynika ze źródeł",
-  "co obiecaliśmy i nie dowieźliśmy", "co z planu siedzi w kodzie", "what did we
-  agree to build", "what is still owed", "intent coverage", "planned vs code",
-  "highest truth", "checklist from intents" — or when scattered decisions from
-  transcripts and sessions must become an implementation queue that survives
-  compactions and machines. Reach for this instead of a bare `aicx search`
-  whenever source statements must be distinguished from model classifications and
-  agent completion claims, and the answer must end in a plan, not a catalogue.
-loctree_value: "structural questions decide whether a promise has a runtime shape"
-aicx_value: "indexed intents, session context; one source among several"
-dogfooding: "required — this skill is the join between corpus, aicx, Loctree and dispatch"
+  Wydobądź kandydatów intencji ze źródeł dla jednego repozytorium w wybranym
+  oknie, skonfrontuj każdego ze stanem kodu za pomocą dwóch niezależnych flot
+  i przygotuj stabilny plan cięć dla vc-dispatch z uwzględnieniem zależności.
+  Używaj przy prośbach „zbierz intencje”, „rozlicz intencje”, „co wynika ze
+  źródeł”, „co obiecaliśmy i nie dowieźliśmy”, „co z planu siedzi w kodzie”,
+  albo gdy rozproszone wypowiedzi z transkryptów i sesji trzeba zamienić
+  w kolejkę prac odporną na kompakcję i zmianę maszyny. Oddziel materiał
+  źródłowy od klasyfikacji modeli i twierdzeń agentów o wykonaniu.
+loctree_value: "pytania strukturalne ustalają, czy obietnica ma ścieżkę runtime"
+aicx_value: "indeksowane intencje i kontekst sesji; jedno z wielu źródeł"
+dogfooding: "wymagane — połączenie korpusu, aicx, Loctree i dispatchu"
 ---
 
 <!-- fleet-imperative: v3 -->
@@ -54,11 +51,11 @@ przekazuje resztę jako cięcia.
 `vc-intents` produkuje ledger, w którym każdy kandydat intencji z wybranego okna
 ma jedną jawną dyspozycję, wynik zgodności między dwiema niezależnymi flotami i
 warstwę korekt edytowalną przez człowieka — i jest gotowy, gdy
-`intents_cli.py <workdir> status` nazywa, co jest jeszcze otwarte, a
+`intents_cli.py <workdir> --lang pl status` nazywa, co jest jeszcze otwarte, a
 `plan --stage implement` zapisał dla tego plan dispatchu. Katalog nie zamyka
 celu. Audyt nie zamyka celu. Plan cięć zamyka.
 
-## Canonical Orientation Gate
+## Kanoniczna bramka orientacji
 
 Przed każdym krokiem dotyczącym repo — sweep wobec repo, konfrontacja, plan —
 uruchom albo skonsumuj procedurę `vc-init` dla przydzielonego repo.
@@ -80,10 +77,15 @@ nigdy jako _absent_.
 
 ## Narzędzie
 
+Jedna wspólna implementacja CLI obsługuje obie wersje. Polski wariant zawsze
+wybieraj przez `<workdir> --lang pl <komenda>`: dotyczy to briefów, promptów,
+raportów i widoków. Domyślne `--lang en` daje angielski wynik. Cytaty źródłowe
+zachowują oryginalny język; nie są tłumaczone.
+
 ```bash
 CLI=~/.claude/skills/vc-intents/scripts/intents_cli.py   # albo ścieżka w store
 W=~/.vibecrafted/artifacts/<owner>/<repo>/intents         # jeden workdir na polowanie
-uv run "$CLI" "$W" <komenda> …
+uv run "$CLI" "$W" --lang pl <komenda> …
 ```
 
 Jeden katalog roboczy trzyma wszystko, co musi przeżyć kompakcję albo drugi
@@ -105,7 +107,7 @@ to brakująca tożsamość, nie cichy kwartał.
 ### 1 · Sweep — rozlicz każde źródło w oknie
 
 ```bash
-uv run "$CLI" "$W" sweep --since 2026-06-01 --until 2026-09-18 \
+uv run "$CLI" "$W" --lang pl sweep --since 2026-06-01 --until 2026-09-18 \
   --source dir:~/.codescribe/transcriptions --source aicx --repo <repo> --shard-size 120
 ```
 
@@ -122,9 +124,9 @@ przeczytane.
 ### 2 · Ekstrakcja — flota czyta, dosłownie
 
 ```bash
-uv run "$CLI" "$W" plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
+uv run "$CLI" "$W" --lang pl plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
 vibecrafted dispatch <plan> --doctor --json && vibecrafted dispatch <plan> --json
-uv run "$CLI" "$W" verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
+uv run "$CLI" "$W" --lang pl verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
 ```
 
 Brief to `references/extraction-brief.md`. Jedna twarda zasada: **`quote` jest
@@ -157,8 +159,8 @@ intencja, wiele cytatów. Sama chronologia nie dowodzi wspólnej intencji rozmó
 ### 5 · Konfrontacja — dwie floty, dwa hosty
 
 ```bash
-uv run "$CLI" "$W" lanes                     # po obszarze; domyślnie sześć torów Codescribe
-uv run "$CLI" "$W" plan --stage confront --repo <repo> --host host-a \
+uv run "$CLI" "$W" --lang pl lanes                     # po obszarze; domyślnie sześć torów Codescribe
+uv run "$CLI" "$W" --lang pl plan --stage confront --repo <repo> --host host-a \
   --agent 'L1-overlay-ui=kimi:kimi-code/k3' --agent 'L4-quality-lexicon=junie:gemini-3.8-flash' …
 ```
 
@@ -173,7 +175,7 @@ entrypointu do X_ (`loct follow trace`), nie trafienie grepa. Tabela obietnica �
 pytanie → komenda: `references/loctree-questions.md`.
 
 ```bash
-uv run "$CLI" "$W" merge --verdicts host-a=<dir> --verdicts host-b=<dir> --primary host-a --project <owner>/<repo>
+uv run "$CLI" "$W" --lang pl merge --verdicts host-a=<dir> --verdicts host-b=<dir> --primary host-a --project <owner>/<repo>
 ```
 
 `merge` pisze `LEDGER.json` i `replication-report.json`. Zgodność per id przy
@@ -184,7 +186,7 @@ zgodna para jest. Do kolejki wchodzą tylko stabilne pary.
 ### 6 · Reklasyfikacja — `landed` to dolna granica
 
 ```bash
-uv run "$CLI" "$W" reclassify
+uv run "$CLI" "$W" --lang pl reclassify
 ```
 
 Dwie reguły bez osądu, stosowane przed liczeniem czegokolwiek jako zamknięte:
@@ -199,9 +201,9 @@ reguł: `references/ledger-schema.md`.
 ### 7 · Warstwa człowieka
 
 ```bash
-uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base https://github.com/<o>/<r>/blob/<sha>/
+uv run "$CLI" "$W" --lang pl render --html --transcripts <dir> --blob-base https://github.com/<o>/<r>/blob/<sha>/
 open "$W/intents.html"
-uv run "$CLI" "$W" decide --import-file decisions.jsonl --by manual-review      # albo --id … --to … --reason …
+uv run "$CLI" "$W" --lang pl decide --import-file decisions.jsonl --by manual-review      # albo --id … --to … --reason …
 ```
 
 Strona pokazuje każdą intencję z dosłownym cytatem, szerszym wycinkiem
@@ -216,8 +218,8 @@ plik jest kanonem w obu przypadkach. Zobacz `references/review-surface.md`.
 ### 8 · Kolejka i plan cięć
 
 ```bash
-uv run "$CLI" "$W" queue --min-strength 4
-uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit 6 --gate 'cd {repo} && make check'
+uv run "$CLI" "$W" --lang pl queue --min-strength 4
+uv run "$CLI" "$W" --lang pl plan --stage implement --repo <repo> --limit 6 --gate 'cd {repo} && make check'
 ```
 
 Kolejka trzyma intencje **otwarte, stabilne między hostami albo rozstrzygnięte

@@ -23,7 +23,7 @@
    delivered on host-b, 218 intents without a second verdict, reported on stderr.
 6. `reclassify` → +410 overrides, 43 % of host-level `landed` fell to the two rules.
 7. `render --html --transcripts … --blob-base https://github.com/vetcoders/codescribe/blob/<sha>/`
-   → the user filters "W kodzie, skarga w źródle" (126), decides, exports
+   → the user filters "In code, source complaint" (126), decides, exports
    `decisions.jsonl` → `decide --import-file decisions.jsonl --by manual-review`.
 8. `queue --min-strength 4` → 199 stable open intents → `plan --stage implement
 --limit 6 --gate 'cd {repo} && make check'` → doctor clean → handoff.

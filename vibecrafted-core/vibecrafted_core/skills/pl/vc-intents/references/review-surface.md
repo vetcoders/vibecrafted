@@ -1,12 +1,12 @@
-# Review surface — the page the user reviews
+# Widok przeglądu — strona do oceny kandydatów
 
-`intents_cli.py <workdir> render --html` wypełnia `assets/intents.html` ledgerem
+`intents_cli.py <workdir> --lang pl render --html` wypełnia `assets/intents.html` ledgerem
 i zapisuje `<workdir>/intents.html`. Jeden plik, dane inline, bez serwera,
 otwierany z dysku. Strona jest widokiem `LEDGER.json`, nigdy drugim źródłem prawdy.
 Wiersze i ich rodzaje to klasyfikacje modelu; sam cytat nie potwierdza autora,
 projektu ani uprawnienia do wdrożenia.
 
-## What the page shows
+## Co pokazuje strona
 
 - Każdą intencję: id, date, topic, kind, subject, strength; **dosłowny cytat**;
   szerszy fragment transkryptu (`--transcripts <dir>`, powtarzalne, najpierw
@@ -18,7 +18,7 @@ projektu ani uprawnienia do wdrożenia.
   kind, subject, tekst; sortowanie po date, strength, id. Klawisze: ↑/↓, Esc.
 - Liczniki w nagłówku według efektywnej klasyfikacji; „przejrzane N/total”.
 
-## Manual review
+## Przegląd ręczny
 
 Dla intencji: **✓ zgadza się** · **↺ zmienia klasyfikację** (wybiera disposition)
 · **✕ odrzuca** (fałszywy trop, głos modelu, inny projekt) · komentarz.
@@ -26,13 +26,13 @@ Przeglądaj po jednym filtrze: najpierw `landed-contested` (sprawdź ścieżkę 
 i kontekst źródła), potem `partial` ze strength 5. Przegląd zmienia ledger;
 autoryzację wdrożenia daje aktywne zadanie użytkownika lub plan.
 
-## How decisions come back
+## Jak decyzje wracają do rejestru
 
 Plik jest kanonem; strona ma dwa transporty:
 
 1. **Plik lokalny** — „Eksportuj decyzje (JSONL)” pokazuje wiersze; użytkownik
    zapisuje `decisions.jsonl` i uruchamia
-   `intents_cli.py <workdir> decide --import-file decisions.jsonl --by manual-review`.
+   `intents_cli.py <workdir> --lang pl decide --import-file decisions.jsonl --by manual-review`.
    Nic nie zależy od vendora.
 2. **Artefakt claude.ai** — publikowany z `capabilities: {db: {}, downloads:
 true, user: {}}`; ta sama strona zapisuje każdą decyzję na żywo do kolekcji
@@ -58,7 +58,7 @@ W obu wariantach wynikiem jest wiersz w `overrides.jsonl`:
 `host: "*"` oznacza nadpisanie werdyktów każdej floty. Wiersz człowieka zawsze
 wygrywa z regułą; żaden nie nadpisuje oryginału floty, który strona pokazuje obok decyzji.
 
-## Regenerate, do not edit
+## Generuj ponownie zamiast edytować
 
 Po `decide` ponownie uruchom `render --html`. Ręczna edycja `intents.html` znika
 przy renderze i nie zmienia ledgera — temu dokładnie zapobiega warstwa override.

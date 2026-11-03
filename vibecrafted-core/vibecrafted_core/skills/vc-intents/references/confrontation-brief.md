@@ -1,44 +1,38 @@
-# Brief: konfrontacja kandydatów intencji ze stanem repo
+# Brief: confront candidate intents with the repository
 
-## Co dostajesz
+## Input
 
-`lanes/<TOR>.json` — wycinek katalogu kandydatów intencji, wydobytych z korpusu
-wskazanego w planie (transkrypcje dyktowanego głosu i/lub aicx).
-Każda pozycja ma `quote` — **dosłowny** fragment wypowiedzi, zweryfikowany maszynowo
-jako podciąg pliku źródłowego. Ta kontrola jest leksykalna: nie potwierdza autora,
-projektu ani uprawnienia. Wiersze i ich `kind` to klasyfikacje modelu, także przy
-`decision`. Interpretuj cytaty w kontekście; niewystarczający kontekst opisz w `gap`.
-Aktywne zadanie użytkownika lub plan daje autoryzację wdrożenia, nigdy sam cytat.
+`lanes/<LANE>.json` contains candidate intents extracted from the plan's corpus
+(transcripts and/or aicx). Every `quote` was checked as a verbatim source
+substring. That lexical check establishes neither author, project nor authority.
+Rows and their `kind`, including `decision`, are model classifications.
+Interpret quotes in context; describe insufficient context in `gap`. The active
+user task or plan supplies implementation authorization, never a quote alone.
 
-Pola: `id, date, source, quote, topic, kind, subject, strength, _shard`.
+Fields: `id, date, source, quote, topic, kind, subject, strength, _shard`.
 `kind`: task / constraint / preference / decision / complaint / question.
-`strength` 1–5 — jak mocno wyrażona.
+`strength` 1–5 describes how strongly the source statement was expressed.
 
-## Twoje zadanie
+## Your task
 
-Dla każdej pozycji orzec **jedną dyspozycję** wobec dzisiejszego stanu repo
-`{repo}` — worktree cutu przypięty do baseline planu; ta ścieżka pochodzi z cutu.
+Assign **one disposition** to every row against the current repo `{repo}`: the
+cut's worktree pinned to the plan baseline. This path comes from the cut.
 
-**NIE IMPLEMENTUJESZ NICZEGO.** Zero edycji plików repo. Zero commitów.
-To jest przegląd stanu; wdrożenie jest osobnym krokiem i należy do kogo innego.
-Jedyny plik, który zapisujesz, to swój wynik JSON.
+**DO NOT IMPLEMENT ANYTHING.** Do not edit repo files or commit. This is a state
+review; implementation is a separate step. Write only your output JSON.
 
-### Dyspozycje
+### Dispositions
 
-- `landed` — kod to dziś robi. **Wymaga dowodu**: `plik:linia` albo nazwa symbolu.
-  Bez dowodu nie wolno użyć tej dyspozycji.
-- `partial` — częściowo; napisz w `gap`, czego brakuje.
-- `absent` — brak śladu w kodzie. Też wymaga dowodu — jakiego pytania zadałeś
-  i co zwróciło zero.
-- `superseded` — późniejsza intencja z tego samego toru ją unieważnia.
-  Podaj `superseded_by` (id).
-- `contradiction` — dwie intencje wykluczają się i żadna nie jest późniejsza
-  co do treści. Podaj `conflicts_with` (id).
-- `unclear` — nie da się orzec bez wyjaśnienia kontekstu z użytkownikiem. Sformułuj to pytanie w `gap`.
+- `landed`: the code does this today. **Evidence required**: `path:line` or a symbol.
+- `partial`: partly implemented; describe the missing behavior in `gap`.
+- `absent`: no code trace. Evidence must name the structural question and its empty result.
+- `superseded`: a later intent in the lane replaces it; name `superseded_by` (id).
+- `contradiction`: two intents conflict without a later resolution; name `conflicts_with` (id).
+- `unclear`: source context cannot settle it; put the question for the user in `gap`.
 
-### Schemat wyjścia
+### Output schema
 
-Zapisz tablicę JSON pod ścieżkę podaną w zadaniu:
+Write a JSON array to the assigned path:
 
 ```json
 [
@@ -46,37 +40,33 @@ Zapisz tablicę JSON pod ścieżkę podaną w zadaniu:
     "id": "s5-042",
     "disposition": "partial",
     "evidence": "core/quality/overlay_quality.rs:1004",
-    "gap": "próg działa przy teach, ale nie filtruje wpisów sprzed 2026-08-21"
+    "gap": "The threshold works during teach but does not filter entries before 2026-08-21."
   }
 ]
 ```
 
-`evidence` obowiązkowe dla `landed`, `partial`, `absent`.
-Zachowaj wszystkie `id` ze swojego toru — żadna pozycja nie może wypaść.
+`evidence` is required for `landed`, `partial` and `absent`. Preserve every input
+`id`; no row may disappear. Preserve raw source quotes in their original language.
 
-## Jak pracować — to jest warunek, nie sugestia
+## Structural inspection is required
 
-**loctree-mcp jest pierwszym ruchem, nie ostatnim.** Projekt:
-`project={repo}`
+**loctree-mcp is the first move, not the last.** Use `project={repo}`:
 
-- `context` — atlas na wejściu, raz
-- `find` (mode `symbols` / `where-symbol` / `literal`) — czy symbol/ciąg istnieje
-- `slice <plik>` — zależności i konsumenci przed orzeczeniem o pliku
-- `impact <plik>` — promień rażenia
-- `follow dead` — czy rzecz istnieje, ale jest odcięta od wywołań
+- `context`: one entry map
+- `find` (symbols / where-symbol / literal): does the symbol or string exist?
+- `slice <file>`: dependencies and consumers before a file verdict
+- `impact <file>`: blast radius
+- `follow dead`: does the code exist but have no reachable callers?
 
-Pytanie strukturalne do loctree oszczędza dziesiątki minut grepowania i odpowiada
-na to, na co grep odpowiedzieć nie może: _kto to woła, czy to żyje, co pęknie_.
-`grep`/`rg` są legalne wyłącznie dla literalnego tekstu (komunikaty błędów,
-ścieżki w configach, markdown).
+Structural questions answer who calls it, whether it is reachable and what a
+change affects. `grep`/`rg` are for literal detail such as errors, paths and docs.
 
-**Uwaga na pułapkę tej roboty:** „symbol istnieje" ≠ „funkcja działa". W tym repo
-wielokrotnie zdarzało się, że konsument kontraktu był, a producenta nie było —
-struktura obecna, zachowanie martwe. Zanim orzekniesz `landed`, sprawdź `follow dead`
-albo znajdź miejsce wywołania. Sonda węższa niż twierdzenie to najczęstszy błąd tej pracy.
+**A symbol existing does not prove working behavior.** A consumer may exist
+without a producer. Before `landed`, inspect `follow dead` or find the caller.
+Do not use evidence narrower than the claim.
 
-## Raport końcowy
+## Final report
 
-Po zapisaniu JSON napisz po polsku 8–12 zdań: rozkład dyspozycji, trzy najstarsze
-intencje wciąż `absent` (z datą i cytatem), najpoważniejsza sprzeczność, oraz —
-osobno — czego nie dało się orzec i dlaczego.
+After saving JSON, write 8–12 sentences in English: disposition counts, the
+three oldest `absent` candidates (date and original-language quote), the most
+serious contradiction, and separately what could not be determined and why.

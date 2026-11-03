@@ -1,23 +1,23 @@
-# Intent ledger — schema and continuity contract
+# Rejestr intencji — schemat i kontrakt ciągłości
 
 Przeczytaj, gdy dotykasz ledgera. `scripts/intents_cli.py` jest właścicielem
 schematu: każdy run, host i agent zapisują ten sam kształt. Ręczna edycja JSON
 jest legalna, ale skrypt jest implementacją referencyjną.
 
-## Location
+## Położenie
 
 ```
 ~/.vibecrafted/artifacts/<owner>/<repo>/intents/
-  sweep.json               coverage per source inside the window
-  shards/sNN/              transcript copies for extraction lanes
-  intents.json             candidate catalog (quotes checked lexically)
-  lanes/<lane>.json        confrontation input per lane
-  LEDGER.json              state — schema vc-intents.ledger.v2
-  LEDGER.md                rendered, regenerated on every write
-  overrides.jsonl          append-only reclassification layer
-  replication-report.json  agreement between hosts
+  sweep.json               pokrycie źródeł w oknie
+  shards/sNN/              kopie transkryptów dla torów ekstrakcji
+  intents.json             katalog kandydatów (cytaty sprawdzone leksykalnie)
+  lanes/<lane>.json        wejście konfrontacji według torów
+  LEDGER.json              stan — schemat vc-intents.ledger.v2
+  LEDGER.md                widok generowany po każdym zapisie
+  overrides.jsonl          warstwa reklasyfikacji tylko do dopisywania
+  replication-report.json  zgodność między hostami
   queue.json · STABLE-QUEUE.md
-  intents.html             review surface
+  intents.html             widok przeglądu
 ```
 
 Celowo poza repo: ledger śledzi intencje sprzed checkoutu, między branchami
@@ -27,9 +27,9 @@ Wiersze to kandydaci sklasyfikowani przez model, także przy `kind=decision`.
 Zawieranie cytatu nie potwierdza autora, związku z projektem ani uprawnienia.
 Autoryzację daje aktywne zadanie użytkownika lub plan.
 
-## Record: intent (`LEDGER.json → intents[]`)
+## Rekord: intencja (`LEDGER.json → intents[]`)
 
-| Field                            | Meaning                                                                                                                                                                                                                           |
+| Pole                             | Znaczenie                                                                                                                                                                                                                         |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`                             | Trwały uchwyt `<shard>-NNN`. Bez ponownego użycia i renumeracji — cytują go `after`, `superseded_by`, overrides.                                                                                                                  |
 | `date`, `source`                 | Dzień i plik wypowiedzi (`<YYYY-MM-DD>_<rest>` rozwiązuje się do `<root>/<date>/<rest>` albo układu płaskiego).                                                                                                                   |
@@ -46,14 +46,14 @@ Autoryzację daje aktywne zadanie użytkownika lub plan.
 | `runtime_verified`               | `yes` · `no` · `unknown`. Czy wykonano ścieżkę produktu, nie tylko znaleziono kod. Werdykty floty startują jako `unknown`; zmienia je człowiek albo sonda runtime. `status` pozostaje otwarte, gdy dowolne `landed` nie ma `yes`. |
 | `after`, `risk`, `flow`, `notes` | Dane porządkowania i wolny tekst, zachowane przez `merge`.                                                                                                                                                                        |
 
-## Record: source (`sweep.json → sources[]`)
+## Rekord: źródło (`sweep.json → sources[]`)
 
 `source` (`dir:<path>` lub `aicx`), `state` (`read` · `empty` · `unavailable`),
 `files`/`rows`, `truncated` (aicx raportuje ucięcie korpusu tylko na stderr;
 skrypt przechwytuje i oznacza), `reason` dla `unavailable`. Nieczytelne źródło
 utrzymuje cel otwarty — znana niewiadoma, nie nieobecność.
 
-## Dispositions
+## Dyspozycje
 
 Werdykty floty: `landed` · `partial` · `absent` · `superseded` · `contradiction` · `unclear`.
 Wyprowadzone regułą: `landed-contested` · `landed-by-doc`. Tylko człowiek: `drop`.
@@ -74,7 +74,7 @@ Wyprowadzone regułą: `landed-contested` · `landed-by-doc`. Tylko człowiek: `
 `drop` zapisuje ręczne odrzucenie kandydata: głos modelu wklejony do
 pliku dyktowania, inny projekt, fraza testowa. Zamyka wiersz bez udawania działania kodu.
 
-## `landed` is a lower bound, not a verdict — mechanical reclassification
+## `landed` to dolna granica, nie werdykt — reklasyfikacja mechaniczna
 
 Wynik terenowy 2026-09-19: dwie niezależne floty na dwóch hostach, te same
 wejścia i commit — **43–45% werdyktów `landed` upadło** po dwóch regułach,
@@ -102,9 +102,9 @@ każdego werdyktu. Render pokazuje override i oryginał obok — warstwa, nigdy
 nadpisanie. Tak użytkownik przegląda katalog: wierszem tutaj, nie ręczną zmianą
 pliku werdyktu. Oba warianty `landed-*` **liczą się jako otwarte**.
 
-## Record: source
+## Rekord: źródło
 
-| Field     | Meaning                                                                           |
+| Pole      | Znaczenie                                                                         |
 | --------- | --------------------------------------------------------------------------------- |
 | `session` | Session id lub ścieżka źródła ze sweep.                                           |
 | `state`   | `unread` · `read` · `unavailable`.                                                |
@@ -114,7 +114,7 @@ Każda sesja znaleziona przez sweep ma wiersz. To czyni rozliczone pokrycie źr�
 liczbą audytowalną, nie wrażeniem. Dlatego `unavailable` utrzymuje cel otwarty:
 nieczytelne źródło jest znaną niewiadomą, nie nieobecnością.
 
-## Ordering
+## Kolejność
 
 `queue` stosuje algorytm Kahna na krawędziach `after` dla otwartych actionable
 dispositions (`partial`, `absent`, `landed-contested`, `landed-by-doc`).
@@ -125,34 +125,34 @@ Wchodzą tylko intencje `stable` lub rozstrzygnięte przez człowieka.
 Cykl jest raportowany na stderr po id, a jego elementy nie wchodzą do kolejki.
 To realna informacja: zwykle intencje były nierozdzielne i trzeba połączyć je w jedną.
 
-## Commands
+## Komendy
 
 ```bash
 CLI=~/.claude/skills/vc-intents/scripts/intents_cli.py
 W=~/.vibecrafted/artifacts/<owner>/<repo>/intents
 
-uv run "$CLI" "$W" sweep --since … --until … --source dir:<transcripts> --source aicx --repo <repo>
-uv run "$CLI" "$W" plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
-uv run "$CLI" "$W" verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
-uv run "$CLI" "$W" lanes [--lane NAME=subject,subject …]
-uv run "$CLI" "$W" plan --stage confront --repo <repo> --host <host> --agent 'LANE=agent:model' …
-uv run "$CLI" "$W" merge --verdicts <host>=<dir> [--verdicts <host2>=<dir>] --primary <host> --project <owner>/<repo>
-uv run "$CLI" "$W" reclassify
-uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base <github blob base>
-uv run "$CLI" "$W" decide --import-file decisions.jsonl --by manual-review   # or --id … --to … --reason …
-uv run "$CLI" "$W" queue --min-strength 4
-uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit N --gate '<repo gate>'
-uv run "$CLI" "$W" status      # exit 0 = CLOSED, 1 = OPEN — usable as a gate
+uv run "$CLI" "$W" --lang pl sweep --since … --until … --source dir:<transcripts> --source aicx --repo <repo>
+uv run "$CLI" "$W" --lang pl plan --stage extract --repo <repo> --agent '*=junie:gemini-3.8-flash'
+uv run "$CLI" "$W" --lang pl verify-quotes --extractions "$W/extractions" --transcripts <dir> --strict
+uv run "$CLI" "$W" --lang pl lanes [--lane NAME=subject,subject …]
+uv run "$CLI" "$W" --lang pl plan --stage confront --repo <repo> --host <host> --agent 'LANE=agent:model' …
+uv run "$CLI" "$W" --lang pl merge --verdicts <host>=<dir> [--verdicts <host2>=<dir>] --primary <host> --project <owner>/<repo>
+uv run "$CLI" "$W" --lang pl reclassify
+uv run "$CLI" "$W" --lang pl render --html --transcripts <dir> --blob-base <github blob base>
+uv run "$CLI" "$W" --lang pl decide --import-file decisions.jsonl --by manual-review   # or --id … --to … --reason …
+uv run "$CLI" "$W" --lang pl queue --min-strength 4
+uv run "$CLI" "$W" --lang pl plan --stage implement --repo <repo> --limit N --gate '<repo gate>'
+uv run "$CLI" "$W" --lang pl status      # exit 0 = CLOSED, 1 = OPEN — usable as a gate
 ```
 
 Każda komenda zapisuje pliki i wypisuje ścieżki oraz liczniki, nic dużego na stdout.
 `merge` zachowuje `after`, `risk`, `flow`, `notes`, `runtime_verified` z poprzedniego
 ledgera, więc powtórny merge po ponownym dispatchu toru nie gubi wkładu człowieka.
 
-## Re-entry after a cut or a compaction
+## Powrót po cięciu lub kompakcji
 
-1. `intents_cli.py "$W" status` — stan celu i powód otwarcia.
-2. `intents_cli.py "$W" queue` — czoło `STABLE-QUEUE.md` to następny cut.
+1. `intents_cli.py "$W" --lang pl status` — stan celu i powód otwarcia.
+2. `intents_cli.py "$W" --lang pl queue` — czoło `STABLE-QUEUE.md` to następny cut.
 3. Przeczytaj `LEDGER.md`: cytaty, werdykty i override'y za tą pozycją.
 4. `aicx continuity show -p <owner>/<repo> --hours <N> --for-inject`, jeśli inni
    agenci mogli dotknąć repo od poprzedniej tury.

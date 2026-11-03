@@ -1,16 +1,16 @@
-# Loctree: structural questions that settle an intent
+# Loctree: pytania strukturalne rozstrzygające intencję
 
 Przeczytaj przed fazą 5.
 
-## Contents
+## Spis treści
 
-- [The errata that this file exists for](#the-errata)
-- [Translation table: promise → structural question → call](#translation-table)
-- [The instrument, command by command](#the-instrument)
-- [Inventory prohibitions](#inventory-prohibitions)
-- [When Loctree cannot answer](#when-loctree-cannot-answer)
+- [Sprostowania, dla których istnieje ten plik](#sprostowania)
+- [Tabela przekładu: obietnica → pytanie strukturalne → wywołanie](#tabela-przekładu)
+- [Narzędzie, komenda po komendzie](#narzędzie)
+- [Zakazy inwentaryzacyjne](#zakazy-inwentaryzacyjne)
+- [Gdy Loctree nie potrafi odpowiedzieć](#gdy-loctree-nie-potrafi-odpowiedzieć)
 
-## The errata
+## Sprostowania
 
 > Loctree nie jest grepem i nigdy nie miało nim zostać. Loctree to **struktura**.
 > `loct --help-full` jest drogowskazem: przeczytaj bez ucięcia, zrozum i wypróbuj.
@@ -34,9 +34,9 @@ Dwa rodzaje błędu, którym to zapobiega:
 Narzędzia literalne (`loct find`, `loct occurrences`) zostają w zestawie jako
 warstwa **potwierdzania** po odpowiedzi strukturalnej, nie odkrywania przed nią.
 
-## Translation table
+## Tabela przekładu
 
-| The promise sounds like                        | The structural question                                           | The call                                                                                    |
+| Brzmienie obietnicy                            | Pytanie strukturalne                                              | Wywołanie                                                                                   |
 | ---------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | „X uruchamia się automatycznie / przy starcie” | Czy jest droga od żywego entrypointu do X?                        | `loct follow trace --handler X` · `loct follow pipelines` · `loct query who-imports <file>` |
 | „Y jest konfigurowalne”                        | Czy deklaracja istnieje i kod ją odczytuje?                       | `loct env-truth --name Y` · `loct env-truth --fail-on orphan-code-reference`                |
@@ -53,7 +53,7 @@ warstwa **potwierdzania** po odpowiedzi strukturalnej, nie odkrywania przed nią
 | „symbol S jest właścicielem”                   | Gdzie zdefiniowany, kto importuje, jak wygląda?                   | `loct query where-symbol S` · `loct query who-imports <file>` · `loct body S`               |
 | „identyfikator zniknął”                        | Prawda literalna w indeksowanym zbiorze                           | `loct occurrences <ident> --count-only`                                                     |
 
-## The instrument
+## Narzędzie
 
 Grupy według pytania, na które odpowiadają. `loct <command> --help` zawiera
 wszystkie flagi; `loct --help-full` jest mapą.
@@ -115,7 +115,7 @@ wszystkie flagi; `loct --help-full` jest mapą.
 - `loct prism --task <a> <b>` — ocenia rozmycie pojęć między ujęciami zadania;
   przydatne, gdy dwie intencje mogą oznaczać tę samą rzecz innymi słowami.
 
-## Inventory prohibitions
+## Zakazy inwentaryzacyjne
 
 Zakazy wynikają z wcześniejszych spalonych runów:
 
@@ -131,7 +131,7 @@ Zakazy wynikają z wcześniejszych spalonych runów:
   skrypty, docs) jako `ignored` dla `find` / `slice` / `impact`.
   Skan jest efemeryczny i nie zmienia cache. Użyj, gdy dowód intencji żyje tam.
 
-## When Loctree cannot answer
+## Gdy Loctree nie potrafi odpowiedzieć
 
 Dopisz dokładną awarię do `~/.vibecrafted/loctree/loctree-fail.md`.
 **Append, nigdy overwrite.** Powtórka sygnalizuje lukę, nie duplikat do usunięcia.
@@ -142,13 +142,13 @@ Zachowaj kształt istniejącego pliku — czyni wpis użytecznym, zamiast skarg�
 ```markdown
 ---
 
-## <YYYY-MM-DD> — <one-line title>
+## <YYYY-MM-DD> — <tytuł w jednym wierszu>
 
 - **Repo:** <path>
-- **Command:** `<exact invocation>`
-- **Observed:** <what came back, with counts>
-- **Fallback:** <what you used instead>
-- **Improvement:** <the capability that would have answered it>
+- **Komenda:** `<dokładne wywołanie>`
+- **Zaobserwowano:** <wynik wraz z liczbami>
+- **Narzędzie zastępcze:** <czego użyto zamiast>
+- **Usprawnienie:** <funkcja, która dałaby odpowiedź>
 ```
 
 Potem przejdź do search literalnego i powiedz o tym w raporcie, żeby dowód
