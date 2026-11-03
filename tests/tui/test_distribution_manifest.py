@@ -606,6 +606,55 @@ def test_stage_payload_rejects_symlink_that_escapes_source(tmp_path: Path) -> No
         manifest.stage_payload(source, tmp_path / "payload", mirror=True)
 
 
+def test_stage_payload_omits_dated_theme_backup_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "payload"
+    _minimal_payload(source)
+    outside = tmp_path / "live-theme.kdl"
+    outside.write_text("theme\n", encoding="utf-8")
+    themes = source / "config" / "vc-frame" / "themes"
+    themes.mkdir(parents=True)
+    (themes / "vetcoders-mesh.kdl").write_text("theme\n", encoding="utf-8")
+    backup = themes / "vetcoders-mesh.kdl.bak.20260810_044305"
+    backup.symlink_to(outside)
+    near_miss = themes / "vetcoders-mesh.kdl.bak"
+    near_miss.symlink_to(outside)
+
+    assert manifest.path_is_forbidden(
+        "config/vc-frame/themes/vetcoders-mesh.kdl.bak.20260810_044305"
+    )
+    assert not manifest.path_is_included(
+        "config/vc-frame/themes/vibecrafted-ivory.kdl.bak.20260810_044305"
+    )
+    assert not manifest.path_is_forbidden("config/vc-frame/themes/vetcoders-mesh.kdl")
+    assert not manifest.path_is_forbidden(
+        "config/vc-frame/themes/vetcoders-mesh.kdl.bak"
+    )
+    assert not manifest.path_is_forbidden(
+        "scripts/vetcoders-mesh.kdl.bak.20260810_044305"
+    )
+
+    with pytest.raises(manifest.ManifestError, match="symlink escapes payload"):
+        manifest.stage_payload(source, destination, mirror=True)
+
+    near_miss.unlink()
+    manifest.stage_payload(source, destination, mirror=True)
+
+    staged_backup = (
+        destination
+        / "config"
+        / "vc-frame"
+        / "themes"
+        / "vetcoders-mesh.kdl.bak.20260810_044305"
+    )
+    assert not staged_backup.exists()
+    assert not staged_backup.is_symlink()
+    assert (
+        destination / "config" / "vc-frame" / "themes" / "vetcoders-mesh.kdl"
+    ).is_file()
+    manifest.validate_payload(destination)
+
+
 @pytest.mark.parametrize("relation", ["equal", "ancestor", "descendant"])
 def test_stage_mirror_rejects_path_overlap_and_preserves_sentinel(
     tmp_path: Path, relation: str

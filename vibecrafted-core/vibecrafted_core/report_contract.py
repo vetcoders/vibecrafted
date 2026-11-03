@@ -429,6 +429,7 @@ def render_minimal_frontmatter(
     skill: str,
     status: str,
     extra: Mapping[str, object] | None = None,
+    include_default_finalized: bool = True,
 ) -> str:
     """Canonical minimal block for salvage/fallback writers."""
     data: dict[str, object] = {
@@ -437,10 +438,13 @@ def render_minimal_frontmatter(
         "skill": skill or "unknown",
         "status": status or "completed",
         "claim_status": status or "completed",
-        # The worker must flip this deliberately and add ``claim``. A fallback
-        # or launcher-normalized report never self-finalizes by construction.
-        "finalized": "false",
     }
+    # The worker must flip this deliberately and add ``claim``. A fallback
+    # or launcher-normalized report never self-finalizes by construction.
+    # Re-rendering a legacy worker report passes False so an omitted key
+    # stays omitted instead of becoming an explicit veto.
+    if include_default_finalized:
+        data["finalized"] = "false"
     if extra:
         for key, value in extra.items():
             if value is not None and str(value).strip() != "":
@@ -484,6 +488,7 @@ def _render_frontmatter_fields(fields: Mapping[str, str], body: str) -> str:
         agent=fields.get("agent", ""),
         skill=fields.get("skill", ""),
         status=fields.get("status", "completed"),
+        include_default_finalized="finalized" in fields,
         extra={
             key: value
             for key, value in fields.items()
@@ -617,6 +622,11 @@ def stamp_launcher_report_identity(
         fields = {}
         body = text
 
+    # Authorship is the report as read. The status default below would make
+    # an empty shell look authored, and a legacy report that omits
+    # ``finalized`` must stay key-absent so process evidence is not vetoed.
+    worker_wrote = worker_authored_report(fields, body)
+
     # run_id/session_id are runtime facts, never agent claims. Always replace
     # copied or guessed values. An unavailable child session stays explicit.
     fields["run_id"] = run_id or "unknown"
@@ -636,12 +646,11 @@ def stamp_launcher_report_identity(
         fields["status"] = status or "completed"
     if not fields.get("claim_status"):
         fields["claim_status"] = fields["status"]
-    if "finalized" not in fields:
+    if "finalized" not in fields and not worker_wrote:
         fields["finalized"] = "false"
 
     template_pending = fields.get(_LAUNCHER_TEMPLATE_KEY, "").strip().lower() in _TRUTHY
-    worker_touched = worker_authored_report(fields, body)
-    if template_pending and worker_touched:
+    if template_pending and worker_wrote:
         fields.pop(_LAUNCHER_TEMPLATE_KEY, None)
 
     normalized = _render_frontmatter_fields(fields, body)

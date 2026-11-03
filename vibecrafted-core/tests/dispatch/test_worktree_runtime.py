@@ -190,29 +190,57 @@ def test_simultaneous_same_provider_reports_are_run_id_addressed_and_atomic(
         reserve("run-a")
 
 
-def test_diamond_dag_overlaps_siblings_and_waits_for_join(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    repo = tmp_path / "repo"
-    _repo(repo)
-    dispatch = _dispatch(
+def _diamond_dispatch(repo: Path, *, concurrency: int):
+    return _dispatch(
         repo,
         _cut("a", integrator=True)
         + _cut("b", depends_on=("a",))
         + _cut("c", depends_on=("a",))
         + _cut("d", depends_on=("b", "c"), integrator=True),
-        concurrency=2,
+        concurrency=concurrency,
     )
-    artifact_root = canonical_artifact_root(repo)
-    reports = artifact_root / "reports" / "diamond"
-    reports.mkdir(parents=True)
-    launched: dict[str, float] = {}
-    lock = threading.Lock()
+
+
+def _diamond_launcher(
+    reports: Path,
+    *,
+    overlap_timeout: float,
+    entry_times: dict[str, float],
+):
+    """Launcher double whose sibling proof is presence, not a clock window.
+
+    The second sibling sleeps before it records an entry time, then both wait
+    until each is inside this function. A serial scheduler never reaches the
+    second wait. Core run 41509769072 measured abs(b-c)=0.156s and failed a
+    0.1s proximity check while the children still overlapped.
+    """
+    overlap = threading.Barrier(2)
+    order: list[str] = []
+    order_lock = threading.Lock()
 
     def launcher(cut, _prompt: str, kind: str) -> CellRun:
-        with lock:
-            launched[cut.id] = time.time()
+        if cut.id in {"b", "c"}:
+            with order_lock:
+                order.append(cut.id)
+                position = len(order)
+            if position == 2:
+                time.sleep(0.16)
+            entry_times[cut.id] = time.monotonic()
+            try:
+                overlap.wait(overlap_timeout)
+            except threading.BrokenBarrierError as exc:
+                raise RuntimeError(
+                    "siblings were not inside the launcher together"
+                ) from exc
+        if cut.id == "d":
+            missing = [
+                name for name in ("b", "c") if not (reports / f"{name}.md").is_file()
+            ]
+            if missing:
+                raise RuntimeError(
+                    "join launcher ran before sibling reports existed: "
+                    + ", ".join(missing)
+                )
         report = reports / f"{cut.id}.md"
         delay = 0.04 if cut.id in {"a", "d"} else 0.2
         script = f"sleep {delay}; printf done > {shlex.quote(str(report))}"
@@ -227,25 +255,68 @@ def test_diamond_dag_overlaps_siblings_and_waits_for_join(
             proc=proc,
         )
 
+    return launcher
+
+
+def test_diamond_dag_overlaps_siblings_and_waits_for_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _repo(repo)
+    dispatch = _diamond_dispatch(repo, concurrency=2)
+    artifact_root = canonical_artifact_root(repo)
+    reports = artifact_root / "reports" / "diamond"
+    reports.mkdir(parents=True)
+    entry_times: dict[str, float] = {}
     result = run_dispatch(
         dispatch,
-        launcher=launcher,
+        launcher=_diamond_launcher(
+            reports, overlap_timeout=30, entry_times=entry_times
+        ),
         artifacts_dir=artifact_root / "plans" / "dispatch" / "diamond",
         run_id="diamond",
         manage_worktrees=True,
     )
 
     assert all(state == "[x]" for state in result.states.values())
-    assert abs(launched["b"] - launched["c"]) < 0.1
-    assert launched["d"] >= max(
-        (reports / "b.md").stat().st_mtime, (reports / "c.md").stat().st_mtime
-    )
+    # The old gate rejected this shape. Both launchers were inside together.
+    assert abs(entry_times["b"] - entry_times["c"]) >= 0.1
+    assert (reports / "b.md").is_file()
+    assert (reports / "c.md").is_file()
     receipts = DispatchReceiptStore("diamond", dispatch.cuts, concurrency=2)
     assert receipts.cut("b")["scheduler_slot"] != receipts.cut("c")["scheduler_slot"]
     assert receipts.cut("d")["integrator_exclusivity"] is True
     assert receipts.cut("b")["worktree_path"] != receipts.cut("c")["worktree_path"]
     assert receipts.cut("b")["target_path"].endswith("/b/target")
     assert receipts.cut("c")["target_path"].endswith("/c/target")
+
+
+def test_serial_diamond_does_not_claim_sibling_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _repo(repo)
+    dispatch = _diamond_dispatch(repo, concurrency=1)
+    artifact_root = canonical_artifact_root(repo)
+    reports = artifact_root / "reports" / "diamond-serial"
+    reports.mkdir(parents=True)
+    entry_times: dict[str, float] = {}
+    result = run_dispatch(
+        dispatch,
+        launcher=_diamond_launcher(
+            reports, overlap_timeout=0.4, entry_times=entry_times
+        ),
+        artifacts_dir=artifact_root / "plans" / "dispatch" / "diamond-serial",
+        run_id="diamond-serial",
+        manage_worktrees=True,
+    )
+
+    assert result.states["a"] == "[x]"
+    assert result.states["b"] != "[x]"
+    notes = " ".join(str(cut.get("note") or "") for cut in result.cuts)
+    assert "siblings were not inside the launcher together" in notes
 
 
 def test_typed_cut_permissions_reach_the_provider_and_run_receipt(

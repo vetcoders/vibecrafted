@@ -218,6 +218,9 @@ def _print_completed(run_id: str, payload: dict[str, Any]) -> int:
         if run.get("session_id"):
             print(f"session_id={run['session_id']}")
         code = _completion_exit_code(payload)
+        denial = control_plane._report_denies_success(run)
+        if denial:
+            print(f"run_id={run_id} incomplete; {denial}", file=sys.stderr)
         if code and not control_plane._run_is_terminal(run):
             print(
                 f"run_id={run_id} non-terminal completion disagreement "
@@ -250,6 +253,7 @@ def _completion_exit_code(payload: dict[str, Any]) -> int:
         run.get("state") in SUCCESS_STATES
         and run.get("artifact_ok") is not False
         and not run.get("artifact_errors")
+        and not control_plane._report_denies_success(run)
     ):
         return 0
     return 3

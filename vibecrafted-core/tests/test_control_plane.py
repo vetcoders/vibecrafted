@@ -1642,6 +1642,147 @@ def test_sync_state_heals_repaired_report_contract_to_completed_attention(
         "total_settled": 1,
         "orphans": 0,
     }
+    assert run["operator_state"] == "completed"
+
+
+def _repaired_report_event(
+    home: Path,
+    tmp_path: Path,
+    *,
+    run_id: str,
+    terminal_state: str,
+    report_text: str,
+) -> None:
+    report = tmp_path / f"{run_id}.md"
+    report.write_text(report_text, encoding="utf-8")
+    events = home / "control_plane" / "events.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    events.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-22T14:28:54+00:00",
+                "run_id": run_id,
+                "kind": f"lifecycle:{terminal_state}",
+                "message": "artifact contract failed",
+                "payload": {
+                    "state": terminal_state,
+                    "agent": "codex",
+                    "skill": "implement",
+                    "mode": "implement",
+                    "root": str(tmp_path),
+                    "report": str(report),
+                    "exit_code": 0,
+                    "artifact_ok": False,
+                    "artifact_errors": [
+                        "report_missing"
+                        if terminal_state == "report_missing"
+                        else "report_frontmatter_missing"
+                    ],
+                    "liveness": "terminal",
+                    "recovery_required": True,
+                    "last_error": "report contract still open",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("terminal_state", ["report_invalid", "report_missing"])
+@pytest.mark.parametrize(
+    ("claim_block", "run_suffix"),
+    [
+        ('finalized: false\nclaim: ""\n', "unfinalized"),
+        (
+            'claim_status: completed\nfinalized: true\nclaim: ""\n',
+            "empty-claim",
+        ),
+    ],
+)
+def test_sync_state_does_not_promote_unattested_repaired_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminal_state: str,
+    claim_block: str,
+    run_suffix: str,
+) -> None:
+    """A structurally valid repair is not completion while the claim is open.
+
+    ``_project_run_payload`` heals ``report_invalid`` / ``report_missing``
+    through ``_reconcile_repaired_report_terminal``. That promotion must keep
+    the report veto: ``finalized: false`` or an empty claim leaves the
+    operator state blocked and does not clear recovery.
+    """
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = f"repaired-{run_suffix}"
+    _repaired_report_event(
+        home,
+        tmp_path,
+        run_id=run_id,
+        terminal_state=terminal_state,
+        report_text=(
+            "---\n"
+            f"run_id: {run_id}\n"
+            "agent: codex\n"
+            "skill: implement\n"
+            "status: completed\n"
+            f"{claim_block}"
+            "---\n"
+            "# Structurally valid, not attested\n"
+        ),
+    )
+
+    snapshot = control_plane.sync_state()
+    run = next(item for item in snapshot["recent_runs"] if item["run_id"] == run_id)
+
+    assert run["state"] == terminal_state
+    assert run["operator_state"] == "blocked"
+    assert run["artifact_ok"] is False
+    assert run.get("recovery_required") is True
+    assert run["lifecycle"]["recovery_required"] is True
+    assert "report contract still open" in str(run.get("last_error") or "")
+    assert run["failure_card"] is not None
+
+
+@pytest.mark.parametrize("terminal_state", ["report_invalid", "report_missing"])
+def test_sync_state_promotes_finalized_repaired_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_state: str
+) -> None:
+    """A repaired report that actually attests completion may still heal."""
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "repaired-attested"
+    _repaired_report_event(
+        home,
+        tmp_path,
+        run_id=run_id,
+        terminal_state=terminal_state,
+        report_text=(
+            "---\n"
+            f"run_id: {run_id}\n"
+            "agent: codex\n"
+            "skill: implement\n"
+            "status: completed\n"
+            "claim_status: completed\n"
+            "finalized: true\n"
+            "claim: shipped the bounded cut\n"
+            "---\n"
+            "# Attested handoff\n"
+        ),
+    )
+
+    snapshot = control_plane.sync_state()
+    run = next(item for item in snapshot["recent_runs"] if item["run_id"] == run_id)
+
+    assert run["state"] == "completed"
+    assert run["operator_state"] == "completed"
+    assert run["artifact_ok"] is True
+    assert run["artifact_errors"] == []
+    assert run["lifecycle"]["recovery_required"] is False
+    assert not str(run.get("last_error") or "").strip()
+    assert run["failure_card"] is None
 
 
 def test_sync_state_refuses_report_repair_from_another_run(
