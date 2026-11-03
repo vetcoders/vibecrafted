@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart TD
-    A[/vc-intents — 'co obiecaliśmy i nie dowieźliśmy?' + window/] --> B[vc-init: repo truth]
+    A[/vc-intents — 'what did we promise but not deliver?' + window/] --> B[vc-init: repo truth]
     B --> C[0 · identity: aicx intents -p /repo; newest intent vs newest commit]
     C --> D[1 · sweep: transcript dirs + aicx inside the window → coverage, shards]
     D --> E[2 · plan --stage extract → vc-dispatch fleet reads shards]

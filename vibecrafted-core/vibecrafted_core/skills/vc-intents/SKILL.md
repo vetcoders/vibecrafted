@@ -5,8 +5,8 @@ description: >
   Find candidate intents in source material for one repository inside a chosen window, settle
   every one of them against the live code with two independent fleets, and hand
   back a stable, dependency-ordered plan of cuts for vc-dispatch. Use whenever
-  the team asks "zbierz intencje", "rozlicz intencje", "co wynika ze źródeł",
-  "co obiecaliśmy i nie dowieźliśmy", "co z planu siedzi w kodzie", "what did we
+  the team asks "collect intents", "reconcile intents", "what do the sources establish",
+  "what did we promise but not deliver", "which planned work exists in code", "what did we
   agree to build", "what is still owed", "intent coverage", "planned vs code",
   "highest truth", "checklist from intents" — or when scattered decisions from
   transcripts and sessions must become an implementation queue that survives

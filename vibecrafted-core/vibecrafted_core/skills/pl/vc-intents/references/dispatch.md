@@ -25,7 +25,7 @@ vibecrafted <skill> <agent> --prompt '<brief>'
 vibecrafted <skill> <agent> --file  '/path/to/brief.md'
 
 # Fork — odgałęzia TĘ sesję; sesja źródłowa pozostaje bez zmian
-vibecrafted fork claude --session current -p '<what this branch should chase>'
+vibecrafted fork claude --session current -p '<co ma rozstrzygnąć to odgałęzienie>'
 vibecrafted fork codex  --session current --runtime headless --file <plan.md>
 vc-fork grok --session <provider-session-id> --placement floating -p '<...>'
 ```

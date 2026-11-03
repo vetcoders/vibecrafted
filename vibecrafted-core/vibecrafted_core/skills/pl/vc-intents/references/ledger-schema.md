@@ -91,7 +91,7 @@ Stosuj obie **przed** liczeniem zamkniętych spraw. Zachowaj oryginalny werdykt
 floty i zapisz reklasyfikację osobno:
 
 ```
-overrides.jsonl   # one JSON object per line, append-only
+overrides.jsonl   # jeden obiekt JSON na wiersz, tylko dopisywanie
 {"id":"s4-017","host":"host-a","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
 {"id":"s2-052","host":"*","from":"landed","to":"absent","by":"manual-review","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
 ```
@@ -139,10 +139,10 @@ uv run "$CLI" "$W" --lang pl plan --stage confront --repo <repo> --host <host> -
 uv run "$CLI" "$W" --lang pl merge --verdicts <host>=<dir> [--verdicts <host2>=<dir>] --primary <host> --project <owner>/<repo>
 uv run "$CLI" "$W" --lang pl reclassify
 uv run "$CLI" "$W" --lang pl render --html --transcripts <dir> --blob-base <github blob base>
-uv run "$CLI" "$W" --lang pl decide --import-file decisions.jsonl --by manual-review   # or --id … --to … --reason …
+uv run "$CLI" "$W" --lang pl decide --import-file decisions.jsonl --by manual-review   # albo --id … --to … --reason …
 uv run "$CLI" "$W" --lang pl queue --min-strength 4
-uv run "$CLI" "$W" --lang pl plan --stage implement --repo <repo> --limit N --gate '<repo gate>'
-uv run "$CLI" "$W" --lang pl status      # exit 0 = CLOSED, 1 = OPEN — usable as a gate
+uv run "$CLI" "$W" --lang pl plan --stage implement --repo <repo> --limit N --gate '<bramka repo>'
+uv run "$CLI" "$W" --lang pl status      # kod wyjścia 0 = CLOSED, 1 = OPEN — można użyć jako bramki
 ```
 
 Każda komenda zapisuje pliki i wypisuje ścieżki oraz liczniki, nic dużego na stdout.
