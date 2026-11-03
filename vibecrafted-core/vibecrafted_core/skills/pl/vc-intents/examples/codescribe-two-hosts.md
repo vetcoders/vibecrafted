@@ -23,8 +23,8 @@
    dotarł na host-b, 218 intencji bez drugiego werdyktu, raportowane na stderr.
 6. `reclassify` → +410 override'ów, 43 % host-level `landed` spadło przez dwie reguły.
 7. `render --html --transcripts … --blob-base https://github.com/vetcoders/codescribe/blob/<sha>/`
-   → Founder filtruje „W kodzie, Founder: nie działa” (126), decyduje, eksportuje
-   `decisions.jsonl` → `decide --import-file decisions.jsonl --by founder`.
+   → użytkownik filtruje „W kodzie, skarga w źródle” (126), decyduje, eksportuje
+   `decisions.jsonl` → `decide --import-file decisions.jsonl --by manual-review`.
 8. `queue --min-strength 4` → 199 stabilnych otwartych intencji → `plan --stage implement
 --limit 6 --gate 'cd {repo} && make check'` → doctor czysty → handoff.
 
@@ -32,10 +32,10 @@
 
 - `<workdir>/LEDGER.json` z `hosts: ["host-a","host-b"]`, `replication-report.json`
   z liczbą `agreement` dla każdej pary
-- `<workdir>/overrides.jsonl` z wierszami `by: rule` i co najmniej jednym `by: founder`
+- `<workdir>/overrides.jsonl` z wierszami `by: rule` i co najmniej jednym `by: manual-review`
 - `intents-implement.host-a.dispatch.toml` przechodzący `vibecrafted dispatch --doctor --json`
 - `status` exit 1 z nazwanymi powodami (otwarte dispositions, `runtime_verified != yes`)
-- Najwyższa prawda w raporcie: „43 % `landed` podważają własne słowa Foundera;
+- Najwyższa prawda w raporcie: „43 % `landed` podważają skargi w źródłach;
   runtime_verified jest `unknown` dla wszystkich 974 — żadna flota nie uruchomiła produktu”.
 
 ## Notes

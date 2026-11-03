@@ -23,8 +23,8 @@
    delivered on host-b, 218 intents without a second verdict, reported on stderr.
 6. `reclassify` → +410 overrides, 43 % of host-level `landed` fell to the two rules.
 7. `render --html --transcripts … --blob-base https://github.com/vetcoders/codescribe/blob/<sha>/`
-   → the Founder filters "W kodzie, Founder: nie działa" (126), decides, exports
-   `decisions.jsonl` → `decide --import-file decisions.jsonl --by founder`.
+   → the user filters "W kodzie, skarga w źródle" (126), decides, exports
+   `decisions.jsonl` → `decide --import-file decisions.jsonl --by manual-review`.
 8. `queue --min-strength 4` → 199 stable open intents → `plan --stage implement
 --limit 6 --gate 'cd {repo} && make check'` → doctor clean → handoff.
 
@@ -32,10 +32,10 @@
 
 - `<workdir>/LEDGER.json` with `hosts: ["host-a","host-b"]`, `replication-report.json`
   with an `agreement` number per pair
-- `<workdir>/overrides.jsonl` with `by: rule` rows and at least one `by: founder` row
+- `<workdir>/overrides.jsonl` with `by: rule` rows and at least one `by: manual-review` row
 - `intents-implement.host-a.dispatch.toml` passing `vibecrafted dispatch --doctor --json`
 - `status` exit 1 with named reasons (open dispositions, `runtime_verified != yes`)
-- Highest truth in the report: "43 % of `landed` is contested by the Founder's own words;
+- Highest truth in the report: "43 % of `landed` is contested by source complaints;
   runtime_verified is `unknown` for all 974 — no fleet ran the product."
 
 ## Notes

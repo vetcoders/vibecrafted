@@ -1,10 +1,10 @@
-# Review surface — the page the Founder edits
+# Review surface — the page the user reviews
 
 `intents_cli.py <workdir> render --html` fills `assets/intents.html` with the
 ledger and writes `<workdir>/intents.html`. It is a single file: data inline,
-no server, opens from disk. The Founder asked for the _procedure_, not the HTML —
-"HTML jest najmniej ważny" — so the page is a view of `LEDGER.json`, never a
-second source of truth.
+no server, opens from disk. The page is a view of `LEDGER.json`, never a second
+source of truth. Rows and their kinds are model classifications; a quote alone
+does not establish its author, target project or permission to implement it.
 
 ## What the page shows
 
@@ -18,22 +18,21 @@ second source of truth.
   kind, subject, free text; sort by date, strength, id. Keyboard: ↑/↓, Esc.
 - Header counts by effective disposition; "przejrzane N/total".
 
-## What the Founder does
+## Manual review
 
 Per intent: **✓ agrees** · **↺ reclassifies** (pick a disposition) · **✕ drops**
-(false lead, model voice, not this project) · comment. The Founder asked for
-exactly this: "chciałbym móc usunąć / zmienić", like `false positive` and
-`Critical → Medium` in Screenscribe. The review is one filter at a time, not the
-whole catalog: `landed-contested` first (only the Founder knows whether it
-works), then `partial` with strength 5.
+(false lead, model voice, not this project) · comment. Review one filter at a
+time: `landed-contested` first (check the runtime path and source context), then
+`partial` with strength 5. Manual review changes the ledger; implementation
+authorization comes from the active user task or plan.
 
 ## How decisions come back
 
 The file is the canon; the page has two transports:
 
-1. **Local file** — "Eksportuj decyzje (JSONL)" shows the lines; the Founder
+1. **Local file** — "Eksportuj decyzje (JSONL)" shows the lines; the user
    saves them as `decisions.jsonl` and runs
-   `intents_cli.py <workdir> decide --import-file decisions.jsonl --by founder`.
+   `intents_cli.py <workdir> decide --import-file decisions.jsonl --by manual-review`.
    Nothing depends on a vendor.
 2. **claude.ai artifact** — published with `capabilities: {db: {}, downloads:
 true, user: {}}`, the same page saves each decision to the collection
@@ -50,7 +49,7 @@ Either way the result is a row in `overrides.jsonl`:
   "from": "landed",
   "to": "absent",
   "verdict": "wrong",
-  "by": "founder",
+  "by": "manual-review",
   "reason": "double control nie działa na drugiej maszynie",
   "at": "2026-09-19"
 }

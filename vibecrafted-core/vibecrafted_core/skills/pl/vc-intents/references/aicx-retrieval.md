@@ -75,8 +75,8 @@ Przydatne modyfikatory:
 - `--session <id>` — search _wewnątrz_ sesji zamiast rankingu sesji.
   `--literal` daje dokładne granice identyfikatora, `--context N` poszerza okno.
   To właściwe narzędzie do „gdzie w tej rozmowie to powiedzieli”.
-- `--dialog` — renderuje opóźnioną ludzką mowę z sealami; pomocne, gdy słowa
-  Foundera z kolejki wyglądają jak wynik narzędzia.
+- `--dialog` — renderuje opóźnioną ludzką mowę z sealami; pomocne, gdy wypowiedzi
+  źródłowe z kolejki wyglądają jak wynik narzędzia.
 - `--result head=N|full` — rozwija ciało trafień `tool_call`, domyślnie skróconych.
 - `--kind conversations|plans|reports|other` — rodzaj indeksowanego dokumentu.
 
@@ -86,7 +86,7 @@ Dotyczą obu komend, chyba że zaznaczono inaczej.
 
 | Filter                                          | What it buys you in an intent hunt                                                                                                                                                                             |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--frame-kind user_msg`                         | **Własne słowa Foundera.** Główny filtr głosu; uwaga niżej: na `search` zwraca zero.                                                                                                                           |
+| `--frame-kind user_msg`                         | **Ramki wiadomości użytkownika; mogą zawierać cytaty i wklejony tekst.** Filtr pobierania, nie dowód tożsamości autora; uwaga niżej: na `search` zwraca zero.                                                  |
 | `--frame-kind agent_reply` / `internal_thought` | Propozycje i rozumowanie agenta — kandydaci, nigdy wymagania.                                                                                                                                                  |
 | `--frame-kind tool_call`                        | Ślady wykonania — cel audytu, nie dowód dostarczenia.                                                                                                                                                          |
 | `--kind decision\|intent\|outcome\|task`        | (intents) Typ wpisu; w `decision` żyją zmiany zdania.                                                                                                                                                          |
@@ -104,7 +104,7 @@ Dotyczą obu komend, chyba że zaznaczono inaczej.
 ## Voice separation
 
 Pipeline torów istnieje, bo twierdzenia agentów o ukończeniu trafiają do tego
-samego transkryptu co wymagania Foundera.
+samego transkryptu co kandydaci wymagań ze źródeł.
 
 ```bash
 aicx sessions report <session-id> --repo "$PWD" --format markdown
@@ -188,5 +188,6 @@ każde typowane twierdzenie, zachowując trwałe intent ids.
   `per_section_limit: 2000` w nagłówku. Raport pozornie ograniczony do 20
   pochodzi z innego wywołania, nie twardego limitu.
 - **`--collapse-session` ukrywa zmiany zdania.** Dwie zmiany w sesji zwijają się do jednej pozycji.
-- **Wysoki score podsumowania agenta nie jest wymaganiem Foundera.**
-  Score mierzy dopasowanie, nie autorytet. Głos określa `--frame-kind`, nigdy ranking.
+- **Wysoki score podsumowania agenta nie jest udowodnionym wymaganiem użytkownika.**
+  Score mierzy dopasowanie, nie autorytet. `--frame-kind` wybiera role ramek;
+  autorstwo i intencja nadal wymagają kontekstu źródła.

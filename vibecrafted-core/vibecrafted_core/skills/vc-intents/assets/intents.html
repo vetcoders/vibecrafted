@@ -150,7 +150,7 @@ const BASE = '__REPO_BLOB_BASE__';
 const HOST0 = '__HOST0__', HOST1 = '__HOST1__';
 const DISP = {
   'landed':['Wdrożone','c-landed'],'partial':['Częściowo','c-partial'],'absent':['Brak w kodzie','c-absent'],
-  'landed-contested':['W kodzie, Founder: nie działa','c-contested'],'landed-by-doc':['Tylko w dokumencie','c-bydoc'],
+  'landed-contested':['W kodzie, skarga w źródle','c-contested'],'landed-by-doc':['Tylko w dokumencie','c-bydoc'],
   'superseded':['Zastąpione późniejszą decyzją','c-superseded'],'unclear':['Niejasne','c-unclear'],'contradiction':['Sprzeczność','c-contradiction'],
   'drop':['Do usunięcia (fałszywy trop)','c-none']
 };
@@ -278,6 +278,7 @@ function select(id){
     <div class="dtop"><div><h2>${esc(d.topic)}</h2>
       <div class="meta"><span class="mono">${d.id}</span><span>${d.date}</span><span>${esc(d.subject)}</span><span>${KIND[d.kind]||d.kind}</span><span>siła ${d.strength}/5</span>${d.stable?'<span title="oba hosty zgodne, siła ≥ 4">stabilne</span>':''}</div></div>
       <button class="x" title="zamknij (Esc)" data-close>×</button></div>
+    <p class="saved">Klasyfikacja modelu · cytat nie ustala autora, projektu ani uprawnienia do wdrożenia.</p>
     <blockquote>${esc(d.quote)}</blockquote>
     <details><summary>Szerszy wycinek transkrypcji · <span class="mono">${esc(d.src)}</span></summary><div class="ctx">${ctxHtml(d)}</div></details>
     <div class="hostcards">
@@ -319,12 +320,12 @@ async function deleteDecision(id,msg){
   if(!db){delete decisions[id];apply();select(id);return}
   try{await db.doc('decisions/'+id).delete();msg.textContent='cofnięte'}catch(e){msg.textContent='nie udało się: '+(e&&e.code||e)}
 }
-function exportLines(){return Object.entries(decisions).map(([id,r])=>JSON.stringify({id,host:'*',from:r.from_div0||r.from||null,to:r.disposition,verdict:r.verdict||null,by:'founder',reason:r.note||'',at:r.at||new Date().toISOString()}))}
-function exportLocal(){const el=document.getElementById('detail');const c=document.getElementById('content');c.classList.add('open');el.classList.add('has');const txt=exportLines().join('\n');el.innerHTML=`<div class="dwrap"><div class="dtop"><h2>Eksport decyzji</h2><button class="x" data-close>×</button></div><p class="saved">${Object.keys(decisions).length} decyzji. Skopiuj do pliku <span class="mono">decisions.jsonl</span> i wczytaj: <span class="mono">intents_cli.py &lt;workdir&gt; decide --import-file decisions.jsonl --by founder</span></p><textarea id="exp" style="min-height:320px" readonly>${esc(txt)}</textarea><div class="actions"><button class="primary" id="cp">Kopiuj</button><span class="saved" id="cpmsg"></span></div></div>`;el.querySelector('[data-close]').onclick=()=>select(null);el.querySelector('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(txt);el.querySelector('#cpmsg').textContent='skopiowane'}catch(e){el.querySelector('#exp').select();el.querySelector('#cpmsg').textContent='zaznaczone — Cmd+C'}}}
+function exportLines(){return Object.entries(decisions).map(([id,r])=>JSON.stringify({id,host:'*',from:r.from_div0||r.from||null,to:r.disposition,verdict:r.verdict||null,by:'manual-review',reason:r.note||'',at:r.at||new Date().toISOString()}))}
+function exportLocal(){const el=document.getElementById('detail');const c=document.getElementById('content');c.classList.add('open');el.classList.add('has');const txt=exportLines().join('\n');el.innerHTML=`<div class="dwrap"><div class="dtop"><h2>Eksport decyzji</h2><button class="x" data-close>×</button></div><p class="saved">${Object.keys(decisions).length} decyzji. Skopiuj do pliku <span class="mono">decisions.jsonl</span> i wczytaj: <span class="mono">intents_cli.py &lt;workdir&gt; decide --import-file decisions.jsonl --by manual-review</span></p><textarea id="exp" style="min-height:320px" readonly>${esc(txt)}</textarea><div class="actions"><button class="primary" id="cp">Kopiuj</button><span class="saved" id="cpmsg"></span></div></div>`;el.querySelector('[data-close]').onclick=()=>select(null);el.querySelector('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(txt);el.querySelector('#cpmsg').textContent='skopiowane'}catch(e){el.querySelector('#exp').select();el.querySelector('#cpmsg').textContent='zaznaczone — Cmd+C'}}}
 function setDbState(t){document.getElementById('dbstate').textContent=t}
 async function boot(){
   buildFilters();apply();if(selected)select(selected);
-  document.getElementById('sub').textContent=`${DATA.length} wypowiedzi Foundera · hosty ${HOST0}${HOST1&&HOST1!=='—'?' / '+HOST1:''} · linki do kodu ${BASE?'pod commitem bazowym':'wyłączone'}`;
+  document.getElementById('sub').textContent=`${DATA.length} kandydatów z korpusu · hosty ${HOST0}${HOST1&&HOST1!=='—'?' / '+HOST1:''} · linki do kodu ${BASE?'pod commitem bazowym':'wyłączone'}`;
   document.getElementById('hosthdr').textContent=HOST1&&HOST1!=='—'?`${HOST0} / ${HOST1}`:HOST0;
   if(!window.claude||!window.claude.use){setDbState('Plik lokalny: decyzje zostają w tej karcie. Eksportuj je przyciskiem i wczytaj: intents_cli.py <workdir> decide --import-file.');const b=document.getElementById('dl');b.hidden=false;b.textContent='Eksportuj decyzje (JSONL)';b.onclick=()=>exportLocal();return}
   const [_db,_dl,_user]=await Promise.all([claude.use('db'),claude.use('downloads'),claude.use('user')]);
@@ -340,7 +341,7 @@ async function boot(){
   });
   if(dlcap){const b=document.getElementById('dl');b.hidden=false;b.onclick=async()=>{
     const lines=exportLines();
-    try{await dlcap.save({filename:'overrides.founder.jsonl',data:lines.join('\n')+'\n'})}catch(e){}
+    try{await dlcap.save({filename:'overrides.manual-review.jsonl',data:lines.join('\n')+'\n'})}catch(e){}
   }}
 }
 boot();

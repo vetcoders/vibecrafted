@@ -1,9 +1,10 @@
-# Review surface — the page the Founder edits
+# Review surface — the page the user reviews
 
 `intents_cli.py <workdir> render --html` wypełnia `assets/intents.html` ledgerem
 i zapisuje `<workdir>/intents.html`. Jeden plik, dane inline, bez serwera,
-otwierany z dysku. Founder prosił o _procedurę_, nie HTML — „HTML jest najmniej
-ważny” — strona jest więc widokiem `LEDGER.json`, nigdy drugim źródłem prawdy.
+otwierany z dysku. Strona jest widokiem `LEDGER.json`, nigdy drugim źródłem prawdy.
+Wiersze i ich rodzaje to klasyfikacje modelu; sam cytat nie potwierdza autora,
+projektu ani uprawnienia do wdrożenia.
 
 ## What the page shows
 
@@ -17,22 +18,21 @@ ważny” — strona jest więc widokiem `LEDGER.json`, nigdy drugim źródłem 
   kind, subject, tekst; sortowanie po date, strength, id. Klawisze: ↑/↓, Esc.
 - Liczniki w nagłówku według efektywnej klasyfikacji; „przejrzane N/total”.
 
-## What the Founder does
+## Manual review
 
 Dla intencji: **✓ zgadza się** · **↺ zmienia klasyfikację** (wybiera disposition)
 · **✕ odrzuca** (fałszywy trop, głos modelu, inny projekt) · komentarz.
-Founder poprosił dokładnie o to: „chciałbym móc usunąć / zmienić”, jak
-`false positive` i `Critical → Medium` w Screenscribe. Review po jednym filtrze,
-nie całego katalogu: najpierw `landed-contested` (tylko Founder wie, czy działa),
-potem `partial` ze strength 5.
+Przeglądaj po jednym filtrze: najpierw `landed-contested` (sprawdź ścieżkę runtime
+i kontekst źródła), potem `partial` ze strength 5. Przegląd zmienia ledger;
+autoryzację wdrożenia daje aktywne zadanie użytkownika lub plan.
 
 ## How decisions come back
 
 Plik jest kanonem; strona ma dwa transporty:
 
-1. **Plik lokalny** — „Eksportuj decyzje (JSONL)” pokazuje wiersze; Founder
+1. **Plik lokalny** — „Eksportuj decyzje (JSONL)” pokazuje wiersze; użytkownik
    zapisuje `decisions.jsonl` i uruchamia
-   `intents_cli.py <workdir> decide --import-file decisions.jsonl --by founder`.
+   `intents_cli.py <workdir> decide --import-file decisions.jsonl --by manual-review`.
    Nic nie zależy od vendora.
 2. **Artefakt claude.ai** — publikowany z `capabilities: {db: {}, downloads:
 true, user: {}}`; ta sama strona zapisuje każdą decyzję na żywo do kolekcji
@@ -49,7 +49,7 @@ W obu wariantach wynikiem jest wiersz w `overrides.jsonl`:
   "from": "landed",
   "to": "absent",
   "verdict": "wrong",
-  "by": "founder",
+  "by": "manual-review",
   "reason": "double control nie działa na drugiej maszynie",
   "at": "2026-09-19"
 }
