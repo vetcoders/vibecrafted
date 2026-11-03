@@ -626,6 +626,229 @@ def test_vc_run_launch_alias_delegates_to_core_workflow(
     assert calls["env_home"] == str(tmp_path / "home")
 
 
+@pytest.mark.parametrize("tool_name", ["vc_launch", "vc_run_launch"])
+def test_launch_schema_exposes_optional_model_and_worktree(tool_name: str) -> None:
+    from fastmcp import Client
+
+    async def inspect() -> Any:
+        async with Client(server.build_server()) as client:
+            return {tool.name: tool for tool in await client.list_tools()}
+
+    schema = _run(inspect())[tool_name].inputSchema
+    properties = schema["properties"]
+    assert properties["model"]["type"] == "string"
+    assert properties["model"]["default"] == ""
+    assert properties["worktree"]["default"] is None
+    assert {item["type"] for item in properties["worktree"]["anyOf"]} == {
+        "boolean",
+        "null",
+    }
+    assert not {"model", "worktree"}.intersection(schema.get("required", []))
+
+
+@pytest.mark.parametrize("tool_name", ["vc_launch", "vc_run_launch"])
+@pytest.mark.parametrize(
+    "overrides,expected_model,expected_worktree",
+    [
+        ({"model": "requested-model", "worktree": True}, "requested-model", True),
+        ({"worktree": False}, "configured-model", False),
+        ({"worktree": None}, "configured-model", False),
+        ({}, "configured-model", False),
+        ({"model": ""}, "configured-model", False),
+    ],
+)
+def test_launch_optional_controls_reach_canonical_normalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    overrides: dict[str, Any],
+    expected_model: str,
+    expected_worktree: bool,
+) -> None:
+    from fastmcp import Client
+
+    root, source = tmp_path / "repo", tmp_path / "source"
+    root.mkdir()
+    source.mkdir()
+    brief = tmp_path / "brief.md"
+    brief.write_text("A hermetic launch request.\n", encoding="utf-8")
+    home = str(tmp_path / "home")
+    previous_home = os.environ.get("VIBECRAFTED_HOME")
+    captured: dict[str, Any] = {}
+    normalize = server._workflow.normalize_launch_spec
+    monkeypatch.setattr(
+        server._workflow,
+        "load_agent_launch_config",
+        lambda agent: server._workflow.AgentLaunchConfig(model="configured-model"),
+    )
+
+    def storage() -> None:
+        assert os.environ["VIBECRAFTED_HOME"] == home
+
+    def normalize_and_capture(payload: dict[str, Any], source_dir: str) -> Any:
+        captured["payload"] = dict(payload)
+        captured["normalization_source"] = source_dir
+        return normalize(payload, source_dir)
+
+    def launch(spec: Any, source_dir: str, *, env: dict[str, str]) -> dict[str, Any]:
+        # Admission is real; process/worktree creation is deliberately mocked.
+        captured["spec"] = spec
+        captured["launch_source"] = source_dir
+        assert env["VIBECRAFTED_HOME"] == home
+        return {
+            "accepted": True,
+            "run_id": "model-worktree",
+            "report": "stub/report.md",
+        }
+
+    monkeypatch.setattr(server._control_plane, "ensure_launch_storage", storage)
+    monkeypatch.setattr(
+        server._workflow, "normalize_launch_spec", normalize_and_capture
+    )
+    monkeypatch.setattr(server._workflow, "launch_workflow", launch)
+    arguments = {
+        "skill": "implement",
+        "agent": "codex",
+        "prompt": "bounded prompt",
+        "file": str(brief),
+        "runtime": "headless",
+        "root": str(root),
+        "source_dir": str(source),
+        "mode": "consumer-mode",
+        "home": home,
+        **overrides,
+    }
+
+    async def call() -> Any:
+        async with Client(server.build_server()) as client:
+            return await client.call_tool(tool_name, arguments)
+
+    result = _run(call()).data
+    assert result == {
+        "accepted": True,
+        "run_id": "model-worktree",
+        "report": "stub/report.md",
+    }
+    payload = captured["payload"]
+    assert payload == {
+        "skill": "implement",
+        "agent": "codex",
+        "prompt": "bounded prompt",
+        "file": str(brief),
+        "runtime": "headless",
+        "root": str(root),
+        "mode": "consumer-mode",
+        **({"model": overrides["model"]} if overrides.get("model") else {}),
+        **(
+            {"worktree": overrides["worktree"]}
+            if overrides.get("worktree") is not None
+            else {}
+        ),
+    }
+    spec = captured["spec"]
+    assert spec.model == expected_model
+    assert spec.model_source == ("cli" if overrides.get("model") else "config.toml")
+    assert spec.worktree is expected_worktree
+    assert spec.runtime_class == (
+        "local-worktrees" if expected_worktree else "living-tree"
+    )
+    assert spec.mode == "consumer-mode"
+    assert spec.agent == "codex"
+    assert spec.prompt == "bounded prompt"
+    assert spec.file == str(brief)
+    assert spec.root == str(root)
+    assert spec.runtime == "headless"
+    assert captured["normalization_source"] == str(source)
+    assert captured["launch_source"] == str(source)
+    assert os.environ.get("VIBECRAFTED_HOME") == previous_home
+
+
+@pytest.mark.parametrize("tool_name", ["vc_launch", "vc_run_launch"])
+@pytest.mark.parametrize(
+    "override,message",
+    [
+        ({"model": " invalid "}, "CLI model must be a non-empty provider identifier"),
+        ({"agent": "unsupported-provider"}, "Unsupported agent"),
+    ],
+)
+def test_launch_optional_controls_keep_core_refusals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    override: dict[str, Any],
+    message: str,
+) -> None:
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+
+    monkeypatch.setattr(server._control_plane, "ensure_launch_storage", lambda: None)
+    monkeypatch.setattr(
+        server._workflow,
+        "load_agent_launch_config",
+        lambda agent: server._workflow.AgentLaunchConfig(),
+    )
+    monkeypatch.setattr(
+        server._workflow,
+        "launch_workflow",
+        lambda *a, **k: pytest.fail("core refusal must precede process creation"),
+    )
+
+    async def call() -> Any:
+        async with Client(server.build_server()) as client:
+            return await client.call_tool(
+                tool_name,
+                {
+                    "skill": "implement",
+                    "agent": "codex",
+                    "prompt": "bounded prompt",
+                    "root": str(tmp_path),
+                    "home": str(tmp_path / "home"),
+                    "worktree": True,
+                    **override,
+                },
+            )
+
+    with pytest.raises(ToolError, match=message):
+        _run(call())
+
+
+@pytest.mark.parametrize("tool_name", ["vc_launch", "vc_run_launch"])
+def test_launch_optional_controls_keep_storage_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    from fastmcp import Client
+
+    def refuse() -> None:
+        raise server._control_plane.ControlPlaneStorageError("storage unavailable")
+
+    monkeypatch.setattr(server._control_plane, "ensure_launch_storage", refuse)
+    monkeypatch.setattr(
+        server._workflow,
+        "normalize_launch_spec",
+        lambda *a, **k: pytest.fail("storage refusal must precede normalization"),
+    )
+
+    async def call() -> Any:
+        async with Client(server.build_server()) as client:
+            return await client.call_tool(
+                tool_name,
+                {
+                    "prompt": "bounded prompt",
+                    "model": "requested-model",
+                    "worktree": True,
+                    "home": str(tmp_path / "home"),
+                },
+            )
+
+    assert _run(call()).data == {
+        "ok": False,
+        "status": "refused",
+        "error": "storage unavailable",
+    }
+
+
 def test_vc_repo_full_returns_ground_truth(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1176,8 +1399,9 @@ def test_lifecycle_schema_resource_returns_packaged_contract() -> None:
 
 
 @pytest.mark.parametrize("exit_code", [0, 9])
+@pytest.mark.parametrize("tool_name", ["vc_launch", "vc_run_launch"])
 def test_run_launch_await_completion_keeps_receipt_and_verdict(
-    tmp_path, monkeypatch, exit_code
+    tmp_path, monkeypatch, exit_code, tool_name
 ):
     from fastmcp import Client
     from vibecrafted_core import control_plane
@@ -1211,7 +1435,7 @@ def test_run_launch_await_completion_keeps_receipt_and_verdict(
     async def call():
         async with Client(server.build_server()) as client:
             return await client.call_tool(
-                "vc_run_launch",
+                tool_name,
                 {
                     "agent": "codex",
                     "skill": "implement",
