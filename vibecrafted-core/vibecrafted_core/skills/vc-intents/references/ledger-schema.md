@@ -10,7 +10,7 @@ the JSON is legal but the script is the reference implementation.
 ~/.vibecrafted/artifacts/<owner>/<repo>/intents/
   sweep.json               coverage per source inside the window
   shards/sNN/              transcript copies for extraction lanes
-  intents.json             verified catalog (verbatim quotes)
+  intents.json             candidate catalog (quotes checked lexically)
   lanes/<lane>.json        confrontation input per lane
   LEDGER.json              state — schema vc-intents.ledger.v2
   LEDGER.md                rendered, regenerated on every write
@@ -23,6 +23,10 @@ the JSON is legal but the script is the reference implementation.
 Outside the repo on purpose: the ledger tracks intents that predate the current
 checkout, span branches, and are confronted on more than one machine.
 
+Rows are model-classified candidates, including `kind=decision`. Quote containment
+does not establish speaker identity, project relevance or implementation authority.
+The active user task or plan supplies authorization.
+
 ## Record: intent (`LEDGER.json → intents[]`)
 
 | Field                            | Meaning                                                                                                                                                                                                                                      |
@@ -30,15 +34,15 @@ checkout, span branches, and are confronted on more than one machine.
 | `id`                             | Stable handle, `<shard>-NNN`. Never reused or renumbered — `after`, `superseded_by`, overrides cite it.                                                                                                                                      |
 | `date`, `source`                 | Day and source file of the statement (`<YYYY-MM-DD>_<rest>` resolves to `<root>/<date>/<rest>` or flat).                                                                                                                                     |
 | `quote`                          | **Verbatim** substring of the source file. `verify-quotes` enforces it by containment; a paraphrase is rejected, never repaired.                                                                                                             |
-| `topic`                          | Normalized 3–8 words in the Founder's vocabulary. Normalization lives here, never in `quote`.                                                                                                                                                |
-| `kind`                           | `task` · `constraint` · `preference` · `decision` · `complaint` · `question` — what the Founder was doing. Drives rule 1 below.                                                                                                              |
+| `topic`                          | Normalized 3–8 words in the source vocabulary. Normalization lives here, never in `quote`.                                                                                                                                                   |
+| `kind`                           | `task` · `constraint` · `preference` · `decision` · `complaint` · `question` — the model's classification of the statement, not proven speaker intent. Drives rule 1 below.                                                                  |
 | `subject`                        | Area key; lanes are built from it.                                                                                                                                                                                                           |
 | `strength`                       | 1–5, how strongly expressed. Queue threshold (`--min-strength`, default 4).                                                                                                                                                                  |
 | `verdicts`                       | `{host: {disposition, evidence, gap, superseded_by, conflicts_with}}` — the fleet's original, never overwritten.                                                                                                                             |
 | `effective_by_host`              | Each host's verdict after rule overrides.                                                                                                                                                                                                    |
 | `stable`                         | True when every host has a verdict and they agree after rules. Only stable (or human-decided) intents enter the queue.                                                                                                                       |
 | `disposition`                    | Effective: human override › rule override › primary host's verdict.                                                                                                                                                                          |
-| `decided_by`                     | `rule`, or the human who decided, or null.                                                                                                                                                                                                   |
+| `decided_by`                     | `rule`, a reviewer/provenance label, or null; not authenticated identity.                                                                                                                                                                    |
 | `runtime_verified`               | `yes` · `no` · `unknown`. Whether someone exercised the product path, not just found the code. Every fleet verdict starts `unknown`; only a human or a runtime probe flips it. `status` keeps the goal open while any `landed` is not `yes`. |
 | `after`, `risk`, `flow`, `notes` | Ordering inputs and free text, preserved across `merge`.                                                                                                                                                                                     |
 
@@ -47,7 +51,7 @@ checkout, span branches, and are confronted on more than one machine.
 `source` (`dir:<path>` or `aicx`), `state` (`read` · `empty` · `unavailable`),
 `files`/`rows`, `truncated` (aicx reports corpus truncation on stderr only; the
 script captures and flags it), `reason` for `unavailable`. An unreadable source
-keeps the goal open — a known unknown, not an absence.
+keeps the goal open — a known unknown, not an absence. After `append`, each selected directory's `coverage` records the scanned `since`, `until` and observed `state`; file counts, bytes and dates refer only to that range. `covered_ranges` preserves verified intervals, including a legacy complete sweep window where no intervening append makes that inference ambiguous. Overlapping or adjacent intervals can jointly cover the hunt window; gaps keep the source `unavailable` with a partial-coverage reason. Unselected sources, including aicx, retain their records and are not newly confirmed for an expanded window. Recovery applies the coverage checkpoint with the append transaction.
 
 ## Dispositions
 
@@ -60,12 +64,12 @@ Derived by rule: `landed-contested` · `landed-by-doc`. Human only: `drop`.
 
 - `partial` — shape exists, promise unmet; `gap` says what is missing
 - `absent` — no trace; evidence is the question that returned zero
-- `contradiction` — two Founder statements conflict, none later resolves them (`conflicts_with`)
-- `unclear` — cannot be decided without the Founder; `gap` holds the question
-- `landed-contested` — code exists, but the Founder's own statement says it does not work (`kind=complaint`). Runtime unverified; the complaint outranks the symbol.
+- `contradiction` — two source statements conflict, none later resolves them (`conflicts_with`)
+- `unclear` — cannot be decided without context from the user; `gap` holds the question
+- `landed-contested` — code exists, but the source contains a complaint that it does not work (`kind=complaint`). Runtime unverified; the complaint outranks the symbol.
 - `landed-by-doc` — the only evidence is a document (`docs/*.md`, `*.md` contract), not code. A document written by an agent is an execution claim in a document's clothes.
 
-`drop` is the Founder's "this was never my intent": model voice pasted into a
+`drop` records a manual rejection of a candidate: model voice pasted into a
 dictation file, another project, a test phrase. It closes the row without
 pretending the code did anything.
 
@@ -78,7 +82,7 @@ judgment, only the record itself:
 1. `kind == complaint` ∧ `disposition == landed` → `landed-contested`.
    A complaint says "it does not work"; `landed` says "it does". The fleet
    resolved in favor of the code because code is checkable and runtime is not.
-   The Founder's statement wins until a runtime probe says otherwise.
+   The source complaint keeps the claim contested until a runtime probe says otherwise.
 2. `evidence` contains no code file (`.rs .swift .py .ts .js .toml .sh …`) →
    `landed-by-doc`. `docs/HOTKEYS_CONTRACT.md:37` proves a contract was written,
    not that it is kept.
@@ -88,14 +92,15 @@ untouched and record the reclassification separately:
 
 ```
 overrides.jsonl   # one JSON object per line, append-only
-{"id":"s4-017","host":"div0","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
-{"id":"s2-052","host":"*","from":"landed","to":"absent","by":"founder","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
+{"id":"s4-017","host":"host-a","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
+{"id":"s2-052","host":"*","from":"landed","to":"absent","by":"manual-review","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
 ```
 
-`by` is `rule` or the human who decided; `host` is `*` when the override applies
+`by` is `rule` or a reviewer/provenance label (`manual-review`, `USER`, or an
+explicit value); it does not authenticate a person or the source speaker; `host` is `*` when the override applies
 to every fleet's verdict. The rendered ledger shows the override and the
 original side by side — reclassification is a layer, never an overwrite. This is
-also how the Founder edits the catalog: a line here, not a hand-edit of a verdict
+also how the user reviews the catalog: a line here, not a hand-edit of a verdict
 file. Both `landed-*` dispositions **count as open**.
 
 ## Record: source
@@ -137,7 +142,7 @@ uv run "$CLI" "$W" plan --stage confront --repo <repo> --host <host> --agent 'LA
 uv run "$CLI" "$W" merge --verdicts <host>=<dir> [--verdicts <host2>=<dir>] --primary <host> --project <owner>/<repo>
 uv run "$CLI" "$W" reclassify
 uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base <github blob base>
-uv run "$CLI" "$W" decide --import-file decisions.jsonl --by founder   # or --id … --to … --reason …
+uv run "$CLI" "$W" decide --import-file decisions.jsonl --by manual-review   # or --id … --to … --reason …
 uv run "$CLI" "$W" queue --min-strength 4
 uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit N --gate '<repo gate>'
 uv run "$CLI" "$W" status      # exit 0 = CLOSED, 1 = OPEN — usable as a gate
@@ -148,6 +153,8 @@ stdout. `merge` preserves `after`, `risk`, `flow`, `notes` and
 `runtime_verified` from the previous ledger, so re-merging after a re-dispatched
 lane loses no human input.
 
+The workdir also holds `.append-transaction.json` and `.append-staging` for interrupted append recovery. Retry the same append with one writer. If recovery cannot proceed, `append --abort` archives pending transaction metadata and unpublished staging inside the workdir; already published shards remain. New transactions use separate staging, and unexpected staging files block publication. Exact replay is a no-op; same-name sources with different bytes require manual resolution. `verify-quotes` adds candidates without replacing earlier IDs and refuses any changed field under an existing ID, including date, topic, subject and strength. Manual revisions require explicit resolution; the verifier never silently accepts metadata changes. `merge` retains the previous primary unless explicitly changed, validates the choice against all retained and incoming hosts, and retains earlier per-host verdicts when new verdict shards omit them; the append-only overrides file is reapplied.
+
 ## Re-entry after a cut or a compaction
 
 1. `intents_cli.py "$W" status` — where the goal stands and why it is open.
@@ -156,6 +163,4 @@ lane loses no human input.
 4. `aicx continuity show -p <owner>/<repo> --hours <N> --for-inject` if other
    agents may have touched the repo since your last turn.
 
-**Do not re-run the sweep or the extraction on re-entry.** Both are expensive and
-their results are already on disk. Re-sweep only when the Founder adds new material, or when
-the window has moved far enough that new sessions exist.
+**Do not re-run the sweep or extraction on re-entry.** Their results are already on disk. For later transcripts use `append`, then extract only the new shard. Run a full `sweep` only in a fresh workdir. The global window expands in both directions; unselected sources keep their previous counts and `status` treats any unconfirmed range as open.

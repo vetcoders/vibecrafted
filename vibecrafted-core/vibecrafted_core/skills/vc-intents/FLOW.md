@@ -13,7 +13,7 @@ flowchart TD
     G --> H[5 · lanes by subject → plan --stage confront on host A and host B]
     H --> I[merge: LEDGER.json + replication-report.json]
     I --> J[6 · reclassify: complaint∧landed, docs-only evidence → overrides.jsonl]
-    J --> K[7 · render --html → Founder reviews → decide --import-file]
+    J --> K[7 · render --html → user reviews → decide --import-file]
     K --> L[8 · queue: stable ∧ open ∧ strong, ordered]
     L --> M[plan --stage implement → vc-dispatch codex cuts]
     M --> N{status}
@@ -23,19 +23,20 @@ flowchart TD
 
 ## Routes
 
-| Entry                                     | Args                                             | Produces                                                  | Exit                  |
-| ----------------------------------------- | ------------------------------------------------ | --------------------------------------------------------- | --------------------- |
-| `/vc-intents`                             | window (`--since/--until` or theme), repo by cwd | workdir with ledger, queue, plans, review page            | interactive           |
-| `vibecrafted intents <agent>`             | one lane: shard or lane JSON, brief path         | `<shard>.json` or `<lane>.verdicts.json`, report          | `0` on dispatch       |
-| `intents_cli.py <workdir> plan --stage …` | `extract` · `confront` · `implement`             | `vibecrafted.dispatch.v1` plan under `<artifacts>/plans/` | `0`                   |
-| `intents_cli.py <workdir> status`         | —                                                | counts, open reasons                                      | `0` CLOSED · `1` OPEN |
+| Entry                                     | Args                                                                | Produces                                                  | Exit                                           |
+| ----------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------- |
+| `/vc-intents`                             | window (`--since/--until` or theme), repo by cwd                    | workdir with ledger, queue, plans, review page            | interactive                                    |
+| `vibecrafted intents <agent>`             | one lane: shard or lane JSON, brief path                            | `<shard>.json` or `<lane>.verdicts.json`, report          | `0` on dispatch                                |
+| `intents_cli.py <workdir> plan --stage …` | `extract` · `confront` · `implement`; extract accepts `--shard sNN` | `vibecrafted.dispatch.v1` plan under `<artifacts>/plans/` | `0`                                            |
+| `intents_cli.py <workdir> append`         | `--until` a later day                                               | the next shard only; `sweep.json` window extended         | `0`; `nothing new` when that day is already in |
+| `intents_cli.py <workdir> status`         | —                                                                   | counts, open reasons                                      | `0` CLOSED · `1` OPEN                          |
 
 ### Escalation edges
 
 - Two modules compete for the truth an intent needs → `vibecrafted canary <agent>` (confirm in code; canary never refactors)
 - The queue is written → `vibecrafted dispatch <intents-implement.*.dispatch.toml>` (codex by default)
 - A worker claims a cut landed → `vibecrafted trust <agent>` before the ledger says `landed`
-- A contradiction between two Founder statements → `aicx clarify`, then the Founder
+- A contradiction between two source statements → `aicx clarify`, then ask the user if unresolved
 - A written plan rather than a corpus is the input → `vibecrafted audit <agent>`
 
 ### Session artifacts
@@ -50,4 +51,6 @@ flowchart TD
 ### Re-entry after a cut or a compaction
 
 `status` → read `LEDGER.md` → `queue` → `plan --stage implement`. Do not re-run
-the sweep or the extraction; both are on disk and expensive.
+the sweep or the extraction; both are on disk and expensive. A day that arrived
+after the sweep is `append`, then `plan --stage extract --shard` for the new
+shard only.

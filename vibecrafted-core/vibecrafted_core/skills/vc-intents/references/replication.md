@@ -51,7 +51,7 @@ Two axes, neither of them "model rank":
   was highest on the previous run. Rotate providers across lanes so no single
   interactive session limit is touched.
 
-Exact model identifiers come from the Founder or from a live list
+Exact model identifiers come from the user or from a live list
 (`agy models`, `junie --model <x>` prints the pool on a bad name). Never guess a
 model id from memory.
 

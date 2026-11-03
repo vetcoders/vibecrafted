@@ -49,7 +49,7 @@ Dwie osie, żadna nie jest „rankingiem modelu”:
   hostami w poprzednim runie. Rotuj providerów między torami, aby nie zużyć limitu
   jednej interaktywnej sesji.
 
-Dokładne identyfikatory modeli pochodzą od Foundera lub z aktualnej listy
+Dokładne identyfikatory modeli pochodzą od użytkownika lub z aktualnej listy
 (`agy models`, `junie --model <x>` wypisuje pulę przy złej nazwie).
 Nigdy nie zgaduj model id z pamięci.
 

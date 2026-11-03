@@ -13,7 +13,7 @@ flowchart TD
     G --> H[5 · tory po obszarze → plan --stage confront na hoście A i hoście B]
     H --> I[merge: LEDGER.json + replication-report.json]
     I --> J[6 · reclassify: complaint∧landed, dowód tylko z dokumentu → overrides.jsonl]
-    J --> K[7 · render --html → Founder przegląda → decide --import-file]
+    J --> K[7 · render --html → użytkownik przegląda → decide --import-file]
     K --> L[8 · queue: stabilne ∧ otwarte ∧ mocne, uporządkowane]
     L --> M[plan --stage implement → cięcia codex przez vc-dispatch]
     M --> N{status}
@@ -35,7 +35,7 @@ flowchart TD
 - Dwa moduły konkurują o prawdę, której intencja potrzebuje → `vibecrafted canary <agent>` (potwierdź w kodzie; canary nigdy nie refaktoruje)
 - Kolejka zapisana → `vibecrafted dispatch <intents-implement.*.dispatch.toml>` (domyślnie codex)
 - Worker twierdzi, że cięcie wylądowało → `vibecrafted trust <agent>`, zanim ledger powie `landed`
-- Sprzeczność dwu wypowiedzi Foundera → `aicx clarify`, potem Founder
+- Sprzeczność dwu wypowiedzi źródłowych → `aicx clarify`, potem pytanie do użytkownika
 - Wejściem jest spisany plan, nie korpus → `vibecrafted audit <agent>`
 
 ### Artefakty sesji

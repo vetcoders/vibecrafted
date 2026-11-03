@@ -10,7 +10,7 @@ jest legalna, ale skrypt jest implementacją referencyjną.
 ~/.vibecrafted/artifacts/<owner>/<repo>/intents/
   sweep.json               coverage per source inside the window
   shards/sNN/              transcript copies for extraction lanes
-  intents.json             verified catalog (verbatim quotes)
+  intents.json             candidate catalog (quotes checked lexically)
   lanes/<lane>.json        confrontation input per lane
   LEDGER.json              state — schema vc-intents.ledger.v2
   LEDGER.md                rendered, regenerated on every write
@@ -23,6 +23,10 @@ jest legalna, ale skrypt jest implementacją referencyjną.
 Celowo poza repo: ledger śledzi intencje sprzed checkoutu, między branchami
 i konfrontowane na więcej niż jednej maszynie.
 
+Wiersze to kandydaci sklasyfikowani przez model, także przy `kind=decision`.
+Zawieranie cytatu nie potwierdza autora, związku z projektem ani uprawnienia.
+Autoryzację daje aktywne zadanie użytkownika lub plan.
+
 ## Record: intent (`LEDGER.json → intents[]`)
 
 | Field                            | Meaning                                                                                                                                                                                                                           |
@@ -30,15 +34,15 @@ i konfrontowane na więcej niż jednej maszynie.
 | `id`                             | Trwały uchwyt `<shard>-NNN`. Bez ponownego użycia i renumeracji — cytują go `after`, `superseded_by`, overrides.                                                                                                                  |
 | `date`, `source`                 | Dzień i plik wypowiedzi (`<YYYY-MM-DD>_<rest>` rozwiązuje się do `<root>/<date>/<rest>` albo układu płaskiego).                                                                                                                   |
 | `quote`                          | **Dosłowny** podciąg źródła; `verify-quotes` wymusza zawieranie. Parafraza odrzucona, nigdy naprawiana.                                                                                                                           |
-| `topic`                          | Znormalizowane 3–8 słów w słownictwie Foundera. Normalizacja tutaj, nigdy w `quote`.                                                                                                                                              |
-| `kind`                           | `task` · `constraint` · `preference` · `decision` · `complaint` · `question` — czynność Foundera; steruje regułą 1 niżej.                                                                                                         |
+| `topic`                          | Znormalizowane 3–8 słów w słownictwie źródła. Normalizacja tutaj, nigdy w `quote`.                                                                                                                                                |
+| `kind`                           | `task` · `constraint` · `preference` · `decision` · `complaint` · `question` — klasyfikacja wypowiedzi przez model, nie dowód intencji autora; steruje regułą 1 niżej.                                                            |
 | `subject`                        | Klucz obszaru, podstawa torów.                                                                                                                                                                                                    |
 | `strength`                       | 1–5: siła wypowiedzi. Próg kolejki `--min-strength`, domyślnie 4.                                                                                                                                                                 |
 | `verdicts`                       | `{host: {disposition, evidence, gap, superseded_by, conflicts_with}}` — oryginał floty, nigdy nadpisywany.                                                                                                                        |
 | `effective_by_host`              | Werdykt każdego hosta po override'ach reguł.                                                                                                                                                                                      |
 | `stable`                         | True, gdy każdy host ma werdykt i po regułach są zgodne. Do kolejki wchodzą tylko stable lub rozstrzygnięte przez człowieka.                                                                                                      |
 | `disposition`                    | Efektywna: override człowieka › override reguły › werdykt głównego hosta.                                                                                                                                                         |
-| `decided_by`                     | `rule`, człowiek rozstrzygający albo null.                                                                                                                                                                                        |
+| `decided_by`                     | `rule`, etykieta przeglądu/proweniencji albo null; nie tożsamość uwierzytelniona.                                                                                                                                                 |
 | `runtime_verified`               | `yes` · `no` · `unknown`. Czy wykonano ścieżkę produktu, nie tylko znaleziono kod. Werdykty floty startują jako `unknown`; zmienia je człowiek albo sonda runtime. `status` pozostaje otwarte, gdy dowolne `landed` nie ma `yes`. |
 | `after`, `risk`, `flow`, `notes` | Dane porządkowania i wolny tekst, zachowane przez `merge`.                                                                                                                                                                        |
 
@@ -47,7 +51,7 @@ i konfrontowane na więcej niż jednej maszynie.
 `source` (`dir:<path>` lub `aicx`), `state` (`read` · `empty` · `unavailable`),
 `files`/`rows`, `truncated` (aicx raportuje ucięcie korpusu tylko na stderr;
 skrypt przechwytuje i oznacza), `reason` dla `unavailable`. Nieczytelne źródło
-utrzymuje cel otwarty — znana niewiadoma, nie nieobecność.
+utrzymuje cel otwarty — znana niewiadoma, nie nieobecność. Po `append` pole `coverage` wybranego katalogu podaje zakres `since`, `until` i zaobserwowany `state`; liczby plików, bajty i daty dotyczą wyłącznie tego zakresu. `covered_ranges` zachowuje potwierdzone przedziały, w tym dawne pełne okno sweep, gdy późniejszy append nie czyni tego wnioskowania niepewnym. Nakładające się lub sąsiadujące przedziały mogą łącznie pokryć okno; luki pozostawiają źródło `unavailable` z powodem częściowego pokrycia. Niewybrane źródła, w tym aicx, zachowują swoje wpisy i nie są ponownie potwierdzane dla rozszerzonego okna. Wznowienie stosuje checkpoint pokrycia wraz z transakcją append.
 
 ## Dispositions
 
@@ -60,14 +64,14 @@ Wyprowadzone regułą: `landed-contested` · `landed-by-doc`. Tylko człowiek: `
 
 - `partial` — kształt jest, obietnica niespełniona; brak opisany w `gap`
 - `absent` — brak śladu; dowód to pytanie, które zwróciło zero
-- `contradiction` — dwie wypowiedzi Foundera sprzeczne, żadna późniejsza nie rozstrzyga (`conflicts_with`)
-- `unclear` — potrzebny Founder; pytanie w `gap`
-- `landed-contested` — kod istnieje, ale Founder mówi, że nie działa (`kind=complaint`).
+- `contradiction` — dwie wypowiedzi źródłowe sprzeczne, żadna późniejsza nie rozstrzyga (`conflicts_with`)
+- `unclear` — potrzebny kontekst od użytkownika; pytanie w `gap`
+- `landed-contested` — kod istnieje, ale źródło zawiera skargę, że nie działa (`kind=complaint`).
   Runtime niezweryfikowany; skarga wygrywa z symbolem.
 - `landed-by-doc` — jedyny dowód to dokument (`docs/*.md`, kontrakt `*.md`), nie kod.
   Dokument agenta jest twierdzeniem o wykonaniu w przebraniu dokumentu.
 
-`drop` to „to nigdy nie była moja intencja” Foundera: głos modelu wklejony do
+`drop` zapisuje ręczne odrzucenie kandydata: głos modelu wklejony do
 pliku dyktowania, inny projekt, fraza testowa. Zamyka wiersz bez udawania działania kodu.
 
 ## `landed` is a lower bound, not a verdict — mechanical reclassification
@@ -78,7 +82,7 @@ które wymagają tylko rekordu, bez osądu:
 
 1. `kind == complaint` ∧ `disposition == landed` → `landed-contested`.
    Skarga mówi „nie działa”, `landed` mówi „działa”. Flota wybrała kod, bo
-   można go sprawdzić, a runtime nie. Słowa Foundera wygrywają do sondy runtime.
+   można go sprawdzić, a runtime nie. Skarga źródłowa podtrzymuje spór do sondy runtime.
 2. `evidence` nie zawiera pliku kodu (`.rs .swift .py .ts .js .toml .sh …`) →
    `landed-by-doc`. `docs/HOTKEYS_CONTRACT.md:37` dowodzi zapisania kontraktu,
    nie jego dotrzymania.
@@ -88,13 +92,14 @@ floty i zapisz reklasyfikację osobno:
 
 ```
 overrides.jsonl   # one JSON object per line, append-only
-{"id":"s4-017","host":"div0","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
-{"id":"s2-052","host":"*","from":"landed","to":"absent","by":"founder","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
+{"id":"s4-017","host":"host-a","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
+{"id":"s2-052","host":"*","from":"landed","to":"absent","by":"manual-review","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
 ```
 
-`by` to `rule` lub człowiek rozstrzygający; `host` to `*`, gdy override dotyczy
+`by` to `rule` albo etykieta przeglądu/proweniencji (`manual-review`, `USER` lub
+wartość jawna); nie uwierzytelnia osoby ani autora źródła; `host` to `*`, gdy override dotyczy
 każdego werdyktu. Render pokazuje override i oryginał obok — warstwa, nigdy
-nadpisanie. Tak Founder edytuje katalog: wierszem tutaj, nie ręczną zmianą
+nadpisanie. Tak użytkownik przegląda katalog: wierszem tutaj, nie ręczną zmianą
 pliku werdyktu. Oba warianty `landed-*` **liczą się jako otwarte**.
 
 ## Record: source
@@ -134,7 +139,7 @@ uv run "$CLI" "$W" plan --stage confront --repo <repo> --host <host> --agent 'LA
 uv run "$CLI" "$W" merge --verdicts <host>=<dir> [--verdicts <host2>=<dir>] --primary <host> --project <owner>/<repo>
 uv run "$CLI" "$W" reclassify
 uv run "$CLI" "$W" render --html --transcripts <dir> --blob-base <github blob base>
-uv run "$CLI" "$W" decide --import-file decisions.jsonl --by founder   # or --id … --to … --reason …
+uv run "$CLI" "$W" decide --import-file decisions.jsonl --by manual-review   # or --id … --to … --reason …
 uv run "$CLI" "$W" queue --min-strength 4
 uv run "$CLI" "$W" plan --stage implement --repo <repo> --limit N --gate '<repo gate>'
 uv run "$CLI" "$W" status      # exit 0 = CLOSED, 1 = OPEN — usable as a gate
@@ -144,6 +149,8 @@ Każda komenda zapisuje pliki i wypisuje ścieżki oraz liczniki, nic dużego na
 `merge` zachowuje `after`, `risk`, `flow`, `notes`, `runtime_verified` z poprzedniego
 ledgera, więc powtórny merge po ponownym dispatchu toru nie gubi wkładu człowieka.
 
+Katalog roboczy zawiera też `.append-transaction.json` i `.append-staging` do wznowienia przerwanego append. Ponów tę samą komendę przy jednym zapisującym. Jeśli wznowienie nie jest możliwe, `append --abort` archiwizuje metadane oczekującej transakcji i nieopublikowany staging w katalogu roboczym; opublikowane shardy pozostają. Nowe transakcje mają oddzielny staging, a obce pliki blokują publikację. Identyczne ponowienie jest no-op; źródła o tej samej nazwie i różnych bajtach wymagają ręcznego rozstrzygnięcia. `verify-quotes` dopisuje kandydatów bez zastępowania poprzednich ID i odmawia każdej zmiany kandydata pod istniejącym ID, także date, topic, subject i strength. Ręczna rewizja wymaga jawnego rozstrzygnięcia; weryfikator nie akceptuje zmian metadanych po cichu. `merge` zachowuje dotychczasowy host główny, chyba że jawnie wybrano inny spośród wszystkich zachowanych i nowych hostów, oraz zachowuje wcześniejsze werdykty hostów pominięte w nowych shardach i ponownie stosuje append-only overrides.
+
 ## Re-entry after a cut or a compaction
 
 1. `intents_cli.py "$W" status` — stan celu i powód otwarcia.
@@ -152,6 +159,4 @@ ledgera, więc powtórny merge po ponownym dispatchu toru nie gubi wkładu czło
 4. `aicx continuity show -p <owner>/<repo> --hours <N> --for-inject`, jeśli inni
    agenci mogli dotknąć repo od poprzedniej tury.
 
-**Nie powtarzaj sweep ani ekstrakcji przy re-entry.** Są kosztowne i już zapisane.
-Powtórz sweep dopiero po nowych materiałach Foundera lub gdy okno przesunęło się
-na tyle, że są nowe sesje.
+**Nie powtarzaj sweep ani ekstrakcji przy re-entry.** Wyniki są już na dysku. Późniejsze transkrypcje dodaj przez `append`, potem ekstrahuj tylko nowy shard. Pełny `sweep` wykonuj tylko w nowym katalogu roboczym. Globalne okno rozszerza się w obie strony; niewybrane źródła zachowują liczniki, a `status` traktuje niepotwierdzony zakres jako otwarty.

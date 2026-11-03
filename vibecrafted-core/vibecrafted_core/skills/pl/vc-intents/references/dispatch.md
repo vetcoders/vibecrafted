@@ -54,11 +54,11 @@ Fork dziedziczy rozmowę, więc nie trzeba odtwarzać godziny rekonstrukcji.
 Dostarczenie (faza 9) zwykle ma ten kształt.
 
 **Cold-dispatch, gdy jednostka pracy opisuje się sama**: „przeczytaj sesję X,
-raportuj każdą wypowiedź Foundera o Y z cytowaniami”. Jest tańszy i nie
+raportuj każdą wypowiedź źródłową o Y z cytowaniami”. Jest tańszy i nie
 może odziedziczyć twojego uprzedzenia co do wyniku.
 
-Drugi argument dotyczy dowodu, nie kosztu. Przy pytaniu „czy Founder naprawdę
-to powiedział” odziedziczony kontekst jest **wadą**: worker dostaje hipotezę
+Drugi argument dotyczy dowodu, nie kosztu. Przy pytaniu „czy źródło naprawdę
+zawiera tę wypowiedź” odziedziczony kontekst jest **wadą**: worker dostaje hipotezę
 wraz z zadaniem i gotową drogę jej potwierdzenia. Fazy 2–3 uruchamiaj więc
 **cold**, a fazę 9 **forked** — odwrotnie niż intuicja „ważne potrzebuje więcej kontekstu”.
 
