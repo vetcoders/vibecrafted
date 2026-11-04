@@ -2104,7 +2104,7 @@ mod tests {
         }
     }
 
-    fn sample_app() -> App {
+    pub(crate) fn sample_app() -> App {
         App {
             mux_subscriber: None,
             config: AppConfig {
