@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 use voc::catalog::{CatalogState, LauncherCatalog};
 use voc::launch::{
     Admission, Confirmation, Environment, LaunchOutcome, LaunchReceipt, LauncherRun,
@@ -831,7 +831,9 @@ fn real_selected_generation_catalog_reaches_voc() {
     let catalog = LauncherCatalog::load(&deck, &std::collections::BTreeMap::new()).unwrap();
     assert_eq!(
         catalog.agents,
-        vec!["agy", "claude", "codex", "copilot", "cursor", "grok", "junie", "kimi", "omp"]
+        vec![
+            "agy", "claude", "codex", "copilot", "cursor", "grok", "junie", "kimi", "omp"
+        ]
     );
     let codex = catalog.provider("codex").unwrap();
     assert!(codex.model_override.supported);
@@ -878,13 +880,15 @@ fn real_deck_receipt_confirms_voc_declaration() {
             "baseline",
         ],
     ] {
-        assert!(std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     let baseline = std::process::Command::new("git")
         .arg("-C")

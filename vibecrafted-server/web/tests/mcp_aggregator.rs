@@ -24,8 +24,8 @@ use tower::ServiceExt;
 use vibecrafted_server_web::mcp::api::mcp_routes_with_aggregator;
 use vibecrafted_server_web::mcp_aggregator::{
     ANCESTOR_HEADER, Aggregator, HttpTransport, MapStarts, McpUpstreamConfig, PID_HEADER,
-    RUN_HEADER, ScriptedTransport, UpstreamExchange, UpstreamFault, UpstreamSpec,
-    UpstreamTransport, assign_from_claims, load_worker_claims, parse_mcp_upstreams,
+    ProcessStarts, RUN_HEADER, ScriptedTransport, SysinfoStarts, UpstreamExchange, UpstreamFault,
+    UpstreamSpec, UpstreamTransport, assign_from_claims, load_worker_claims, parse_mcp_upstreams,
     parse_started_unix,
 };
 
@@ -37,6 +37,8 @@ struct TempHome {
 
 impl TempHome {
     fn new(label: &str) -> Self {
+        let scratch = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(scratch).expect("create Cargo test scratch");
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -45,7 +47,7 @@ impl TempHome {
         let path = (0..100)
             .find_map(|attempt| {
                 let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                let candidate = std::env::temp_dir().join(format!(
+                let candidate = scratch.join(format!(
                     "vc-agg-{label}-{}-{nanos}-{nonce}-{attempt}",
                     std::process::id()
                 ));
@@ -448,7 +450,17 @@ async fn cached_list_does_not_refetch_until_ttl() {
 #[tokio::test]
 async fn pid_header_maps_ancestor_to_worker_and_unknown_is_passthrough() {
     let home = TempHome::new("pid");
-    write_meta(&home.path, "run-alpha", 4242, "2026-09-26T12:00:00+00:00");
+    let worker_pid = i64::from(std::process::id());
+    let started = SysinfoStarts
+        .unix_start(worker_pid)
+        .expect("this test process has a start time");
+    let started_at = chrono::DateTime::from_timestamp(started, 0)
+        .expect("process start is a timestamp")
+        .to_rfc3339();
+    write_meta(&home.path, "run-alpha", worker_pid, &started_at);
+    let worker_header = worker_pid.to_string();
+    let shim_header = (worker_pid + 1).to_string();
+    let ancestors = format!("{worker_pid},1");
     let app = router(&home.path, Aggregator::local_only());
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
 
@@ -456,8 +468,8 @@ async fn pid_header_maps_ancestor_to_worker_and_unknown_is_passthrough() {
         &app,
         body.clone(),
         &[
-            (PID_HEADER.as_str(), "9001"),
-            (ANCESTOR_HEADER.as_str(), "4242,1"),
+            (PID_HEADER.as_str(), &shim_header),
+            (ANCESTOR_HEADER.as_str(), &ancestors),
         ],
     )
     .await;
@@ -469,7 +481,8 @@ async fn pid_header_maps_ancestor_to_worker_and_unknown_is_passthrough() {
         Some("run-alpha")
     );
 
-    let (status, headers, _) = post(&app, body.clone(), &[(PID_HEADER.as_str(), "111")]).await;
+    let (status, headers, _) =
+        post(&app, body.clone(), &[(PID_HEADER.as_str(), &shim_header)]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(headers.get(RUN_HEADER).is_none());
 
@@ -478,7 +491,7 @@ async fn pid_header_maps_ancestor_to_worker_and_unknown_is_passthrough() {
         body,
         &[
             (RUN_HEADER.as_str(), "missing-run"),
-            (PID_HEADER.as_str(), "4242"),
+            (PID_HEADER.as_str(), &worker_header),
         ],
     )
     .await;

@@ -1879,7 +1879,7 @@ def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
     for tool in ("rustc", "cargo"):
         binary = toolchain / tool
         binary.write_text(
-            f"#!/bin/sh\nprintf '%s\\n' '{tool} 1.96.0 (fixture)'\n",
+            f"#!/bin/sh\nprintf '%s\\n' '{tool} 1.97.0 (fixture)'\n",
             encoding="utf-8",
         )
         binary.chmod(0o755)
@@ -1975,11 +1975,11 @@ def test_make_runtime_pack_reports_the_path_the_builder_recorded(
     result = _make_runtime_pack(repo)
 
     assert result.returncode == 0, result.stderr
-    assert "Release prerequisites ready: Rust 1.96.0" in result.stdout
+    assert "Release prerequisites ready: Rust 1.97.0" in result.stdout
     calls = (repo / "mock-toolchain/calls").read_text(encoding="utf-8")
     for tool in ("rustc", "cargo"):
-        assert f"which --toolchain 1.96.0 {tool}" in calls
-    assert "target list --installed --toolchain 1.96.0" in calls
+        assert f"which --toolchain 1.97.0 {tool}" in calls
+    assert "target list --installed --toolchain 1.97.0" in calls
     printed = result.stdout.strip().splitlines()[-1]
     assert printed == str(
         repo
@@ -2137,7 +2137,7 @@ def test_release_prereqs_verifies_provisioned_rust_binaries(
         timeout=20,
     )
     assert (
-        "toolchain install 1.96.0 --profile minimal"
+        "toolchain install 1.97.0 --profile minimal"
         in (toolchain / "calls").read_text()
     )
     assert "unchanged (error reading rustc version)" in result.stdout
