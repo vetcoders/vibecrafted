@@ -465,6 +465,82 @@ def test_a_partial_measurement_stays_partial() -> None:
     assert telemetry["cost"]["amount"]["value"] == "unknown"
 
 
+@pytest.mark.parametrize("cache_write", [None, "0", 0.0, False, True])
+def test_measured_cache_write_must_be_an_integer_before_price_estimation(
+    cache_write: object,
+) -> None:
+    measured = {
+        "input_tokens": 2,
+        "cache_read_input_tokens": 3,
+        "output_tokens": 5,
+        "total_tokens": 10,
+        "messages": 1,
+    }
+    if cache_write is not None:
+        measured["cache_creation_input_tokens"] = cache_write
+    meta = _measured_meta()
+    meta["measured_usage"] = measured
+    telemetry = run_telemetry_from_meta(meta, transcript=None)
+    assert telemetry["usage"]["tokens_cache_write"]["value"] == "unknown"
+    assert telemetry["usage"]["tokens_total"] == 10
+    assert telemetry["cost"]["amount"]["value"] == "unknown"
+    assert telemetry["cost"]["source"] == "unknown"
+
+
+def test_measured_cache_write_zero_is_a_recorded_count_and_can_be_priced() -> None:
+    meta = _measured_meta(
+        measured={
+            "input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 5,
+            "total_tokens": 10,
+            "messages": 1,
+        }
+    )
+    telemetry = run_telemetry_from_meta(meta, transcript=None)
+    assert telemetry["usage"]["tokens_cache_write"] == 0
+    assert telemetry["cost"]["amount"] == pytest.approx(0.000109)
+    assert telemetry["cost"]["source"].startswith("estimated:")
+
+
+@pytest.mark.parametrize("amount", [0, 0.123])
+def test_recorded_cost_wins_over_an_incomplete_measured_cache_write(
+    amount: float,
+) -> None:
+    meta = _measured_meta(
+        measured={
+            "input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "output_tokens": 5,
+            "total_tokens": 10,
+            "messages": 1,
+        }
+    )
+    meta["cost"] = {"amount": amount, "currency": "USD", "source": "provider_reported"}
+    telemetry = run_telemetry_from_meta(meta, transcript=None)
+    assert telemetry["usage"]["tokens_cache_write"]["value"] == "unknown"
+    assert telemetry["cost"]["amount"] == amount
+    assert telemetry["cost"]["source"] == "provider_reported"
+
+
+def test_legacy_usage_without_a_cache_write_bucket_keeps_its_pricing_contract() -> None:
+    meta = _measured_meta()
+    del meta["measured_usage"]
+    meta["usage"] = {
+        "events": 1,
+        "tokens_input": 2,
+        "tokens_cached_input": 3,
+        "tokens_output": 5,
+        "tokens_total": 10,
+        "source": "provider_stream",
+    }
+    telemetry = run_telemetry_from_meta(meta, transcript=None)
+    assert "tokens_cache_write" not in telemetry["usage"]
+    assert telemetry["cost"]["amount"] == pytest.approx(0.000109)
+    assert telemetry["cost"]["source"].startswith("estimated:")
+
+
 def test_a_whole_run_aggregate_is_priced_at_base_rates() -> None:
     telemetry = run_telemetry_from_meta(
         _measured_meta(

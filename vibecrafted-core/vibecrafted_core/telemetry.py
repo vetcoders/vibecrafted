@@ -869,8 +869,8 @@ def _usage_from_measured(
 
     ``messages`` becomes ``events`` only when it is an integer. A missing
     ``messages`` stays ``events: 0``. Cost of a partial record stays unknown
-    because ``resolve_cost`` refuses an unknown input, cache, or output, and
-    also refuses a record with no events.
+    because pricing requires recorded input, cache-read, cache-write and output
+    counts, as well as at least one event.
     """
     measurement = meta.get("usage_measurement")
     source = "meta"
@@ -964,6 +964,11 @@ def run_telemetry_from_meta(
         usage_block = usage.as_dict()
         if isinstance(meta.get("cost"), Mapping):
             cost_block = cost_from_dict(meta["cost"]).as_dict()
+        elif isinstance(usage.tokens_cache_write, Unknown):
+            cost_block = CostRecord(
+                amount=Unknown(reason="measured cache-write count is unknown"),
+                source="unknown",
+            ).as_dict()
         else:
             cost_block = resolve_cost(
                 model_value,
@@ -1048,9 +1053,11 @@ def run_telemetry_from_meta(
         if isinstance(only_model, str) and is_model_name(only_model):
             model = only_model
             model_value = only_model
-    recorded_measured_cost = measured_run and isinstance(meta.get("cost"), Mapping)
+    # Measured aggregates were priced above with their recorded buckets. This
+    # fallback is for older stream records; its missing cache-write convention
+    # must not turn an incomplete measured aggregate into a partial estimate.
     if (
-        not recorded_measured_cost
+        not measured_run
         and cost_block.get("source") == "unknown"
         and usage_block.get("events")
     ):
