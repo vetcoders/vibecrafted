@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,35 @@ def _source_gate_workflow(trigger: str = "release.yml") -> str:
     return (REPO_ROOT / ".github/workflows/source-gate.yml").read_text(encoding="utf-8")
 
 
+def test_executed_release_pin_matches_server_and_covers_control_core_msrv() -> None:
+    helper = REPO_ROOT / "scripts/lib/release-toolchain-contract.sh"
+    result = subprocess.run(
+        [
+            "sh",
+            "-c",
+            '. "$1"; printf "%s\\n" "$VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN"',
+            "release-contract",
+            str(helper),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    release_pin = result.stdout.strip()
+    server = tomllib.loads(
+        (REPO_ROOT / "vibecrafted-server/rust-toolchain.toml").read_text()
+    )["toolchain"]["channel"]
+    minimum = tomllib.loads(
+        (REPO_ROOT / "vibecrafted-server/control-core/Cargo.toml").read_text()
+    )["package"]["rust-version"]
+    assert release_pin == server, (
+        "release env must preserve the canonical server compiler"
+    )
+    assert tuple(map(int, release_pin.split("."))) >= tuple(
+        map(int, minimum.split("."))
+    ), "release compiler must satisfy control-core and its pinned ccusage dependencies"
+
+
 def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
@@ -53,7 +83,7 @@ def test_make_release_bootstraps_exact_rust_targets_and_uses_classic_ld() -> Non
         "RELEASE_TOOLCHAIN_CONTRACT := scripts/lib/release-toolchain-contract.sh"
         in makefile
     )
-    assert "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.96.0'" in contract
+    assert "VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.97.0'" in contract
     assert (
         "VIBECRAFTED_RELEASE_RUST_TARGETS='wasm32-wasip1 wasm32-unknown-unknown'"
         in contract
@@ -428,8 +458,8 @@ def _hosted_release_toolchain_fixture(tmp_path: Path) -> tuple[Path, dict[str, s
         "ld-classic": "#!/bin/sh\nprintf '%s\\n' \"$FAKE_LD_VERSION\"\n",
         "xcodebuild": "#!/bin/sh\nprintf '%s\\n' \"$FAKE_XCODE_VERSION\"\n",
         "uname": "#!/bin/sh\nprintf '%s\\n' Darwin\n",
-        "rustc": "#!/bin/sh\nprintf '%s\\n' \"rustc 1.96.0 (fixture)\"\n",
-        "cargo": "#!/bin/sh\nprintf '%s\\n' \"cargo 1.96.0 (fixture)\"\n",
+        "rustc": "#!/bin/sh\nprintf '%s\\n' \"rustc 1.97.0 (fixture)\"\n",
+        "cargo": "#!/bin/sh\nprintf '%s\\n' \"cargo 1.97.0 (fixture)\"\n",
         "rustup": '#!/bin/sh\ntouch "$RUSTUP_CALLED"\ncase "$1" in\nwhich) printf \'%s/%s\\n\' "$FAKE_BIN" "$4" ;;\ntarget) printf \'%s\\n\' wasm32-wasip1 wasm32-unknown-unknown ;;\n*) exit 1 ;;\nesac\n',
     }
     for name, body in tools.items():
@@ -620,7 +650,7 @@ def test_hosted_profile_preflight_has_no_downloads_and_prereqs_use_exact_rust(
         assert result.returncode == 0, result.stderr
         assert "classic" in result.stdout
         assert Path(env["RUSTUP_CALLED"]).exists() == (target == "release-prereqs")
-    assert "Rust 1.96.0" in result.stdout
+    assert "Rust 1.97.0" in result.stdout
 
 
 def test_hosted_release_and_pr_smoke_use_same_explicit_profile() -> None:

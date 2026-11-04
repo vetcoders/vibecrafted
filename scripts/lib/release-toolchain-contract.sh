@@ -33,7 +33,7 @@
 # This sourced helper publishes a caller-visible result or status; its consumer lives outside this
 # file, so deleting the binding would break the shared helper contract.
 # shellcheck disable=SC2034
-readonly VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.96.0'
+readonly VIBECRAFTED_RELEASE_RUSTUP_TOOLCHAIN='1.97.0'
 readonly VIBECRAFTED_RELEASE_RUST_TARGETS='wasm32-wasip1 wasm32-unknown-unknown'
 readonly VIBECRAFTED_RELEASE_DARWIN_CLANG='/Library/Developer/CommandLineTools/usr/bin/clang'
 readonly VIBECRAFTED_RELEASE_DARWIN_CLANG_VERSION='Apple clang version 17.0.0 (clang-1700.6.3.2)'
