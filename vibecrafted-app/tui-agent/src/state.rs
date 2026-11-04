@@ -336,8 +336,27 @@ fn stalled_is_archive(snapshot: &RunSnapshot, now: DateTime<Utc>) -> bool {
     timestamp.is_none_or(|ts| now.signed_duration_since(ts).num_hours() >= 2)
 }
 
+/// Check temporal labels/queue membership without cloning snapshots, collecting
+/// per-run event tails or sorting. Durable/filter changes use the normal render.
+pub(crate) fn time_labels_changed(
+    state: &ControlPlaneState,
+    previous: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    state.runs.iter().any(|run| {
+        let before = classify_run(run, previous);
+        let after = classify_run(run, now);
+        before != after
+            || age_label(run, previous) != age_label(run, now)
+            || is_actionable_kind(before, run, previous) != is_actionable_kind(after, run, now)
+    })
+}
+
 pub fn render_runs(state: &ControlPlaneState) -> Vec<RenderedRun> {
-    let now = Utc::now();
+    render_runs_at(state, Utc::now())
+}
+
+pub(crate) fn render_runs_at(state: &ControlPlaneState, now: DateTime<Utc>) -> Vec<RenderedRun> {
     let mut runs: Vec<RenderedRun> = state
         .runs
         .iter()
@@ -845,6 +864,44 @@ mod tests {
     use super::ControlPlaneState;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn temporal_refresh_preserves_age_health_and_queue_deadlines() {
+        let now = chrono::Utc::now();
+        let snapshot = |state: &str, at: chrono::DateTime<chrono::Utc>| {
+            serde_json::from_value(
+                serde_json::json!({"run_id":"fixture", "state":state,"updated_at":at.to_rfc3339()}),
+            )
+            .unwrap()
+        };
+        for (status, at, seconds) in [
+            ("running", now - chrono::Duration::seconds(59), 2),
+            ("running", now - chrono::Duration::minutes(15), 61),
+            ("stalled", now - chrono::Duration::minutes(119), 61),
+            (
+                "completed",
+                now - chrono::Duration::hours(23) - chrono::Duration::minutes(59),
+                61,
+            ),
+        ] {
+            let mut state = ControlPlaneState::empty("/tmp/temporal-fixture");
+            state.runs.push(snapshot(status, at));
+            assert!(super::time_labels_changed(
+                &state,
+                now,
+                now + chrono::Duration::seconds(seconds)
+            ));
+        }
+        let mut state = ControlPlaneState::empty("/tmp/temporal-fixture");
+        state
+            .runs
+            .push(snapshot("completed", now - chrono::Duration::seconds(10)));
+        assert!(!super::time_labels_changed(
+            &state,
+            now,
+            now + chrono::Duration::seconds(1)
+        ));
+    }
 
     #[test]
     fn runtime_only_run_is_active_until_retained_terminal_snapshot_supersedes_it() {

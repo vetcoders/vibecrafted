@@ -607,6 +607,12 @@ impl App {
         if let Some(loaded) = result.control_plane {
             self.apply_control_plane(loaded);
         }
+        if let Some(usage) = result.usage {
+            match usage {
+                Ok(usage) => self.state.usage = usage,
+                Err(error) => self.append_status(format!("usage unavailable: {error}")),
+            }
+        }
         let current_repo = result.repo == self.config.repo;
         if let Some(intents) = result.polarize {
             if current_repo {
@@ -671,6 +677,7 @@ impl App {
             }
         }
         self.home_rows_memo.clear();
+        self.refresh.rendered_at = Some(chrono::Utc::now());
         let mut runs = render_runs(&self.state);
         apply_run_filters(
             &mut runs,
@@ -694,14 +701,32 @@ impl App {
     /// Recompute only time-derived labels and filters from cached state.
     /// This keeps ages and stale classifications moving without re-reading
     /// the control-plane filesystem.
+    pub fn refresh_time_labels(&mut self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(previous) = self.refresh.rendered_at else {
+            self.refresh.rendered_at = Some(now);
+            return false;
+        };
+        if !crate::state::time_labels_changed(&self.state, previous, now) {
+            return false;
+        }
+        self.refresh_rendered_runs_at(now);
+        true
+    }
+
     pub fn refresh_rendered_runs(&mut self) {
+        self.refresh_rendered_runs_at(chrono::Utc::now());
+    }
+
+    fn refresh_rendered_runs_at(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        self.refresh.rendered_at = Some(now);
         let selected_run_id = self.selected_run().map(|run| run.snapshot.run_id.clone());
-        let mut runs = render_runs(&self.state);
-        apply_run_filters(
+        let mut runs = crate::state::render_runs_at(&self.state, now);
+        apply_run_filters_at(
             &mut runs,
             self.queue_scope,
             &self.search_query,
             &self.config.repo,
+            now,
         );
         self.runs = runs;
         if let Some(run_id) = selected_run_id
@@ -2574,7 +2599,22 @@ fn apply_run_filters(
     search_query: &str,
     workspace: &Path,
 ) {
-    let now = chrono::Utc::now();
+    apply_run_filters_at(
+        runs,
+        queue_scope,
+        search_query,
+        workspace,
+        chrono::Utc::now(),
+    );
+}
+
+fn apply_run_filters_at(
+    runs: &mut Vec<RenderedRun>,
+    queue_scope: QueueScope,
+    search_query: &str,
+    workspace: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     let workspace_live = runs.iter().any(|run| {
         is_actionable_kind(run.kind, &run.snapshot, now)
             && workspace_matches(&run.snapshot, workspace)

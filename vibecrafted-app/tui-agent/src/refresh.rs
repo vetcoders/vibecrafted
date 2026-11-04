@@ -13,6 +13,7 @@
 use crate::mission_control::MissionControlState;
 use crate::polarize::PolarizeIntent;
 use crate::state::ControlPlaneState;
+use crate::usage::UsageDashboard;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -24,10 +25,12 @@ use std::time::{Duration, Instant};
 /// is dropped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RefreshNeeds {
-    /// Reload when its revision moved or Usage has an unfinished background read.
+    /// Reload when its durable revision moved or lifecycle reconciliation is due.
     pub control_plane: bool,
     /// Reload the projection even when the revision did not move.
     pub force_control_plane: bool,
+    /// Poll the canonical usage reader without replaying lifecycle sources.
+    pub usage: bool,
     pub polarize: bool,
     pub mission_control: bool,
     /// Continuity is read only when the person asks for Memory.
@@ -39,6 +42,7 @@ impl RefreshNeeds {
         Self {
             control_plane: true,
             force_control_plane: true,
+            usage: true,
             polarize: true,
             mission_control: true,
             memory: false,
@@ -53,14 +57,11 @@ impl RefreshNeeds {
         Self {
             control_plane: self.control_plane || other.control_plane,
             force_control_plane: self.force_control_plane || other.force_control_plane,
+            usage: self.usage || other.usage,
             polarize: self.polarize || other.polarize,
             mission_control: self.mission_control || other.mission_control,
             memory: self.memory || other.memory,
         }
-    }
-
-    fn touches_mission_control(self) -> bool {
-        self.control_plane || self.force_control_plane || self.polarize || self.mission_control
     }
 }
 
@@ -80,6 +81,8 @@ pub struct RefreshState {
     pub requested_generation: u64,
     pub applied_generation: u64,
     pub projection: ProjectionLoadState,
+    /// Last wall-clock instant used for the cached run labels and filters.
+    pub rendered_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One hand-off to the worker, numbered so its answer can be ordered.
@@ -110,8 +113,9 @@ pub struct RefreshResult {
     pub generation: u64,
     /// The repository the polarize and Mission Control parts were read for.
     pub repo: PathBuf,
-    /// `None` when the revision is unchanged, Usage is complete and no reload was forced.
+    /// `None` when durable inputs and lifecycle are unchanged and no reload was forced.
     pub control_plane: Option<Result<ControlPlaneState, String>>,
+    pub usage: Option<Result<UsageDashboard, String>>,
     pub polarize: Option<Vec<PolarizeIntent>>,
     pub mission_control: Option<MissionControlState>,
     pub memory: Option<crate::memory::MemoryState>,
@@ -122,6 +126,9 @@ pub struct RefreshResult {
 pub trait RefreshSource: Send + 'static {
     fn projection_revision(&mut self, state_root: &Path) -> u64;
     fn control_plane(&mut self, state_root: &Path) -> io::Result<ControlPlaneState>;
+    fn usage(&mut self, state_root: &Path) -> io::Result<UsageDashboard> {
+        UsageDashboard::load(state_root)
+    }
     fn polarize(&mut self, repo: &Path) -> Vec<PolarizeIntent>;
     fn mission_control(
         &mut self,
@@ -429,6 +436,7 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
         generation: job.generation,
         repo: job.repo.clone(),
         control_plane: None,
+        usage: None,
         polarize: None,
         mission_control: None,
         memory: None,
@@ -443,7 +451,10 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
         );
         if needs.force_control_plane
             || cache.revision.as_ref() != Some(&revision)
-            || cache.state.usage.refresh_interval().is_some()
+            // Durable files cannot announce a process exit or a health deadline.
+            // Control-plane requests include the normal 30s reconciliation;
+            // frequent usage-only polls never enter this lifecycle path.
+            || cache.state.runs.iter().any(|run| run.is_runtime_inflight())
         {
             result.control_plane = Some(match source.control_plane(&job.state_root) {
                 Ok(state) => {
@@ -453,8 +464,24 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
                 }
                 // The last good projection stays cached, and the revision stays
                 // unknown so the next pass tries the load again.
-                Err(error) => Err(error.to_string()),
+                Err(error) => {
+                    cache.revision = None;
+                    Err(error.to_string())
+                }
             });
+        }
+    }
+    if result.control_plane.is_none()
+        && (needs.usage || needs.control_plane)
+        && cache.state.usage.refresh_interval().is_some()
+    {
+        match source.usage(&job.state_root) {
+            Ok(usage) if usage != cache.state.usage => {
+                cache.state.usage = usage.clone();
+                result.usage = Some(Ok(usage));
+            }
+            Ok(_) => {}
+            Err(error) => result.usage = Some(Err(error.to_string())),
         }
     }
     if needs.polarize {
@@ -462,7 +489,7 @@ fn execute<S: RefreshSource>(source: &mut S, cache: &mut Cache, job: RefreshJob)
         cache.intents = intents.clone();
         result.polarize = Some(intents);
     }
-    if needs.touches_mission_control() {
+    if needs.mission_control || result.control_plane.is_some() || result.polarize.is_some() {
         result.mission_control =
             Some(source.mission_control(&cache.state, &job.artifact_root, &cache.intents));
     }
@@ -512,6 +539,7 @@ mod tests {
     #[derive(Default)]
     struct Ledger {
         loads: usize,
+        usage: usize,
         polarize: usize,
         mission_runs: Vec<usize>,
     }
@@ -541,6 +569,11 @@ mod tests {
             } else {
                 self.loads.remove(0)
             }
+        }
+
+        fn usage(&mut self, _root: &Path) -> io::Result<UsageDashboard> {
+            self.ledger.lock().unwrap().usage += 1;
+            self.loads.remove(0).map(|state| state.usage)
         }
 
         fn polarize(&mut self, _repo: &Path) -> Vec<PolarizeIntent> {
@@ -605,6 +638,37 @@ mod tests {
     }
 
     const GUARD: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn idle_pending_usage_does_not_repeat_full_load_or_mission_work() {
+        let mut pending = state_with(&["retained"]);
+        pending.usage.refresh_state = crate::usage::UsageRefreshState::Pending;
+        let loads = (0..20).map(|_| Ok(pending.clone())).collect();
+        let mut harness = harness(false, loads, &[]);
+        let started = Instant::now();
+        for generation in 1..=20 {
+            harness.worker.submit(job(generation, only_control_plane()));
+            harness.results.recv_timeout(GUARD).unwrap();
+        }
+        assert!(harness.worker.shutdown(GUARD));
+        let ledger = harness.ledger.lock().unwrap();
+        eprintln!(
+            "VOC_COUNTS pending20 full={} usage={} mission={} elapsed_us={}",
+            ledger.loads,
+            ledger.usage,
+            ledger.mission_runs.len(),
+            started.elapsed().as_micros()
+        );
+        assert_eq!(
+            ledger.loads, 1,
+            "usage progress must not replay all run sources"
+        );
+        assert_eq!(
+            ledger.mission_runs.len(),
+            1,
+            "unchanged inputs must not rebuild Mission Control"
+        );
+    }
 
     #[test]
     fn a_waiting_request_absorbs_newer_ones_without_losing_a_need() {
@@ -676,8 +740,8 @@ mod tests {
         let unmoved = harness.results.recv_timeout(GUARD).unwrap();
         assert!(unmoved.control_plane.is_none());
         assert!(
-            unmoved.mission_control.is_some(),
-            "Mission Control still follows the request"
+            unmoved.mission_control.is_none(),
+            "unchanged inputs do not rebuild Mission Control"
         );
 
         harness.revision.store(2, Ordering::SeqCst);
@@ -711,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_usage_bypasses_revision_cache_until_complete() {
+    fn unfinished_usage_polls_only_usage_until_complete() {
         use crate::usage::UsageRefreshState;
         let mut pending = state_with(&["retained"]);
         pending.usage.refresh_state = UsageRefreshState::Pending;
@@ -724,14 +788,14 @@ mod tests {
         let mut harness = harness(false, vec![Ok(pending), Ok(stale), Ok(complete)], &[]);
         for (generation, tokens) in [(1, 17), (2, 17), (3, 51)] {
             harness.worker.submit(job(generation, only_control_plane()));
-            let state = harness
-                .results
-                .recv_timeout(GUARD)
-                .unwrap()
-                .control_plane
-                .expect("unfinished Usage must be re-read without a disk change")
-                .unwrap();
-            assert_eq!(state.usage.tokens_total_known, tokens);
+            let result = harness.results.recv_timeout(GUARD).unwrap();
+            let usage = if generation == 1 {
+                result.control_plane.unwrap().unwrap().usage
+            } else {
+                assert!(result.control_plane.is_none());
+                result.usage.expect("usage progress is published").unwrap()
+            };
+            assert_eq!(usage.tokens_total_known, tokens);
         }
         harness.worker.submit(job(4, only_control_plane()));
         assert!(
@@ -743,7 +807,10 @@ mod tests {
                 .is_none()
         );
         assert!(harness.worker.shutdown(GUARD));
-        assert_eq!(harness.ledger.lock().unwrap().loads, 3);
+        let ledger = harness.ledger.lock().unwrap();
+        assert_eq!(ledger.loads, 1);
+        assert_eq!(ledger.usage, 2);
+        assert_eq!(ledger.mission_runs.len(), 1);
     }
 
     #[test]
@@ -772,6 +839,131 @@ mod tests {
         assert!(harness.worker.shutdown(GUARD));
         let ledger = harness.ledger.lock().unwrap();
         assert_eq!(ledger.mission_runs, vec![2, 1]);
+    }
+
+    #[test]
+    fn usage_errors_keep_last_good_data_and_new_lifecycle_inputs_still_reload() {
+        let mut pending = state_with(&["old"]);
+        pending.usage.refresh_state = crate::usage::UsageRefreshState::Pending;
+        pending.usage.tokens_total_known = 17;
+        let mut fresh = state_with(&["new", "old"]);
+        fresh.usage.tokens_total_known = 51;
+        let mut harness = harness(
+            false,
+            vec![
+                Ok(pending),
+                Err(io::Error::other("usage source unreadable")),
+                Ok(fresh),
+            ],
+            &[],
+        );
+        harness.worker.submit(job(1, only_control_plane()));
+        harness.results.recv_timeout(GUARD).unwrap();
+        harness.worker.submit(job(2, only_control_plane()));
+        let failed = harness.results.recv_timeout(GUARD).unwrap();
+        assert!(failed.control_plane.is_none());
+        assert!(failed.usage.unwrap().unwrap_err().contains("unreadable"));
+        assert!(failed.mission_control.is_none());
+        harness.revision.store(2, Ordering::SeqCst);
+        harness.worker.submit(job(3, only_control_plane()));
+        let result = harness.results.recv_timeout(GUARD).unwrap();
+        let state = result.control_plane.unwrap().unwrap();
+        assert_eq!(state.runs.len(), 2);
+        assert_eq!(state.usage.tokens_total_known, 51);
+        assert!(result.mission_control.is_some());
+        assert!(harness.worker.shutdown(GUARD));
+        let ledger = harness.ledger.lock().unwrap();
+        assert_eq!(ledger.loads, 2);
+        assert_eq!(ledger.usage, 1);
+    }
+
+    #[test]
+    fn a_failed_force_read_is_retried_at_the_same_revision() {
+        let mut harness = harness(
+            false,
+            vec![
+                Ok(state_with(&["good"])),
+                Err(io::Error::other("temporarily unreadable")),
+                Ok(state_with(&["recovered"])),
+            ],
+            &[],
+        );
+        for (generation, force) in [(1, false), (2, true), (3, false)] {
+            harness.worker.submit(job(
+                generation,
+                RefreshNeeds {
+                    control_plane: true,
+                    force_control_plane: force,
+                    ..RefreshNeeds::default()
+                },
+            ));
+            let result = harness.results.recv_timeout(GUARD).unwrap();
+            match result.control_plane.unwrap() {
+                Err(error) => assert!(error.contains("unreadable")),
+                Ok(state) => assert_eq!(
+                    state.runs[0].run_id,
+                    if generation == 1 { "good" } else { "recovered" }
+                ),
+            }
+        }
+        assert!(harness.worker.shutdown(GUARD));
+        assert_eq!(harness.ledger.lock().unwrap().loads, 3);
+    }
+
+    #[test]
+    fn canonical_liveness_is_reconciled_without_a_durable_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        std::fs::create_dir_all(&root).unwrap();
+        // This owned fixture exits naturally on EOF; no process is signalled.
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read answer"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::fs::write(
+            root.join("events.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "ts":chrono::Utc::now().to_rfc3339(),"run_id":"fixture-worker",
+                    "kind":"lifecycle:active", "message":"fixture", "payload":{
+                        "state":"active", "root":dir.path(), "owner_pid":child.id(), "worker_pid":child.id()
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        let state = ControlPlaneState::load(&root).unwrap();
+        assert_eq!(state.canonical_active_count(), 1);
+        let revision = crate::projection_revision(&root);
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert_eq!(revision, crate::projection_revision(&root));
+        let mut cache = Cache {
+            state,
+            intents: Vec::new(),
+            revision: Some((root.clone(), revision)),
+        };
+        let result = execute(
+            &mut CanonicalRefreshSource,
+            &mut cache,
+            RefreshJob {
+                state_root: root.clone(),
+                repo: dir.path().to_path_buf(),
+                artifact_root: dir.path().join("artifacts"),
+                ..job(1, only_control_plane())
+            },
+        );
+        let fresh = result
+            .control_plane
+            .expect("canonical lifecycle reconciliation is due")
+            .unwrap();
+        assert_eq!(
+            fresh.canonical_active_count(),
+            0,
+            "cached PID truth must expire"
+        );
     }
 
     #[test]

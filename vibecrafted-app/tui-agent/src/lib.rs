@@ -57,6 +57,7 @@ pub const MAX_CHANGE_LATENCY: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RefreshPlan {
     control_plane: bool,
+    usage: bool,
     polarize: bool,
     mission_control: bool,
     rendered_runs: bool,
@@ -70,6 +71,7 @@ struct RefreshScheduler {
     polarize_dirty_since: Option<Instant>,
     mission_dirty_since: Option<Instant>,
     last_control_plane: Instant,
+    last_usage: Instant,
     last_artifacts: Instant,
     last_rendered_runs: Instant,
     last_observe: Instant,
@@ -84,6 +86,7 @@ impl RefreshScheduler {
             polarize_dirty_since: None,
             mission_dirty_since: None,
             last_control_plane: now,
+            last_usage: now,
             last_artifacts: now,
             last_rendered_runs: now,
             last_observe: now,
@@ -126,12 +129,15 @@ impl RefreshScheduler {
             // or a telemetry root created after watch registration. The normal
             // fallback only stats the revision; unchanged ready data stays cached.
             || now.duration_since(self.last_control_plane)
-                >= usage_interval.unwrap_or(WATCHER_FALLBACK_INTERVAL)
-                    .min(WATCHER_FALLBACK_INTERVAL)
+                >= WATCHER_FALLBACK_INTERVAL
         {
             plan.control_plane = true;
             self.state_dirty_since = None;
             self.last_control_plane = now;
+        }
+        if usage_interval.is_some_and(|interval| now.duration_since(self.last_usage) >= interval) {
+            plan.usage = true;
+            self.last_usage = now;
         }
         if due(self.polarize_dirty_since, now, CHANGE_DEBOUNCE)
             || (!self.artifact_watcher_active
@@ -386,17 +392,21 @@ impl ConsoleLoop {
             app.handle_ipc_event(event);
         }
         let plan = self.scheduler.plan(now, app.state.usage.refresh_interval());
-        if plan.control_plane || plan.polarize || plan.mission_control {
+        if plan.control_plane || plan.usage || plan.polarize || plan.mission_control {
             app.request_refresh(RefreshNeeds {
                 control_plane: plan.control_plane,
                 force_control_plane: false,
+                usage: plan.usage,
                 polarize: plan.polarize,
-                mission_control: true,
+                mission_control: plan.mission_control,
                 memory: false,
             });
         }
-        if plan.rendered_runs {
-            app.refresh_rendered_runs();
+        if plan.rendered_runs && app.refresh_time_labels(chrono::Utc::now()) {
+            app.request_refresh(RefreshNeeds {
+                mission_control: true,
+                ..RefreshNeeds::default()
+            });
         }
         if plan.observe && app.config.view == crate::observe::ConsoleView::Observe {
             let ok = app.refresh_observe();
@@ -1837,7 +1847,7 @@ fn artifact_watch_root(home: &Path) -> PathBuf {
 }
 
 /// Roots the state watcher observes, with their depth. The control-plane
-/// directories are flat. `locks/` and `marbles/` sit beside `control_plane/`
+/// snapshots are flat; runtime metadata is nested. `locks/` and `marbles/` sit beside `control_plane/`
 /// in the Vibecrafted home and are raw run sources the canonical projection
 /// folds, so releasing a lock or settling a loop must refresh a running console
 /// too; both nest (`locks/<org>/<repo>/<id>.lock`,
@@ -1850,7 +1860,7 @@ fn control_plane_watch_roots(state_root: &Path) -> Vec<(PathBuf, RecursiveMode)>
             state_root.join("runs").join(".archived"),
             RecursiveMode::NonRecursive,
         ),
-        (state_root.join("runtime_runs"), RecursiveMode::NonRecursive),
+        (state_root.join("runtime_runs"), RecursiveMode::Recursive),
     ];
     if let Some((locks, marbles)) = raw_run_source_roots(state_root) {
         roots.push((locks, RecursiveMode::Recursive));
@@ -1872,8 +1882,8 @@ fn raw_run_source_roots(state_root: &Path) -> Option<(PathBuf, PathBuf)> {
 /// A watcher event is worth a refresh only when it can move
 /// [`projection_revision`], whose inputs are exactly `events.jsonl`, the JSON
 /// snapshots in `runs/` and `runs/.archived/`, the entry names directly in
-/// `runtime_runs/`, and the raw run sources (`locks/**/*.lock`,
-/// `marbles/**/state.json`) and canonical telemetry scan caches/archives.
+/// `runtime_runs/` plus each runtime `meta.json`, and the raw run sources (`locks/**/*.lock`,
+/// `marbles/**/state.json`) and canonical telemetry scan caches/archives/ccusage projections.
 /// Anything else in the watched roots cannot change
 /// the board: `caretaker.json`, rewritten every five seconds by the server's
 /// caretaker, used to wake every console into a refresh pass around the clock.
@@ -1892,6 +1902,11 @@ fn is_projection_path(path: &Path) -> bool {
         .unwrap_or_default();
     let control_plane = match parent {
         "runtime_runs" => true,
+        _ if name == "meta.json" => path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|value| value == "runtime_runs"),
         "runs" | ".archived" => name.ends_with(".json"),
         _ => {
             name == "events.jsonl"
@@ -1905,7 +1920,8 @@ fn is_projection_path(path: &Path) -> bool {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .is_some_and(|value| value == "telemetry")
-        && ((name == "scan-cache.json" && control_core::USAGE_PROVIDER_ADAPTERS.contains(&parent))
+        && ((matches!(name, "scan-cache.json" | "ccusage-sessions.json")
+            && control_core::USAGE_PROVIDER_ADAPTERS.contains(&parent))
             || (parent == "archive"
                 && path
                     .file_stem()
@@ -1944,7 +1960,19 @@ fn projection_revision(root: &Path) -> u64 {
     hash_mtime(&root.join("events.jsonl"), &mut hasher);
     hash_dir_entries(&root.join("runs"), &mut hasher);
     hash_dir_entries(&root.join("runs").join(".archived"), &mut hasher);
-    hash_dir_names(&root.join("runtime_runs"), &mut hasher);
+    let runtime = root.join("runtime_runs");
+    hash_dir_names(&runtime, &mut hasher);
+    if let Ok(entries) = fs::read_dir(&runtime) {
+        let mut meta = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path().join("meta.json"))
+            .collect::<Vec<_>>();
+        meta.sort();
+        for path in meta {
+            hash_mtime(&path, &mut hasher);
+        }
+    }
     if let Some((locks, marbles)) = raw_run_source_roots(root) {
         hash_tree_files(&locks, &|name| name.ends_with(".lock"), &mut hasher);
         hash_tree_files(&marbles, &|name| name == "state.json", &mut hasher);
@@ -1953,6 +1981,10 @@ fn projection_revision(root: &Path) -> u64 {
         let telemetry = home.join("telemetry");
         for agent in control_core::USAGE_PROVIDER_ADAPTERS {
             hash_mtime(&telemetry.join(agent).join("scan-cache.json"), &mut hasher);
+            hash_mtime(
+                &telemetry.join(agent).join("ccusage-sessions.json"),
+                &mut hasher,
+            );
             hash_mtime(
                 &telemetry.join("archive").join(format!("{agent}.jsonl")),
                 &mut hasher,
@@ -2666,35 +2698,23 @@ mod tests {
         assert!(
             !scheduler
                 .plan(start + Duration::from_millis(999), pending)
-                .control_plane
+                .usage
         );
         assert!(
             scheduler
                 .plan(start + Duration::from_secs(1), pending)
-                .control_plane
+                .usage
         );
         assert!(
             scheduler
                 .plan(start + Duration::from_secs(2), pending)
-                .control_plane
+                .usage
         );
         // Completion removes the fast poll; stale failures use the slow fallback.
-        assert!(
-            !scheduler
-                .plan(start + Duration::from_secs(3), None)
-                .control_plane
-        );
+        assert!(!scheduler.plan(start + Duration::from_secs(3), None).usage);
         let stale = Some(Duration::from_secs(30));
-        assert!(
-            !scheduler
-                .plan(start + Duration::from_secs(31), stale)
-                .control_plane
-        );
-        assert!(
-            scheduler
-                .plan(start + Duration::from_secs(32), stale)
-                .control_plane
-        );
+        assert!(!scheduler.plan(start + Duration::from_secs(31), stale).usage);
+        assert!(scheduler.plan(start + Duration::from_secs(32), stale).usage);
     }
 
     #[test]
@@ -2784,6 +2804,7 @@ mod tests {
             "/tmp/control_plane/runs/impl-1.json",
             "/tmp/control_plane/runs/.archived/impl-0.json",
             "/tmp/control_plane/runtime_runs/impl-2",
+            "/tmp/control_plane/runtime_runs/impl-1/meta.json",
         ] {
             assert!(is_projection_path(&PathBuf::from(moved)), "{moved}");
         }
@@ -2792,13 +2813,318 @@ mod tests {
             "/tmp/control_plane/caretaker.json",
             "/tmp/control_plane/.triage-reconciliation-cursor.json",
             "/tmp/control_plane/.DS_Store",
-            "/tmp/control_plane/runtime_runs/impl-1/meta.json",
             "/tmp/control_plane/runtime_runs/impl-1/report.md",
             "/tmp/control_plane/runtime_runs/impl-1/events.jsonl",
             "/tmp/control_plane/runs/impl-1.json.tmp",
         ] {
             assert!(!is_projection_path(&PathBuf::from(inert)), "{inert}");
         }
+    }
+
+    #[test]
+    fn idle_scaled_board_keeps_rendered_snapshots_and_event_tails() {
+        let mut app = sample_app();
+        app.queue_scope = QueueScope::All;
+        app.state = ControlPlaneState::empty("/tmp/voc-idle-scaled");
+        app.state.runs = (0..387)
+            .map(|index| {
+                serde_json::from_value(
+                    serde_json::json!({"run_id":format!("closed-{index}"), "state":"completed"}),
+                )
+                .unwrap()
+            })
+            .collect();
+        app.state.retained_runs = app.state.runs.clone();
+        app.refresh_rendered_runs();
+        let (_state_tx, state_rx) = mpsc::channel();
+        let (_artifact_tx, artifact_rx) = mpsc::channel();
+        let mut console = ConsoleLoop::start(
+            &app,
+            CanonicalRefreshSource,
+            FixtureTranscripts,
+            ChangeFeeds {
+                state: state_rx,
+                artifacts: artifact_rx,
+                artifact_watcher_active: true,
+            },
+        )
+        .unwrap();
+        let start = Instant::now();
+        let mut replacements = 0;
+        for tick in 1..=20 {
+            let pointer = app.runs.as_ptr();
+            console.tick(&mut app, start + Duration::from_secs(tick));
+            replacements += usize::from(pointer != app.runs.as_ptr());
+        }
+        console.shutdown();
+        eprintln!("VOC_COUNTS idle20 runs387 render_replacements={replacements}");
+        assert_eq!(
+            replacements, 0,
+            "unchanged labels must not clone/sort the board"
+        );
+    }
+
+    #[test]
+    fn watcher_publishes_existing_meta_and_ccusage_changes_to_console() {
+        fn watch_until(
+            console: &mut ConsoleLoop,
+            app: &mut App,
+            done: impl Fn(&App) -> bool,
+        ) -> bool {
+            let end = Instant::now() + GUARD;
+            while !done(app) && Instant::now() < end {
+                console.tick(app, Instant::now());
+                thread::sleep(Duration::from_millis(10));
+            }
+            done(app)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        let run = root.join("runtime_runs/existing");
+        let telemetry = dir.path().join("telemetry/codex");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&telemetry).unwrap();
+        let meta = run.join("meta.json");
+        fs::write(&meta, serde_json::to_vec(&serde_json::json!({
+            "run_id":"existing", "status":"running", "started_at":chrono::Utc::now().to_rfc3339()
+        })).unwrap()).unwrap();
+        let mut app = sample_app();
+        app.queue_scope = QueueScope::All;
+        app.config.state_root = root.clone();
+        app.config.repo = dir.path().to_path_buf();
+        app.mission_artifact_root = dir.path().join("artifacts");
+        app.state = ControlPlaneState::empty(&root);
+        let (state_tx, state_rx) = mpsc::channel();
+        let watcher = start_state_watcher(&root, state_tx).unwrap();
+        let (_artifact_tx, artifact_rx) = mpsc::channel();
+        let mut console = ConsoleLoop::start(
+            &app,
+            CanonicalRefreshSource,
+            FixtureTranscripts,
+            ChangeFeeds {
+                state: state_rx,
+                artifacts: artifact_rx,
+                artifact_watcher_active: true,
+            },
+        )
+        .unwrap();
+        app.request_full_refresh();
+        console.tick(&mut app, Instant::now());
+        assert!(console.wait_until(&mut app, GUARD, |app| app.refresh.applied_generation >= 1));
+        assert_eq!(app.state.runs.len(), 1);
+        fs::write(
+            &meta,
+            serde_json::to_vec(&serde_json::json!({
+                "run_id":"existing", "status":"completed", "exit_code":0,
+                "completed_at":chrono::Utc::now().to_rfc3339()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(watch_until(&mut console, &mut app, |app| app
+            .state
+            .runs
+            .iter()
+            .any(|run| run.state.as_deref() == Some("completed"))));
+        let projection = telemetry.join("ccusage-sessions.json");
+        fs::write(
+            &projection,
+            serde_json::to_vec(&serde_json::json!({
+                "schema":"vibecrafted.ccusage-sessions.v1", "sessions":[{
+                    "id":"fixture-local", "model":"gpt-5", "recorded_at":"2026-11-04T10:00:00Z",
+                    "events":1,"input":40,"cache_read":0,"cache_write":0,"output":11,"total":51,
+                    "cost_amount":null,"cost_source":"unknown","unpriced_models":["gpt-5"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(watch_until(&mut console, &mut app, |app| app
+            .state
+            .usage
+            .tokens_total_known
+            == 51));
+        assert_eq!(
+            app.state.usage.runs_cost_unknown, 2,
+            "local unknown cost is not zero"
+        );
+        console.shutdown();
+        drop(watcher);
+    }
+
+    #[test]
+    fn scaled_fixture_avoids_replaying_canonical_reads_on_idle_pending_ticks() {
+        struct CountedCanonical {
+            full: Arc<AtomicUsize>,
+            mission: Arc<AtomicUsize>,
+        }
+        impl RefreshSource for CountedCanonical {
+            fn projection_revision(&mut self, root: &Path) -> u64 {
+                projection_revision(root)
+            }
+            fn control_plane(&mut self, root: &Path) -> io::Result<ControlPlaneState> {
+                self.full.fetch_add(1, Ordering::SeqCst);
+                let mut state = ControlPlaneState::load(root)?;
+                state.usage.refresh_state = crate::usage::UsageRefreshState::Pending;
+                Ok(state)
+            }
+            fn polarize(&mut self, _repo: &Path) -> Vec<crate::polarize::PolarizeIntent> {
+                Vec::new()
+            }
+            fn mission_control(
+                &mut self,
+                state: &ControlPlaneState,
+                artifacts: &Path,
+                intents: &[crate::polarize::PolarizeIntent],
+            ) -> MissionControlState {
+                self.mission.fetch_add(1, Ordering::SeqCst);
+                MissionControlState::build_with_intents(state, artifacts, intents)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        fs::create_dir_all(root.join("runs")).unwrap();
+        for index in 0..2340 {
+            let run_id = format!("closed-{index}");
+            let runtime = root.join("runtime_runs").join(&run_id);
+            fs::create_dir_all(&runtime).unwrap();
+            let meta = serde_json::json!({"run_id":run_id,"status":"completed","exit_code":0,
+                "completed_at":"2026-11-03T00:00:00Z", "agent":"codex", "model_requested":"gpt-5",
+                "measured_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}});
+            fs::write(
+                runtime.join("meta.json"),
+                serde_json::to_vec(&meta).unwrap(),
+            )
+            .unwrap();
+            if index < 387 {
+                fs::write(
+                    root.join("runs").join(format!("{run_id}.json")),
+                    serde_json::to_vec(
+                        &serde_json::json!({"run_id":run_id,"state":"completed","exit_code":0}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        let full = Arc::new(AtomicUsize::new(0));
+        let mission = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel();
+        let mut worker = RefreshWorker::spawn(
+            CountedCanonical {
+                full: full.clone(),
+                mission: mission.clone(),
+            },
+            RefreshSeed {
+                state: ControlPlaneState::empty(&root),
+                intents: Vec::new(),
+            },
+            move |result| tx.send(result).is_ok(),
+        )
+        .unwrap();
+        let start = Instant::now();
+        for generation in 1..=20 {
+            worker.submit(refresh::RefreshJob {
+                generation,
+                needs: RefreshNeeds {
+                    control_plane: true,
+                    ..RefreshNeeds::default()
+                },
+                state_root: root.clone(),
+                repo: dir.path().to_path_buf(),
+                artifact_root: dir.path().join("artifacts"),
+            });
+            rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        }
+        assert!(worker.shutdown(GUARD));
+        eprintln!(
+            "VOC_COUNTS scaled387retained2340runtime20passes full={} mission={} elapsed_ms={}",
+            full.load(Ordering::SeqCst),
+            mission.load(Ordering::SeqCst),
+            start.elapsed().as_millis()
+        );
+        assert_eq!(full.load(Ordering::SeqCst), 1);
+        assert_eq!(mission.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn usage_only_answers_keep_rows_selection_and_last_good_data_on_error() {
+        let mut app = sample_app();
+        app.queue_scope = QueueScope::All;
+        app.state.runs = (0..2)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "run_id":format!("fixture-{i}"),"state":"completed"
+                }))
+                .unwrap()
+            })
+            .collect();
+        app.state.usage.tokens_total_known = 17;
+        app.refresh_rendered_runs();
+        app.selected = 1;
+        let selected = app.selected_run().unwrap().snapshot.run_id.clone();
+        let pointer = app.runs.as_ptr();
+        app.apply_refresh(refresh::RefreshResult {
+            generation: 1,
+            repo: app.config.repo.clone(),
+            control_plane: None,
+            usage: Some(Err("fixture read denied".into())),
+            polarize: None,
+            mission_control: None,
+            memory: None,
+        });
+        assert_eq!(app.state.usage.tokens_total_known, 17);
+        assert!(
+            app.status_line
+                .contains("usage unavailable: fixture read denied")
+        );
+        let mut usage = app.state.usage.clone();
+        usage.tokens_total_known = 51;
+        app.apply_refresh(refresh::RefreshResult {
+            generation: 2,
+            repo: app.config.repo.clone(),
+            control_plane: None,
+            usage: Some(Ok(usage)),
+            polarize: None,
+            mission_control: None,
+            memory: None,
+        });
+        assert_eq!(app.state.usage.tokens_total_known, 51);
+        assert_eq!(app.runs.as_ptr(), pointer);
+        assert_eq!(app.selected_run().unwrap().snapshot.run_id, selected);
+    }
+
+    #[test]
+    fn runtime_metadata_and_ccusage_publications_move_revision_and_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("control_plane");
+        let run = root.join("runtime_runs/existing");
+        let telemetry = dir.path().join("telemetry/codex");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&telemetry).unwrap();
+        let meta = run.join("meta.json");
+        fs::write(&meta, r#"{"status":"running"}"#).unwrap();
+        let before = projection_revision(&root);
+        fs::write(&meta, r#"{"status":"completed","exit_code":0}"#).unwrap();
+        assert_ne!(
+            before,
+            projection_revision(&root),
+            "existing metadata must invalidate fallback"
+        );
+        assert!(is_projection_path(&meta));
+        assert!(
+            control_plane_watch_roots(&root)
+                .contains(&(root.join("runtime_runs"), RecursiveMode::Recursive))
+        );
+        let projection = telemetry.join("ccusage-sessions.json");
+        let before = projection_revision(&root);
+        fs::write(&projection, r#"{"sessions":[]}"#).unwrap();
+        assert_ne!(
+            before,
+            projection_revision(&root),
+            "ccusage publication must invalidate fallback"
+        );
+        assert!(is_projection_path(&projection));
     }
 
     #[test]
@@ -3300,6 +3626,7 @@ mod tests {
             generation: initial.generation,
             repo: app.config.repo.clone(),
             control_plane: Some(Err("state permission denied".into())),
+            usage: None,
             polarize: None,
             mission_control: None,
             memory: None,
@@ -3323,6 +3650,7 @@ mod tests {
             generation: retry.generation,
             repo: app.config.repo.clone(),
             control_plane: Some(Ok(ControlPlaneState::empty("/tmp/state"))),
+            usage: None,
             polarize: None,
             mission_control: None,
             memory: None,
@@ -3448,6 +3776,7 @@ mod tests {
             generation,
             repo: PathBuf::from("/tmp/repo"),
             control_plane: Some(Ok(state_with_runs("/tmp/state", &[(run_id, "codex")]))),
+            usage: None,
             polarize: None,
             mission_control: None,
             memory: None,
@@ -3481,6 +3810,7 @@ mod tests {
             generation: pass.generation,
             repo: app.config.repo.clone(),
             control_plane: Some(Err("runs/ is unreadable".to_string())),
+            usage: None,
             polarize: None,
             mission_control: None,
             memory: None,
@@ -3630,6 +3960,7 @@ mod tests {
             generation: reread.generation,
             repo: destination.clone(),
             control_plane: None,
+            usage: None,
             polarize: Some(Vec::new()),
             mission_control: Some(MissionControlState::default()),
             memory: None,
