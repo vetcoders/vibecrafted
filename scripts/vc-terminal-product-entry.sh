@@ -217,6 +217,10 @@ for argument in "$@"; do
       fi
       value_pending=true
       ;;
+    --vibecrafted-hosted | --vibecrafted-hosted=*)
+      printf 'vc-terminal: the hosted application role is product-owned\n' >&2
+      exit 2
+      ;;
     --option)
       value_pending=true
       option_pending=true
@@ -266,7 +270,7 @@ if [[ "$host" == */Contents/MacOS/vc-terminal && "$(/usr/bin/uname -s)" == "Darw
       || exit $?
     case "$admission" in
       reused) exit 0 ;;
-      fresh) exec "$host" --config-file "$config" ${host_tail[@]+"${host_tail[@]}"} ;;
+      fresh) exec "$host" --vibecrafted-hosted --config-file "$config" ${host_tail[@]+"${host_tail[@]}"} ;;
     esac
     printf 'vc-terminal: unrecognized host admission: %s\n' "$admission" >&2
     exit 70

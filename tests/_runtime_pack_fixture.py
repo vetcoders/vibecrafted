@@ -516,6 +516,7 @@ def seed_runtime_pack(
         "scripts/vc-terminal-product-entry.sh",
         "scripts/vc-frame-product-entry.sh",
         "scripts/lib/runtime-roots.sh",
+        "scripts/lib/app-main-identity.py",
         "config/starship.toml",
         "config/atuin/config.toml",
     ):

@@ -41,6 +41,7 @@ FIXTURE_REQUIRED_FILES = {
     "scripts/installer_brand.py",
     "scripts/install-foundations.sh",
     "scripts/lib/runtime-roots.sh",
+    "scripts/lib/app-main-identity.py",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
@@ -90,7 +91,10 @@ def _materialize_complete_distribution_fixture(source_dir: Path) -> None:
         path = source_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.write_text(f"fixture: {relative}\n", encoding="utf-8")
+            if relative == "scripts/lib/app-main-identity.py":
+                shutil.copy2(REPO_ROOT / relative, path)
+            else:
+                path.write_text(f"fixture: {relative}\n", encoding="utf-8")
 
 
 def _fixture_tree_record(source_dir: Path) -> dict[str, object]:

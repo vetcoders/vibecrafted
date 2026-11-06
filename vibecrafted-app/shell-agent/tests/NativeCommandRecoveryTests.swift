@@ -154,6 +154,22 @@ struct NativeCommandRecoveryTests {
       TerminalLauncher.hostState(launcherPID: 77, launcherRunning: running,
         launcherStatus: status, receipt: receipt, startToken: token)
     }
+    let observed = try receipt(["kind": "observed",
+      "delivery": "host_observed_without_window_request", "code_proof": "kernel_live_cdhash",
+      "code_cdhash": String(repeating: "a", count: 40)])
+    try require(state(false, 0, observed) == .reused(4242), "Main restart lost the admitted host")
+    try require(state(false, 0, observed) == .reused(4242), "Repeated adoption changed the host")
+    try require(state(false, 0, observed, swapped) == .ended(0), "Observation adopted recycled PID")
+    try require(state(false, 0, observed, { _ in nil }) == .ended(0), "Observation adopted exited PID")
+    try require(state(true, nil, observed) == .ended(nil), "Unfinished observer claimed readiness")
+    for bad: [String: Any] in [["code_proof": "static"], ["code_cdhash": "bad"],
+      ["delivery": "create_window_request_written"]] {
+      var fields: [String: Any] = ["kind": "observed",
+        "delivery": "host_observed_without_window_request", "code_proof": "kernel_live_cdhash",
+        "code_cdhash": String(repeating: "a", count: 40)]
+      fields.merge(bad) { $1 }
+      try rejects { _ = try receipt(fields) }
+    }
     // Fresh: the launcher PID is the host (wrapper execs in place).
     try require(state(true, nil, nil) == .launching(77), "Admission phase lost")
     try require(state(true, nil, fresh) == .launching(77), "Fresh host not the launcher")
@@ -176,6 +192,35 @@ struct NativeCommandRecoveryTests {
       workingDirectory: root, environment: ["VIBECRAFTED_ROOT": root.path,
         "VIBECRAFTED_RUNTIME_ROOT": root.path, "VIBECRAFTED_TERMINAL_HOST": host.path])
     let launch = TerminalLauncher.Receipt(processIdentifier: 77, specification: specification)
+    let query = TerminalLauncher.observationProcess(specification)
+    try require(!query.isRunning, "Constructing observation launched a process")
+    try require(query.executableURL == root.appendingPathComponent("bin/python3"), "Ambient Python selected")
+    try require(query.arguments == ["-I", "-B", root.appendingPathComponent(
+      "vibecrafted-core/vibecrafted_core/terminal_host.py").path, "observe", "--host", host.path],
+      "Observation escaped the selected generation")
+    try require(query.environment == specification.environment, "Observation environment changed")
+    func adoption(_ fields: [String: Any]) throws -> TerminalLauncher.Launch? {
+      var object: [String: Any] = ["schema": TerminalLauncher.HostReceipt.schema,
+        "kind": "observed", "host_pid": 4242, "host_start": "1760000000.000123",
+        "executable": host.path, "delivery": "host_observed_without_window_request",
+        "code_proof": "kernel_live_cdhash", "code_cdhash": String(repeating: "a", count: 40),
+        "agent_start_proven": false]
+      object.merge(fields) { $1 }
+      return try TerminalLauncher.adopt(JSONSerialization.data(withJSONObject: object), specification: specification)
+    }
+    for _ in 0..<2 {
+      let adopted = try adoption([:])
+      try require(adopted?.receipt.processIdentifier == 4242 && adopted?.hostReceipt == observed,
+        "Fresh Main did not adopt the exact receipt")
+    }
+    for bad: [String: Any] in [["kind": "reused"], ["kind": "fresh"], ["kind": "absent"],
+      ["executable": "/Applications/Foreign.app/terminal"], ["agent_start_proven": true]] {
+      try rejects { _ = try adoption(bad) }
+    }
+    let absent: [String: Any] = ["schema": TerminalLauncher.HostReceipt.schema,
+      "kind": "absent", "agent_start_proven": false]
+    let noHost = try TerminalLauncher.adopt(JSONSerialization.data(withJSONObject: absent), specification: specification)
+    try require(noHost == nil, "Absent authority fabricated a host")
     let observation = TerminalRegistrationObservation(receipt: launch, now: 0, timeout: 10)
     let reusedState = state(false, 0, reused)
     try require(observation.observe(now: 1, currentLaunchID: launch.launchID,

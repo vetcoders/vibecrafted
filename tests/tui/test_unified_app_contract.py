@@ -4863,7 +4863,7 @@ def test_unified_release_has_one_top_level_owner() -> None:
         '"${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"}' in terminal_entry
     )
     assert (
-        'fresh) exec "$host" --config-file "$config" '
+        'fresh) exec "$host" --vibecrafted-hosted --config-file "$config" '
         '${host_tail[@]+"${host_tail[@]}"} ;;' in terminal_entry
     )
     assert "--config-file | --config-file=*)" in terminal_entry
@@ -4900,6 +4900,7 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert '"$runtime/scripts/vetcoders_install.py"' in builder
     assert '"$runtime/scripts/distribution_manifest.py"' in builder
     assert '"$runtime/scripts/installer_brand.py"' in builder
+    assert '"$runtime/scripts/lib/app-main-identity.py"' in builder
     assert '"$REPO_ROOT/scripts/verify-vibecrafted-product.sh"' not in builder
     assert "--noprofile" not in builder  # vc-start, not the release shell, owns this
     assert "vc-frame.real" not in builder

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1069,5 +1070,217 @@ def test_product_entry_routes_bundle_host_through_admission() -> None:
         in entry
     )
     assert "reused) exit 0 ;;" in entry
-    assert 'fresh) exec "$host" --config-file "$config"' in entry
+    assert 'fresh) exec "$host" --vibecrafted-hosted --config-file "$config"' in entry
+    assert "the hosted application role is product-owned" in entry
     assert "host admission helper missing" in entry and "exit 78" in entry
+
+
+def test_native_payload_materializes_the_existing_signed_main_identity_helper(
+    tmp_path: Path,
+) -> None:
+    import re
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    command = re.search(
+        r'  install -m 0644 "\$SOURCE_ROOT/scripts/lib/app-main-identity.py" \\\n'
+        r'    "\$runtime/scripts/lib/app-main-identity.py"',
+        builder,
+    )
+    assert command is not None, "the generation cannot prove its Main owner"
+    runtime = tmp_path / "runtime"
+    (runtime / "scripts/lib").mkdir(parents=True)
+    subprocess.run(
+        ["/bin/bash", "-eu", "-c", command.group()],
+        check=True,
+        env={"SOURCE_ROOT": str(REPO_ROOT), "runtime": str(runtime)},
+    )
+    carried = runtime / "scripts/lib/app-main-identity.py"
+    assert (
+        carried.read_bytes()
+        == (REPO_ROOT / "scripts/lib/app-main-identity.py").read_bytes()
+    )
+    assert carried.stat().st_mode & 0o777 == 0o644
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import runpy,sys; m=runpy.run_path(sys.argv[1]); assert callable(m['inspect_main'])",
+            str(carried),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _observe(fx: Fixture) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            SANDBOX,
+            sys.executable,
+            "-I",
+            "-B",
+            str(fx.helper),
+            "observe",
+            "--host",
+            str(fx.host),
+        ],
+        env=fx.env(),
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+
+
+def test_main_restart_observes_same_live_host_without_requesting_a_window(
+    fx: Fixture,
+) -> None:
+    first = _start_one_host(fx)
+    record_path = fx.state / "host.json"
+    before = record_path.read_bytes()
+    # Each new helper process represents a Main with no in-memory launch state.
+    results = [_observe(fx), _observe(fx)]
+    assert [result.returncode for result in results] == [0, 0]
+    receipts = [json.loads(result.stdout) for result in results]
+    assert receipts[0] == receipts[1]
+    assert receipts[0]["kind"] == "observed"
+    assert receipts[0]["host_pid"] == first.pid
+    assert receipts[0]["host_start"] == json.loads(before)["start"]
+    assert receipts[0]["code_cdhash"] == _codesign_cdhash(fx.host)
+    assert receipts[0]["code_proof"] == "kernel_live_cdhash"
+    assert receipts[0]["agent_start_proven"] is False
+    assert record_path.read_bytes() == before
+    assert [r[0].split()[0] for r in fx.records()] == ["start"]
+    assert not list(fx.state.glob("window-*.env"))
+    assert first.poll() is None
+
+
+@pytest.mark.parametrize("state", ["missing", "recycled", "malformed"])
+def test_main_observation_never_launches_an_unproven_host(
+    fx: Fixture, state: str
+) -> None:
+    first = None
+    if state != "missing":
+        first = _start_one_host(fx)
+        if state == "recycled":
+            _rewrite_record(fx, start="1.000001")
+        else:
+            (fx.state / "host.json").write_text("{broken")
+    before = (fx.state / "host.json").read_bytes() if state != "missing" else None
+    result = _observe(fx)
+    if state == "malformed":
+        assert result.returncode == 78
+    else:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "schema": "vibecrafted.terminal-launch-receipt.v1",
+            "kind": "absent",
+            "agent_start_proven": False,
+        }
+    assert ([r[0].split()[0] for r in fx.records()]) == (
+        [] if first is None else ["start"]
+    )
+    assert not list(fx.state.glob("window-*.env"))
+    if before is not None:
+        assert (fx.state / "host.json").read_bytes() == before
+        assert first.poll() is None
+
+
+def test_main_observation_refuses_republished_code(
+    fx: Fixture, variant_host_binary: Path
+) -> None:
+    first = _start_one_host(fx)
+    _overwrite_in_place(fx.host, variant_host_binary.read_bytes())
+    _overwrite_in_place(fx.expected, variant_host_binary.read_bytes())
+    result = _observe(fx)
+    assert result.returncode == 75
+    assert "not admitted for the installed host code" in result.stderr
+    assert first.poll() is None
+    assert [r[0].split()[0] for r in fx.records()] == ["start"]
+
+
+@pytest.mark.parametrize("already_running", [True, False])
+def test_cli_targets_verified_main_owner_without_command_payload(
+    monkeypatch, already_running: bool
+) -> None:
+    module = _helper_module()
+    calls = []
+    released = []
+    api = SimpleNamespace(
+        objc=SimpleNamespace(objc_getClass=lambda name: name),
+        cf=SimpleNamespace(CFRelease=released.append),
+        string=lambda value: value,
+    )
+
+    def send(target, selector, *args, **kwargs):
+        calls.append((target, selector, args))
+        return "center" if selector == "defaultCenter" else None
+
+    api.send = send
+    proofs = iter(["4242\n12.000001"] if already_running else ["", "4242\n12.000001"])
+    inspected = []
+
+    def inspect(_api, bundle):
+        inspected.append(bundle)
+        return next(proofs)
+
+    identity = SimpleNamespace(MacOS=lambda: api, inspect_main=inspect)
+    monkeypatch.setattr(module, "_main_identity_module", lambda: identity)
+    monkeypatch.setattr(module, "production_policy", lambda host: True)
+    opened = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda argv, **kw: opened.append(argv) or SimpleNamespace(returncode=0),
+    )
+    module.ensure_main_owner("/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal")
+    assert inspected == ["/Applications/Vibecrafted.app"] * (
+        1 if already_running else 2
+    )
+    assert opened == (
+        []
+        if already_running
+        else [
+            [
+                "/usr/bin/open",
+                "-g",
+                "-n",
+                "/Applications/Vibecrafted.app",
+                "--args",
+                "--terminal-host-owner",
+            ]
+        ]
+    )
+    assert calls[-1] == (
+        "center",
+        "postNotificationName:object:userInfo:deliverImmediately:",
+        (module.MAIN_OWNER_NOTIFICATION, "4242", None, True),
+    )
+    assert released == [module.MAIN_OWNER_NOTIFICATION, "4242"]
+
+
+def test_cli_never_opens_over_ambiguous_or_foreign_main(monkeypatch) -> None:
+    module = _helper_module()
+
+    def refuse(*args):
+        raise ValueError("ambiguous or foreign Main")
+
+    identity = SimpleNamespace(MacOS=lambda: object(), inspect_main=refuse)
+    monkeypatch.setattr(module, "_main_identity_module", lambda: identity)
+    monkeypatch.setattr(module, "production_policy", lambda host: True)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("foreign Main launched over"),
+    )
+    with pytest.raises(module.Refusal, match="ambiguous or foreign Main"):
+        module.ensure_main_owner(
+            "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+        )

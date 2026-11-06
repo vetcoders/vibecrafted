@@ -47,6 +47,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import socket
@@ -59,6 +60,8 @@ from pathlib import Path
 
 RECORD_SCHEMA = "vibecrafted.terminal-host.v1"
 RECEIPT_SCHEMA = "vibecrafted.terminal-launch-receipt.v1"
+MAIN_OWNER_NOTIFICATION = "io.vetcoders.vibecrafted.terminal-host-requested"
+MAIN_OWNER_FLAG = "--terminal-host-owner"
 STATE_DIR_ENV = "VIBECRAFTED_TERMINAL_HOST_DIR"
 LOCK_WAIT_SECONDS = 20.0
 STARTUP_WAIT_SECONDS = 15.0
@@ -813,6 +816,124 @@ def _clear_own_stale_socket(path: Path) -> None:
     raise Refusal(EX_TEMPFAIL, f"host socket path has a live listener: {path}")
 
 
+def _main_identity_module():
+    """Reuse the installer's signed Main-role proof from this exact generation."""
+    source = Path(__file__).resolve().parents[2] / "scripts/lib/app-main-identity.py"
+    if not source.is_file() or source.is_symlink():
+        raise Refusal(EX_CONFIG, "signed Main identity helper is unavailable")
+    spec = importlib.util.spec_from_file_location("vc_terminal_main_identity", source)
+    if spec is None or spec.loader is None:
+        raise Refusal(EX_CONFIG, "signed Main identity helper is unreadable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def ensure_main_owner(host: str) -> None:
+    """Hosted windows have one public Main owner; never elect by bundle ID alone."""
+    if not production_policy(host):
+        return
+    identity = _main_identity_module()
+    try:
+        api = identity.MacOS()
+        bundle = str(Path(host).parents[2])
+        proof = identity.inspect_main(api, bundle)
+        if not proof:
+            opened = subprocess.run(
+                ["/usr/bin/open", "-g", "-n", bundle, "--args", MAIN_OWNER_FLAG],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if opened.returncode:
+                raise Refusal(EX_TEMPFAIL, "the signed Main owner could not be opened")
+            deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+            while not proof and time.monotonic() < deadline:
+                time.sleep(0.05)
+                proof = identity.inspect_main(api, bundle)
+        if not proof:
+            raise Refusal(EX_TEMPFAIL, "the signed Main owner is not registered")
+        pid = int(proof.splitlines()[0])
+        if pid <= 0:
+            raise ValueError("invalid Main pid")
+        # No path, command or launch authority is carried by this notification.
+        # The addressed Main re-reads the authenticated durable host record.
+        center = api.send(
+            api.objc.objc_getClass(b"NSDistributedNotificationCenter"), "defaultCenter"
+        )
+        if not center:
+            raise ValueError("Main notification center unavailable")
+        name, target = api.string(MAIN_OWNER_NOTIFICATION), api.string(str(pid))
+        try:
+            api.send(
+                center,
+                "postNotificationName:object:userInfo:deliverImmediately:",
+                name,
+                target,
+                None,
+                True,
+                result=None,
+                types=(
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_bool,
+                ),
+            )
+        finally:
+            api.cf.CFRelease(name)
+            api.cf.CFRelease(target)
+    except Refusal:
+        raise
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise Refusal(
+            EX_TEMPFAIL, f"signed Main ownership is unconfirmed: {error}"
+        ) from None
+
+
+def observe_host(host: str, environ: dict[str, str]) -> dict:
+    """Observe existing admission authority; never launch a host or a window."""
+    if not os.path.isabs(host) or os.path.realpath(host) != host:
+        raise Refusal(EX_CONFIG, f"host path is not canonical: {host}")
+    admitted_code_identity(host)
+    directory = state_directory(environ, host)
+    lock = acquire_lock(directory)
+    try:
+        code = admitted_code_identity(host)
+        record = read_record(directory)
+        state = host_state(record, host, code) if record else "stale"
+        deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+        while state == "starting":
+            if time.monotonic() >= deadline:
+                raise Refusal(EX_TEMPFAIL, "admitted terminal is still starting")
+            time.sleep(0.05)
+            state = host_state(record, host, code)
+        if state != "live":
+            return {
+                "schema": RECEIPT_SCHEMA,
+                "kind": "absent",
+                "agent_start_proven": False,
+            }
+        current = admitted_code_identity(host)
+        if current != code or host_state(record, host, current) != "live":
+            raise Refusal(EX_TEMPFAIL, "admitted terminal changed during observation")
+        return {
+            "schema": RECEIPT_SCHEMA,
+            "kind": "observed",
+            "host_pid": record["pid"],
+            "host_start": record["start"],
+            "executable": host,
+            "delivery": "host_observed_without_window_request",
+            "code_cdhash": current.cdhash,
+            "code_proof": "kernel_live_cdhash",
+            "agent_start_proven": False,
+        }
+    finally:
+        os.close(lock)
+
+
 def admit(
     wrapper_pid: int,
     host: str,
@@ -851,6 +972,7 @@ def admit(
             state = host_state(record, host, code)
         if state == "live":
             assert record is not None
+            ensure_main_owner(host)
             env_file = write_env_file(directory, environ)
             shim = [
                 python,
@@ -941,6 +1063,7 @@ def admit(
                 },
             )
         _write_private_json(directory / "host.json", fresh, exclusive=False)
+        ensure_main_owner(host)
         return "fresh"
     finally:
         os.close(lock)
@@ -953,6 +1076,11 @@ def main(argv: list[str]) -> int:
             return EX_USAGE
         return spawn(argv[1], argv[3:])
     try:
+        if argv[:1] == ["observe"]:
+            if len(argv) != 3 or argv[1] != "--host":
+                raise Refusal(EX_USAGE, "usage: observe --host HOST")
+            print(json.dumps(observe_host(argv[2], dict(os.environ))))
+            return 0
         if argv[:1] == ["owns-fixed-host"]:
             if len(argv) != 1:
                 raise Refusal(EX_USAGE, "usage: owns-fixed-host")

@@ -39,6 +39,7 @@ EXPECTED_REQUIRED = {
     "scripts/build-linux-arm64-runtime-pack.sh",
     "scripts/build-linux-runtime-pack.sh",
     "scripts/vetcoders_install.py",
+    "scripts/lib/app-main-identity.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",

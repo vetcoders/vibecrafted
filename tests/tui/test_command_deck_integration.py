@@ -20,6 +20,32 @@ SHELL = ROOT / "vibecrafted-app/shell-agent"
 APP = SHELL / "app/Vibecrafted"
 
 
+def test_main_restart_reopen_and_cli_notification_share_durable_adoption() -> None:
+    delegate = (APP / "AppDelegate.swift").read_text()
+    startup = delegate.split("func applicationDidFinishLaunching", 1)[1].split(
+        "func applicationShouldHandleReopen", 1
+    )[0]
+    reopen = delegate.split("func applicationShouldHandleReopen", 1)[1].split(
+        "func applicationDidHide", 1
+    )[0]
+    assert "launchWorkspaceTerminal(createIfAbsent: false)" in startup
+    assert reopen.count("launchWorkspaceTerminal(createIfAbsent: false)") == 2
+    assert "object: String(getpid())" in reopen
+    assert "TerminalLauncher.ownerNotification" in reopen
+    open_terminal = delegate.split("private func openWorkspaceTerminal", 1)[1].split(
+        "private func openProject", 1
+    )[0]
+    assert "TerminalLauncher.observationProcess(specification)" in open_terminal
+    assert (
+        "TerminalLauncher.adopt(result.stdout, specification: specification)"
+        in open_terminal
+    )
+    assert "else if createIfAbsent" in open_terminal
+    assert open_terminal.index("TerminalLauncher.adopt") < open_terminal.index(
+        "TerminalLauncher.launch"
+    )
+
+
 def test_app_ffi_has_one_dynamic_linkage_owner() -> None:
     project = (SHELL / "app/project.yml").read_text()
     # Static + dynamic Rust linkage registers mac-notification-sys's ObjC
