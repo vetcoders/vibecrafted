@@ -214,10 +214,13 @@ Verify print-mode initialization and an actual authorized private tool call.
 AGY headless permission denial is not a successful tool call, even if its
 process/result status says success; inspect the tool completion state.
 
-Canonical compiler-lane activation uses `make install-tools` with its existing
-service policy and ownership fences; it does not replace the fixed notarized
-App. `preserve` restarts a previously active managed pair; use `ensure` when a
-live pair is required even if it was already stopped.
+For a Native-managed macOS install, activate a coherent Runtime Pack through the
+canonical paired Runtime Pack/App installer. Compiler-only `make install-tools`
+staging is not activation proof: native service admission still binds `active.json`,
+the install receipt, current selection and the installed core's physical location.
+Compiler `preserve`/`ensure` policies do not relax that identity contract. Do not
+use a source-generation selector or a Python fallback to bypass a refused native
+publication or paired-App gate.
 
 Native stopped-pair admission corroborates owned, stable execution and supervisor
 receipts, the dead owner, absent role PID paths and the actual closed loopback
