@@ -665,6 +665,7 @@ def _option_lines(topic: str) -> list[str]:
         "  --remediation-reason <text>   Required with --remediate-trust-block; recorded on the launch receipt",
         "  --remediation-task <id>       Bounded identity: repair or admission",
         "  --model <name>                 Exact model; CLI > plan frontmatter > provider default",
+        "  --mcp-config <PATH.json>       Only this profile's MCP servers; frozen on native resume/fork/retry (supported direct agents only)",
         "  --session <id|current|last>    Continue this provider-native session (never a work-* run id)",
     ]
     definition = workflow_definition(topic)

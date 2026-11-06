@@ -397,6 +397,15 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         ),
     )
     run.add_argument(
+        "--mcp-config",
+        default="",
+        metavar="PATH.json",
+        help=(
+            "strict MCP profile: expose only its mcpServers; freeze it for "
+            "native continuations (supported direct agent workflows only)"
+        ),
+    )
+    run.add_argument(
         "--session",
         default="",
         help=(
@@ -1269,6 +1278,7 @@ def _continue_launcher_named_session(
         source_path=source_path,
         permissions=str(getattr(args, "permissions", "") or ""),
         sandbox=getattr(args, "sandbox", "") or None,
+        mcp_config=str(getattr(args, "mcp_config", "") or ""),
     )
     if args.await_completion:
         return _emit_launch_result(
@@ -3152,6 +3162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "depth": args.depth,
         "model": args.model,
         "effort": getattr(args, "effort", ""),
+        "mcp_config": getattr(args, "mcp_config", ""),
         "research_agents": research_agents,
         "synthesizer": getattr(args, "synthesizer", ""),
         "synthesizer_model": getattr(args, "synthesizer_model", ""),

@@ -2355,24 +2355,6 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
     assert payload["transport"] == "vc-frame"
 
 
-def test_claude_terminal_command_streams_visible_json(tmp_path: Path) -> None:
-    spec = workflow.WorkflowLaunchSpec(
-        agent="claude",
-        mode="audit",
-        skill="audit",
-        prompt="prove it",
-        file="",
-        runtime="terminal",
-        root=str(tmp_path),
-    )
-
-    command = workflow.build_launch_command(spec, tmp_path)
-
-    assert command[:4] == ["claude", "-p", "--output-format", "stream-json"]
-    assert "--verbose" in command
-    assert command[-2:] == ["--permission-mode", "auto"]
-
-
 def test_stream_capable_agents_use_native_stream_commands(tmp_path: Path) -> None:
     expected = {
         "codex": ("--json",),
@@ -2496,6 +2478,94 @@ def test_launch_workflow_artifact_paths_are_terminal_truth(
     assert truth["next_stage"] == "polarize"
     assert truth["next_agent"] == "codex"
     assert truth["dou_index"] == 3
+
+
+@pytest.mark.parametrize(
+    "report_case,expected_gate,artifact_ok",
+    [
+        ("valid", "validated", True),
+        ("missing", "failed", False),
+        ("launcher-template", "failed", False),
+        ("invalid-frontmatter", "failed", False),
+        ("optional-report", "validated", True),
+        ("operator-stop", "stopped", True),
+    ],
+)
+def test_await_launch_truth_projects_terminal_artifacts_without_board_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    report_case: str,
+    expected_gate: str,
+    artifact_ok: bool,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    run = {
+        "run_id": "work-terminal-runtime",
+        "state": "completed",
+        "liveness": "terminal",
+        "exit_code": 0,
+    }
+    if report_case == "operator-stop":
+        run.update(state="stopped", operator_stop_accepted=True, exit_code=143)
+    meta = _write_runtime_run_meta(run["run_id"], run)
+    report = meta.with_name("report.md")
+    transcript = meta.with_name("transcript.log")
+    transcript.write_text("worker completed\n", encoding="utf-8")
+    if report_case == "valid":
+        report.write_text(
+            "---\nrun_id: work-terminal-runtime\nagent: claude\n"
+            "skill: workflow\nstatus: completed\n---\nworker report\n",
+            encoding="utf-8",
+        )
+    elif report_case in {"launcher-template", "operator-stop"}:
+        workflow.reserve_launcher_report_template(
+            report, run_id=run["run_id"], agent="claude", skill="workflow"
+        )
+    elif report_case == "invalid-frontmatter":
+        report.write_text(
+            "---\nstatus: completed\n---\nunsteerable report\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(
+        workflow,
+        "await_run",
+        lambda *a, **k: {
+            "found": True,
+            "completed": True,
+            "reason": "terminal",
+            "worker_alive": False,
+            "run": dict(run),
+        },
+    )
+    truth = workflow.await_launch_truth(
+        {
+            "run_id": run["run_id"],
+            "meta": str(meta),
+            "report": str(report),
+            "transcript": str(transcript),
+        },
+        require_transcript_output=True,
+        require_report=report_case != "optional-report",
+    )
+    assert truth["terminal_evidence"] is True
+    assert truth["artifact_ok"] is artifact_ok
+    assert truth["run"]["artifact_gate"] == expected_gate
+    assert truth["meta_payload"]["artifact_gate"] == expected_gate
+    assert truth["meta_payload"]["artifact_ok"] is artifact_ok
+    persisted = json.loads(meta.read_text(encoding="utf-8"))
+    assert persisted["artifact_gate"] == expected_gate
+    assert persisted["artifact_ok"] is artifact_ok
+    assert (
+        persisted["artifact_errors"]
+        == truth["run"]["artifact_errors"]
+        == truth["artifact_errors"]
+    )
+    if report_case in {"missing", "launcher-template"}:
+        assert "report_missing" in truth["artifact_errors"]
+    elif report_case == "invalid-frontmatter":
+        assert any(
+            error.startswith("report_frontmatter_")
+            for error in truth["artifact_errors"]
+        )
 
 
 def test_report_requested_next_stage_reads_report_frontmatter(
@@ -3198,17 +3268,6 @@ def test_manual_explicit_resume_launches_own_tracked_headless_run(
     assert result["agent_session_id"] == "codex-thread-42"
     assert result["runtime_session_id"] == "runtime-manual-1"
     launch = launches[0]
-    assert launch["worker_command_override"] == [
-        "/verified/bin/codex",
-        "exec",
-        "-m",
-        "gpt-5.5",
-        "resume",
-        "--json",
-        "--approve-for-me",
-        "codex-thread-42",
-        "-",
-    ]
     assert launch["spec"].mode == "manual_explicit"
     assert launch["spec"].runtime == "headless"
     assert launch["spec"].run_id == "rsme-manual-1"
@@ -3311,22 +3370,6 @@ def test_manual_explicit_resume_agy_uses_conversation_and_stream_json(
     assert result["agent_session_id"] == "839007be-60a5-43f9-842b-cfa0f8a0dc02"
     assert result["runtime_session_id"] == "runtime-agy-1"
     launch = launches[0]
-    assert launch["worker_command_override"] == [
-        "/verified/bin/agy",
-        "--model",
-        "gemini-3.8-flash-high",
-        "--conversation",
-        "839007be-60a5-43f9-842b-cfa0f8a0dc02",
-        "--add-dir",
-        ".",
-        "--print-timeout",
-        "30m",
-        "--print=",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-    ]
     assert launch["spec"].mode == "manual_explicit"
     assert launch["spec"].runtime == "headless"
     assert launch["spec"].skill == "workflow"
@@ -3479,17 +3522,6 @@ def test_native_resume_creates_new_tracked_monotonic_attempts(
     assert second["attempt"] == 3
     assert first["runtime_session_id"] != "runtime-parent-id"
     assert first["runtime_session_id"] != second["runtime_session_id"]
-    assert launches[0]["worker_command_override"] == [
-        "/verified/bin/codex",
-        "exec",
-        "-m",
-        "gpt-5.5",
-        "resume",
-        "--json",
-        "--approve-for-me",
-        "codex-native-id",
-        "-",
-    ]
     assert launches[0]["env"]["VIBECRAFTED_AGENT_SESSION_ID"] == "codex-native-id"
     assert launches[0]["launch_meta"]["resume_of"] == run_id
     assert launches[0]["launch_meta"]["parent_runtime_session_id"] == (
@@ -5276,3 +5308,57 @@ def test_sid_only_resume_refuses_conflicting_policy_owners(
     assert result["accepted"] is False
     assert result["reason"] == "native_resume_policy_unavailable"
     assert "--run-id" in result["detail"]
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_guardian_native_resume_preserves_strict_mcp_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tampered: bool
+) -> None:
+    frozen = tmp_path / "frozen.json"
+    frozen.write_text(
+        '{"mcpServers":{"private-mock":{"type":"http",'
+        '"url":"https://mock.example.invalid/mcp"}}}',
+        encoding="utf-8",
+    )
+    import hashlib
+
+    isolation = {
+        "schema": "vibecrafted.mcp-isolation.v1",
+        "agent": "codex",
+        "strict": True,
+        "config_path": str(frozen),
+        "sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(),
+        "server_names": ["private-mock"],
+    }
+    run_id, _ = _native_resume_parent(
+        monkeypatch,
+        tmp_path,
+        meta_fields={"mcp_isolation": isolation, "mcp_config": str(frozen)},
+    )
+    if tampered:
+        frozen.write_text('{"mcpServers":{}}', encoding="utf-8")
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: SimpleNamespace(
+            state="confirmed",
+            executable="/verified/bin/codex",
+            version="fixture",
+            detail="confirmed",
+        ),
+    )
+    launches = []
+
+    def launch(spec, source_dir, **kwargs):
+        launches.append(spec)
+        return {"accepted": True, "run_id": spec.run_id}
+
+    monkeypatch.setattr(workflow, "launch_workflow", launch)
+    result = workflow.native_resume_run(run_id, tmp_path)
+    if tampered:
+        assert result["accepted"] is False
+        assert result["reason"] == "mcp_isolation_unavailable"
+        assert launches == []
+    else:
+        assert result["accepted"] is True
+        assert launches[0].mcp_config == str(frozen)

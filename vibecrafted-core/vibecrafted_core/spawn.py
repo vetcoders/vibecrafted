@@ -1944,6 +1944,24 @@ def interactive_launch_interpreter(
     return sys.executable, False
 
 
+def _refuse_unscoped_interactive_continuation(
+    provider: str,
+    native_id: str,
+    *,
+    binding: Mapping[str, Any],
+) -> None:
+    parent = dict(binding)
+    if "mcp_isolation" not in parent and not parent.get("mcp_config") and native_id:
+        from .workflow import _continuation_parent
+
+        parent = _continuation_parent(provider, native_id, binding=parent)
+    if "mcp_isolation" in parent or parent.get("mcp_config"):
+        raise ValueError(
+            "strict MCP continuations require --prompt or --file; "
+            "bare interactive resume/fork cannot preserve the admitted MCP scope"
+        )
+
+
 def interactive_workspace_command(
     provider: str,
     prompt: str,
@@ -2151,6 +2169,20 @@ def interactive_workspace_command(
             "selection_root": str(Path(root).resolve()),
         }
         base = ""  # validate current checkout without changing historical baseline
+    if native_session or continuity_policy.mode in {"bare-fork", "full-lineage"}:
+        continuation_binding: dict[str, Any] = {
+            "session_selection": session_selection or {}
+        }
+        source_run = resume_run_id or (
+            parent_run_id if not (session_selection or {}).get("source_run_id") else ""
+        )
+        if source_run:
+            continuation_binding["parent_run_id"] = source_run
+        _refuse_unscoped_interactive_continuation(
+            provider,
+            native_session or continuity_policy.parent_provider_session_id,
+            binding=continuation_binding,
+        )
     # local-native selects the host environment, not a checkout substrate.
     # Leave its omitted selector empty so --worktree can select the substrate.
     execution = execution_runtime
@@ -2943,6 +2975,28 @@ def launch_interactive_workspace(
     from .workflow import reserve_run_id
 
     admission = dict(admission or {})
+    if (
+        "mcp_isolation" in admission
+        or admission.get("mcp_config")
+        or admission.get("skill") in {"resume", "fork"}
+        or continuity != "fresh"
+    ):
+        continuation_binding = {
+            key: admission[key]
+            for key in ("mcp_isolation", "mcp_config", "session_selection")
+            if key in admission
+        }
+        if (
+            admission.get("skill") == "resume"
+            and admission.get("parent_run_id")
+            and not admission.get("session_selection")
+        ):
+            continuation_binding["parent_run_id"] = admission["parent_run_id"]
+        _refuse_unscoped_interactive_continuation(
+            provider,
+            str(parent_session_id or admission.get("agent_session_id") or ""),
+            binding=continuation_binding,
+        )
     controls = controls_from_receipt(admission.get("execution_controls") or {})
     if controls is None:
         from .server_config import durable_permission_selection
