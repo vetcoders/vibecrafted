@@ -4,6 +4,8 @@ import Foundation
 /// AppDelegate supplies these values together; this leaf never resolves an active pointer,
 /// selects a host, composes PATH, or substitutes the App bundle's generation.
 struct TerminalLauncher {
+  static let ownerLaunchFlag = "--terminal-host-owner"
+  static let ownerNotification = "io.vetcoders.vibecrafted.terminal-host-requested"
   struct Specification: Equatable, Sendable {
     let generationRoot: URL
     let terminalHost: URL
@@ -50,7 +52,7 @@ struct TerminalLauncher {
     case invalidHostReceipt
   }
 
-  /// Spawn evidence only: a PID does not prove that the window became ready.
+  /// Launch or adoption evidence only: a PID does not prove window readiness.
   /// Keep in memory; the specification contains the owner's environment and
   /// must not be dumped into logs or web responses.
   struct Receipt: Equatable, Sendable {
@@ -61,10 +63,11 @@ struct TerminalLauncher {
 
   /// The one launch receipt the generation wrapper's admission helper writes.
   /// `fresh`: the wrapper PID execs into the single native host. `reused`: the
-  /// admitted host received one `create-window` request. Neither proves a
-  /// window, and neither ever proves that an agent started.
+  /// admitted host received one `create-window` request. `observed` is a fresh
+  /// authenticated read of durable admission, without a window request.
+  /// None proves a window or that an agent started.
   struct HostReceipt: Equatable, Sendable {
-    enum Kind: String, Equatable, Sendable { case fresh, reused }
+    enum Kind: String, Equatable, Sendable { case fresh, reused, observed }
     let kind: Kind
     let hostProcessIdentifier: Int32
     let hostStartToken: String
@@ -80,6 +83,13 @@ struct TerminalLauncher {
         object["executable"] as? String == terminalHost.path,
         object["agent_start_proven"] as? Bool == false
       else { throw LaunchError.invalidHostReceipt }
+      if kind == .observed {
+        guard object["code_proof"] as? String == "kernel_live_cdhash",
+          object["delivery"] as? String == "host_observed_without_window_request",
+          let hash = object["code_cdhash"] as? String,
+          hash.count == 40, hash.allSatisfy(\.isHexDigit)
+        else { throw LaunchError.invalidHostReceipt }
+      }
       self.kind = kind
       hostProcessIdentifier = Int32(pid)
       hostStartToken = start
@@ -106,6 +116,12 @@ struct TerminalLauncher {
 
   static func hostState(launcherPID: Int32, launcherRunning: Bool, launcherStatus: Int32?,
                         receipt: HostReceipt?, startToken: (Int32) -> String?) -> HostState {
+    if let receipt, receipt.kind == .observed {
+      guard !launcherRunning, launcherStatus == 0,
+        startToken(receipt.hostProcessIdentifier) == receipt.hostStartToken
+      else { return .ended(launcherStatus) }
+      return .reused(receipt.hostProcessIdentifier)
+    }
     if let receipt, receipt.kind == .fresh, receipt.hostProcessIdentifier != launcherPID {
       return .ended(nil)
     }
@@ -135,7 +151,7 @@ struct TerminalLauncher {
 
   final class Launch {
     let receipt: Receipt
-    private let process: Process
+    private let process: Process?
     private let receiptURL: URL?
     private var parsedHostReceipt: HostReceipt?
 
@@ -143,6 +159,13 @@ struct TerminalLauncher {
       self.process = process
       self.receiptURL = receiptURL
       receipt = Receipt(processIdentifier: process.processIdentifier, specification: specification)
+    }
+
+    fileprivate init(observed: HostReceipt, specification: Specification) {
+      process = nil
+      receiptURL = nil
+      parsedHostReceipt = observed
+      receipt = Receipt(processIdentifier: observed.hostProcessIdentifier, specification: specification)
     }
 
     /// Reads the wrapper's private receipt once; refuses foreign or shared files.
@@ -162,9 +185,9 @@ struct TerminalLauncher {
     }
 
     var hostState: HostState {
-      let running = process.isRunning
+      let running = process?.isRunning == true
       return TerminalLauncher.hostState(launcherPID: receipt.processIdentifier,
-        launcherRunning: running, launcherStatus: running ? nil : process.terminationStatus,
+        launcherRunning: running, launcherStatus: running ? nil : (process?.terminationStatus ?? 0),
         receipt: hostReceipt, startToken: TerminalLauncher.kernelStartToken)
     }
 
@@ -177,6 +200,35 @@ struct TerminalLauncher {
     }
     // Intentionally no cancellation, stop, or deinit action. Closing a client
     // never terminates this process, its terminal children, or the server.
+  }
+
+  /// Query the same generation's durable admission authority, without a window request.
+  /// The owner runs this through its existing bounded process runner.
+  static func observationProcess(_ specification: Specification) -> Process {
+    let process = Process()
+    process.executableURL = specification.generationRoot.appendingPathComponent("bin/python3")
+    process.arguments = ["-I", "-B", specification.generationRoot
+      .appendingPathComponent("vibecrafted-core/vibecrafted_core/terminal_host.py").path,
+      "observe", "--host", specification.terminalHost.path]
+    process.currentDirectoryURL = specification.workingDirectory
+    process.environment = specification.environment
+    return process
+  }
+
+  /// Main restart adopts a proven host, never an arbitrary PID or stale spawn receipt.
+  static func adopt(_ data: Data, specification: Specification) throws -> Launch? {
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      object["schema"] as? String == HostReceipt.schema,
+      object["agent_start_proven"] as? Bool == false
+    else { throw LaunchError.invalidHostReceipt }
+    if object["kind"] as? String == "absent" {
+      guard object["host_pid"] == nil, object["host_start"] == nil, object["executable"] == nil
+      else { throw LaunchError.invalidHostReceipt }
+      return nil
+    }
+    let receipt = try HostReceipt(data: data, terminalHost: specification.terminalHost)
+    guard receipt.kind == .observed else { throw LaunchError.invalidHostReceipt }
+    return Launch(observed: receipt, specification: specification)
   }
 
   /// Uses the exact generation wrapper (which execs the native host in place,

@@ -181,6 +181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var configRepairProcess: Process?
   private var terminalLaunch: TerminalLauncher.Launch?
   private var terminalRegistration: TerminalRegistrationObservation?
+  private var terminalOwnerObserver: NSObjectProtocol?
   private var terminalRegistrationTimer: Timer?
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
@@ -250,6 +251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     // which hid the app as a tray-only accessory and left the window without
     // app identity). LSUIElement in Info.plist is false for the same reason.
     NSApp.setActivationPolicy(.regular)
+    observeTerminalOwnerRequests()
     configureCommandDeck()
     buildMainMenu()
     buildStatusItem()
@@ -269,20 +271,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       print("Failed to init runtime: \(error)")
     }
 
-    showMainWindowIfNeeded()
+    if !ProcessInfo.processInfo.arguments.contains(TerminalLauncher.ownerLaunchFlag) {
+      showMainWindowIfNeeded()
+    }
     productUpdateStartupAdoption = adoptPendingProductUpdateIfNeeded()
     switch productUpdateStartupAdoption {
     case .waiting, .publishing, .restoring:
       break
     case .none, .retained:
       connectCommandDeck()
+      // A restarted Main has no in-memory Launch, even when entered from the Dock.
+      launchWorkspaceTerminal(createIfAbsent: false)
     }
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
     lifecycleLog("window.restore reason=application-reopen hadVisibleWindows=\(hasVisibleWindows)")
-    showMainWindowIfNeeded()
+    launchWorkspaceTerminal(createIfAbsent: false)
     return true
+  }
+
+  private func observeTerminalOwnerRequests() {
+    terminalOwnerObserver = DistributedNotificationCenter.default().addObserver(
+      forName: Notification.Name(TerminalLauncher.ownerNotification),
+      object: String(getpid()), queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor [weak self] in
+        self?.launchWorkspaceTerminal(createIfAbsent: false)
+      }
+    }
   }
 
   func applicationDidHide(_ notification: Notification) {
@@ -562,8 +579,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       openTerminal: { [unowned self] directory in
         guard self.canonicalInstall != nil else { throw NativeCommandError.pathNotAllowed }
         self.terminalWorkingDirectory = directory
-        if self.terminalIsLive() { self.focusTerminal() }
-        else { self.launchWorkspaceTerminal() }
+        self.launchWorkspaceTerminal()
       },
       openExternalURL: { url in NSWorkspace.shared.open(url) },
       revealPath: { url in NSWorkspace.shared.activateFileViewerSelecting([url]) },
@@ -712,8 +728,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.runModal()
   }
 
-  private func launchWorkspaceTerminal() {
-    if terminalIsLive() || terminalLaunchInFlight {
+  private func launchWorkspaceTerminal(createIfAbsent: Bool = true) {
+    if terminalLaunchInFlight {
       return
     }
 
@@ -737,8 +753,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           self.terminalLaunchInFlight = false
           return
         }
-        self.openWorkspaceTerminal(install: install)
+        self.openWorkspaceTerminal(install: install, createIfAbsent: createIfAbsent)
       case .absent(let reason):
+        guard createIfAbsent else {
+          self.terminalLaunchInFlight = false
+          self.showMainWindowIfNeeded()
+          return
+        }
         // Nothing is installed yet, so the bundled carrier is the only runtime
         // that can exist. Publishing it here is first onboarding.
         self.applyResolution(resolution)
@@ -781,9 +802,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// rather than substituted from this bundle. Pairing a newly resolved
   /// generation with the old App's helper binary was the ownership failure this
   /// replaces.
-  private func openWorkspaceTerminal(install: CanonicalRuntimeInstall) {
-    defer { terminalLaunchInFlight = false }
+  private func openWorkspaceTerminal(install: CanonicalRuntimeInstall, createIfAbsent: Bool = true) {
     guard let environment = canonicalRuntimeEnvironment else {
+      terminalLaunchInFlight = false
       reportWorkspaceLaunchFailure("The resolved runtime carries no launch environment")
       return
     }
@@ -798,9 +819,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         terminalHost: install.terminalHost, primaryShell: install.primaryShell,
         start: install.start, workingDirectory: terminalWorkingDirectory,
         environment: environment)
-      terminalLaunch = try TerminalLauncher.launch(specification)
-      observeTerminalRegistration()
+      let observation = TerminalLauncher.observationProcess(specification)
+      try runBounded(observation, timeout: 45, label: "terminal-adoption") { [weak self] result in
+        guard let self else { return }
+        defer { self.terminalLaunchInFlight = false }
+        guard result.clean, result.terminationStatus == 0 else {
+          self.reportWorkspaceLaunchFailure("Cannot confirm the admitted terminal: "
+            + String(decoding: result.stderr, as: UTF8.self))
+          return
+        }
+        do {
+          if let adopted = try TerminalLauncher.adopt(result.stdout, specification: specification) {
+            self.terminalLaunch = adopted
+          } else if createIfAbsent {
+            self.terminalLaunch = try TerminalLauncher.launch(specification)
+          } else {
+            self.terminalLaunch = nil
+            self.showMainWindowIfNeeded()
+            return
+          }
+          self.observeTerminalRegistration()
+        } catch {
+          self.reportWorkspaceLaunchFailure("Cannot adopt the terminal: \(error.localizedDescription)")
+        }
+      }
     } catch {
+      terminalLaunchInFlight = false
       reportWorkspaceLaunchFailure("Cannot open the generation-owned terminal: \(error.localizedDescription)")
     }
   }
@@ -850,11 +894,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   private func terminalIsLive() -> Bool {
     terminalLaunch?.isRunning == true || terminalApplication?.isTerminated == false
-  }
-
-  private func focusTerminal() {
-    // An explicit Open Terminal retries focus for this exact live launch.
-    observeTerminalRegistration()
   }
 
   private func observeTerminalRegistration() {

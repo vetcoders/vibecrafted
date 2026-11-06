@@ -955,6 +955,8 @@ materialize_runtime_payload() {
   mkdir -p "$runtime/scripts/lib"
   install -m 0644 "$SOURCE_ROOT/scripts/lib/runtime-roots.sh" \
     "$runtime/scripts/lib/runtime-roots.sh"
+  install -m 0644 "$SOURCE_ROOT/scripts/lib/app-main-identity.py" \
+    "$runtime/scripts/lib/app-main-identity.py"
   install -m 0644 "$SOURCE_ROOT/scripts/distribution_manifest.py" \
     "$runtime/scripts/distribution_manifest.py"
   install -m 0644 "$SOURCE_ROOT/scripts/installer_brand.py" \

@@ -206,7 +206,12 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
         text=True,
         env=env,
     )
-    expected = [f"aicx={user_aicx}", "--config-file", str(entry)]
+    expected = [
+        f"aicx={user_aicx}",
+        "--vibecrafted-hosted",
+        "--config-file",
+        str(entry),
+    ]
     assert first.stdout.splitlines() == expected
     assert second.stdout.splitlines() == expected
     assert first.stdout == second.stdout
@@ -228,6 +233,16 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     )
     assert rejected_equals.returncode == 2
     assert "--config-file is product-owned" in rejected_equals.stderr
+    for argument in ("--vibecrafted-hosted", "--vibecrafted-hosted=foreign"):
+        role_override = subprocess.run(
+            [str(wrapper), argument],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert role_override.returncode == 2
+        assert "the hosted application role is product-owned" in role_override.stderr
     entry.unlink()
     missing = subprocess.run(
         [str(wrapper)],
