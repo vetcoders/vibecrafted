@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -276,6 +276,9 @@ def _app_child_command(command: list[str], env: dict[str, str]) -> list[str]:
     empty_main_probe = root / "fixture-bin/swift-main-empty"
     if empty_main_probe.is_file():
         allowed.append(empty_main_probe)
+    warning_probe = root / "fixture-bin/lsof-warning"
+    if warning_probe.is_file():
+        allowed.append(warning_probe)
     pgrep = shutil.which("pgrep", path=env["PATH"])
     if pgrep and Path(pgrep).resolve().is_relative_to(root):
         allowed.append(Path(pgrep))
@@ -692,7 +695,8 @@ def test_historical_signed_chain_requires_exact_inode_authority(lane):
     assert not list(parent.glob(".vc-update-capture-*"))
 
 
-def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
+@pytest.mark.parametrize("deferred", [False, True])
+def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane, deferred):
     parent, env = lane
     repo = parent.parent / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -762,16 +766,23 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
             check=True,
             capture_output=True,
         )
-        result = subprocess.run(
-            _app_child_command(
-                ["/bin/bash", str(repo / "scripts/install-app.sh")], env
-            ),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        # Keep a real descriptor open while the mutation owner moves its inode
+        # into the rollback capture, just like a surviving terminal process.
+        with (
+            (parent / "Vibecrafted.app/Contents/Info.plist").open()
+            if deferred
+            else nullcontext()
+        ):
+            result = subprocess.run(
+                _app_child_command(
+                    ["/bin/bash", str(repo / "scripts/install-app.sh")], env
+                ),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
         assert result.returncode == 0, result.stderr
         pointer = (
             Path(env["VIBECRAFTED_HOME"])
@@ -780,6 +791,38 @@ def test_real_cli_wrapper_has_distinct_paths_and_bounded_capture(lane):
         latest = json.loads(pointer.read_text())
         receipts.append(latest["receipt"])
         assert Path(latest["settlement"]).is_file()
+        assert latest["cleanup_status"] == ("deferred" if deferred else "disposed")
+        if deferred:
+            observation = Path(latest["settlement"]).read_bytes()
+            assert "cleanup deferred" in result.stdout
+            assert list(parent.glob(".vc-update-capture-*"))
+            settled = run(
+                [
+                    "--mode",
+                    "settle",
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(parent / "Vibecrafted.app"),
+                    "--receipt",
+                    latest["receipt"],
+                    "--admission",
+                    str(Path(latest["receipt"]).with_name("admission.json")),
+                    "--journal",
+                    str(Path(latest["receipt"]).with_name("journal.json")),
+                    "--transaction",
+                    latest["transaction"],
+                ],
+                env,
+            )
+            assert settled.returncode == 0, settled.stderr
+            assert Path(latest["settlement"]).read_bytes() == observation
+            assert (
+                json.loads(Path(latest["receipt"] + ".settlement.json").read_text())[
+                    "status"
+                ]
+                == "disposed"
+            )
         assert not list(parent.glob(".vc-update-capture-*"))
     assert receipts[0] != receipts[1]
     assert all(Path(path).is_file() for path in receipts)
@@ -1147,8 +1190,28 @@ def test_automatic_settlement_preserves_live_capture_until_owner_releases(lane, 
     plan = (state / "receipt.json.settlement-plan.json").read_bytes()
     with referenced.open():
         refused = run(command, env)
-        assert refused.returncode == 20
+        assert refused.returncode == 21
         assert "live mapped/open capture dependency" in refused.stderr
+        observation = state / "receipt.json.settlement-deferred.json"
+        before_observation = observation.read_bytes()
+        deferred = json.loads(before_observation)
+        assert deferred["status"] == "deferred"
+        assert deferred["capture_present"] is True and deferred["retry"] is True
+        assert deferred["plan_sha256"]
+        assert set(deferred["owner_documents"]) == {
+            str(state / name)
+            for name in (
+                "receipt.json",
+                "admission.json",
+                "journal.json",
+                "receipt.json.capture-owner.json",
+                "receipt.json.settlement-plan.json",
+            )
+        }
+        assert not (state / "receipt.json.settlement.json").exists()
+        repeated = run(command, env)
+        assert repeated.returncode == 21, repeated.stderr
+        assert observation.read_bytes() == before_observation
         assert {
             str(p.relative_to(capture)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in capture.rglob("*")
@@ -1158,3 +1221,160 @@ def test_automatic_settlement_preserves_live_capture_until_owner_releases(lane, 
     completed = run(command, env)
     assert completed.returncode == 0, completed.stderr
     assert not capture.exists()
+    assert observation.read_bytes() == before_observation
+
+
+def _warning_census(env, *, mutate=None):
+    """Model one unavailable census, retaining the real signed/publication path."""
+    probe = Path(env["HOME"]).parent / "fixture-bin/lsof-warning"
+    probe.parent.mkdir(exist_ok=True)
+    probe.write_text(
+        f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
+        + (
+            f"path = Path({str(mutate)!r})\n"
+            "data = json.loads(path.read_text())\n"
+            "data['transaction'] = 'foreign-transaction'\n"
+            "path.write_text(json.dumps(data))\n"
+            if mutate
+            else ""
+        )
+        + "print('fixture: incomplete census', file=sys.stderr)\n"
+    )
+    probe.chmod(0o755)
+    text = HELPER.read_text()
+    assert text.count("/usr/sbin/lsof") == 1
+    HELPER.write_text(text.replace("/usr/sbin/lsof", str(probe)))
+
+
+def test_cleanup_warning_retains_capture_and_disposed_retry_skips_census(lane):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    original = HELPER.read_text()
+    _warning_census(env)
+    refused = run([*args, "--mode", "settle"], env)
+    assert refused.returncode == 21, refused.stderr
+    assert "cannot establish live capture dependencies" in refused.stderr
+    deferred = state / "receipt.json.settlement-deferred.json"
+    observation = deferred.read_bytes()
+    assert not (state / "receipt.json.settlement.json").exists()
+    HELPER.write_text(original)
+    completed = run([*args, "--mode", "settle"], env)
+    assert completed.returncode == 0, completed.stderr
+    assert deferred.read_bytes() == observation
+    _warning_census(env)
+    repeated = run([*args, "--mode", "settle"], env)
+    assert repeated.returncode == 0, repeated.stderr
+
+
+@pytest.mark.parametrize(
+    "binding", ["owner_documents", "plan_sha256", "capture_present", "retry"]
+)
+def test_cleanup_warning_rejects_foreign_deferred_observation(lane, binding):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    _warning_census(env)
+    command = [*args, "--mode", "settle"]
+    deferred = run(command, env)
+    assert deferred.returncode == 21, deferred.stderr
+    path = state / "receipt.json.settlement-deferred.json"
+    observation = json.loads(path.read_text())
+    if binding == "owner_documents":
+        del observation[binding][str(state / "receipt.json.capture-owner.json")]
+    elif binding == "plan_sha256":
+        observation[binding] = "0" * 64
+    else:
+        observation[binding] = False
+    write_json(path, observation)
+    refused = run(command, env)
+    assert refused.returncode == 20, refused.stderr
+    assert "cleanup deferral binding changed" in refused.stderr
+    assert not (state / "receipt.json.settlement.json").exists()
+
+
+@pytest.mark.parametrize(
+    "tamper,reason",
+    [
+        ("signature", "codesign"),
+        ("identity", "installed cdhash does not match transaction"),
+        ("owner", "wrong capture creation authority"),
+        ("plan", "wrong settlement plan"),
+        ("history", "wrong historical evidence"),
+        ("result", "settlement receipt disagrees"),
+        ("publication", "mismatched publication"),
+    ],
+)
+def test_cleanup_warning_never_masks_failed_authority(lane, tamper, reason):
+    parent, env = lane
+    destination = app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    command = [*args, "--mode", "settle"]
+    if tamper == "signature":
+        (destination / "Contents/Info.plist").write_bytes(b"invalid signed bytes")
+    elif tamper == "identity":
+        for name in ("receipt.json", "admission.json", "journal.json"):
+            path = state / name
+            data = json.loads(path.read_text())
+            data["source_identity"] = "cdhash:abc123"
+            if name == "journal.json":
+                data["candidate_identity"] = "cdhash:abc123"
+            write_json(path, data)
+    elif tamper in ("owner", "plan"):
+        if tamper == "plan":
+            planned = run([*command, "--plan-only"], env)
+            assert planned.returncode == 0, planned.stderr
+        path = state / (
+            "receipt.json.capture-owner.json"
+            if tamper == "owner"
+            else "receipt.json.settlement-plan.json"
+        )
+        data = json.loads(path.read_text())
+        write_json(path, {**data, "transaction": "foreign-transaction"})
+    elif tamper == "history":
+        evidence = state / "history.json"
+        write_json(
+            evidence, {"schema": "io.vetcoders.vibecrafted.app-capture-history.v1"}
+        )
+        command += ["--historical-evidence", str(evidence)]
+    elif tamper == "result":
+        write_json(state / "receipt.json.settlement.json", {"status": "disposed"})
+    else:
+        path = Path(env["VIBECRAFTED_RUNTIME_HOME"]) / "install-receipt.json"
+        data = json.loads(path.read_text())
+        write_json(path, {**data, "version": "foreign-generation"})
+    _warning_census(env)
+    result = run(command, env)
+    assert result.returncode == 20, result.stderr
+    assert reason in result.stderr
+    assert not (state / "receipt.json.settlement-deferred.json").exists()
+    assert list(parent.glob(".vc-update-capture-*"))
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "receipt.json",
+        "admission.json",
+        "journal.json",
+        "receipt.json.capture-owner.json",
+        "receipt.json.settlement-plan.json",
+    ],
+)
+def test_cleanup_warning_cannot_hide_authority_drift_during_census(lane, document):
+    parent, env = lane
+    app(parent / "Vibecrafted.app", 0)
+    args, state = replace(parent, env, 1)
+    publish(parent, env, 1)
+    command = [*args, "--mode", "settle"]
+    planned = run([*command, "--plan-only"], env)
+    assert planned.returncode == 0, planned.stderr
+    _warning_census(env, mutate=state / document)
+    result = run(command, env)
+    assert result.returncode == 20, result.stderr
+    assert "cleanup authority changed during census" in result.stderr
+    assert not (state / "receipt.json.settlement-deferred.json").exists()
+    assert list(parent.glob(".vc-update-capture-*"))

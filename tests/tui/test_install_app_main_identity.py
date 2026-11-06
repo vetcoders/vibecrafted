@@ -259,6 +259,10 @@ def _private_wrapper(
         "for option in ('--receipt', '--admission', '--journal'):\n"
         "    target = Path(sys.argv[sys.argv.index(option) + 1])\n"
         "    target.write_text(json.dumps({'historical': option}))\n"
+        "receipt = sys.argv[sys.argv.index('--receipt') + 1]\n"
+        "Path(receipt + '.settlement.json').write_text(json.dumps({"
+        "'schema':'io.vetcoders.vibecrafted.app-capture-settlement.v1',"
+        "'status':'disposed','transaction':sys.argv[sys.argv.index('--transaction') + 1]}))\n"
         "raise SystemExit(int(os.environ.get('MAIN_HELPER_EXIT', '0')))\n",
     )
     # vc-app-update.sh is invoked with bash; retain that interface while the
@@ -768,7 +772,9 @@ def test_settlement_only_recovery_of_startup_service_lease(
         "    except BlockingIOError: pass\n"
         "    else: raise SystemExit('shared runtime lease was not retained through settlement')\n"
         "    if os.environ['RACE_SCENARIO']=='settle-refuses': raise SystemExit(20)\n"
-        "    Path(arg('--receipt')+'.settlement.json').write_text(json.dumps({'status':'disposed'}))\n"
+        "    Path(arg('--receipt')+'.settlement.json').write_text(json.dumps({"
+        "'schema':'io.vetcoders.vibecrafted.app-capture-settlement.v1',"
+        "'status':'disposed','transaction':arg('--transaction')}))\n"
         "    raise SystemExit(0)\n"
         "assert '--complete' in args and '--relaunch' in args\n"
         "base={'transaction':arg('--transaction'),'destination':arg('--destination'),"

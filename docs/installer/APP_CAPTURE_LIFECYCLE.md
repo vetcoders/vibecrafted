@@ -19,7 +19,10 @@ and capture creation records under
 `$VIBECRAFTED_HOME/vibecrafted-product-update/transactions/<transaction>/`.
 `install-app-latest.json` and the helper's `app-capture-latest.json` are atomic projections, never deletion authority. The latter also lets same-generation UI repair discover a raw CLI bootstrap without inventing a pending handoff.
 Successful CLI installation publishes the bundled pack, relaunches the App,
-and settles the capture. A pack or relaunch failure returns failure and retains
+and either disposes the capture or explicitly defers cleanup while retaining it.
+`install-app-latest.json` names the actual cleanup observation in `settlement`
+and distinguishes `cleanup_status: disposed` from `cleanup_status: deferred`.
+A pack or relaunch failure returns failure and retains
 recovery. Same-generation UI pack repair can finish a retained local
 transaction. Startup replacement adoption settles only after successful pack
 publication and retains its handoff on cleanup failure.
@@ -31,7 +34,21 @@ plan. Failure returns exit 20; rerunning the exact settlement retries the
 remaining entries, including after partial deletion. A compact immutable
 settlement receipt records `disposed` only after the capture directory is gone.
 `.DS_Store` is host metadata; a symlink or unknown payload is refused.
-Every settlement path checks live open/mapped/cwd/executable/argv capture references before planning and immediately before deletion. A live reference refuses cleanup until its owner releases it; the helper sends no signals.
+Settlement checks live open/mapped/cwd/executable/argv capture references after
+validating publication, installed CDHash, capture ownership/history, existing
+results, and the plan's inode/inventory bindings, and again before deletion.
+A live reference or unavailable census retains the capture. After rechecking
+the publication and every authority document following the census, the owner
+writes an immutable `receipt.json.settlement-deferred.json` observation and
+returns exit 21. This is publication success with cleanup pending, accepted by
+`--complete`; standalone `--mode settle` keeps exit 21 until cleanup can finish.
+`--plan-only` still refuses an unsafe census with exit 20. A deferred observation
+binds the exact authority documents, installed identity, publication and plan;
+it never authorizes deletion or replaces the `disposed` receipt. A later exact
+settlement retry validates the original evidence and may write the separate
+`receipt.json.settlement.json` after disposal, preserving the earlier
+observation. Invalid signatures, identity, publication, history or plan remain
+fatal regardless of census availability. The helper sends no signals.
 Original replacement evidence remains after disposal. Recovery archives the
 original replacement journal before advancing its own journal.
 

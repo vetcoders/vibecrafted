@@ -371,7 +371,7 @@ try:
         stream.write(result.stderr)
     print(result.stdout, end="")
     print(result.stderr, end="", file=sys.stderr)
-    require(result.returncode == 0, "canonical settlement-only retry refused")
+    require(result.returncode in (0, 21), "canonical settlement-only retry refused")
     validate_lock()
     unchanged()
 except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
@@ -391,11 +391,24 @@ path = Path(pointer)
 for item in [*reversed(path.parents), path]:
     if item.is_symlink():
         raise SystemExit("install-app: refusing symlink latest projection")
+settlement = Path(receipt + ".settlement.json")
+cleanup_status = "disposed"
+schema = "io.vetcoders.vibecrafted.app-capture-settlement.v1"
+if not settlement.exists():
+    settlement = Path(receipt + ".settlement-deferred.json")
+    cleanup_status = "deferred"
+    schema = "io.vetcoders.vibecrafted.app-capture-settlement-deferred.v1"
+for item in [*reversed(settlement.parents), settlement]:
+    if item.is_symlink():
+        raise SystemExit("install-app: refusing symlink cleanup observation")
+observation = json.loads(settlement.read_text())
+if observation.get("schema") != schema or observation.get("status") != cleanup_status or observation.get("transaction") != transaction:
+    raise SystemExit("install-app: missing matching cleanup observation")
 temporary = pointer + ".tmp." + str(os.getpid())
 with open(temporary, "x") as handle:
-    json.dump({"transaction": transaction, "receipt": receipt, "settlement": receipt + ".settlement.json"}, handle)
+    json.dump({"transaction": transaction, "receipt": receipt, "settlement": str(settlement), "cleanup_status": cleanup_status}, handle)
     handle.flush()
     os.fsync(handle.fileno())
 os.replace(temporary, pointer)
+print("[install-app] App/runtime published; capture cleanup " + cleanup_status + "; receipt: " + str(settlement))
 PY
-echo "[install-app] settled receipt: $TRANSACTION_DIR/receipt.json.settlement.json"

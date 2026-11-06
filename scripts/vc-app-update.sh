@@ -1790,6 +1790,55 @@ def no_live_capture():
     processes = subprocess.run(["/bin/ps", "-axo", "pid=,command="], check=True, capture_output=True, text=True, timeout=30)
     require(str(capture) not in processes.stdout, "live process capture dependency")
 
+def authority_documents(paths):
+    documents = {}
+    for path in paths:
+        path = physical(Path(path))
+        before = path.lstat()
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid() and before.st_nlink == 1, "unowned cleanup authority")
+        data = path.read_bytes()
+        require(stamp(path.lstat()) == stamp(before), "cleanup authority changed while reading")
+        documents[str(path)] = {"stamp": stamp(before), "sha256": hashlib.sha256(data).hexdigest()}
+    return documents
+
+def validate_remaining_capture(plan, owner):
+    require(plan.get("capture_inode") == owner.get("capture_inode") and plan.get("parent_inode") == owner.get("parent_inode") == inode(parent), "disposal inode authority changed")
+    require(isinstance(plan.get("entries"), dict), "invalid disposal inventory")
+    if capture.exists():
+        require(inode(capture) == plan["capture_inode"] and capture.stat().st_uid == os.geteuid(), "capture inode/owner replaced")
+        allowed = {"prior.app", "displaced.app", ".DS_Store"} | ({"failed-new.app"} if recovery else set())
+        require({entry.name for entry in capture.iterdir()} <= allowed, "foreign capture entry")
+        require(all(plan["entries"].get(path) == value for path, value in inventory(capture).items()), "remaining capture inventory changed")
+
+def defer_cleanup(observed, installed, authority, plan):
+    reason = None
+    try:
+        no_live_capture()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        reason = str(error)
+    # A census refusal may retain payload, but cannot bypass any publication,
+    # owner/history, plan or inode proof, including changes during the census.
+    require(publication() == observed and signed_identity(dest) == installed, "publication changed during cleanup census")
+    require(authority_documents(authority) == authority, "cleanup authority changed during census")
+    require(capture.exists(), "capture disappeared during cleanup census")
+    validate_remaining_capture(plan, plan)
+    if plan_path.exists():
+        require(read(plan_path) == plan, "settlement plan changed during census")
+    if reason is None:
+        return
+    require(plan_only != "1", reason)
+    deferred = Path(receipt_path + ".settlement-deferred.json")
+    observation = {"schema": "io.vetcoders.vibecrafted.app-capture-settlement-deferred.v1", "status": "deferred", "transaction": txn, "destination": str(dest), "capture": str(capture), "capture_present": True, "retry": True, "reason": reason, "publication": observed, "installed_identity": installed, "owner_documents": authority, "plan_sha256": digest(plan)}
+    if deferred.exists():
+        previous = read(deferred)
+        # This is immutable observation history, never disposal authority.
+        require(all(previous.get(key) == observation[key] for key in ("schema", "status", "transaction", "destination", "capture", "capture_present", "retry", "owner_documents", "plan_sha256", "installed_identity", "publication")), "cleanup deferral binding changed")
+    else:
+        write_new(deferred, observation)
+    print(json.dumps(observation, sort_keys=True))
+    print("App/runtime published; capture cleanup deferred: " + reason + "; payload preserved for settlement retry", file=sys.stderr)
+    sys.exit(21)  # Only --complete accepts deferred disposal as publication success.
+
 def settle_legacy(evidence):
     require(evidence.get("transaction") == txn and evidence.get("capture") == str(capture) and evidence.get("destination") == str(dest), "wrong reviewed legacy path/transaction")
     require(evidence.get("identifier") == identifier and evidence.get("team_id") == team and evidence.get("uid") == os.getuid(), "wrong reviewed legacy owner")
@@ -1890,7 +1939,6 @@ try:
         require(receipt.get("journal") == journal_path and journal.get("receipt") == receipt_path and admission.get("receipt") == receipt_path, "receipt paths do not name this transaction")
     current_identity = signed_identity(dest)
     observed = publication()
-    no_live_capture()
     recovery = None
     if historical:
         evidence = read(historical)
@@ -1923,7 +1971,8 @@ try:
     owner = {"capture_inode": owner.get("capture_inode"), "parent_inode": owner.get("parent_inode")}
     if result_path.exists():
         result = read(result_path)
-        require(result.get("status") == "disposed" and result.get("owner_sha256") == owner_digest and not capture.exists(), "settlement receipt disagrees with payload")
+        require(result.get("schema") == "io.vetcoders.vibecrafted.app-capture-settlement.v1" and result.get("status") == "disposed" and result.get("owner_sha256") == owner_digest and result.get("transaction") == txn and result.get("destination") == str(dest) and result.get("capture") == str(capture) and not capture.exists(), "settlement receipt disagrees with payload")
+        require(result.get("plan_sha256") == digest(read(plan_path)), "disposed settlement plan changed")
         sys.exit(0)
     if plan_path.exists():
         plan = read(plan_path)
@@ -1939,15 +1988,31 @@ try:
                 require(signed_identity(entry) == expected, "wrong captured cdhash")
         require((capture / "prior.app").is_dir() or not receipt.get("prior_identity"), "missing rollback App")
         plan = {"schema": "io.vetcoders.vibecrafted.app-capture-disposal-plan.v1", "transaction": txn, "capture": str(capture), "destination": str(dest), "owner_sha256": owner_digest, **owner, "entries": inventory(capture), "publication": observed}
+    validate_remaining_capture(plan, owner)
+    authority_paths = [base, admission_path, journal_path]
+    if historical:
+        authority_paths += [historical, *evidence.get("successor_settlements", [])]
+        if evidence.get("recovery_receipt"):
+            authority_paths += [evidence["recovery_receipt"], evidence["recovery_journal"]]
+    else:
+        authority_paths.append(receipt_path + ".capture-owner.json")
+    if plan_only != "1" and not plan_path.exists():
         write_new(plan_path, plan)
-    require(plan.get("capture_inode") == owner.get("capture_inode") and plan.get("parent_inode") == inode(parent), "disposal inode authority changed")
+    if plan_path.exists():
+        authority_paths.append(plan_path)
+    authority = authority_documents(authority_paths)
     require(publication() == observed and signed_identity(dest) == current_identity, "publication changed during settlement")
+    if capture.exists():
+        defer_cleanup(observed, current_identity, authority, plan)
+    if not plan_path.exists():
+        write_new(plan_path, plan)
     if plan_only == "1":
         print(json.dumps({"status": "authorized", "transaction": txn, "capture": str(capture), "plan": str(plan_path), "plan_sha256": digest(plan)}))
         sys.exit(0)
     if fail == "settlement_authorized":
         raise OSError("injected cleanup failure; payload retained for retry")
-    no_live_capture()
+    if capture.exists():
+        defer_cleanup(observed, current_identity, authority, plan)
     parent_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         require([os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino] == plan["parent_inode"], "parent changed")
@@ -1994,10 +2059,16 @@ complete_replacement() {
 }
 
 finish_replacement() {
+  local settlement_status
   if [[ "$COMPLETE" -eq 1 ]]; then
     complete_replacement || return "$?"
     relaunch_destination || return "$?"
-    settle_capture || return "$?"
+    if settle_capture; then
+      return 0
+    else
+      settlement_status=$?
+      [[ "$settlement_status" -eq 21 ]] || return "$settlement_status"
+    fi
   else
     relaunch_destination || true
   fi
