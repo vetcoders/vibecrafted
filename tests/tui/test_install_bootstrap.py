@@ -925,12 +925,16 @@ def test_bootstrap_rejects_member_mutation_with_unchanged_carrier(
     assert not marker.exists(), "candidate helper ran before member digest rejection"
 
 
+@pytest.mark.parametrize(
+    "missing_file", ["LICENSE", "scripts/lib/app-main-identity.py"]
+)
 def test_bootstrap_rejects_digest_consistent_incomplete_shape_before_helper(
     tmp_path: Path,
+    missing_file: str,
 ) -> None:
     marker = tmp_path / "stage-ran.txt"
     source_dir = _minimal_v2_source(tmp_path, stage_marker=marker)
-    (source_dir / "LICENSE").unlink()
+    (source_dir / missing_file).unlink()
     provenance_path = source_dir / "source-provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     provenance["payload"] = _fixture_tree_record(source_dir)
@@ -938,13 +942,13 @@ def test_bootstrap_rejects_digest_consistent_incomplete_shape_before_helper(
         json.dumps(provenance, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
     )
-    archive_path = tmp_path / "missing-license.tar.gz"
+    archive_path = tmp_path / "missing-required-file.tar.gz"
     _write_v2_archive(source_dir, archive_path, "vibecrafted-main")
 
     result = _bootstrap_archive(tmp_path, archive_path)
 
     assert result.returncode != 0
-    assert "missing required file: LICENSE" in result.stderr
+    assert f"missing required file: {missing_file}" in result.stderr
     assert not marker.exists(), "candidate helper ran before shape rejection"
 
 
