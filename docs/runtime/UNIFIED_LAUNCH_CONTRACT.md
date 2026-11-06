@@ -191,6 +191,11 @@ is a refusal, not permission to restore the user's global MCP registry.
 Bare interactive resume/fork of a strict-profile run is refused before provider
 startup; supply `--prompt` or `--file` to use the supported task continuation.
 
+Admission requires the launcher and managed Guardian to load the same updated
+core. A new source-only client against an older installed Guardian is not an
+isolation guarantee: automatic recovery imports the Guardian's own workflow
+module.
+
 | Provider | Native isolation                                               | Authentication boundary                                                                                 |
 | -------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Claude   | `--mcp-config FILE --strict-mcp-config`                        | Existing provider login/config retained                                                                 |
@@ -208,6 +213,17 @@ subcommand can display global registrations even when print mode is strict.
 Verify print-mode initialization and an actual authorized private tool call.
 AGY headless permission denial is not a successful tool call, even if its
 process/result status says success; inspect the tool completion state.
+
+Canonical compiler-lane activation uses `make install-tools` with its existing
+service policy and ownership fences; it does not replace the fixed notarized
+App. `preserve` restarts a previously active managed pair; use `ensure` when a
+live pair is required even if it was already stopped.
+
+Native stopped-pair admission corroborates owned, stable execution and supervisor
+receipts, the dead owner, absent role PID paths and the actual closed loopback
+bind endpoint. A public URL is not bind authority. Invalid native evidence never
+downgrades to legacy PID-file absence, and an expired settlement deadline cannot
+produce a successful handoff.
 
 ## Workspace creation and Frame dependency
 

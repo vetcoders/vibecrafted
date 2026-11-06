@@ -9,6 +9,7 @@ import os
 import plistlib
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -3431,6 +3432,266 @@ def test_healthy_runtime_snapshot_uses_one_correlated_service_observation(
     assert snapshot[1].healthy is True
     assert snapshot[2] == "running"
     assert calls == [("service", "status", "--json")]
+
+
+@pytest.fixture
+def native_stopped_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stopped native owner retains its execution receipt, not healthy pair text."""
+    shared_home = tmp_path / ".vibecrafted"
+    server_dir = shared_home / "server"
+    server_dir.mkdir(parents=True)
+    launcher = tmp_path / "vibecrafted"
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_runtime_service_launcher", lambda _home: launcher)
+    status = {
+        "installed": True,
+        "loaded": False,
+        "supervisor_live": False,
+        "supervisor_verified": False,
+        "supervisor_service_managed": False,
+        "build_current": False,
+        "pair_healthy": False,
+        "supervisor_pid": None,
+    }
+
+    def service_command(_launcher, _home, *arguments):
+        if arguments == ("service", "status", "--json"):
+            return subprocess.CompletedProcess(
+                list(arguments), 1, json.dumps(status) + "\n", ""
+            )
+        if not receipt_path.is_file():
+            return subprocess.CompletedProcess(
+                list(arguments), 0, "Server: STOPPED\nGuardian: STOPPED\n", ""
+            )
+        return subprocess.CompletedProcess(
+            list(arguments),
+            4,
+            "Supervision: UNSUPERVISED (service installed=yes, loaded=no)\n",
+            "server or embedded Guardian is not ready\n",
+        )
+
+    def dead_owner(_pid, _signal):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(installer, "_run_runtime_service_command", service_command)
+    monkeypatch.setattr(installer.os, "kill", dead_owner)
+    with socket.socket() as endpoint:
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        receipt = {
+            "schema": "vibecrafted.supervisor-guardian.v1",
+            "execution": "supervisor-thread",
+            "owner_pid": 12345,
+            "nonce": "stopped-owner",
+            "ready": False,
+            "server_url": f"http://127.0.0.1:{port}",
+        }
+        receipt_path = server_dir / "guardian.execution.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        supervisor_path = server_dir / "supervisor.status.json"
+        supervisor = {
+            "schema": "vibecrafted.server-supervisor.v1",
+            "state": "stopped",
+            "service_managed": True,
+            "supervisor_pid": receipt["owner_pid"],
+            "endpoint": {
+                "host": "127.0.0.1",
+                "port": port,
+                "url": receipt["server_url"],
+                "public_url": receipt["server_url"],
+            },
+            "managed_pair": {
+                "server_pid": None,
+                "guardian_pid": None,
+                "guardian_owner_pid": None,
+            },
+        }
+        supervisor_path.write_text(json.dumps(supervisor), encoding="utf-8")
+        yield shared_home, receipt_path, receipt, endpoint, supervisor_path, supervisor
+
+
+def test_native_stopped_pair_allows_verified_install_handoff(
+    native_stopped_pair,
+) -> None:
+    shared_home, *_observations = native_stopped_pair
+
+    snapshot = installer._runtime_service_snapshot(shared_home)
+
+    assert snapshot is not None
+    assert snapshot[1].quiescent
+    assert snapshot[2] == "stopped"
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        "live_owner",
+        "server_pid",
+        "guardian_pid",
+        "ready",
+        "symlink",
+        "dangling_symlink",
+        "directory",
+        "writable_receipt",
+        "foreign_listener",
+        "reserved_bind_port",
+        "bad_schema",
+        "contradictory_public_url",
+        "missing_bind_receipt",
+        "bad_bind_schema",
+        "mismatched_owner",
+        "invalid_bind_host",
+    ],
+)
+def test_native_stopped_pair_refuses_incomplete_or_live_evidence(
+    native_stopped_pair,
+    monkeypatch: pytest.MonkeyPatch,
+    contradiction: str,
+) -> None:
+    shared_home, receipt_path, receipt, endpoint, supervisor_path, supervisor = (
+        native_stopped_pair
+    )
+    if contradiction == "live_owner":
+        monkeypatch.setattr(installer.os, "kill", lambda _pid, _signal: None)
+    elif contradiction in {"server_pid", "guardian_pid"}:
+        (receipt_path.parent / contradiction.replace("_pid", ".pid")).write_text(
+            "12345\n", encoding="utf-8"
+        )
+    elif contradiction == "ready":
+        receipt["ready"] = True
+    elif contradiction == "symlink":
+        receipt_path.rename(receipt_path.with_suffix(".saved"))
+        receipt_path.symlink_to(receipt_path.with_suffix(".saved"))
+    elif contradiction == "dangling_symlink":
+        receipt_path.unlink()
+        receipt_path.symlink_to(receipt_path.with_suffix(".missing"))
+    elif contradiction == "directory":
+        receipt_path.unlink()
+        receipt_path.mkdir()
+    elif contradiction == "writable_receipt":
+        receipt_path.chmod(0o666)
+    elif contradiction in {"foreign_listener", "reserved_bind_port"}:
+        endpoint.bind(("127.0.0.1", supervisor["endpoint"]["port"]))
+        if contradiction == "foreign_listener":
+            endpoint.listen()
+    elif contradiction == "bad_schema":
+        receipt["schema"] = "not-a-native-execution-receipt"
+    elif contradiction == "contradictory_public_url":
+        receipt["server_url"] = "https://example.invalid:3024"
+    elif contradiction == "missing_bind_receipt":
+        supervisor_path.unlink()
+    elif contradiction == "bad_bind_schema":
+        supervisor["schema"] = "not-a-supervisor-receipt"
+    elif contradiction == "mismatched_owner":
+        supervisor["supervisor_pid"] = 67890
+    elif contradiction == "invalid_bind_host":
+        supervisor["endpoint"]["host"] = []
+    if contradiction not in {"symlink", "dangling_symlink", "directory"}:
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    if contradiction != "missing_bind_receipt":
+        supervisor_path.write_text(json.dumps(supervisor), encoding="utf-8")
+
+    with pytest.raises(OSError):
+        installer._runtime_service_snapshot(shared_home)
+
+
+def test_native_stopped_pair_probes_bind_endpoint_not_public_url(
+    native_stopped_pair,
+) -> None:
+    shared_home, receipt_path, receipt, endpoint, supervisor_path, supervisor = (
+        native_stopped_pair
+    )
+    with socket.socket() as public_endpoint:
+        public_endpoint.bind(("127.0.0.1", 0))
+        public_url = f"http://127.0.0.1:{public_endpoint.getsockname()[1]}"
+        receipt["server_url"] = public_url
+        supervisor["endpoint"]["public_url"] = public_url
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        supervisor_path.write_text(json.dumps(supervisor), encoding="utf-8")
+
+        snapshot = installer._runtime_service_snapshot(shared_home)
+        assert snapshot is not None and snapshot[2] == "stopped"
+
+        endpoint.bind(("127.0.0.1", supervisor["endpoint"]["port"]))
+        endpoint.listen()
+        with pytest.raises(OSError):
+            installer._runtime_service_snapshot(shared_home)
+
+
+def test_native_stopped_pair_refuses_fifo_without_blocking(
+    native_stopped_pair,
+) -> None:
+    shared_home, receipt_path, *_observations = native_stopped_pair
+    receipt_path.unlink()
+    os.mkfifo(receipt_path)
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from pathlib import Path; "
+                "from scripts import vetcoders_install as installer; "
+                "installer.sys.platform = 'darwin'; "
+                "assert not installer._native_runtime_pair_is_quiescent(Path(sys.argv[1]))"
+            ),
+            str(shared_home),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+
+
+def test_native_stopped_pair_rejects_proof_finishing_after_deadline(
+    native_stopped_pair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_home, *_observations = native_stopped_pair
+    clock = [10.0]
+    connect = socket.create_connection
+
+    def delayed_refusal(*arguments, **kwargs):
+        try:
+            return connect(*arguments, **kwargs)
+        finally:
+            clock[0] = 12.0
+
+    monkeypatch.setattr(installer.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(installer.socket, "create_connection", delayed_refusal)
+    token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(11.0)
+    try:
+        with pytest.raises(installer._RuntimeServiceBudgetExhausted):
+            installer._runtime_service_snapshot(shared_home)
+    finally:
+        installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
+
+
+def test_native_stopped_pair_rejects_bind_receipt_replaced_during_probe(
+    native_stopped_pair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_home, _receipt_path, _receipt, _endpoint, supervisor_path, supervisor = (
+        native_stopped_pair
+    )
+    connect = socket.create_connection
+
+    def replaced_receipt(*arguments, **kwargs):
+        try:
+            return connect(*arguments, **kwargs)
+        finally:
+            replacement = supervisor_path.with_suffix(".replacement")
+            replacement.write_text(json.dumps(supervisor), encoding="utf-8")
+            replacement.replace(supervisor_path)
+
+    monkeypatch.setattr(installer.socket, "create_connection", replaced_receipt)
+    with pytest.raises(OSError):
+        installer._runtime_service_snapshot(shared_home)
 
 
 @contextmanager

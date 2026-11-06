@@ -55,6 +55,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -5667,6 +5668,137 @@ def _runtime_service_pair_state(
     )
 
 
+def _read_runtime_stop_observation(
+    path: Path,
+) -> tuple[dict[str, Any], os.stat_result] | None:
+    """Read bounded owned JSON without following links or blocking on a FIFO."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o022
+                or metadata.st_nlink != 1
+            ):
+                return None
+            body = stream.read(16385)
+        if len(body) > 16384:
+            return None
+        payload = json.loads(body)
+    except (OSError, ValueError):
+        return None
+    return (payload, metadata) if isinstance(payload, dict) else None
+
+
+def _native_runtime_pair_is_quiescent(shared_home: Path) -> bool:
+    """Prove a stopped native pair without treating failed health as absence."""
+    if sys.platform != "darwin":
+        return False
+    server_dir = shared_home / "server"
+    execution_path = server_dir / "guardian.execution.json"
+    status_path = server_dir / "supervisor.status.json"
+    execution_observation = _read_runtime_stop_observation(execution_path)
+    status_observation = _read_runtime_stop_observation(status_path)
+    if execution_observation is None or status_observation is None:
+        return False
+    execution, execution_metadata = execution_observation
+    supervisor, supervisor_metadata = status_observation
+    if (
+        execution.get("schema") != "vibecrafted.supervisor-guardian.v1"
+        or execution.get("execution") != "supervisor-thread"
+        or execution.get("ready") is not False
+        or not isinstance(execution.get("nonce"), str)
+        or not execution["nonce"]
+        or supervisor.get("schema") != "vibecrafted.server-supervisor.v1"
+        or supervisor.get("state") != "stopped"
+        or supervisor.get("service_managed") is not True
+    ):
+        return False
+    owner_pid = execution.get("owner_pid")
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 1
+        or supervisor.get("supervisor_pid") != owner_pid
+    ):
+        return False
+    pair = supervisor.get("managed_pair")
+    if not isinstance(pair, dict) or any(
+        role not in pair or pair[role] is not None
+        for role in ("server_pid", "guardian_pid", "guardian_owner_pid")
+    ):
+        return False
+    endpoint = supervisor.get("endpoint")
+    if not isinstance(endpoint, dict):
+        return False
+    host, port = endpoint.get("host"), endpoint.get("port")
+    if (
+        not isinstance(host, str)
+        or host not in {"127.0.0.1", "::1"}
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or not 0 < port <= 65535
+    ):
+        return False
+    rendered_host = f"[{host}]" if ":" in host else host
+    if (
+        endpoint.get("url") != f"http://{rendered_host}:{port}"
+        or not isinstance(endpoint.get("public_url"), str)
+        or not endpoint["public_url"]
+        or execution.get("server_url") != endpoint["public_url"]
+    ):
+        return False
+    role_paths = (server_dir / "server.pid", server_dir / "guardian.pid")
+    if any(os.path.lexists(path) for path in role_paths):
+        return False
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    else:
+        return False
+    timeout = 0.25
+    deadline = _RUNTIME_SERVICE_COMMAND_DEADLINE.get()
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise _RuntimeServiceBudgetExhausted(
+                "runtime settlement deadline expired before native stopped-pair proof"
+            )
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return False
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        return False
+    for path, metadata in (
+        (execution_path, execution_metadata),
+        (status_path, supervisor_metadata),
+    ):
+        try:
+            final_metadata = path.lstat()
+        except OSError:
+            return False
+        if (
+            final_metadata.st_dev != metadata.st_dev
+            or final_metadata.st_ino != metadata.st_ino
+            or final_metadata.st_ctime_ns != metadata.st_ctime_ns
+        ):
+            return False
+    if any(os.path.lexists(path) for path in role_paths):
+        return False
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _RuntimeServiceBudgetExhausted(
+            "runtime settlement deadline expired during native stopped-pair proof"
+        )
+    return True
+
+
 def _runtime_service_snapshot(
     shared_home: Path,
 ) -> tuple[Path, _RuntimeServiceStatus, str] | None:
@@ -5691,6 +5823,16 @@ def _runtime_service_snapshot(
     # restart.
     if status.healthy:
         return launcher, status, "running"
+    # Native stopped status calls running-only pair-health. Never downgrade
+    # present but invalid native evidence into legacy PID-file absence.
+    if status.quiescent and os.path.lexists(
+        shared_home / "server" / "guardian.execution.json"
+    ):
+        if _native_runtime_pair_is_quiescent(shared_home):
+            return launcher, status, "stopped"
+        raise OSError(
+            "native stopped-pair evidence is uncertain; refusing install handoff"
+        )
     pair_state = _runtime_service_pair_state(launcher, shared_home)
     if status.reclaimable and pair_state == "orphaned":
         # The verified managed supervisor owns the lifecycle, while a guardian
