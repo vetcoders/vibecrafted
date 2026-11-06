@@ -70,6 +70,7 @@ from .execution_controls import (
     resolve_execution_controls,
 )
 from .init_resume import init_resume_block
+from .mcp_isolation import prepare_isolated_mcp, validate_mcp_config
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
 from .process_control import process_identity_receipt, validate_process_identity
@@ -215,12 +216,16 @@ class WorkflowLaunchSpec:
     # from admission to argv/meta/resume; nothing downstream re-resolves
     # against live config (Founder decision 13716da4a2b8af7049ea1565).
     execution_controls_frozen: dict[str, Any] | None = None
+    # Explicit strict MCP scope; empty preserves the provider's normal config.
+    mcp_config: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
         payload = {**asdict(self), "prompt": "", "plan_source": None}
         if not self.source_readonly:
             payload.pop("source_readonly", None)
+        if not self.mcp_config:
+            payload.pop("mcp_config", None)
         if not self.remediate_trust_block:
             payload.pop("remediate_trust_block", None)
             payload.pop("remediation_reason", None)
@@ -421,12 +426,14 @@ def _write_command_script(
     exports: dict[str, str] | None = None,
     *,
     visible: bool = False,
+    unset_environment: tuple[str, ...] = (),
 ) -> Path:
     """Write an executable bash wrapper: export ``exports`` then ``exec command``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     export_lines = "".join(
         f"export {key}={shlex.quote(value)}\n" for key, value in (exports or {}).items()
     )
+    unset_lines = "".join(f"unset -- {shlex.quote(key)}\n" for key in unset_environment)
     # Frame executes this script with its long-lived daemon environment, not
     # Popen's map. Only managed provider scripts cross this identity boundary;
     # ordinary command scripts retain their current provider's tool context.
@@ -439,6 +446,7 @@ def _write_command_script(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         f"{identity_prelude}"
+        f"{unset_lines}"
         f"{export_lines}"
         f"{visible_color_shell_prelude() if visible else ''}"
         f"exec {shlex.join(command)}\n",
@@ -918,6 +926,8 @@ def _launch_transport_command(
     artifact_ts: str,
     artifact_suffix: str,
     research_selection: ResearchAgentSelection | None = None,
+    provider_environment: dict[str, str] | None = None,
+    provider_environment_unset: tuple[str, ...] = (),
 ) -> tuple[list[str], str, Path | None]:
     """Build the transport-specific launch argv: headless dispatch or vc-frame host action.
 
@@ -942,22 +952,26 @@ def _launch_transport_command(
         launch_dir / f"{run_id}-dispatcher.sh",
         dispatch_command,
         visible=True,
-        exports=_runtime_script_exports(
-            run_id=run_id,
-            prompt_path=prompt_path,
-            report_path=report_path,
-            transcript_path=transcript_path,
-            meta_path=meta_path,
-            agent=spec.agent,
-            skill=spec.skill,
-            runtime=spec.runtime,
-            canonical_report_dir=canonical_report_dir,
-            artifact_slug=artifact_slug,
-            artifact_ts=artifact_ts,
-            artifact_suffix=artifact_suffix,
-            claim_digest=spec.claim_digest,
-            worker_session=operator_session,
-        ),
+        unset_environment=provider_environment_unset,
+        exports={
+            **_runtime_script_exports(
+                run_id=run_id,
+                prompt_path=prompt_path,
+                report_path=report_path,
+                transcript_path=transcript_path,
+                meta_path=meta_path,
+                agent=spec.agent,
+                skill=spec.skill,
+                runtime=spec.runtime,
+                canonical_report_dir=canonical_report_dir,
+                artifact_slug=artifact_slug,
+                artifact_ts=artifact_ts,
+                artifact_suffix=artifact_suffix,
+                claim_digest=spec.claim_digest,
+                worker_session=operator_session,
+            ),
+            **(provider_environment or {}),
+        },
     )
     definition = workflow_registry.workflow_definition(spec.skill)
     if spec.skill == "research":
@@ -1173,6 +1187,7 @@ def _terminal_meta_payload(
         "meta": meta_path,
         "artifact_ok": bool(run.get("artifact_ok")),
         "artifact_errors": list(run.get("artifact_errors") or []),
+        "artifact_gate": str(run.get("artifact_gate") or ""),
         "updated_at": str(run.get("updated_at") or ""),
         "completed_at": str(run.get("completed_at") or ""),
     }
@@ -1276,8 +1291,47 @@ def await_launch_truth(
         and not worker_alive
     )
 
+    from .control_plane import _accepted_operator_stop_payload
+
+    validation = validate_artifacts(
+        meta_path=meta_path or None,
+        report_path=report_path or None,
+        transcript_path=transcript_path or None,
+        require_report=require_report,
+        require_transcript_output=require_transcript_output,
+    )
+    paths_exist = {
+        "report": _path_exists(report_path),
+        "transcript": _path_exists(transcript_path),
+        "meta": _path_exists(meta_path),
+    }
+    path_errors = [
+        f"{name}_missing"
+        for name, exists in paths_exist.items()
+        if not exists and (name != "report" or require_report)
+    ]
+    artifact_errors = list(dict.fromkeys([*validation.errors, *path_errors]))
+    artifact_ok = not artifact_errors
+    operator_stopped = _accepted_operator_stop_payload(run)
+    if operator_stopped:
+        # Accepted operator intent owes no completion report. It is stopped,
+        # not a validated worker success, even if a launcher template remains.
+        artifact_ok, artifact_errors = True, []
     meta_payload: dict[str, Any] = {}
     if terminal:
+        # The socket can outrun board projection. Validate the actual announced
+        # artifacts before publishing any successful gate in run or disk meta.
+        run.update(
+            artifact_ok=artifact_ok,
+            artifact_errors=artifact_errors,
+            artifact_gate=(
+                "stopped"
+                if operator_stopped
+                else "validated"
+                if artifact_ok
+                else "failed"
+            ),
+        )
         if str(run.get("liveness") or "") != "terminal":
             # The event-stream projection lags the launcher-written runtime
             # meta (it only saw process_spawned/heartbeat), so once the await
@@ -1298,22 +1352,6 @@ def await_launch_truth(
             meta_path=meta_path,
         )
 
-    validation = validate_artifacts(
-        meta_path=meta_path or None,
-        report_path=report_path or None,
-        transcript_path=transcript_path or None,
-        require_report=require_report,
-        require_transcript_output=require_transcript_output,
-    )
-    paths_exist = {
-        "report": _path_exists(report_path),
-        "transcript": _path_exists(transcript_path),
-        "meta": _path_exists(meta_path),
-    }
-    path_errors = [
-        f"{name}_missing" for name, exists in paths_exist.items() if not exists
-    ]
-
     return {
         "run_id": run_id,
         "found": bool(awaited.get("found")),
@@ -1329,8 +1367,8 @@ def await_launch_truth(
         "transcript": transcript_path,
         "meta": meta_path,
         "paths_exist": paths_exist,
-        "artifact_ok": validation.ok and not path_errors,
-        "artifact_errors": list(validation.errors) + path_errors,
+        "artifact_ok": artifact_ok,
+        "artifact_errors": artifact_errors,
         "artifact_warnings": list(validation.warnings),
         "meta_payload": meta_payload or validation.meta_payload,
         "next_stage": _report_requested_next_stage(report_path),
@@ -1639,6 +1677,93 @@ def _identity_base_hint(requested_repo: str, base: str) -> str:
     )
 
 
+def _validated_mcp_config(value: str, *, agent: str, skill: str) -> str:
+    """Admit an explicit MCP profile only at a supported native boundary."""
+    if not value:
+        return ""
+    if workflow_registry.workflow_runtime_kind(skill) in SUPERVISED_RUNTIME_KINDS:
+        raise ValueError(
+            "--mcp-config requires a direct agent workflow; "
+            "supervised runtimes cannot enforce strict MCP isolation"
+        )
+    return str(validate_mcp_config(value, agent=agent))
+
+
+def _continuation_mcp_config(
+    agent: str, parent: dict[str, Any], requested: str = ""
+) -> str:
+    """Keep a recorded strict profile immutable, refusing missing/tampered truth."""
+    receipt = parent.get("mcp_isolation")
+    if "mcp_isolation" not in parent:
+        if parent.get("mcp_config"):
+            raise ValueError("strict MCP continuation is missing its frozen receipt")
+        return requested
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != "vibecrafted.mcp-isolation.v1"
+        or receipt.get("strict") is not True
+        or receipt.get("agent") != agent
+        or not receipt.get("config_path")
+        or not receipt.get("sha256")
+    ):
+        raise ValueError("strict MCP continuation has an invalid frozen receipt")
+    frozen = validate_mcp_config(receipt["config_path"], agent=agent)
+    try:
+        digest = hashlib.sha256(frozen.read_bytes()).hexdigest()
+        requested_digest = (
+            hashlib.sha256(
+                validate_mcp_config(requested, agent=agent).read_bytes()
+            ).hexdigest()
+            if requested
+            else digest
+        )
+    except OSError:
+        raise ValueError("strict MCP continuation profile is unavailable") from None
+    if digest != receipt["sha256"] or requested_digest != digest:
+        raise ValueError("strict MCP continuation cannot replace its frozen profile")
+    return str(frozen)
+
+
+def _continuation_parent(
+    agent: str, native_id: str, binding: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Resolve an exact continuation owner before considering SID discovery."""
+    caller = dict(binding or {})
+    selection = caller.get("session_selection")
+    selection = selection if isinstance(selection, dict) else {}
+    exact_ids = {
+        bare_run_id(str(value).strip())
+        for value in (
+            caller.get("parent_run_id"),
+            caller.get("resume_of"),
+            selection.get("source_run_id"),
+        )
+        if value
+    }
+    if len(exact_ids) > 1:
+        raise ValueError("continuation parent bindings conflict; select one --run-id")
+    if exact_ids:
+        recorded = _read_identity_run_facts(next(iter(exact_ids)))
+        if recorded is None:
+            raise ValueError("exact continuation parent metadata is unavailable")
+    else:
+        recorded = find_run_for_identity_token(
+            native_id, require_unique_root=True, require_unique_run=True
+        )
+    if recorded:
+        if str(recorded.get("agent") or "") != agent:
+            raise ValueError("continuation parent provider does not match")
+        if _provider_session_for_continue(recorded) != native_id:
+            raise ValueError("continuation parent native identity does not match")
+    # Caller bindings can carry a damaged MCP-only clue. Never discard it just
+    # because discovery found no owner or canonical metadata lacks that field.
+    parent = {**caller, **(recorded or {})}
+    if recorded and recorded.get("mcp_config") and "mcp_isolation" not in recorded:
+        # A caller's cached receipt cannot repair missing canonical authority.
+        parent.pop("mcp_isolation", None)
+    return parent
+
+
 def normalize_launch_spec(
     payload: dict[str, Any],
     source_dir: str | Path,
@@ -1684,6 +1809,9 @@ def normalize_launch_spec(
         agent = "swarm"
     if agent not in SUPPORTED_AGENTS:
         raise ValueError(f"Unsupported agent: {agent}")
+    mcp_config = _validated_mcp_config(
+        str(payload.get("mcp_config") or ""), agent=agent, skill=skill
+    )
 
     prompt = str(payload.get("prompt") or "")
     file_path = str(payload.get("file") or "").strip()
@@ -1890,6 +2018,7 @@ def normalize_launch_spec(
         depth=depth,
         model=model,
         effort=effort,
+        mcp_config=mcp_config,
         effort_source=effort_source,
         model_source=model_source,
         source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
@@ -2304,6 +2433,8 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         receipt["provider_launch_environment"] = dict(
             payload["provider_launch_environment"]
         )
+    if isinstance(payload.get("mcp_isolation"), dict):
+        receipt["mcp_isolation"] = dict(payload["mcp_isolation"])
     for key in (
         "model_requested",
         "model_effective",
@@ -3229,6 +3360,13 @@ def launch_workflow(
     _normalized_runtime(spec.runtime)
     if spec.runtime_class not in {"living-tree", "local-worktrees"}:
         raise ValueError("unsupported execution runtime; no host adapter")
+    mcp_config = _validated_mcp_config(
+        _continuation_mcp_config(spec.agent, launch_meta or {}, spec.mcp_config),
+        agent=spec.agent,
+        skill=spec.skill,
+    )
+    if mcp_config:
+        spec = replace(spec, mcp_config=mcp_config)
     _source_prompt(spec)  # refuse source drift before any mutation
     # Opportunistic pre-flight: before adding a run to the machine, take the dead
     # ones' survivors off it. Every spawn is the natural sweep point — it needs no
@@ -3405,6 +3543,9 @@ def launch_workflow(
     # Launcher requests are measured below from this child's environment;
     # caller metadata (including a continuation's parent) cannot supply them.
     initial_meta.pop("provider_launch_environment", None)
+    initial_meta.pop("mcp_isolation", None)
+    if mcp_config:
+        initial_meta["mcp_config"] = mcp_config
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
     initial_meta.update(
@@ -3445,6 +3586,9 @@ def launch_workflow(
         if worker_command_override is not None
         else build_launch_command(spec, source_dir, prompt_file=prompt_path)
     )
+    mcp_receipt: dict[str, Any] = {}
+    provider_environment: dict[str, str] = {}
+    provider_environment_unset: tuple[str, ...] = ()
     try:
         merged_env = selected_runtime_environment()
         if env:
@@ -3452,6 +3596,32 @@ def launch_workflow(
         merged_env = selected_runtime_environment(merged_env)
         merged_env["PATH"] = agent_tool_search_path(merged_env)
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
+        if mcp_config:
+            isolated = prepare_isolated_mcp(
+                spec.agent,
+                worker_command,
+                mcp_config,
+                run_dir=artifacts["meta"].parent,
+                environment=merged_env,
+            )
+            if isolated.environment.get("HOME") != merged_env.get("HOME"):
+                raise ValueError("strict MCP isolation must preserve worker HOME")
+            provider_environment = {
+                key: value
+                for key, value in isolated.environment.items()
+                if merged_env.get(key) != value
+                or (spec.agent == "codex" and key == "CODEX_HOME")
+            }
+            provider_environment_unset = tuple(
+                key for key in merged_env if key not in isolated.environment
+            )
+            worker_command = isolated.command
+            merged_env = isolated.environment
+            mcp_receipt = dict(isolated.receipt)
+            safe_spec["mcp_config"] = mcp_receipt["config_path"]
+            initial_meta["mcp_config"] = mcp_receipt["config_path"]
+            initial_meta["mcp_isolation"] = mcp_receipt
+            atomic_write_json(artifacts["meta"], initial_meta)
         if spec.source_readonly:
             from .marbles_reception import readonly_command
 
@@ -3503,6 +3673,8 @@ def launch_workflow(
         "runtime_class": spec.runtime_class,
         "presentation": "headless" if spec.runtime == "headless" else "visible",
     }
+    if mcp_receipt:
+        model_receipt["mcp_isolation"] = mcp_receipt
     if guard_receipt:
         model_receipt["guard"] = dict(guard_receipt)
     dispatch_command = _dispatcher_command(
@@ -3609,6 +3781,8 @@ def launch_workflow(
         artifact_ts=artifact_ts,
         artifact_suffix="",
         research_selection=research_selection,
+        provider_environment=provider_environment,
+        provider_environment_unset=provider_environment_unset,
     )
     if operator_session:
         merged_env["VIBECRAFTED_OPERATOR_SESSION"] = operator_session
@@ -4293,6 +4467,9 @@ def _retry_run_locked(
         payload["model_requested"] = model_requested
 
     try:
+        parent = _merge_run_and_meta(run, _native_resume_meta(target, run))
+        payload["agent"] = str(parent.get("agent") or "claude")
+        payload["mcp_config"] = _continuation_mcp_config(payload["agent"], parent)
         spec = normalize_launch_spec(payload, source_dir)
     except ValueError as exc:
         append_event(
@@ -5290,6 +5467,7 @@ def manual_resume_session(
     env: dict[str, str] | None = None,
     permissions: str = "",
     sandbox: bool | str | None = None,
+    mcp_config: str = "",
 ) -> dict[str, Any]:
     """Launch an explicit provider-session continuation as its own tracked run.
 
@@ -5303,6 +5481,8 @@ def manual_resume_session(
     they are resolved before admission freezes the controls, so a read-only
     review session can be continued as a bypass implement (and vice versa).
     Omitted, the owning run's admitted decision is inherited unchanged.
+    A strict MCP profile is always inherited from the owning run; a caller
+    cannot replace it with live/global provider configuration.
     """
 
     normalized_agent = str(agent or "").strip().lower()
@@ -5348,12 +5528,22 @@ def manual_resume_session(
             detail=str(exc),
         )
     try:
+        mcp_parent = _continuation_parent(normalized_agent, native_id, launch_meta)
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="native_resume_policy_unavailable",
+            detail=str(exc),
+        )
+    try:
         command, _probe_state, _probe_version, controls = (
             _verified_native_resume_command(
                 normalized_agent,
                 native_id,
                 permissions=permissions_word,
                 sandbox=sandbox_requested,
+                parent_meta=mcp_parent,
             )
         )
     except _NativeResumeCommandRejected as exc:
@@ -5363,6 +5553,19 @@ def manual_resume_session(
             reason=exc.reason,
             detail=exc.detail,
             retryable=exc.retryable,
+        )
+    try:
+        mcp_config = _validated_mcp_config(
+            _continuation_mcp_config(normalized_agent, mcp_parent, mcp_config),
+            agent=normalized_agent,
+            skill=skill,
+        )
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
         )
     command = _with_model_override(
         normalized_agent,
@@ -5379,6 +5582,11 @@ def manual_resume_session(
     child_env["VIBECRAFTED_AGENT_SESSION_ID"] = native_id
     launch_meta = {
         **(launch_meta or {}),
+        **(
+            {"mcp_isolation": mcp_parent["mcp_isolation"]}
+            if "mcp_isolation" in mcp_parent
+            else {}
+        ),
         "run_id": child_run_id,
         "agent": normalized_agent,
         "agent_session_id": native_id,
@@ -5399,6 +5607,7 @@ def manual_resume_session(
                 "model": model_requested,
                 "permissions": permissions_word,
                 "sandbox": sandbox_requested,
+                "mcp_config": mcp_config,
             },
             resolved_source_dir,
             admission_controls=controls,
@@ -5479,8 +5688,14 @@ def manual_fork_session(
     if not source.get("accepted"):
         return source
     try:
+        mcp_parent = _continuation_parent(
+            agent,
+            session,
+            {"parent_run_id": parent_run_id, "session_selection": source},
+        )
+        mcp_config = _continuation_mcp_config(agent, mcp_parent)
         command, probe_state, version, _controls = _verified_native_resume_command(
-            agent, session
+            agent, session, parent_meta=mcp_parent
         )
         if agent == "codex":
             # The resume probe alone is insufficient evidence of exec fork.
@@ -5513,6 +5728,7 @@ def manual_fork_session(
                 "worktree": worktree,
                 "runtime_class": execution_runtime,
                 "permissions": permissions,
+                "mcp_config": mcp_config,
             },
             source_dir,
         )
@@ -6453,6 +6669,7 @@ def operator_continue_run(
                 or ""
             ),
         )
+        mcp_config = _continuation_mcp_config(agent, parent)
     except ValueError as exc:
         return _operator_continue_rejection(
             target, "launch_spec_invalid", detail=str(exc), run=parent
@@ -6461,6 +6678,11 @@ def operator_continue_run(
         "parent_run_id": target,
         "resume_of": target,
         "model_source": model_source,
+        **(
+            {"mcp_isolation": parent["mcp_isolation"]}
+            if "mcp_isolation" in parent
+            else {}
+        ),
         **{
             key: parent[key]
             for key in (
@@ -6509,6 +6731,7 @@ def operator_continue_run(
                 "root": str(resolved_root),
                 "mode": "resume-new-session",
                 "model": model_requested,
+                "mcp_config": mcp_config,
             },
             resolved_source_dir,
         )
@@ -6851,6 +7074,18 @@ def native_resume_run(
                 retryable=authority.retryable,
             )
         locked_receipt_id = authority.receipt_id
+        try:
+            mcp_config = _continuation_mcp_config(
+                agent, _merge_run_and_meta(locked_run, locked_meta)
+            )
+        except ValueError as exc:
+            return _native_resume_rejection(
+                target,
+                "mcp_isolation_unavailable",
+                run=locked_run,
+                detail=str(exc),
+                idempotency_key=resume_idempotency_key,
+            )
         # The probe remains outside mutation locks; revalidate the exact
         # parent's frozen decision with its identity/settlement snapshot.
         if _merge_run_and_meta(locked_run, locked_meta).get(
@@ -7020,6 +7255,7 @@ def native_resume_run(
             claim_digest=claim_digest,
             run_id=child_run_id,
             execution_controls_frozen=controls.receipt(),
+            mcp_config=mcp_config,
         )
         resume_command = _with_model_override(agent, command, spec.model)
         if owner_token:
