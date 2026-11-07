@@ -76,3 +76,15 @@ test('unverified multiline insertion and unavailable undo state fail closed', ()
   assert.equal(history.apply('x', edit('historyUndo', 0)), false);
   assert.equal(history.failed(), true);
 });
+
+test('refuses edits that would merge adjacent carriage-return and line-feed bytes', () => {
+  const deletion = create('a\rX\nb');
+  assert.equal(deletion.apply('a\n\nb', edit('deleteContentForward', 2, 3)), false);
+  assert.equal(deletion.failed(), true);
+  assert.equal(deletion.raw(), 'a\rX\nb');
+
+  const paste = create('a\rXb');
+  assert.equal(paste.apply('a\n\nXb', edit('insertFromPaste', 2, 2, '\n')), false);
+  assert.equal(paste.failed(), true);
+  assert.equal(paste.raw(), 'a\rXb');
+});

@@ -147,7 +147,12 @@ def guest_bridge_selected(run_id: str) -> bool:
         root = Path(_run_dir(run_id))
     except RuntimeError:
         return False
-    return (root / "provider.identity").is_file() or (root / "prompt.md").is_file()
+    try:
+        return (root / "provider.identity").is_file() or (root / "prompt.md").is_file()
+    except PermissionError:
+        # A host shell may not be able to traverse the guest's root-owned
+        # staging path; normal run resolution still validates the requested ID.
+        return False
 
 
 def guest_channel(run_id: str) -> str:

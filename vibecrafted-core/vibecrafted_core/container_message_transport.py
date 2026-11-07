@@ -38,7 +38,9 @@ def discover_channel(root: Path, run_id: str) -> str:
             try:
                 fd = os.open(
                     channel / "connection.json",
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
                 )
             except FileNotFoundError:
                 # Old relays had no discovery descriptor. Do not mutate them.
@@ -113,11 +115,18 @@ def request(
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                fd = os.open(response, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                fd = os.open(
+                    response,
+                    os.O_RDONLY
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
             except FileNotFoundError:
                 time.sleep(0.05)
                 continue
             with os.fdopen(fd, "rb") as inp:
+                if not stat.S_ISREG(os.fstat(inp.fileno()).st_mode):
+                    raise BridgeTransportError("bridge_invalid_response")
                 raw = inp.read(_MAX_RESPONSE + 1)
             response.unlink(missing_ok=True)
             if len(raw) > _MAX_RESPONSE:

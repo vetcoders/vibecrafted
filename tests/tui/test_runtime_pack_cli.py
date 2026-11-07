@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -239,30 +240,49 @@ def _sealed_archive(
     return archive, public_key
 
 
+def _darwin_host_env(tools: Path, env: dict[str, str] | None = None) -> dict[str, str]:
+    tools.mkdir(parents=True, exist_ok=True)
+    uname = tools / "uname"
+    uname.write_text(
+        '#!/bin/sh\ncase "$1" in\n'
+        "  -s) echo Darwin ;;\n"
+        "  -m) echo arm64 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    child_env = {**os.environ, **(env or {})}
+    child_env["PATH"] = f"{tools}{os.pathsep}{child_env.get('PATH', '')}"
+    return child_env
+
+
 def _run(
     *arguments: str,
     env: dict[str, str] | None = None,
     umask: int = -1,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "bash",
-            str(INSTALLER),
-            "--expected-version",
-            VERSION,
-            "--expected-platform",
-            "darwin-arm64",
-            "--expected-architecture",
-            "arm64",
-            *arguments,
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, **(env or {})},
-        umask=umask,
-    )
+    with tempfile.TemporaryDirectory(prefix="vc-runtime-pack-host-") as tools_dir:
+        child_env = _darwin_host_env(Path(tools_dir), env)
+        return subprocess.run(
+            [
+                "bash",
+                str(INSTALLER),
+                "--expected-version",
+                VERSION,
+                "--expected-platform",
+                "darwin-arm64",
+                "--expected-architecture",
+                "arm64",
+                *arguments,
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=child_env,
+            umask=umask,
+        )
 
 
 def _isolated_repo_install(
@@ -807,13 +827,15 @@ def test_final_app_carrier_installer_uses_its_bound_version_truth(
         capture_output=True,
         text=True,
         check=False,
-        env={
-            **os.environ,
-            "CAPTURE": str(capture),
-            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(
-                carrier / "vibecrafted-signing-v1.pub"
-            ),
-        },
+        env=_darwin_host_env(
+            tmp_path / "host-bin",
+            {
+                "CAPTURE": str(capture),
+                "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(
+                    carrier / "vibecrafted-signing-v1.pub"
+                ),
+            },
+        ),
     )
 
     assert result.returncode == 0, result.stderr
