@@ -563,45 +563,46 @@ def _worktree_summary(payload: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     """Expose the original rich repo renderer as a checkout-free executable."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments[:1] == ["worktrees"]:
-        arguments = ["--worktrees", *arguments[1:]]
+    worktrees_command = arguments[:1] == ["worktrees"]
+    if worktrees_command:
+        arguments = arguments[1:]
     parser = argparse.ArgumentParser(
-        prog="vc-git",
+        prog="vc-git worktrees" if worktrees_command else "vc-git",
         description="Show full Git context, including every worktree.",
         epilog=(
-            "Read-only worktree reception: vc-git worktrees list|triage [PROJECT] "
-            "[--target BRANCH] [--json]. The spelling --worktrees list|triage is also accepted. "
+            "Read-only worktree reception: vc-git worktrees [list|triage] [PROJECT] "
+            "[--target BRANCH] [--json]. With no action, worktrees lists the current repository. "
             "Cleanup, pruning and merge preparation are deferred and unavailable."
         ),
     )
+    if worktrees_command:
+        parser.add_argument(
+            "action", nargs="?", choices=("list", "triage"), default="list"
+        )
     parser.add_argument("project", nargs="?", default=".", help="repository path")
     parser.add_argument("--json", action="store_true", help="emit structured JSON")
-    parser.add_argument(
-        "--worktrees",
-        choices=("list", "triage"),
-        help="read-only worktree inventory and reception triage",
+    parser.set_defaults(
+        worktrees=worktrees_command, target=None, compare=None, cuts=None
     )
-    parser.add_argument(
-        "--target", help="local branch to inspect worktree integration against"
-    )
-    parser.add_argument(
-        "--compare",
-        metavar="DISPATCH_RUN_ID",
-        help="compare completed parallel work before deploy",
-    )
-    parser.add_argument(
-        "--cuts",
-        nargs=2,
-        metavar=("LEFT", "RIGHT"),
-        help="two settled, verified dispatch cuts",
-    )
+    if worktrees_command:
+        parser.add_argument(
+            "--target", help="local branch to inspect worktree integration against"
+        )
+    else:
+        parser.add_argument(
+            "--compare",
+            metavar="DISPATCH_RUN_ID",
+            help="compare completed parallel work before deploy",
+        )
+        parser.add_argument(
+            "--cuts",
+            nargs=2,
+            metavar=("LEFT", "RIGHT"),
+            help="two settled, verified dispatch cuts",
+        )
     args = parser.parse_args(arguments)
     if bool(args.compare) != bool(args.cuts):
         parser.error("--compare and --cuts must be supplied together")
-    if args.worktrees and args.compare:
-        parser.error("--worktrees cannot be combined with --compare")
-    if args.target and not args.worktrees:
-        parser.error("--target requires --worktrees")
     try:
         if args.worktrees:
             from .git_worktrees import worktree_inventory

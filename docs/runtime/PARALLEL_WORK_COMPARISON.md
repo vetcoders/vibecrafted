@@ -3,12 +3,13 @@
 ## Read-only worktree inventory and triage
 
 ```sh
+vc-git worktrees
 vc-git worktrees list /path/to/repository --target main
 vc-git worktrees triage /path/to/repository --target main --json
-vc-git /path/to/repository --worktrees triage --target main
 ```
 
-`list` and `triage` expose the same read-only inventory, also available through
+With no action, `worktrees` lists the current repository. `list` and `triage`
+expose the same read-only inventory, also available through
 MCP `vc_worktrees(project=".", target=None)`. With no target they compare to
 the invoking checkout's HEAD. An explicit target must name a local branch.
 Rows include full source and target SHAs, ahead/behind counts, canonical

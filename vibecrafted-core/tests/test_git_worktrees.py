@@ -360,20 +360,20 @@ def test_dispatch_restart_is_active_even_after_settlement(example, monkeypatch) 
 def test_cli_uses_shared_inventory(example, monkeypatch, capsys, verb) -> None:
     repo, _, _ = example
     monkeypatch.setattr(worktrees, "_holders", lambda path: "none-observed")
-    assert git.main([str(repo), "--worktrees", verb, "--target", "main", "--json"]) == 0
+    assert git.main(["worktrees", verb, str(repo), "--target", "main", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == worktrees.worktree_inventory(
         repo, target="main"
     )
 
 
-def test_installed_console_entrypoint_accepts_readonly_alias(example) -> None:
+@pytest.mark.parametrize("action", [[], ["list"], ["triage"]])
+def test_installed_console_entrypoint_accepts_worktrees(example, action) -> None:
     repo, wt, _ = example
     result = subprocess.run(
         [
             str(Path(sys.executable).with_name("vc-git")),
             "worktrees",
-            "list",
-            str(repo),
+            *action,
             "--target",
             "main",
             "--json",
@@ -381,6 +381,7 @@ def test_installed_console_entrypoint_accepts_readonly_alias(example) -> None:
         capture_output=True,
         text=True,
         check=True,
+        cwd=repo,
     )
     payload = json.loads(result.stdout)
     assert payload["schema"] == "vibecrafted.worktree-inventory.v1"
@@ -390,11 +391,13 @@ def test_installed_console_entrypoint_accepts_readonly_alias(example) -> None:
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--worktrees", "clean", "--apply"],
-        ["--worktrees", "prune", "--dry-run"],
+        ["worktrees", "clean", "--apply"],
+        ["worktrees", "prune", "--dry-run"],
         ["worktrees", "merge", "worker"],
-        ["--worktrees", "list", "--apply"],
-        ["--worktrees", "triage", "--remove-integrated"],
+        ["worktrees", "list", "--apply"],
+        ["worktrees", "triage", "--remove-integrated"],
+        ["--worktrees", "list"],
+        ["worktrees", "--compare", "dispatch-1", "--cuts", "left", "right"],
     ],
 )
 def test_mutating_commands_are_unavailable(example, capsys, arguments) -> None:
@@ -404,6 +407,16 @@ def test_mutating_commands_are_unavailable(example, capsys, arguments) -> None:
     assert exc.value.code == 2
     assert "error:" in capsys.readouterr().err
     assert wt.exists() and receipt.exists()
+
+
+@pytest.mark.parametrize("arguments", [["--help"], ["worktrees", "--help"]])
+def test_cli_help_promotes_worktrees_subcommand(capsys, arguments) -> None:
+    with pytest.raises(SystemExit) as exc:
+        git.main(arguments)
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "vc-git worktrees" in output
+    assert "--worktrees" not in output
 
 
 def test_inventory_does_not_write_git_or_owner_state(example, monkeypatch) -> None:
