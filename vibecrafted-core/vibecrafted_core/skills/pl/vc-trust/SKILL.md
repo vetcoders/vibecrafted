@@ -16,7 +16,8 @@ dogfooding: "required"
 # vc-trust — sędzia po fakcie
 
 `vc-trust` to spokojny sędzia po fakcie dla commitów zrobionych na wspólnym
-Living Tree. Wiadomości commitów są hipotezami. Trust falsyfikuje ich claimy
+Living Tree lub jawnie wskazanego fleet-worktree. Wiadomości commitów są 
+hipotezami. Trust falsyfikuje ich claimy
 wobec diffu, konsumentów, testów, runtime'u i historycznej intencji, zanim
 wyda:
 

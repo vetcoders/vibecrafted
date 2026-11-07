@@ -16,7 +16,7 @@ dogfooding: "required"
 # vc-trust — the judge after the fact
 
 `vc-trust` is a calm, post-hoc judge for commits made on the shared Living
-Tree. Commit messages are hypotheses. Trust falsifies their claims against the
+Tree or explicitly indicated fleet-worktrees. Commit messages are hypotheses. Trust falsifies their claims against the
 diff, consumers, tests, runtime, and historical intent before issuing:
 
 - `pass` — every material claim survived falsification **with strong evidence**
