@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-11-03",
+  "generated_at": "2026-11-08",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -4706,6 +4706,7 @@
     },
     "vc-trust": {
       "sha256": [
+        "0b609c9e2d918987e2b6467371560f847f36b481163ffb6788e59e65bc8ce329",
         "1e8174653c1b492ffcc4d99e4780ba777f2b92e315d71a158810767e8f4c120b",
         "434f6dc9cc22bb2f918010962f2cd6fa7b44fe5259f61524c0122084108cfe73",
         "52e2eab3ce075445b33287029d5bbe28473d45933e7f5e9f5d6fb5632eba26b7",
@@ -4718,7 +4719,8 @@
         "b1b5e395eeffdbbda44b8764ac9ed9fe0030093afc396e6693962c5b6d769514",
         "ea56b7d7121055d06b338ddd9b1d88615e7da9b1362c8c8a449be35ad4b40fec",
         "ee671540acc4ae521ba584498f8f8a3436a31e07210cd18b95f329a7b094ff30",
-        "fd435c4ed99f4a9f1896370728d57ef01517ebf2ba01ab5c75deaad6f91c15a2"
+        "fd435c4ed99f4a9f1896370728d57ef01517ebf2ba01ab5c75deaad6f91c15a2",
+        "fe5dae1123c1ff68d0923228527d76a2c1df919adb9a64106914e444388ded68"
       ],
       "files": {
         "FLOW.md": [
@@ -4728,6 +4730,7 @@
           "c9c7a34991ca1edd84556a6837ef0442ccf1c248"
         ],
         "SKILL.md": [
+          "04b61e33b55ffae27f66d6e84fd59af39144b652",
           "1b35ac514016bbf8d320966138cbdf1bd7ad3426",
           "4d6ee10055092958e7f3bafbab0e43bd1f9ee23a",
           "4fc6b53e95e5eaeb8f743702be6cfb3ee08d7b9c",
@@ -4737,6 +4740,7 @@
           "76ceb841f0c4a17ca54c44880fe51b0e30e05e58",
           "88cabde18445c1e9f35b3b786b0429d25bf34477",
           "8c54180715d9ad415a860c5e54b1a68e3bb12cd0",
+          "9f751ab6e092595c2a9f7855d3c8ca9bf6da7a87",
           "b6574133c5fa5b841fa1be656e0877519fc39147",
           "ba09423dcee8ccf8e81ecd821157b1119450e8b3",
           "e253bf76dc38f0f825e852dc7fef59e6cc4b73d6",
