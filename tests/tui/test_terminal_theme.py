@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -17,6 +18,31 @@ def test_frame_rgb_backgrounds_follow_window_opacity() -> None:
     assert config["colors"].get("transparent_background_colors", False) is True
     assert config["window"]["opacity"] == 0.9
     assert config["window"]["blur"] is True
+
+
+def test_window_matches_founder_ghostty_baseline() -> None:
+    """Maciej's baseline (2026-11-09): opacity 0.9, blur radius 20, zero padding.
+
+    A larger radius (winit's built-in 80) frosts the window grey; any change
+    here has to come from him, not from a template refresh.
+    """
+    window = tomllib.loads(
+        (REPO_ROOT / "config/vc-terminal/vibecrafted.toml").read_text()
+    )["window"]
+    assert window["opacity"] == 0.9
+    assert window["blur"] is True
+    assert window["blur_radius"] == 20
+    assert window["padding"] == {"x": 0, "y": 0}
+    assert window["decorations"] == "Transparent"
+    assert window["startup_mode"] == "Maximized"
+
+
+def test_pinned_vc_terminal_understands_blur_radius() -> None:
+    components = json.loads((REPO_ROOT / "config/source-components.json").read_text())
+    revision = components["components"]["vc-terminal"]["revision"]
+    assert revision != "df47e6f1452896a0f4f7c7ceb07117955b6ff4c9", (
+        "vc-terminal before 5d182a6a ignores window.blur_radius and warns about it"
+    )
 
 
 def test_local_path_hint_stops_before_terminal_padding() -> None:

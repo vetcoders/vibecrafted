@@ -9,7 +9,7 @@
     "vc-terminal": {
       "repository": "https://github.com/vetcoders/vc-terminal.git",
       "version": "0.18.0-dev",
-      "revision": "df47e6f1452896a0f4f7c7ceb07117955b6ff4c9"
+      "revision": "5d182a6aebdc2095db582290d03641f308fbc14d"
     }
   }
 }

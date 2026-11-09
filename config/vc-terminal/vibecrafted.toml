@@ -13,7 +13,11 @@ live_config_reload = true
 shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\""] }
 
 [window]
+# Maciej's baseline (2026-11-09, his Ghostty: background-opacity 0.9,
+# background-blur-radius 20). winit's built-in radius of 80 frosts the whole
+# window grey; blur_radius needs vc-terminal >= 5d182a6a (source-components).
 blur = true
+blur_radius = 20
 opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
 # Founder-stated product chrome (2026-09-15): transparent macOS title

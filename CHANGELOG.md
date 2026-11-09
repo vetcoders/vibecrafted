@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- The Vibecrafted terminal window follows the 0.9 opacity / blur radius 20 /
+  zero padding baseline. vc-terminal is pinned to `5d182a6a`, which adds
+  `window.blur_radius`.
+
+### Fixed
+
+- The terminal no longer looks frosted grey behind translucent backgrounds:
+  winit's fixed macOS blur radius of 80 is replaced by the configurable
+  `window.blur_radius` (default 20).
+
 ## [4.5.1] - 2026-10-26
 
 ### Fixed
