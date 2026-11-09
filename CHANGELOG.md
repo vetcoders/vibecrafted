@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- The terminal font chooser offers a curated set only: the five Monaspace NF
+  families, then Anonymous Pro. Other fixed-width fonts installed on the Mac are
+  no longer listed; a policy that already names one keeps it as current.
 - The Vibecrafted terminal window follows the 0.9 opacity / blur radius 20 /
   zero padding baseline. vc-terminal is pinned to `5d182a6a`, which adds
   `window.blur_radius`.

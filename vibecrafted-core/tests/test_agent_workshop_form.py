@@ -1535,12 +1535,12 @@ def test_real_macos_font_catalogue_and_offscreen_direct_chooser(tmp_path: Path) 
     ]
     if len(variants) < 2:
         pytest.skip(
-            "paging acceptance requires at least two installed fixed-width families"
+            "paging acceptance requires at least two installed curated families"
         )
     terminal_height = min(24, len(variants) + 10)
     page_size = terminal_height - 11
-    assert any(v.family not in cbo.MONASPACE_FAMILIES for v in variants)
-    assert any("mono" not in v.family.casefold() for v in variants)
+    # The host's other fixed-width families never reach the chooser.
+    assert all(v.family in cbo.CURATED_FONT_FAMILIES for v in variants)
     faces = cbo._native_font_faces()
     fixed = {face.family for face in faces if face.traits & (1 << 10)}
     assert all(v.family in fixed for v in variants)

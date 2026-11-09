@@ -1893,7 +1893,7 @@ class Workshop:
                 font_dirs=self.onboarding_font_dirs,
             )
             self.font_catalogue_note = (
-                "Installed fixed-width fonts · Monaspace NF first"
+                "Monaspace NF · Anonymous Pro"
                 if variants
                 and variants[0].catalogue_source == "CoreText fixed-pitch traits"
                 else "Native catalogue unavailable; font files cannot verify fixed width"

@@ -351,6 +351,21 @@ MONASPACE_FONT_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
 )
 MONASPACE_FAMILIES: tuple[str, ...] = tuple(item[0] for item in MONASPACE_FONT_VARIANTS)
+# The chooser offers this set and nothing else (Maciej, 2026-11-09: "Monaspace
+# only jako default", "może być też Anonymous", "nie jakieś egzotics"). Other
+# fixed-width families installed on the host stay out of the list; a policy
+# that already names one keeps it as the current entry.
+CURATED_FONT_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    *MONASPACE_FONT_VARIANTS,
+    (
+        "Anonymous Pro",
+        "Classic coding monospace",
+        ("AnonymousPro", "Anonymous Pro"),
+    ),
+)
+CURATED_FONT_FAMILIES: tuple[str, ...] = tuple(
+    item[0] for item in CURATED_FONT_VARIANTS
+)
 
 _FONT_EXTENSIONS = {".ttf", ".otf", ".ttc"}
 _FONT_SECTIONS = ("[font.normal]", "[font.bold]", "[font.italic]")
@@ -673,11 +688,13 @@ def inspect_font_variants(
     env: Mapping[str, str] | None = None,
     home: Path | None = None,
 ) -> list[FontVariantStatus]:
-    """Curated families first, then OS fixed-width families, without writes.
+    """Installed curated families, in curated order, without writes.
 
-    Explicit font_dirs and non-macOS retain curated file diagnostics only;
-    filenames cannot prove fixed width or provide genuine face styles.
-    A configured ineligible family remains visible as current, never eligible.
+    Only CURATED_FONT_FAMILIES are offered; the configured family is the one
+    exception and stays visible as current (selectable when it is an installed
+    fixed-width family). Explicit font_dirs and non-macOS retain curated file
+    diagnostics only; filenames cannot prove fixed width or provide genuine
+    face styles. A configured ineligible family stays current, never eligible.
     """
     configured = read_configured_font_family(policy_path, env=env, home=home)
     native = sys.platform == "darwin" and font_dirs is None
@@ -686,11 +703,14 @@ def inspect_font_variants(
         if native
         else "font files; fixed-width metadata unavailable"
     )
+    offered = {family.casefold() for family in CURATED_FONT_FAMILIES}
+    if configured:
+        offered.add(configured.casefold())
     families: dict[str, list[_FontFace]] = {}
     paths: dict[str, str] = {}
     if native:
         for face in _native_font_faces():
-            if face.traits & _FONT_MONOSPACE:
+            if face.traits & _FONT_MONOSPACE and face.family.casefold() in offered:
                 families.setdefault(face.family, []).append(face)
     else:
         dirs = (
@@ -698,13 +718,13 @@ def inspect_font_variants(
             if font_dirs is not None
             else default_font_dirs(home=home)
         )
-        for family, _description, tokens in MONASPACE_FONT_VARIANTS:
+        for family, _description, tokens in CURATED_FONT_VARIANTS:
             found = _find_font_file(tokens, dirs)
             if found is not None:
                 paths[family] = str(found)
 
     descriptions = {
-        family: description for family, description, _ in MONASPACE_FONT_VARIANTS
+        family: description for family, description, _ in CURATED_FONT_VARIANTS
     }
     # Merge eligible faces before choosing styles; alternate spellings may
     # carry different faces of the same family.
@@ -717,7 +737,7 @@ def inspect_font_variants(
             families[name].extend(families[family])
     ordered = [
         canonical[name.casefold()]
-        for name in MONASPACE_FAMILIES
+        for name in CURATED_FONT_FAMILIES
         if name.casefold() in canonical
     ]
     ordered += [name for name in canonical.values() if name not in ordered]
@@ -730,7 +750,7 @@ def inspect_font_variants(
                 family=family,
                 label=family,
                 description=(
-                    descriptions.get(family, "Installed fixed-width family")
+                    descriptions.get(family, "Current policy; outside the curated set")
                     if verified
                     else "Font file found; fixed-width metadata unavailable"
                 ),

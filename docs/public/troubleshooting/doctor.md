@@ -145,16 +145,16 @@ Each fix flag re-verifies after repairing, so a clean exit means the repair actu
 ## Terminal fonts
 
 Open **Agents → New agent → Setup / Font (f)**. The existing chooser shows the
-current policy and lists available Monaspace NF families first, followed by other
-installed fixed-width families. On macOS, CoreText fixed-pitch traits determine
-eligibility; a family name containing “Mono” is not evidence. Upstream family
-names are retained.
+current policy and lists the curated families that are installed: the five
+Monaspace NF families, then Anonymous Pro. Other fonts installed on the Mac are
+not offered. On macOS, CoreText fixed-pitch traits confirm each family is fixed
+width; a family name containing “Mono” is not evidence. Upstream family names are
+retained.
 
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to browse. Clicking a row
 selects it; **Apply Font** or Enter applies it. Opening, browsing and cancelling
-leave the policy unchanged. An unavailable or proportional configured family
-remains visible as current, but cannot be chosen as an installed fixed-width
-font. Applying another family updates normal/bold/italic face styles and keeps
+leave the policy unchanged. A configured family outside the curated set stays
+visible as current; an unavailable or proportional one cannot be chosen. Applying another family updates normal/bold/italic face styles and keeps
 font size, offsets and unrelated preferences.
 
 Frame's direct entry uses the canonical Workshop script with `launcher --font`;

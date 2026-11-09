@@ -274,17 +274,19 @@ def test_coretext_traits_order_dedupe_and_face_policy(
     mono = 1 << 10
     faces = [
         cbo._FontFace("Fake Mono", "Regular", 0),
-        cbo._FontFace("Menlo", "Regular", mono),
-        cbo._FontFace("Menlo", "Bold", mono | 2),
-        cbo._FontFace("Menlo", "ExtraLight Italic", mono | 1),
-        cbo._FontFace("Menlo", "ExtraBold", mono | 2),
-        cbo._FontFace("Menlo", "Italic", mono | 1),
-        cbo._FontFace("menlo", "Regular", mono),
-        cbo._FontFace("Menlo", "Regular", mono),
+        cbo._FontFace("Anonymous Pro", "Regular", mono),
+        cbo._FontFace("Anonymous Pro", "Bold", mono | 2),
+        cbo._FontFace("Anonymous Pro", "ExtraLight Italic", mono | 1),
+        cbo._FontFace("Anonymous Pro", "ExtraBold", mono | 2),
+        cbo._FontFace("Anonymous Pro", "Italic", mono | 1),
+        cbo._FontFace("anonymous pro", "Regular", mono),
+        cbo._FontFace("Anonymous Pro", "Regular", mono),
         cbo._FontFace("Monaspace Neon NF", "Regular", mono),
+        cbo._FontFace("Monaspace Neon NF", "Proportional Italic", 1),
         cbo._FontFace("Monaspace Xenon NF", "Regular", mono),
+        # Installed and fixed-width, but outside the curated set.
+        cbo._FontFace("Menlo", "Regular", mono),
         cbo._FontFace("Courier", "Regular", mono),
-        cbo._FontFace("Courier", "Proportional Italic", 1),
     ]
     monkeypatch.setattr(cbo, "_native_font_faces", lambda: list(reversed(faces)))
     policy = tmp_path / "terminal-policy.toml"
@@ -300,24 +302,25 @@ def test_coretext_traits_order_dedupe_and_face_policy(
     assert [v.family for v in variants if v.selectable] == [
         "Monaspace Xenon NF",
         "Monaspace Neon NF",
-        "Courier",
-        "Menlo",
+        "Anonymous Pro",
     ]
     assert variants[-1].family == "Fake Mono" and not variants[-1].selectable
     assert variants[-1].active and policy.read_text() == original
-    with pytest.raises(cbo.FontNotAvailableError):
-        cbo.select_font_family("Other Mono", policy_path=policy)
+    for outside in ("Other Mono", "Menlo", "Courier"):
+        with pytest.raises(cbo.FontNotAvailableError):
+            cbo.select_font_family(outside, policy_path=policy)
     assert policy.read_text() == original
-    cbo.select_font_family("Menlo", policy_path=policy)
+    cbo.select_font_family("Anonymous Pro", policy_path=policy)
     result = tomllib.loads(policy.read_text())
     assert [result["font"][key] for key in ("normal", "bold", "italic")] == [
-        {"family": "Menlo", "style": style} for style in ("Regular", "Bold", "Italic")
+        {"family": "Anonymous Pro", "style": style}
+        for style in ("Regular", "Bold", "Italic")
     ]
     assert result["font"]["size"] == 17.5
     assert result["font"]["offset"] == {"x": -2, "y": -6}
     assert result["window"]["opacity"] == 0.85
     assert "# retained style comment" in policy.read_text()
-    cbo.select_font_family("Courier", policy_path=policy)
+    cbo.select_font_family("Monaspace Neon NF", policy_path=policy)
     result = tomllib.loads(policy.read_text())
     assert all(
         result["font"][key]["style"] == "Regular"
@@ -610,8 +613,10 @@ def test_genuine_quoted_family_and_style_comment_survive_policy_write(
         cbo, "_native_font_faces", lambda: [cbo._FontFace(family, "Book", 1 << 10)]
     )
     policy = tmp_path / "policy.toml"
+    # Outside the curated set, so only reachable as the current family.
     policy.write_text(
-        '[font.normal]\nfamily = "Old"\nstyle = "Old # Face" # keep this\n'
+        '[font.normal]\nfamily = "Founder\'s \\"Fixed\\""\n'
+        'style = "Old # Face" # keep this\n'
     )
     cbo.select_font_family(family, policy_path=policy)
     result = tomllib.loads(policy.read_text())
@@ -691,10 +696,10 @@ def test_casefolded_family_merges_split_genuine_styles(
 ) -> None:
     monkeypatch.setattr(cbo.sys, "platform", "darwin")
     faces = [
-        cbo._FontFace("Example", "Book", 1 << 10),
-        cbo._FontFace("example", "Bold", (1 << 10) | 2),
-        cbo._FontFace("EXAMPLE", "Oblique", (1 << 10) | 1),
-        cbo._FontFace("Example", "Proportional Bold", 2),
+        cbo._FontFace("Anonymous Pro", "Book", 1 << 10),
+        cbo._FontFace("anonymous pro", "Bold", (1 << 10) | 2),
+        cbo._FontFace("ANONYMOUS PRO", "Oblique", (1 << 10) | 1),
+        cbo._FontFace("Anonymous Pro", "Proportional Bold", 2),
     ]
     monkeypatch.setattr(
         cbo, "_native_font_faces", lambda: faces[::-1] if reverse else faces
