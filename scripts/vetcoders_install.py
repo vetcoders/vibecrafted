@@ -9547,6 +9547,58 @@ def _is_native_executable(path: Path) -> bool:
 
 _TERMINAL_BUNDLE_DISPLAY_NAME = "Vibecrafted"
 _FIXED_TERMINAL_HOST = Path("/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal")
+_STANDALONE_TERMINAL_HOST: Path | None = None
+_STANDALONE_TERMINAL_MIN_VERSION = (0, 18, 0)
+
+
+def _standalone_terminal_host() -> Path:
+    if _STANDALONE_TERMINAL_HOST is not None:
+        return _STANDALONE_TERMINAL_HOST
+    return (
+        _FIXED_TERMINAL_HOST.parents[3] / "vc-terminal.app/Contents/MacOS/vc-terminal"
+    )
+
+
+def _parse_terminal_semver(raw: str) -> tuple[int, int, int] | None:
+    parts = str(raw or "").strip().split(".")
+    if len(parts) < 2:
+        return None
+    numbers: list[int] = []
+    for part in parts[:3]:
+        match = re.match(r"^(\d+)", part)
+        if match is None:
+            return None
+        numbers.append(int(match.group(1)))
+    while len(numbers) < 3:
+        numbers.append(0)
+    return (numbers[0], numbers[1], numbers[2])
+
+
+def _is_standalone_bundle_terminal_host(path: Path) -> bool:
+    """Standalone /Applications/vc-terminal.app owns its own macOS Dock identity."""
+    if path != _standalone_terminal_host():
+        return False
+    try:
+        contents = path.parent.parent
+        bundle = contents.parent
+        for node in (path, path.parent, contents, bundle, contents / "Info.plist"):
+            if node.is_symlink():
+                return False
+        with (contents / "Info.plist").open("rb") as stream:
+            document = plistlib.load(stream)
+        if not isinstance(document, dict) or not _is_native_executable(path):
+            return False
+        version = _parse_terminal_semver(
+            str(document.get("CFBundleShortVersionString") or "")
+        )
+        return (
+            document.get("CFBundleIdentifier") == "io.vetcoders.vc-terminal"
+            and document.get("CFBundleExecutable") == "vc-terminal"
+            and version is not None
+            and version >= _STANDALONE_TERMINAL_MIN_VERSION
+        )
+    except (OSError, plistlib.InvalidFileException, ExpatError, ValueError, TypeError):
+        return False
 
 
 def _is_product_bundle_terminal_host(path: Path) -> bool:
@@ -9615,6 +9667,15 @@ def _signed_terminal_identity(path: Path) -> tuple[str, str]:
 def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
     """Admit a matching fixed signed host before publishing a usable GUI entry."""
     if sys.platform == "darwin":
+        standalone = _standalone_terminal_host()
+        if _is_standalone_bundle_terminal_host(standalone):
+            _, host_team = _signed_terminal_identity(standalone)
+            _, bundle_team = _signed_terminal_identity(standalone.parents[2])
+            if bundle_team != host_team:
+                raise RuntimeInstallRefusal(
+                    "pending paired notarized app handoff: main app and terminal signing owners differ"
+                )
+            return standalone
         host = _FIXED_TERMINAL_HOST
         if not _is_product_bundle_terminal_host(host):
             raise RuntimeInstallRefusal(

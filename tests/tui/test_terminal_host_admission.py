@@ -1284,3 +1284,52 @@ def test_cli_never_opens_over_ambiguous_or_foreign_main(monkeypatch) -> None:
         module.ensure_main_owner(
             "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
         )
+
+
+def test_standalone_terminal_host_admission_and_no_main_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import plistlib
+
+    module = _helper_module()
+    assert module.production_policy(module.STANDALONE_HOST)
+    app = tmp_path / "vc-terminal.app"
+    exe = app / "Contents/MacOS/vc-terminal"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"fixture")
+    plist = app / "Contents/Info.plist"
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "vc-terminal",
+                "CFBundleShortVersionString": "0.18.0-dev",
+            }
+        )
+    )
+    monkeypatch.setattr(module, "STANDALONE_HOST", str(exe))
+    monkeypatch.setattr(module, "FIXED_HOSTS", (str(exe), module.FIXED_HOST))
+    code = module.CodeIdentity("ef" * 20, "MW223P3NPX", False)
+    monkeypatch.setattr(module, "static_code_identity", lambda _path, basic=False: code)
+    assert module.admitted_code_identity(str(exe)) == code
+
+    # Standalone vc-terminal.app is its own Dock app; ensure_main_owner is a no-op.
+    monkeypatch.setattr(
+        module,
+        "_main_identity_module",
+        lambda: pytest.fail("standalone host must not open Vibecrafted.app Main owner"),
+    )
+    module.ensure_main_owner(str(exe))
+
+    # Version below 0.18.0 is refused.
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "vc-terminal",
+                "CFBundleShortVersionString": "0.17.9",
+            }
+        )
+    )
+    with pytest.raises(module.Refusal, match="older than 0.18.0"):
+        module.admitted_code_identity(str(exe))

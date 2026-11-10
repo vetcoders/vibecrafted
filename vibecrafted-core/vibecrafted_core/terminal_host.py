@@ -50,6 +50,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
+import re
 import socket
 import stat
 import subprocess
@@ -87,6 +89,10 @@ _SOL_LOCAL, _LOCAL_PEERCRED, _LOCAL_PEERPID = 0, 0x001, 0x002
 _PROC_PIDTBSDINFO, _BSDINFO_SIZE, _PATH_MAX = 3, 136, 4096
 
 FIXED_HOST = "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+STANDALONE_HOST = "/Applications/vc-terminal.app/Contents/MacOS/vc-terminal"
+FIXED_HOSTS = (STANDALONE_HOST, FIXED_HOST)
+STANDALONE_BUNDLE_ID = "io.vetcoders.vc-terminal"
+STANDALONE_MIN_VERSION = (0, 18, 0)
 # <sys/codesign.h> csops operations and flags; CS_CDHASH_LEN.
 _CS_OPS_STATUS, _CS_OPS_CDHASH, _CS_VALID, _CS_ADHOC, _CDHASH_LEN = 0, 5, 0x1, 0x2, 20
 # <Security/CSCommon.h>, <Security/SecStaticCode.h>, <Security/SecCode.h>.
@@ -322,8 +328,62 @@ def generation_terminal() -> str:
 
 
 def production_policy(host: str) -> bool:
-    """Only the fixed app path is the product; the path, not caller env, decides."""
-    return host == FIXED_HOST
+    """Only a fixed /Applications app path is the product; the path, not caller env, decides."""
+    return host in FIXED_HOSTS
+
+
+def _parse_version_tuple(raw: str) -> tuple[int, int, int] | None:
+    parts = str(raw or "").strip().split(".")
+    if len(parts) < 2:
+        return None
+    numbers: list[int] = []
+    for part in parts[:3]:
+        match = re.match(r"^(\d+)", part)
+        if match is None:
+            return None
+        numbers.append(int(match.group(1)))
+    while len(numbers) < 3:
+        numbers.append(0)
+    return (numbers[0], numbers[1], numbers[2])
+
+
+def require_standalone_bundle_metadata(host: str) -> None:
+    plist_path = Path(host).parents[1] / "Info.plist"
+    try:
+        info = os.lstat(plist_path)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refusal(
+                EX_CONFIG,
+                f"standalone terminal Info.plist is not a regular file: {plist_path}",
+            )
+        with plist_path.open("rb") as handle:
+            document = plistlib.load(handle)
+    except Refusal:
+        raise
+    except (OSError, plistlib.InvalidFileException, ValueError, TypeError) as exc:
+        raise Refusal(
+            EX_CONFIG, f"standalone terminal Info.plist unreadable: {plist_path}: {exc}"
+        ) from None
+    if not isinstance(document, dict):
+        raise Refusal(
+            EX_CONFIG, f"standalone terminal Info.plist malformed: {plist_path}"
+        )
+    if document.get("CFBundleIdentifier") != STANDALONE_BUNDLE_ID:
+        raise Refusal(
+            EX_CONFIG, f"standalone terminal bundle identifier mismatch: {plist_path}"
+        )
+    if document.get("CFBundleExecutable") != "vc-terminal":
+        raise Refusal(
+            EX_CONFIG, f"standalone terminal executable mismatch: {plist_path}"
+        )
+    version = _parse_version_tuple(
+        str(document.get("CFBundleShortVersionString") or "")
+    )
+    if version is None or version < STANDALONE_MIN_VERSION:
+        raise Refusal(
+            EX_CONFIG,
+            f"standalone terminal version {document.get('CFBundleShortVersionString')!r} is older than {'.'.join(map(str, STANDALONE_MIN_VERSION))}",
+        )
 
 
 def require_paired_developer_id(host: str, identity: CodeIdentity) -> None:
@@ -337,8 +397,28 @@ def require_paired_developer_id(host: str, identity: CodeIdentity) -> None:
         raise Refusal(EX_CONFIG, "main app and terminal signing owners differ")
 
 
+def _is_standalone_terminal_bundle_path(host: str) -> bool:
+    return host == STANDALONE_HOST or (
+        host.endswith("/vc-terminal.app/Contents/MacOS/vc-terminal")
+        and not host.endswith("/libexec/vc-terminal.app/Contents/MacOS/vc-terminal")
+    )
+
+
 def admitted_code_identity(host: str) -> CodeIdentity:
     """Static host code paired with the selected generation under its policy."""
+    if _is_standalone_terminal_bundle_path(host):
+        identity = static_code_identity(host)
+        require_standalone_bundle_metadata(host)
+        if production_policy(host):
+            require_paired_developer_id(host, identity)
+        else:
+            expected = static_code_identity(generation_terminal())
+            if identity.team != expected.team:
+                raise Refusal(
+                    EX_CONFIG,
+                    f"standalone terminal host team {identity.team} differs from selected generation terminal {expected.team}",
+                )
+        return identity
     expected = static_code_identity(generation_terminal())
     identity = static_code_identity(host)
     if (identity.cdhash, identity.team) != (expected.cdhash, expected.team):
@@ -382,15 +462,16 @@ def owns_fixed_terminal_ancestor(start_pid: int | None = None) -> bool:
         # fallback; an outer fixed app must not override that nearer boundary.
         if identity.executable in generation_local:
             return False
-        if identity.executable == FIXED_HOST:
+        if identity.executable in FIXED_HOSTS:
+            matched_host = identity.executable
             if identity.uid != os.getuid():
                 raise Refusal(
                     EX_TEMPFAIL, f"fixed terminal host {pid} belongs to another user"
                 )
-            before = admitted_code_identity(FIXED_HOST)
+            before = admitted_code_identity(matched_host)
             live = live_code_hash(pid)
             again = process_identity(pid)
-            after = admitted_code_identity(FIXED_HOST)
+            after = admitted_code_identity(matched_host)
             if (before.cdhash, before.team) != (after.cdhash, after.team):
                 raise Refusal(
                     EX_TEMPFAIL,
@@ -400,7 +481,7 @@ def owns_fixed_terminal_ancestor(start_pid: int | None = None) -> bool:
                 again is None
                 or again.start != identity.start
                 or again.uid != identity.uid
-                or again.executable != FIXED_HOST
+                or again.executable != matched_host
             ):
                 raise Refusal(
                     EX_TEMPFAIL, "fixed terminal host identity changed during admission"
@@ -832,7 +913,7 @@ def _main_identity_module():
 
 def ensure_main_owner(host: str) -> None:
     """Hosted windows have one public Main owner; never elect by bundle ID alone."""
-    if not production_policy(host):
+    if host != FIXED_HOST:
         return
     identity = _main_identity_module()
     try:
