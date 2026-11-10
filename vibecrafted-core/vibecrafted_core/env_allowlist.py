@@ -235,6 +235,7 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
 # paired with GIT_CONFIG_COUNT above.
 _PREFIX_ALLOW: tuple[str, ...] = (
     "VIBECRAFTED_",
+    "X9RUN_",
     "XDG_",
     "LC_",
     "SPAWN_",

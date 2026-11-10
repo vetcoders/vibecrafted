@@ -195,9 +195,28 @@ def read_staged_tools_version() -> str:
     return "unknown"
 
 
+def _x9run_env_alias(name: str) -> str | None:
+    if name.startswith("VIBECRAFTED_"):
+        return "X9RUN_" + name.removeprefix("VIBECRAFTED_")
+    return None
+
+
+def _get_env_with_x9run_alias(
+    name: str, environment: Mapping[str, str] | None = None
+) -> str | None:
+    env = os.environ if environment is None else environment
+    alias = _x9run_env_alias(name)
+    if alias is not None:
+        raw_alias = env.get(alias)
+        if raw_alias:
+            return raw_alias
+    raw = env.get(name)
+    return raw if raw else None
+
+
 def resolve_env_path(name: str, default: Path) -> Path:
-    """Return ``$name`` expanded to a ``Path`` if set, else the expanded default."""
-    raw = os.environ.get(name)
+    """Return ``$name`` (or its ``X9RUN_*`` twin) expanded to a ``Path`` if set, else the expanded default."""
+    raw = _get_env_with_x9run_alias(name)
     if raw:
         return Path(raw).expanduser()
     return default.expanduser()
@@ -224,9 +243,10 @@ def xdg_data_home() -> Path:
 
 
 def vibecrafted_home() -> Path:
-    """``$VIBECRAFTED_HOME`` or the platform control-plane root."""
-    if os.environ.get("VIBECRAFTED_HOME"):
-        return Path(os.environ["VIBECRAFTED_HOME"]).expanduser()
+    """``$X9RUN_HOME`` / ``$VIBECRAFTED_HOME`` or the platform control-plane root."""
+    raw = _get_env_with_x9run_alias("VIBECRAFTED_HOME")
+    if raw:
+        return Path(raw).expanduser()
     return canonical_vibecrafted_home()
 
 
@@ -249,9 +269,10 @@ def vibecrafted_backups_home() -> Path:
 
 
 def vibecrafted_runtime_home() -> Path:
-    """``$VIBECRAFTED_RUNTIME_HOME`` or the platform runtime home."""
-    if os.environ.get("VIBECRAFTED_RUNTIME_HOME"):
-        return Path(os.environ["VIBECRAFTED_RUNTIME_HOME"]).expanduser()
+    """``$X9RUN_RUNTIME_HOME`` / ``$VIBECRAFTED_RUNTIME_HOME`` or the platform runtime home."""
+    raw = _get_env_with_x9run_alias("VIBECRAFTED_RUNTIME_HOME")
+    if raw:
+        return Path(raw).expanduser()
     if os.environ.get("XDG_DATA_HOME"):
         return xdg_data_home() / "vibecrafted"
     if is_windows():
@@ -379,9 +400,10 @@ def is_operator_home_root(
 
 
 def vibecrafted_launcher_bin() -> Path:
-    """``$VIBECRAFTED_LAUNCHER_BIN`` or the platform launcher directory."""
-    if os.environ.get("VIBECRAFTED_LAUNCHER_BIN"):
-        return Path(os.environ["VIBECRAFTED_LAUNCHER_BIN"]).expanduser()
+    """``$X9RUN_LAUNCHER_BIN`` / ``$VIBECRAFTED_LAUNCHER_BIN`` or the platform launcher directory."""
+    raw = _get_env_with_x9run_alias("VIBECRAFTED_LAUNCHER_BIN")
+    if raw:
+        return Path(raw).expanduser()
     return canonical_vibecrafted_launcher_bin()
 
 

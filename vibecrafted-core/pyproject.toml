@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 vibecrafted = "vibecrafted_core.cli:main"
+x9run = "vibecrafted_core.cli:main"
 vc-agents = "vibecrafted_core.wrappers:agents_main"
 vc-audit = "vibecrafted_core.wrappers:audit_main"
 vc-dou = "vibecrafted_core.wrappers:dou_main"

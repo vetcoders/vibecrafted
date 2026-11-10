@@ -1727,7 +1727,12 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
     assert _snapshot(home) == before
     if accepted:
         capture = json.loads(result.stdout)
-        assert capture["argv"] == ["--config-file", str(entry), *arguments]
+        expected_prefix = (
+            ["--vibecrafted-hosted", "--config-file", str(entry)]
+            if sys.platform == "darwin"
+            else ["--config-file", str(entry)]
+        )
+        assert capture["argv"] == [*expected_prefix, *arguments]
         environment = capture["env"]
         for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
             assert environment[key] == str(generation)
@@ -1830,7 +1835,13 @@ def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stderr
     captured = json.loads(result.stdout)
     assert captured["host"] == str(host)
-    assert captured["argv"] == ["--config-file", str(entry), "-e", "true"]
+    assert captured["argv"] == [
+        "--vibecrafted-hosted",
+        "--config-file",
+        str(entry),
+        "-e",
+        "true",
+    ]
     # A generation bundle or inherited override never rescues a missing or
     # symlinked fixed host. Keep the flat generation engine present as control.
     host.unlink()
@@ -1843,6 +1854,49 @@ def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
         assert refused.returncode == 78, refused.stderr
         assert not refused.stdout
         assert "fixed signed host missing" in refused.stderr
+
+    # Standalone vc-terminal.app is preferred and runs without --vibecrafted-hosted.
+    standalone_host = host.parents[3] / "vc-terminal.app/Contents/MacOS/vc-terminal"
+    standalone_host.parent.mkdir(parents=True, exist_ok=True)
+    standalone_host.write_text(paired.read_text())
+    standalone_host.chmod(0o755)
+    (standalone_host.parents[1] / "Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleIdentifier</key><string>io.vetcoders.vc-terminal</string>"
+        "<key>CFBundleExecutable</key><string>vc-terminal</string>"
+        "<key>CFBundleShortVersionString</key><string>0.18.0-dev</string>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+    sign_private_terminal_pair(paired, standalone_host)
+    standalone_result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert standalone_result.returncode == 0, standalone_result.stderr
+    standalone_captured = json.loads(standalone_result.stdout)
+    assert standalone_captured["host"] == str(standalone_host)
+    assert standalone_captured["argv"] == ["--config-file", str(entry), "-e", "true"]
+
+
+def test_x9run_env_vars_take_priority_over_vibecrafted_aliases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from vibecrafted_core import env_allowlist, runtime_paths
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "legacy-home"))
+    monkeypatch.setenv("X9RUN_HOME", str(tmp_path / "x9run-home"))
+    assert runtime_paths.vibecrafted_home() == tmp_path / "x9run-home"
+
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(tmp_path / "legacy-rt"))
+    monkeypatch.setenv("X9RUN_RUNTIME_HOME", str(tmp_path / "x9run-rt"))
+    assert runtime_paths.vibecrafted_runtime_home() == tmp_path / "x9run-rt"
+
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(tmp_path / "legacy-bin"))
+    monkeypatch.setenv("X9RUN_LAUNCHER_BIN", str(tmp_path / "x9run-bin"))
+    assert runtime_paths.vibecrafted_launcher_bin() == tmp_path / "x9run-bin"
+
+    assert env_allowlist.env_key_allowed("X9RUN_HOME")
+    assert env_allowlist.env_key_allowed("X9RUN_RUNTIME_ROOT")
 
 
 @pytest.mark.skipif(
