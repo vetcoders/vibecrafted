@@ -21,7 +21,6 @@ RELEASE_TOOLCHAIN_CONTRACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/re
 . "$RELEASE_TOOLCHAIN_CONTRACT"
 
 MODE="release"
-SNAPSHOT_DONORS=0
 UNPROVISIONED_UPDATE_CHANNEL=0
 for argument in "$@"; do
   case "$argument" in
@@ -29,7 +28,7 @@ for argument in "$@"; do
     --runtime-pack-only) MODE="runtime-pack" ;;
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
-    --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    --snapshot-donors) : ;; # compatibility: only runtime source is snapshotted
     --unprovisioned-update-channel) UNPROVISIONED_UPDATE_CHANNEL=1 ;;
     --help|-h)
       echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel]" >&2
@@ -68,10 +67,6 @@ prefer_rustup_cargo() {
 # while `/Volumes/<...>/vc-frame` and `/Volumes/<...>/vc-terminal` are present in
 # Contents/Helpers/vc-frame, Contents/MacOS/Vibecrafted, Contents/MacOS/voc and
 # the bundled alacritty. Resolve the donor roots; never concatenate them.
-canonical_dir() {
-  local target="$1"
-  (cd "$target" >/dev/null 2>&1 && pwd) || die "missing donor directory: $target"
-}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -93,10 +88,6 @@ PY
 then
   lease_roots=()
   [[ -z "${CARGO_TARGET_DIR:-}" ]] || lease_roots+=(--lease-root "$CARGO_TARGET_DIR")
-  for donor in "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}" \
-    "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}"; do
-    [[ ! -d "$donor" ]] || lease_roots+=(--lease-root "$donor/target")
-  done
   exec "$REPO_ROOT/scripts/vc-build-lease" --root "$REPO_ROOT/build" \
     "${lease_roots[@]}" -- /bin/bash "$REPO_ROOT/scripts/build-vibecrafted-release.sh" "$@"
 fi
@@ -231,17 +222,12 @@ validate_update_channel
 # Main product input is always a detached snapshot at the ROOT_SHA captured
 # above. REPO_ROOT stays the Living Tree so DIST_DIR, BUILD_DIR caches and
 # runtime-pack selection keep living on a path the reaper will not delete.
-TERMINAL_DONOR="$(canonical_dir "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}")"
-FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"
 DONOR_SNAPSHOT_ROOT="$REPO_ROOT/build/unified-release/donor-snapshots"
 SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"
-if (( SNAPSHOT_DONORS )); then
-  TERMINAL_REPO="$DONOR_SNAPSHOT_ROOT/vc-terminal"
-  FRAME_REPO="$DONOR_SNAPSHOT_ROOT/vc-frame"
-else
-  TERMINAL_REPO="$TERMINAL_DONOR"
-  FRAME_REPO="$FRAME_DONOR"
-fi
+# Transitional feed keys retain the declared external source pins. No sibling
+# checkout or external product binary participates in this runtime build.
+TERMINAL_SHA="$(git -C "$REPO_ROOT" show "$ROOT_SHA:config/source-components.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["components"]["vc-terminal"]["revision"])')"
+FRAME_SHA="$(git -C "$REPO_ROOT" show "$ROOT_SHA:config/source-components.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["components"]["vc-frame"]["revision"])')"
 ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$SOURCE_ROOT/docs/presence/logo-master.png}"
 ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-}"
 # DIST_DIR was resolved and locked immediately after the checkout lock.
@@ -292,7 +278,6 @@ EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
 EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
 RUNTIME_PAYLOAD="$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime"
 KEYS="${KEYS:-$HOME/.keys}"
-TERMINAL_FONT_DIR="$SOURCE_ROOT/assets/fonts/source-code-pro"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
 CERT_P12="$KEYS/Certificates.p12"
 CERT_PASSWORD_FILE="$KEYS/cert_password.txt"
@@ -359,15 +344,7 @@ PATH_REMAPS=(
   "$HOME=/usr/src/operator-home"
   "$REPO_ROOT=/usr/src/vibecrafted"
   "$SOURCE_ROOT=/usr/src/vibecrafted"
-  "$TERMINAL_DONOR=/usr/src/vc-terminal"
-  "$FRAME_DONOR=/usr/src/vc-frame"
 )
-if (( SNAPSHOT_DONORS )); then
-  PATH_REMAPS+=(
-    "$TERMINAL_REPO=/usr/src/vc-terminal"
-    "$FRAME_REPO=/usr/src/vc-frame"
-  )
-fi
 RUSTFLAGS=""
 FILE_PREFIX_MAP=""
 SWIFT_PREFIX_MAP=""
@@ -517,28 +494,7 @@ if [[ "$MODE" != "runtime-pack" ]]; then
   done
 fi
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
-# Darwin terminal bundles carry the canonical OFL family from the captured
-# source commit. SOURCE_ROOT is materialized later: preflight its Git blobs,
-# rather than reading a missing snapshot or mutable Living Tree font files.
-if [[ "$MODE" != "runtime-pack" || "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
-  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf'; do
-    git -C "$REPO_ROOT" cat-file -e "$ROOT_SHA:assets/fonts/source-code-pro/$font" \
-      || die "missing Source Code Pro input at $ROOT_SHA: $font"
-    git -C "$REPO_ROOT" show "$ROOT_SHA:assets/fonts/source-code-pro/$font" \
-      | LC_ALL=C file -b - | grep -Eq '(OpenType|TrueType) [Ff]ont' \
-      || die "Source Code Pro input is not an OpenType/TrueType font: $font"
-  done
-  git -C "$REPO_ROOT" show "$ROOT_SHA:assets/fonts/source-code-pro/OFL.txt" \
-    | grep -Fq 'SIL OPEN FONT LICENSE Version 1.1' \
-    || die "missing Source Code Pro OFL license at $ROOT_SHA"
-fi
 prepare_signing_identity
-
-# Empty unless the frame repo is a snapshot we are entitled to regenerate into.
-FRAME_DERIVED=()
-if (( SNAPSHOT_DONORS )); then
-  FRAME_DERIVED=("zellij-utils/assets/plugins/")
-fi
 
 # normalize_embedded_python_paths <runtime-root> <seed-dir>
 #
@@ -801,19 +757,6 @@ materialize_donor_snapshots() {
   [[ "$DONOR_SNAPSHOT_HEAD" == "$ROOT_SHA" ]] \
     || die "main snapshot HEAD $DONOR_SNAPSHOT_HEAD is not the bound release revision $ROOT_SHA"
   log "vibecrafted snapshot at $DONOR_SNAPSHOT_HEAD"
-  if (( SNAPSHOT_DONORS )); then
-    log "Snapshotting donors at the selected commits; their dirty working trees stay untouched"
-    local terminal_head frame_head
-    donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"
-    terminal_head="$DONOR_SNAPSHOT_HEAD"
-    donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"
-    frame_head="$DONOR_SNAPSHOT_HEAD"
-    log "vc-terminal snapshot at $terminal_head"
-    log "vc-frame snapshot at $frame_head"
-  fi
-  # Source snapshots are disposable; donor Cargo/WASM outputs remain under the
-  # physical donors' leased target roots, never below the snapshots we reap.
-  # Main cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
   [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
@@ -828,8 +771,8 @@ produce_runtime_pack() {
   # the pack is sealed would let a donor that moved mid-build describe bytes it
   # did not produce.
   local terminal_revision frame_revision
-  terminal_revision="$(git_sha "$TERMINAL_REPO")"
-  frame_revision="$(git_sha "$FRAME_REPO")"
+  terminal_revision="$TERMINAL_SHA"
+  frame_revision="$FRAME_SHA"
   log "Producing the canonical standalone Runtime Pack"
   rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
   "$SOURCE_ROOT/scripts/package-runtime-pack.sh" \
@@ -873,56 +816,13 @@ embed_runtime_pack() {
     || die "embedded Runtime Pack contains an invalid or unsigned Mach-O"
 }
 
-# embed_terminal_font_resources <vc-terminal.app>
-#
-# Give the process that actually draws the glyphs its own copy of the OFL
-# Source Code Pro family, declared the way Apple documents for a consuming app:
-# ATSApplicationFontsPath names a Resources-relative directory and CoreText
-# registers it privately for that bundle's process.
-#
-# Measured on macOS 27 with an isolated probe (see
-# tests/tui/test_terminal_font_ownership.py):
-#   * a family absent from the host resolves inside the declaring bundle and
-#     stays invisible to every other process, so a user without Source Code Pro
-#     installed still gets it;
-#   * a family already registered from /System/Library/Fonts or /Library/Fonts
-#     keeps winning inside the declaring process, so for those stores the
-#     bundled copy is a fallback and not a takeover. The probe deliberately
-#     does not read ~/Library/Fonts, so precedence over the owner's private
-#     collection is not claimed here — only the system stores were measured.
-# That is the whole reason this replaced the parent app's CTFontManager
-# `.session` registration, which reached the entire login session; there the
-# shadowing of a user-installed SpotMono.ttc WAS observed directly.
-embed_terminal_font_resources() {
-  local terminal_app="$1"
-  local resources="$terminal_app/Contents/Resources"
-  local plist="$terminal_app/Contents/Info.plist"
-  [[ -f "$plist" ]] || die "vc-terminal bundle has no Info.plist: $terminal_app"
-  mkdir -p "$resources/fonts"
-  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf' 'OFL.txt'; do
-    install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"
-  done
-  /usr/libexec/PlistBuddy -c "Set :ATSApplicationFontsPath fonts" "$plist" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :ATSApplicationFontsPath string fonts" "$plist"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :ATSApplicationFontsPath' "$plist")" == "fonts" ]] \
-    || die "vc-terminal bundle does not declare its private font directory"
-  for font in 'SourceCodePro[wght].ttf' 'SourceCodePro-Italic[wght].ttf' 'OFL.txt'; do
-    [[ -s "$resources/fonts/$font" ]] || die "vc-terminal bundle is missing $font"
-  done
-}
+
 
 materialize_runtime_payload() {
   local runtime="$1"
-  local terminal_source="$2"
-  local frame_source="$3"
-  local start_source="$4"
-  local voc_source="$5"
-  local server_source="$6"
-  local server_site="$7"
-  local scaffold_doctor_source="$8"
-  local control_observe_source="$9"
-  local admin_source="${10}"
-  local procs_source="${11}"
+  local start_source="$2" voc_source="$3" server_source="$4" server_site="$5"
+  local scaffold_doctor_source="$6" control_observe_source="$7"
+  local admin_source="$8" procs_source="$9"
   local canonical_deck python_seed seed_python python_home _attempt
 
   log "Materializing the App-independent Runtime Pack payload"
@@ -997,15 +897,8 @@ materialize_runtime_payload() {
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
   install -m 0755 "$control_observe_source" "$runtime/bin/control-observe"
-  install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
-  # Generations are internal payloads, never separate macOS app/Dock identities.
-  # The macOS public entry requires the fixed Applications host; Linux keeps
-  # the flat native host. A standalone pack must disclose this GUI requirement.
-  install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
-    "$runtime/bin/vc-terminal"
-  install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
-  install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
-    "$runtime/bin/vc-frame"
+  install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" "$runtime/bin/vc-terminal"
+  install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" "$runtime/bin/vc-frame"
   # The foundation manifest is a closed inventory of the complete executable
   # surface. Generate it only after every required runtime executable exists.
   # Loctree, AICX, PRView and ScreenScribe are not in it: each ships through
@@ -1106,68 +999,6 @@ build_product() {
   materialize_donor_snapshots
   require_clean_repo "$SOURCE_ROOT" vibecrafted
   require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"
-  require_clean_repo "$TERMINAL_REPO" vc-terminal
-  require_clean_repo "$FRAME_REPO" vc-frame
-
-  log "Building vc-terminal through its release binary target"
-  CARGO_TARGET_DIR="$TERMINAL_DONOR/target" \
-    CARGO_BUILD_BUILD_DIR="$TERMINAL_DONOR/target" \
-    make -C "$TERMINAL_REPO" \
-    DEPLOYMENT_TARGET='MACOSX_DEPLOYMENT_TARGET=14.0' release-bins
-  local terminal_source="$TERMINAL_DONOR/target/release/alacritty"
-  [[ -x "$terminal_source" ]] || die "vc-terminal release binary is missing"
-  chmod 0755 "$terminal_source"
-
-  # vc-frame's `release-binary` target builds --no-plugins and the binary
-  # embeds zellij-utils/assets/plugins/*.wasm through include_bytes!. Those
-  # blobs are GIT-TRACKED build output: they carry whatever paths the machine
-  # that last ran `make plugins-assets` happened to have. MEASURED 2026-08-18:
-  # 276 occurrences of $HOME/.cargo/registry across the 14 tracked blobs, of
-  # which 411 reached Contents/Helpers/vc-frame in the shipped 4.1.0 DMG. No
-  # compiler flag rewrites bytes that were compiled somewhere else, so the
-  # release has to compile them again under its own remaps. Closed loop,
-  # measured on default-plugins/link: 16 -> 0 occurrences of $HOME.
-  #
-  # Only ever against a SNAPSHOT. This rebuild rewrites assets/plugins/ and its
-  # SHA256SUMS; doing that to the operator's living donor would trample work
-  # another agent may be mid-edit on. The snapshot is a detached worktree this
-  # script created and will reap, so it is ours to dirty.
-  if (( SNAPSHOT_DONORS )); then
-    log "Rebuilding vc-frame's bundled WASM plugins under the release remaps"
-    CARGO_TARGET_DIR="$FRAME_DONOR/target" \
-      CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
-      CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets
-  else
-    log "NOTE: --snapshot-donors is off, so the tracked WASM plugin blobs ship"
-    log "      as they are. If they name this host the payload gate refuses"
-    log "      the build; rerun with --snapshot-donors."
-  fi
-
-  log "Building vc-frame through its provenance-stable donor target"
-  # zellij-utils/build.rs bakes CARGO_MANIFEST_DIR into the binary for
-  # install-freshness (dev builds compare themselves with their checkout). A
-  # release build's checkout is a donor snapshot that is reaped minutes later,
-  # so the baked path would be both useless and a host-path leak (measured
-  # 2026-08-19: 1 hit in Contents/Helpers/vc-frame). Pin it to the same root
-  # the source remap advertises; the freshness probe then reports NoCheckout.
-  # `plugins-assets` deliberately rewrites tracked derived blobs in the
-  # detached snapshot.  That does not make the source revision dirty: the
-  # regenerated bytes are checked by plugins-parity and the release receipt is
-  # bound to the immutable snapshot HEAD.  Resolve that identity before Cargo
-  # asks zellij-utils/build.rs to inspect the derived-output mutation.
-  local frame_release_sha
-  frame_release_sha="$(git_sha "$FRAME_REPO")"
-  CARGO_TARGET_DIR="$FRAME_DONOR/target" \
-    CARGO_BUILD_BUILD_DIR="$FRAME_DONOR/target" \
-    CARGO_PROFILE_RELEASE_STRIP=false \
-    VC_FRAME_GIT_SHA="$frame_release_sha" \
-    VC_FRAME_GIT_DIRTY=0 \
-    VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
-    make -C "$FRAME_REPO" release-binary
-  local frame_source="$FRAME_DONOR/target/release/vc-frame"
-  [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
-  chmod 0755 "$frame_source"
-
   build_native_voc
   local start_source="$NATIVE_VC_START_SOURCE"
   local voc_source="$NATIVE_VOC_SOURCE"
@@ -1200,7 +1031,7 @@ build_product() {
   chmod 0755 "$scaffold_doctor_source" "$control_observe_source"
 
   materialize_runtime_payload "$RUNTIME_PAYLOAD" \
-    "$terminal_source" "$frame_source" "$start_source" "$voc_source" \
+    "$start_source" "$voc_source" \
     "$server_source" "$server_site" "$scaffold_doctor_source" \
     "$control_observe_source" "$admin_source" "$procs_source"
   produce_runtime_pack
@@ -1261,17 +1092,9 @@ build_product() {
 
   log "Embedding the already-materialized Runtime Pack payload"
   local runtime="$resources/runtime"
-  mkdir -p "$APP/Contents/Helpers" "$resources/terminal"
+  mkdir -p "$APP/Contents/Helpers"
   /usr/bin/ditto "$RUNTIME_PAYLOAD" "$runtime"
-  # Both native executables live under one physical signed app identity.
-  install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"
-  embed_terminal_font_resources "$APP"
-  install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
   install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
-
-  install -m 0644 "$SOURCE_ROOT/config/vc-terminal/vibecrafted.toml" \
-    "$resources/terminal/vibecrafted.toml"
-
   if find "$APP" -type l -print -quit | grep -q .; then
     die "assembled app contains symlinks"
   fi
@@ -1296,22 +1119,19 @@ build_product() {
     --app "$APP" --entitlements-output "$host_entitlements" \
     > "$BUILD_DIR/host-permissions-plan.json"
   sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted" \
-    "$APP/Contents/MacOS/vc-terminal" "$host_entitlements" \
-    "$runtime/libexec/vc-terminal"
+    "" "$host_entitlements"
   sign_nested_app_bundles
   sign_helper_scripts
   embed_runtime_pack
   require_clean_repo "$SOURCE_ROOT" vibecrafted
   require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"
-  require_clean_repo "$TERMINAL_REPO" vc-terminal
-  require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}
   PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
     "$SOURCE_ROOT/scripts/unified_product_manifest.py" app \
-    --app "$APP" --terminal-source "$terminal_source" --frame-source "$frame_source" \
+    --app "$APP" \
     --version "$VERSION" --build "$BUILD_NUMBER" \
     --vibecrafted-sha "$ROOT_SHA" \
-    --terminal-sha "$(git_sha "$TERMINAL_REPO")" \
-    --frame-sha "$(git_sha "$FRAME_REPO")"
+    --terminal-sha "$TERMINAL_SHA" \
+    --frame-sha "$FRAME_SHA"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
     "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"
   log "Probing the signed bundled Python without mutating the app seal"

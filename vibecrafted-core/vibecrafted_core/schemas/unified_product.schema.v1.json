@@ -4,12 +4,24 @@
   "title": "Unified Vibecrafted Product Contracts v1",
   "description": "Fail-closed manifests for unsigned modules, the assembled app, atomic activation, and the mounted-DMG walk-around.",
   "oneOf": [
-    { "$ref": "#/$defs/moduleManifest" },
-    { "$ref": "#/$defs/assemblyReceipt" },
-    { "$ref": "#/$defs/productManifest" },
-    { "$ref": "#/$defs/transactionReceipt" },
-    { "$ref": "#/$defs/releaseOutput" },
-    { "$ref": "#/$defs/walkaroundReceipt" }
+    {
+      "$ref": "#/$defs/moduleManifest"
+    },
+    {
+      "$ref": "#/$defs/assemblyReceipt"
+    },
+    {
+      "$ref": "#/$defs/productManifest"
+    },
+    {
+      "$ref": "#/$defs/transactionReceipt"
+    },
+    {
+      "$ref": "#/$defs/releaseOutput"
+    },
+    {
+      "$ref": "#/$defs/walkaroundReceipt"
+    }
   ],
   "$defs": {
     "sha256": {
@@ -38,8 +50,12 @@
       "additionalProperties": false,
       "required": ["path", "sha256", "mode", "kind", "size", "dylibs"],
       "properties": {
-        "path": { "$ref": "#/$defs/relativePath" },
-        "sha256": { "$ref": "#/$defs/sha256" },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "mode": {
           "type": "string",
           "pattern": "^0[0-7]{3}$"
@@ -86,16 +102,26 @@
           "type": "string",
           "minLength": 1
         },
-        "git_sha": { "$ref": "#/$defs/gitSha" },
-        "dirty": { "type": "boolean" },
-        "architecture": { "$ref": "#/$defs/architecture" },
-        "minimum_macos": { "$ref": "#/$defs/minimumMacos" },
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "architecture": {
+          "$ref": "#/$defs/architecture"
+        },
+        "minimum_macos": {
+          "$ref": "#/$defs/minimumMacos"
+        },
         "files": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "x-vibecrafted-uniqueKeys": ["path"],
-          "items": { "$ref": "#/$defs/fileEntry" }
+          "items": {
+            "$ref": "#/$defs/fileEntry"
+          }
         },
         "entrypoints": {
           "type": "object",
@@ -103,28 +129,48 @@
           "minProperties": 1,
           "maxProperties": 1,
           "properties": {
-            "terminal": { "$ref": "#/$defs/relativePath" },
-            "frame": { "$ref": "#/$defs/relativePath" }
+            "terminal": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "frame": {
+              "$ref": "#/$defs/relativePath"
+            }
           }
         }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "module": { "const": "vc-terminal" } },
+            "properties": {
+              "module": {
+                "const": "vc-terminal"
+              }
+            },
             "required": ["module"]
           },
           "then": {
-            "properties": { "entrypoints": { "required": ["terminal"] } }
+            "properties": {
+              "entrypoints": {
+                "required": ["terminal"]
+              }
+            }
           }
         },
         {
           "if": {
-            "properties": { "module": { "const": "vc-frame" } },
+            "properties": {
+              "module": {
+                "const": "vc-frame"
+              }
+            },
             "required": ["module"]
           },
           "then": {
-            "properties": { "entrypoints": { "required": ["frame"] } }
+            "properties": {
+              "entrypoints": {
+                "required": ["frame"]
+              }
+            }
           }
         }
       ]
@@ -140,11 +186,21 @@
         "transformation"
       ],
       "properties": {
-        "module_path": { "$ref": "#/$defs/relativePath" },
-        "product_path": { "$ref": "#/$defs/relativePath" },
-        "unsigned_sha256": { "$ref": "#/$defs/sha256" },
-        "product_sha256": { "$ref": "#/$defs/sha256" },
-        "transformation": { "enum": ["identity", "codesign"] }
+        "module_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "product_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "unsigned_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "product_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "transformation": {
+          "enum": ["identity", "codesign"]
+        }
       }
     },
     "assemblyReceipt": {
@@ -158,13 +214,17 @@
         "module": {
           "enum": ["vc-terminal", "vc-frame"]
         },
-        "module_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "module_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "files": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "x-vibecrafted-uniqueKeys": ["module_path", "product_path"],
-          "items": { "$ref": "#/$defs/signedFileTransformation" }
+          "items": {
+            "$ref": "#/$defs/signedFileTransformation"
+          }
         }
       }
     },
@@ -183,11 +243,21 @@
         "module": {
           "enum": ["vc-terminal", "vc-frame"]
         },
-        "manifest_path": { "$ref": "#/$defs/relativePath" },
-        "manifest_sha256": { "$ref": "#/$defs/sha256" },
-        "assembly_receipt_path": { "$ref": "#/$defs/relativePath" },
-        "assembly_receipt_sha256": { "$ref": "#/$defs/sha256" },
-        "git_sha": { "$ref": "#/$defs/gitSha" }
+        "manifest_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "assembly_receipt_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "assembly_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
+        }
       }
     },
     "outerBundleCode": {
@@ -207,108 +277,97 @@
         "codesign_identifier"
       ],
       "properties": {
-        "identity": { "const": "outer-bundle-codesign-v1" },
-        "path": { "const": "Contents/MacOS/Vibecrafted" },
-        "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
-        "kind": { "const": "executable" },
-        "architecture": { "$ref": "#/$defs/architecture" },
-        "minimum_macos": { "$ref": "#/$defs/minimumMacos" },
+        "identity": {
+          "const": "outer-bundle-codesign-v1"
+        },
+        "path": {
+          "const": "Contents/MacOS/Vibecrafted"
+        },
+        "mode": {
+          "type": "string",
+          "pattern": "^0[0-7]{3}$"
+        },
+        "kind": {
+          "const": "executable"
+        },
+        "architecture": {
+          "$ref": "#/$defs/architecture"
+        },
+        "minimum_macos": {
+          "$ref": "#/$defs/minimumMacos"
+        },
         "dylibs": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "code_identity": { "const": "macho-code-v1" },
-        "code_sha256": { "$ref": "#/$defs/sha256" },
-        "info_plist_sha256": { "$ref": "#/$defs/sha256" },
-        "codesign_identifier": { "const": "io.vetcoders.vibecrafted" }
+        "code_identity": {
+          "const": "macho-code-v1"
+        },
+        "code_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "info_plist_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "codesign_identifier": {
+          "const": "io.vetcoders.vibecrafted"
+        }
       }
     },
     "launchContract": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema", "program", "argv", "config_path", "primary_shell", "shell", "environment"
-      ],
-      "properties": {
-        "schema": { "const": "io.vetcoders.vibecrafted.launch.v1" },
-        "program": {
-          "const": "Contents/MacOS/vc-terminal"
-        },
-        "argv": {
-          "const": [
-            "--config-file",
-            "Contents/Resources/terminal/vibecrafted.toml",
-            "-e",
-            "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh",
-            "Contents/Resources/runtime/bin/vc-start",
-            "operator"
-          ]
-        },
-        "config_path": { "const": "Contents/Resources/terminal/vibecrafted.toml" },
+      "const": {
+        "schema": "io.vetcoders.vibecrafted.launch.v2",
+        "program": "Contents/Resources/runtime/bin/vc-terminal",
+        "argv": [
+          "-e",
+          "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh",
+          "Contents/Resources/runtime/bin/vc-start",
+          "operator"
+        ],
+        "config_path": "Contents/Resources/runtime/config/vc-terminal/vibecrafted.toml",
         "primary_shell": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["program", "argv"],
-          "properties": {
-            "program": {
-              "const": "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh"
-            },
-            "argv": {
-              "const": ["Contents/Resources/runtime/bin/vc-start", "operator"]
-            }
-          }
+          "program": "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh",
+          "argv": ["Contents/Resources/runtime/bin/vc-start", "operator"]
         },
         "shell": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["program", "argv"],
-          "properties": {
-            "program": { "const": "Contents/Resources/runtime/bin/vc-start" },
-            "argv": { "const": ["operator"] }
-          }
+          "program": "Contents/Resources/runtime/bin/vc-start",
+          "argv": ["operator"]
         },
         "environment": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "resolver_inputs",
-            "inherit_exact",
-            "inject_literal",
-            "inject_bundle_paths",
-            "resolve_writable"
+          "resolver_inputs": ["VIBECRAFTED_RUNTIME_HOME", "XDG_DATA_HOME"],
+          "inherit_exact": [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "COLORTERM",
+            "TMPDIR",
+            "SHELL"
           ],
-          "properties": {
-            "resolver_inputs": { "const": ["VIBECRAFTED_RUNTIME_HOME", "XDG_DATA_HOME"] },
-            "inherit_exact": {
-              "const": [
-                "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
-                "TERM", "COLORTERM", "TMPDIR", "SHELL"
-              ]
-            },
-            "inject_literal": {
-              "const": { "PATH": "/usr/bin:/bin:/usr/sbin:/sbin" }
-            },
-            "inject_bundle_paths": {
-              "const": {
-                "VIBECRAFTED_APP_ROOT": ".",
-                "VIBECRAFTED_VC_FRAME_BIN": "Contents/Helpers/vc-frame"
-              }
-            },
-            "resolve_writable": {
-              "const": {
-                "VIBECRAFTED_RUNTIME_HOME": {
-                  "source_order": [
-                    "env:VIBECRAFTED_RUNTIME_HOME",
-                    "env:XDG_DATA_HOME+rel:vibecrafted",
-                    "env:HOME+rel:.local/share/vibecrafted"
-                  ],
-                  "must_be_absolute": true,
-                  "must_be_writable_or_creatable": true,
-                  "must_not_descend_from": "$APP_BUNDLE",
-                  "publish_to_env": "VIBECRAFTED_RUNTIME_HOME"
-                }
-              }
+          "inject_literal": {
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"
+          },
+          "inject_bundle_paths": {
+            "VIBECRAFTED_APP_ROOT": "."
+          },
+          "resolve_writable": {
+            "VIBECRAFTED_RUNTIME_HOME": {
+              "source_order": [
+                "env:VIBECRAFTED_RUNTIME_HOME",
+                "env:XDG_DATA_HOME+rel:vibecrafted",
+                "env:HOME+rel:.local/share/vibecrafted"
+              ],
+              "must_be_absolute": true,
+              "must_be_writable_or_creatable": true,
+              "must_not_descend_from": "$APP_BUNDLE",
+              "publish_to_env": "VIBECRAFTED_RUNTIME_HOME"
             }
           }
         }
@@ -332,15 +391,23 @@
         "outer_bundle_code",
         "files",
         "entrypoints",
-        "launch_contract"
+        "launch_contract",
+        "external_products",
+        "source_revisions"
       ],
       "properties": {
         "schema": {
-          "const": "io.vetcoders.vibecrafted.product.v1"
+          "const": "io.vetcoders.vibecrafted.product.v2"
         },
-        "product": { "const": "Vibecrafted" },
-        "bundle_id": { "const": "io.vetcoders.vibecrafted" },
-        "bundle_executable": { "const": "Vibecrafted" },
+        "product": {
+          "const": "Vibecrafted"
+        },
+        "bundle_id": {
+          "const": "io.vetcoders.vibecrafted"
+        },
+        "bundle_executable": {
+          "const": "Vibecrafted"
+        },
         "version": {
           "type": "string",
           "minLength": 1
@@ -349,60 +416,80 @@
           "type": "string",
           "minLength": 1
         },
-        "git_sha": { "$ref": "#/$defs/gitSha" },
-        "dirty": { "type": "boolean" },
-        "architecture": { "$ref": "#/$defs/architecture" },
-        "minimum_macos": { "$ref": "#/$defs/minimumMacos" },
-        "modules": {
-          "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
-          "x-vibecrafted-uniqueKeys": [
-            "module",
-            "manifest_path",
-            "assembly_receipt_path"
-          ],
-          "items": { "$ref": "#/$defs/moduleBinding" },
-          "allOf": [
-            {
-              "contains": {
-                "type": "object",
-                "properties": { "module": { "const": "vc-terminal" } },
-                "required": ["module"]
-              },
-              "minContains": 1,
-              "maxContains": 1
-            },
-            {
-              "contains": {
-                "type": "object",
-                "properties": { "module": { "const": "vc-frame" } },
-                "required": ["module"]
-              },
-              "minContains": 1,
-              "maxContains": 1
-            }
-          ]
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
         },
-        "outer_bundle_code": { "$ref": "#/$defs/outerBundleCode" },
+        "dirty": {
+          "type": "boolean"
+        },
+        "architecture": {
+          "$ref": "#/$defs/architecture"
+        },
+        "minimum_macos": {
+          "$ref": "#/$defs/minimumMacos"
+        },
+        "modules": {
+          "const": []
+        },
+        "outer_bundle_code": {
+          "$ref": "#/$defs/outerBundleCode"
+        },
         "files": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "x-vibecrafted-uniqueKeys": ["path"],
-          "items": { "$ref": "#/$defs/fileEntry" }
+          "items": {
+            "$ref": "#/$defs/fileEntry"
+          }
         },
         "entrypoints": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["app", "terminal", "frame"],
+          "required": ["app"],
           "properties": {
-            "app": { "$ref": "#/$defs/relativePath" },
-            "terminal": { "$ref": "#/$defs/relativePath" },
-            "frame": { "$ref": "#/$defs/relativePath" }
+            "app": {
+              "const": "Contents/MacOS/Vibecrafted"
+            }
           }
         },
-        "launch_contract": { "$ref": "#/$defs/launchContract" }
+        "launch_contract": {
+          "$ref": "#/$defs/launchContract"
+        },
+        "external_products": {
+          "const": {
+            "vc-terminal": {
+              "id": "io.vetcoders.vc-terminal",
+              "min_version": "0.18.0",
+              "team_id": "MW223P3NPX",
+              "resolve": "/Applications/vc-terminal.app",
+              "install_hint": "Install vc-terminal >=0.18.0 in /Applications/vc-terminal.app from https://github.com/vetcoders/vc-terminal/releases"
+            },
+            "vc-frame": {
+              "id": "io.vetcoders.vc-frame",
+              "min_version": "4.5.1",
+              "max_version_exclusive": "5.0.0",
+              "resolve": "PATH",
+              "install_hint": "Install vc-frame >=4.5.1,<5.0.0 on PATH from https://github.com/vetcoders/vc-frame/releases"
+            }
+          }
+        },
+        "source_revisions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vibecrafted", "vc-terminal", "vc-frame"],
+          "properties": {
+            "vibecrafted": {
+              "$ref": "#/$defs/gitSha"
+            },
+            "vc-terminal": {
+              "$ref": "#/$defs/gitSha"
+            },
+            "vc-frame": {
+              "$ref": "#/$defs/gitSha"
+            }
+          }
+        }
       }
     },
     "productIdentity": {
@@ -419,9 +506,15 @@
           "type": "string",
           "minLength": 1
         },
-        "manifest_path": { "const": "manifests/product-manifest.json" },
-        "product_manifest_sha256": { "$ref": "#/$defs/sha256" },
-        "source_revision": { "$ref": "#/$defs/gitSha" }
+        "manifest_path": {
+          "const": "manifests/product-manifest.json"
+        },
+        "product_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_revision": {
+          "$ref": "#/$defs/gitSha"
+        }
       }
     },
     "runtimeIdentity": {
@@ -434,10 +527,19 @@
         "source_revision"
       ],
       "properties": {
-        "version": { "type": "string", "minLength": 1 },
-        "manifest_path": { "const": "manifests/runtime-manifest.json" },
-        "runtime_manifest_sha256": { "$ref": "#/$defs/sha256" },
-        "source_revision": { "$ref": "#/$defs/gitSha" }
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_path": {
+          "const": "manifests/runtime-manifest.json"
+        },
+        "runtime_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_revision": {
+          "$ref": "#/$defs/gitSha"
+        }
       }
     },
     "releasePair": {
@@ -445,21 +547,35 @@
       "additionalProperties": false,
       "required": ["state", "app", "runtime"],
       "properties": {
-        "state": { "const": "present" },
-        "app": { "$ref": "#/$defs/productIdentity" },
-        "runtime": { "$ref": "#/$defs/runtimeIdentity" }
+        "state": {
+          "const": "present"
+        },
+        "app": {
+          "$ref": "#/$defs/productIdentity"
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtimeIdentity"
+        }
       }
     },
     "releaseAbsent": {
       "type": "object",
       "additionalProperties": false,
       "required": ["state"],
-      "properties": { "state": { "const": "absent" } }
+      "properties": {
+        "state": {
+          "const": "absent"
+        }
+      }
     },
     "releaseState": {
       "oneOf": [
-        { "$ref": "#/$defs/releasePair" },
-        { "$ref": "#/$defs/releaseAbsent" }
+        {
+          "$ref": "#/$defs/releasePair"
+        },
+        {
+          "$ref": "#/$defs/releaseAbsent"
+        }
       ]
     },
     "transactionReceipt": {
@@ -481,9 +597,15 @@
           "type": "string",
           "minLength": 1
         },
-        "previous": { "$ref": "#/$defs/releaseState" },
-        "new": { "$ref": "#/$defs/releasePair" },
-        "active": { "$ref": "#/$defs/releaseState" },
+        "previous": {
+          "$ref": "#/$defs/releaseState"
+        },
+        "new": {
+          "$ref": "#/$defs/releasePair"
+        },
+        "active": {
+          "$ref": "#/$defs/releaseState"
+        },
         "outcome": {
           "enum": ["activated", "rolled_back"]
         }
@@ -494,9 +616,16 @@
       "additionalProperties": false,
       "required": ["path", "sha256", "size"],
       "properties": {
-        "path": { "$ref": "#/$defs/relativePath" },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "size": { "type": "integer", "minimum": 0 }
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "releaseModuleIdentity": {
@@ -509,8 +638,12 @@
           "additionalProperties": false,
           "required": ["path", "sha256"],
           "properties": {
-            "path": { "$ref": "#/$defs/relativePath" },
-            "sha256": { "$ref": "#/$defs/sha256" }
+            "path": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
           }
         },
         "assembly_receipt": {
@@ -518,11 +651,17 @@
           "additionalProperties": false,
           "required": ["path", "sha256"],
           "properties": {
-            "path": { "$ref": "#/$defs/relativePath" },
-            "sha256": { "$ref": "#/$defs/sha256" }
+            "path": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
           }
         },
-        "git_sha": { "$ref": "#/$defs/gitSha" }
+        "git_sha": {
+          "$ref": "#/$defs/gitSha"
+        }
       }
     },
     "releaseOutput": {
@@ -541,33 +680,61 @@
         "notarization"
       ],
       "properties": {
-        "schema": { "const": "io.vetcoders.vibecrafted.release-output.v1" },
+        "schema": {
+          "const": "io.vetcoders.vibecrafted.release-output.v1"
+        },
         "signature_policy": {
           "type": "object",
           "additionalProperties": false,
           "required": ["algorithm", "key_id", "spki_sha256"],
           "properties": {
-            "algorithm": { "const": "rsa-pkcs1v15-sha256" },
-            "key_id": { "const": "vibecrafted-signing-v1" },
-            "spki_sha256": { "const": "521ed59d3c446c540afe1557c2dbc39c9c190775f99896b2b65206c32814b25b" }
+            "algorithm": {
+              "const": "rsa-pkcs1v15-sha256"
+            },
+            "key_id": {
+              "const": "vibecrafted-signing-v1"
+            },
+            "spki_sha256": {
+              "const": "521ed59d3c446c540afe1557c2dbc39c9c190775f99896b2b65206c32814b25b"
+            }
           }
         },
         "product": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["version", "build", "architecture", "minimum_macos", "manifest"],
+          "required": [
+            "version",
+            "build",
+            "architecture",
+            "minimum_macos",
+            "manifest"
+          ],
           "properties": {
-            "version": { "type": "string", "minLength": 1 },
-            "build": { "type": "string", "minLength": 1 },
-            "architecture": { "const": "arm64" },
-            "minimum_macos": { "const": "14.0" },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "build": {
+              "type": "string",
+              "minLength": 1
+            },
+            "architecture": {
+              "const": "arm64"
+            },
+            "minimum_macos": {
+              "const": "14.0"
+            },
             "manifest": {
               "type": "object",
               "additionalProperties": false,
               "required": ["path", "sha256"],
               "properties": {
-                "path": { "const": "Contents/Resources/product-manifest.json" },
-                "sha256": { "$ref": "#/$defs/sha256" }
+                "path": {
+                  "const": "Contents/Resources/product-manifest.json"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                }
               }
             }
           }
@@ -576,26 +743,54 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "path", "sha256", "code_identity", "code_sha256", "cdhash",
+            "path",
+            "sha256",
+            "code_identity",
+            "code_sha256",
+            "cdhash",
             "signer_policy"
           ],
           "properties": {
-            "path": { "const": "Contents/MacOS/Vibecrafted" },
-            "sha256": { "$ref": "#/$defs/sha256" },
-            "code_identity": { "const": "macho-code-v1" },
-            "code_sha256": { "$ref": "#/$defs/sha256" },
-            "cdhash": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "path": {
+              "const": "Contents/MacOS/Vibecrafted"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "code_identity": {
+              "const": "macho-code-v1"
+            },
+            "code_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "cdhash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
             "signer_policy": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["team_id", "designated_requirement", "hardened_runtime", "entitlements"],
+              "required": [
+                "team_id",
+                "designated_requirement",
+                "hardened_runtime",
+                "entitlements"
+              ],
               "properties": {
-                "team_id": { "const": "MW223P3NPX" },
+                "team_id": {
+                  "const": "MW223P3NPX"
+                },
                 "designated_requirement": {
                   "const": "identifier \"io.vetcoders.vibecrafted\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"MW223P3NPX\""
                 },
-                "hardened_runtime": { "const": true },
-                "entitlements": { "const": {"com.apple.security.device.audio-input": true} }
+                "hardened_runtime": {
+                  "const": true
+                },
+                "entitlements": {
+                  "const": {
+                    "com.apple.security.device.audio-input": true
+                  }
+                }
               }
             }
           }
@@ -605,8 +800,12 @@
           "additionalProperties": false,
           "required": ["path", "sha256"],
           "properties": {
-            "path": { "const": "Contents/_CodeSignature/CodeResources" },
-            "sha256": { "$ref": "#/$defs/sha256" }
+            "path": {
+              "const": "Contents/_CodeSignature/CodeResources"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
           }
         },
         "dmg": {
@@ -618,8 +817,13 @@
               "type": "string",
               "pattern": "^Vibecrafted_[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-[0-9]{8}-[0-9a-f]{8}\\.dmg$"
             },
-            "sha256": { "$ref": "#/$defs/sha256" },
-            "size": { "type": "integer", "minimum": 1 }
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         "runtime_pack": {
@@ -635,26 +839,55 @@
               "type": "string",
               "pattern": "^Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_[^/]+\\.tar\\.gz$"
             },
-            "sha256": { "$ref": "#/$defs/sha256" },
-            "size": { "type": "integer", "minimum": 1 },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1
+            },
             "provenance": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["path", "sha256", "version", "platform", "architecture", "source_revisions"],
+              "required": [
+                "path",
+                "sha256",
+                "version",
+                "platform",
+                "architecture",
+                "source_revisions"
+              ],
               "properties": {
-                "path": { "const": "runtime-pack-provenance.json" },
-                "sha256": { "$ref": "#/$defs/sha256" },
-                "version": { "type": "string", "minLength": 1 },
-                "platform": { "const": "darwin-arm64" },
-                "architecture": { "const": "arm64" },
+                "path": {
+                  "const": "runtime-pack-provenance.json"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "platform": {
+                  "const": "darwin-arm64"
+                },
+                "architecture": {
+                  "const": "arm64"
+                },
                 "source_revisions": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": ["vibecrafted", "vc-terminal", "vc-frame"],
                   "properties": {
-                    "vibecrafted": { "$ref": "#/$defs/gitSha" },
-                    "vc-terminal": { "$ref": "#/$defs/gitSha" },
-                    "vc-frame": { "$ref": "#/$defs/gitSha" }
+                    "vibecrafted": {
+                      "$ref": "#/$defs/gitSha"
+                    },
+                    "vc-terminal": {
+                      "$ref": "#/$defs/gitSha"
+                    },
+                    "vc-frame": {
+                      "$ref": "#/$defs/gitSha"
+                    }
                   }
                 }
               }
@@ -662,22 +895,22 @@
           }
         },
         "modules": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["vc-terminal", "vc-frame"],
-          "properties": {
-            "vc-terminal": { "$ref": "#/$defs/releaseModuleIdentity" },
-            "vc-frame": { "$ref": "#/$defs/releaseModuleIdentity" }
-          }
+          "const": {}
         },
         "source_revisions": {
           "type": "object",
           "additionalProperties": false,
           "required": ["vibecrafted", "vc-terminal", "vc-frame"],
           "properties": {
-            "vibecrafted": { "$ref": "#/$defs/gitSha" },
-            "vc-terminal": { "$ref": "#/$defs/gitSha" },
-            "vc-frame": { "$ref": "#/$defs/gitSha" }
+            "vibecrafted": {
+              "$ref": "#/$defs/gitSha"
+            },
+            "vc-terminal": {
+              "$ref": "#/$defs/gitSha"
+            },
+            "vc-frame": {
+              "$ref": "#/$defs/gitSha"
+            }
           }
         },
         "notarization": {
@@ -690,8 +923,12 @@
               "additionalProperties": false,
               "required": ["ticket", "gatekeeper"],
               "properties": {
-                "ticket": { "const": true },
-                "gatekeeper": { "const": true }
+                "ticket": {
+                  "const": true
+                },
+                "gatekeeper": {
+                  "const": true
+                }
               }
             },
             "dmg": {
@@ -699,9 +936,15 @@
               "additionalProperties": false,
               "required": ["codesign", "ticket", "gatekeeper"],
               "properties": {
-                "codesign": { "const": true },
-                "ticket": { "const": true },
-                "gatekeeper": { "const": true }
+                "codesign": {
+                  "const": true
+                },
+                "ticket": {
+                  "const": true
+                },
+                "gatekeeper": {
+                  "const": true
+                }
               }
             }
           }
@@ -716,108 +959,215 @@
       "additionalProperties": false,
       "required": ["name", "passed", "evidence_sha256"],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "passed": { "const": true },
-        "evidence_sha256": { "$ref": "#/$defs/sha256" }
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "passed": {
+          "const": true
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "runnerArgvObservation": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "probe_id", "executor", "owner_stage", "operation_id", "assertions",
-        "command", "exit_code", "stdout_sha256", "stderr_sha256"
+        "probe_id",
+        "executor",
+        "owner_stage",
+        "operation_id",
+        "assertions",
+        "command",
+        "exit_code",
+        "stdout_sha256",
+        "stderr_sha256"
       ],
       "properties": {
         "probe_id": {
           "type": "string",
           "pattern": "^io\\.vetcoders\\.vibecrafted\\.walkaround\\.[a-z_]+\\.v1$"
         },
-        "executor": { "const": "argv" },
-        "owner_stage": { "const": "W0" },
-        "operation_id": { "type": "string", "minLength": 1 },
+        "executor": {
+          "const": "argv"
+        },
+        "owner_stage": {
+          "const": "W0"
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
         "assertions": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/runnerAssertionObservation" }
+          "items": {
+            "$ref": "#/$defs/runnerAssertionObservation"
+          }
         },
         "command": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "exit_code": { "const": 0 },
-        "stdout_sha256": { "$ref": "#/$defs/sha256" },
-        "stderr_sha256": { "$ref": "#/$defs/sha256" }
+        "exit_code": {
+          "const": 0
+        },
+        "stdout_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "stderr_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "runnerSemanticObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["probe_id", "executor", "owner_stage", "operation_id", "assertions"],
+      "required": [
+        "probe_id",
+        "executor",
+        "owner_stage",
+        "operation_id",
+        "assertions"
+      ],
       "properties": {
         "probe_id": {
           "type": "string",
           "pattern": "^io\\.vetcoders\\.vibecrafted\\.walkaround\\.[a-z_]+\\.v1$"
         },
-        "executor": { "enum": ["builtin", "scenario", "pipeline_gate"] },
-        "owner_stage": { "enum": ["W0", "W2", "W3", "W4"] },
-        "operation_id": { "type": "string", "minLength": 1 },
+        "executor": {
+          "enum": ["builtin", "scenario", "pipeline_gate"]
+        },
+        "owner_stage": {
+          "enum": ["W0", "W2", "W3", "W4"]
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
         "assertions": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/runnerAssertionObservation" }
+          "items": {
+            "$ref": "#/$defs/runnerAssertionObservation"
+          }
         }
       }
     },
     "runnerProbeObservation": {
       "oneOf": [
-        { "$ref": "#/$defs/runnerArgvObservation" },
-        { "$ref": "#/$defs/runnerSemanticObservation" }
+        {
+          "$ref": "#/$defs/runnerArgvObservation"
+        },
+        {
+          "$ref": "#/$defs/runnerSemanticObservation"
+        }
       ]
     },
     "runnerProbeObservations": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "one_app", "app_codesign", "dmg_codesign", "app_notarization",
-        "dmg_notarization", "app_gatekeeper", "dmg_gatekeeper",
-        "sanitized_launch", "mission_control", "bundled_console", "start_here",
-        "update", "rollback", "reattach", "one_outer_writer"
+        "one_app",
+        "app_codesign",
+        "dmg_codesign",
+        "app_notarization",
+        "dmg_notarization",
+        "app_gatekeeper",
+        "dmg_gatekeeper",
+        "sanitized_launch",
+        "mission_control",
+        "bundled_console",
+        "start_here",
+        "update",
+        "rollback",
+        "reattach",
+        "one_outer_writer"
       ],
       "properties": {
-        "one_app": { "$ref": "#/$defs/runnerProbeObservation" },
-        "app_codesign": { "$ref": "#/$defs/runnerProbeObservation" },
-        "dmg_codesign": { "$ref": "#/$defs/runnerProbeObservation" },
-        "app_notarization": { "$ref": "#/$defs/runnerProbeObservation" },
-        "dmg_notarization": { "$ref": "#/$defs/runnerProbeObservation" },
-        "app_gatekeeper": { "$ref": "#/$defs/runnerProbeObservation" },
-        "dmg_gatekeeper": { "$ref": "#/$defs/runnerProbeObservation" },
-        "sanitized_launch": { "$ref": "#/$defs/runnerProbeObservation" },
-        "mission_control": { "$ref": "#/$defs/runnerProbeObservation" },
-        "bundled_console": { "$ref": "#/$defs/runnerProbeObservation" },
-        "start_here": { "$ref": "#/$defs/runnerProbeObservation" },
-        "update": { "$ref": "#/$defs/runnerProbeObservation" },
-        "rollback": { "$ref": "#/$defs/runnerProbeObservation" },
-        "reattach": { "$ref": "#/$defs/runnerProbeObservation" },
-        "one_outer_writer": { "$ref": "#/$defs/runnerProbeObservation" }
+        "one_app": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "app_codesign": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "dmg_codesign": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "app_notarization": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "dmg_notarization": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "app_gatekeeper": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "dmg_gatekeeper": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "sanitized_launch": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "mission_control": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "bundled_console": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "start_here": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "update": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "rollback": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "reattach": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        },
+        "one_outer_writer": {
+          "$ref": "#/$defs/runnerProbeObservation"
+        }
       }
     },
     "runnerWalkaroundReceipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "release_output", "release_signature", "observations"],
+      "required": [
+        "schema",
+        "release_output",
+        "release_signature",
+        "observations"
+      ],
       "properties": {
-        "schema": { "const": "io.vetcoders.vibecrafted.walkaround.v1" },
-        "release_output": { "$ref": "#/$defs/proofArtifact" },
-        "release_signature": { "$ref": "#/$defs/proofArtifact" },
+        "schema": {
+          "const": "io.vetcoders.vibecrafted.walkaround.v1"
+        },
+        "release_output": {
+          "$ref": "#/$defs/proofArtifact"
+        },
+        "release_signature": {
+          "$ref": "#/$defs/proofArtifact"
+        },
         "observations": {
           "type": "object",
           "additionalProperties": false,
           "required": ["issuer", "probes"],
           "properties": {
-            "issuer": { "const": "io.vetcoders.vibecrafted.walkaround-runner.v1" },
-            "probes": { "$ref": "#/$defs/runnerProbeObservations" }
+            "issuer": {
+              "const": "io.vetcoders.vibecrafted.walkaround-runner.v1"
+            },
+            "probes": {
+              "$ref": "#/$defs/runnerProbeObservations"
+            }
           }
         }
       }

@@ -1269,7 +1269,7 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
     assert '--app "$APP"' not in producer
     assert (
         'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"'
-        in materializer
+        not in materializer
     )
     assert 'install -m 0755 "$voc_source" "$runtime/bin/voc"' in materializer
     assert 'install -m 0755 "$voc_source" "$runtime/bin/vc-o"' in materializer
@@ -1284,7 +1284,10 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         'install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"'
         not in materializer
     )
-    assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
+    assert (
+        'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"'
+        not in materializer
+    )
     assert (
         "cargo build --locked -p voc --bin vc-start --bin voc "
         "--bin vc-admin --bin vc-procs --release"
@@ -1626,20 +1629,12 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "launch-alt-screen" not in installer
     assert 'product_config / "terminal-theme.toml"' in installer
     assert 'product_config / "terminal.toml"' not in installer
-    assert (
-        'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"' in builder
-    )
+    assert 'install -m 0755 "$terminal_source"' not in builder
+    assert 'install -m 0755 "$frame_source"' not in builder
     assert "vc-terminal-product-entry.sh" in builder
-    assert (
-        'install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"' in builder
-    )
-    assert "SourceCodePro[wght].ttf" in builder
-    assert "SourceCodePro-Italic[wght].ttf" in builder
-    assert "OFL.txt" in builder
-    assert 'embed_terminal_font_resources "$APP"' in builder
-    assert "Add :ATSApplicationFontsPath string fonts" in builder
-    assert "missing Source Code Pro input" in builder
-    assert "(OpenType|TrueType) [Ff]ont" in builder
+    assert "embed_terminal_font_resources" not in builder
+    assert "ATSApplicationFontsPath" not in builder
+    assert "SourceCodePro[wght].ttf" not in builder
 
 
 def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
@@ -1770,7 +1765,7 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(encoding="utf-8")
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
 
-    assert "--snapshot-donors) SNAPSHOT_DONORS=1 ;;" in builder
+    assert "--snapshot-donors) : ;;" in builder
     assert '. "$REPO_ROOT/scripts/lib/donor-snapshot.sh"' in builder
     # The reaper runs from the same trap that ends the keychain session, so it
     # fires on success, on error, and on Ctrl-C during a notarization wait.
@@ -1783,19 +1778,22 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
     assert (
         'donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO" "${VIBECRAFTED_FRAME_REVISION:-}"'
-        in builder
+        not in builder
     )
     assert (
         'donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO" "${VIBECRAFTED_TERMINAL_REVISION:-}"'
-        in builder
+        not in builder
     )
 
     # Regenerated plugin assets are deterministic derived output. Their
     # mutation must not make the binary claim that the immutable donor commit
     # itself was dirty.
-    assert 'frame_release_sha="$(git_sha "$FRAME_REPO")"' in builder
-    assert 'VC_FRAME_GIT_SHA="$frame_release_sha"' in builder
-    assert "VC_FRAME_GIT_DIRTY=0" in builder
+    assert (
+        'FRAME_SHA="$(git -C "$REPO_ROOT" show "$ROOT_SHA:config/source-components.json"'
+        in builder
+    )
+    assert "VC_FRAME_GIT_SHA=" not in builder
+    assert "VC_FRAME_GIT_DIRTY=0" not in builder
 
     # Reaping goes through git; `rm -rf` alone is what creates ghosts.
     assert "worktree add --detach" in library
@@ -1833,30 +1831,12 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert not spliced, spliced
 
 
-def test_donor_remap_prefixes_are_resolved_never_concatenated() -> None:
-    """A `..` inside a --remap-path-prefix never matches; measured on 4.1.0.
-
-    In `Vibecrafted_4.1.0-20260817-237d2814.dmg` the strings `/usr/src/vc-frame`
-    and `/usr/src/vc-terminal` are absent from every shipped binary while the
-    living checkout path is present, because both donor prefixes were built as
-    `"$REPO_ROOT/../vc-frame"` and the compiler matches prefixes textually.
-    """
-
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-
-    assert "canonical_dir()" in builder
-    assert (
-        'TERMINAL_DONOR="$(canonical_dir "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}")"'
-        in builder
-    )
-    assert (
-        'FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"'
-        in builder
-    )
-    assert '"$TERMINAL_DONOR=/usr/src/vc-terminal"' in builder
-    assert '"$FRAME_DONOR=/usr/src/vc-frame"' in builder
+def test_runtime_release_does_not_resolve_sibling_product_roots() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    assert "TERMINAL_DONOR=" not in builder
+    assert "FRAME_DONOR=" not in builder
+    assert '"$SOURCE_ROOT=/usr/src/vibecrafted"' in builder
+    assert "$ROOT_SHA:config/source-components.json" in builder
 
 
 def test_remaps_run_broadest_prefix_first() -> None:
@@ -1876,10 +1856,6 @@ def test_remaps_run_broadest_prefix_first() -> None:
         '"$HOME=/usr/src/operator-home"',
         '"$REPO_ROOT=/usr/src/vibecrafted"',
         '"$SOURCE_ROOT=/usr/src/vibecrafted"',
-        '"$TERMINAL_DONOR=/usr/src/vc-terminal"',
-        '"$FRAME_DONOR=/usr/src/vc-frame"',
-        '"$TERMINAL_REPO=/usr/src/vc-terminal"',
-        '"$FRAME_REPO=/usr/src/vc-frame"',
     ]
     positions = [builder.index(entry) for entry in order]
     assert positions == sorted(positions), "remap order is no longer broadest-first"
@@ -1888,7 +1864,8 @@ def test_remaps_run_broadest_prefix_first() -> None:
     snapshot_block = builder[
         builder.index("PATH_REMAPS=(") : builder.index('RUSTFLAGS=""')
     ]
-    assert "if (( SNAPSHOT_DONORS )); then" in snapshot_block
+    assert "TERMINAL_DONOR" not in snapshot_block
+    assert "FRAME_DONOR" not in snapshot_block
 
 
 def test_every_compiler_in_the_build_gets_a_prefix_map() -> None:
@@ -1911,66 +1888,21 @@ def test_every_compiler_in_the_build_gets_a_prefix_map() -> None:
     assert "OTHER_CFLAGS=" in builder
 
 
-def test_bundled_wasm_plugins_are_rebuilt_only_inside_a_snapshot() -> None:
-    """The blobs are git-tracked build output; a flag cannot reach them.
-
-    `make release-binary` builds `--no-plugins` and the binary embeds
-    zellij-utils/assets/plugins/*.wasm via include_bytes!. Measured 2026-08-18:
-    276 occurrences of `$HOME/.cargo/registry` across the 14 tracked blobs, 411
-    of which reached Contents/Helpers/vc-frame in the shipped DMG. Rebuilding
-    them under the release remaps drops both counts to zero — measured on all
-    fourteen inside a real snapshot worktree.
-
-    It must not happen against the living donor: that would rewrite tracked
-    files another agent may be mid-edit on.
-    """
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-
-    rebuild_at = builder.index('make -C "$FRAME_REPO" plugins-assets')
-    guard_at = builder.rindex("if (( SNAPSHOT_DONORS )); then", 0, rebuild_at)
-    assert rebuild_at - guard_at < 400, "the plugin rebuild escaped its snapshot guard"
-
-    binary_at = builder.index('make -C "$FRAME_REPO" release-binary')
-    assert rebuild_at < binary_at, (
-        "plugins must be rebuilt before the binary embeds them"
-    )
+def test_runtime_release_never_builds_external_frame_plugins() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    assert 'make -C "$FRAME_REPO" plugins-assets' not in builder
+    assert 'make -C "$FRAME_REPO" release-binary' not in builder
+    assert 'install -m 0755 "$frame_source"' not in builder
+    assert "scripts/vc-frame-product-entry.sh" in builder
 
 
-def test_the_clean_repo_allowance_is_exactly_the_regenerated_plugin_assets() -> None:
-    """Rebuilding into the snapshot makes it dirty; the allowance is narrow.
-
-    Measured on a real snapshot: `git status --porcelain` afterwards lists
-    exactly SHA256SUMS and the fourteen .wasm files under
-    zellij-utils/assets/plugins/, and nothing else. The receipt still binds the
-    donor HEAD, and those files are a deterministic function of it.
-    """
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'FRAME_DERIVED=("zellij-utils/assets/plugins/")' in builder
-    assert (
-        'require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}'
-        in builder
-    )
-    # The pre-build assertion stays strict: a snapshot that is dirty on arrival
-    # is a refusal, not an allowance. Exactly one of the two frame assertions
-    # carries the allowance, and vc-terminal never gets one — nothing
-    # regenerates into it.
-    frame_calls = [
-        line.strip()
-        for line in builder.splitlines()
-        if 'require_clean_repo "$FRAME_REPO"' in line
-    ]
-    assert len(frame_calls) == 2, frame_calls
-    assert sum("FRAME_DERIVED" in line for line in frame_calls) == 1, frame_calls
-    assert not any(
-        "DERIVED" in line
-        for line in builder.splitlines()
-        if 'require_clean_repo "$TERMINAL_REPO"' in line
-    )
+def test_runtime_snapshot_has_no_external_product_dirt_allowance() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
+    assert "FRAME_DERIVED=" not in builder
+    assert 'require_clean_repo "$SOURCE_ROOT" vibecrafted' in builder
+    assert 'require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"' in builder
+    assert 'require_clean_repo "$FRAME_REPO"' not in builder
+    assert 'require_clean_repo "$TERMINAL_REPO"' not in builder
 
 
 def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
@@ -2234,9 +2166,9 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
 
     assert (
         'CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets'
-        in builder
+        not in builder
     )
-    assert "VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils" in builder
+    assert "VC_FRAME_SOURCE_MANIFEST_DIR=" not in builder
     assert "strip_macho_debug_tree() {" in helper
     assert "strip -S" not in builder, "per-binary strip lists came back"
 
@@ -2466,16 +2398,16 @@ def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> Non
     assert "_CodeSignature/CodeResources" in helper
 
 
-def test_vc_terminal_uses_one_fixed_main_app_identity() -> None:
+def test_terminal_is_resolved_as_an_independent_signed_product() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
     entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
-    assert (
-        'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
-        in builder
-    )
-    assert "materialize_vc_terminal_app_bundle" not in builder
-    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in entry
-    assert "io.vetcoders.vibecrafted" in entry
+    resolver = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/external_products.py"
+    ).read_text()
+    assert 'install -m 0755 "$terminal_source"' not in builder
+    assert 'external_products.py" terminal' in entry
+    assert '"io.vetcoders.vc-terminal"' in resolver
+    assert '"MW223P3NPX"' in resolver
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
@@ -2625,9 +2557,9 @@ def test_standalone_pack_publishes_its_selection_only_after_it_is_signed() -> No
     # The donor SHAs recorded are the ones handed to the packager, read once.
     # Re-reading a sibling HEAD after sealing lets a donor that moved mid-build
     # describe bytes it did not produce.
-    assert 'terminal_revision="$(git_sha "$TERMINAL_REPO")"' in produce
-    assert produce.count('git_sha "$TERMINAL_REPO"') == 1
-    assert produce.count('git_sha "$FRAME_REPO"') == 1
+    assert 'terminal_revision="$TERMINAL_SHA"' in produce
+    assert produce.count('git_sha "$TERMINAL_REPO"') == 0
+    assert produce.count('git_sha "$FRAME_REPO"') == 0
 
 
 def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> None:
@@ -2658,7 +2590,7 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     acquire_at = builder.index("release_single_flight_acquire")
     output_at = builder.index("release_single_flight_acquire_output")
     assert acquire_at < output_at < begin_at
-    assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
+    assert begin_at < builder.index('TERMINAL_SHA="$(git -C')
     assert begin_at < builder.index("\nbuild_product\n")
     assert "release_single_flight_release" in builder
     assert builder.index("donor_snapshot_reap") < builder.index(

@@ -19,11 +19,10 @@ from urllib.parse import urlsplit
 
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
+from vibecrafted_core.external_products import PRODUCTS
 
 # Fixed main-app terminal and its helpers are executable payload.
 _DECLARED_CODE = {
-    "Contents/MacOS/vc-terminal",
-    "Contents/Helpers/vc-frame",
     "Contents/Resources/runtime/bin/vc-start",
 }
 
@@ -150,9 +149,7 @@ def configure_host_permissions(args: argparse.Namespace) -> None:
             raise SystemExit("--verify-signatures requires --verify-only")
         if args.verify_only:
             if args.verify_signatures:
-                contract._verify_host_permission_signatures(
-                    runtime, targets=(runtime / "libexec/vc-terminal",)
-                )
+                contract._verify_host_permission_signatures(runtime, targets=())
         else:
             if args.entitlements_output is None:
                 raise SystemExit("host assembly requires --entitlements-output")
@@ -163,7 +160,7 @@ def configure_host_permissions(args: argparse.Namespace) -> None:
                 {
                     "entitlements": entitlements,
                     "hardened_runtime": True,
-                    "signing_targets": ["libexec/vc-terminal"],
+                    "signing_targets": [],
                     "signatures_verified": bool(
                         args.verify_only and args.verify_signatures
                     ),
@@ -208,7 +205,7 @@ def configure_host_permissions(args: argparse.Namespace) -> None:
                 },
                 "entitlements": contract.HOST_ENTITLEMENTS,
                 "hardened_runtime": True,
-                "signing_targets": ["Vibecrafted.app", "Contents/MacOS/vc-terminal"],
+                "signing_targets": ["Vibecrafted.app"],
                 "signatures_verified": bool(
                     args.verify_only and args.verify_signatures
                 ),
@@ -341,24 +338,7 @@ def produce_app(args: argparse.Namespace) -> None:
     with plist_path.open("wb") as handle:
         plistlib.dump(plist, handle, sort_keys=True)
 
-    modules = [
-        _module(
-            app,
-            name="vc-terminal",
-            source=args.terminal_source.resolve(),
-            product_relative="Contents/MacOS/vc-terminal",
-            git_sha=args.terminal_sha,
-            version=args.version,
-        ),
-        _module(
-            app,
-            name="vc-frame",
-            source=args.frame_source.resolve(),
-            product_relative="Contents/Helpers/vc-frame",
-            git_sha=args.frame_sha,
-            version=args.version,
-        ),
-    ]
+    modules = []
     manifest_relative = Path("Contents/Resources/product-manifest.json")
     outer_relative = "Contents/MacOS/Vibecrafted"
     excluded = {
@@ -399,6 +379,12 @@ def produce_app(args: argparse.Namespace) -> None:
         "architecture": "arm64",
         "minimum_macos": "14.0",
         "modules": modules,
+        "external_products": PRODUCTS,
+        "source_revisions": {
+            "vibecrafted": args.vibecrafted_sha,
+            "vc-terminal": args.terminal_sha,
+            "vc-frame": args.frame_sha,
+        },
         "outer_bundle_code": {
             "identity": contract.OUTER_BUNDLE_CODE_IDENTITY,
             "path": outer_relative,
@@ -415,8 +401,6 @@ def produce_app(args: argparse.Namespace) -> None:
         "files": files,
         "entrypoints": {
             "app": outer_relative,
-            "terminal": "Contents/MacOS/vc-terminal",
-            "frame": "Contents/Helpers/vc-frame",
         },
         "launch_contract": contract._canonical_launch_contract(),
     }
@@ -453,8 +437,8 @@ def produce_release(args: argparse.Namespace) -> None:
     provenance = json.loads(provenance_raw.decode("utf-8"))
     expected_revisions = {
         "vibecrafted": product["git_sha"],
-        "vc-terminal": modules["vc-terminal"]["git_sha"],
-        "vc-frame": modules["vc-frame"]["git_sha"],
+        "vc-terminal": product["source_revisions"]["vc-terminal"],
+        "vc-frame": product["source_revisions"]["vc-frame"],
     }
     if provenance.get("source_revisions") != expected_revisions:
         raise SystemExit("Runtime Pack provenance disagrees with the product sources")
@@ -527,8 +511,8 @@ def produce_release(args: argparse.Namespace) -> None:
         },
         "source_revisions": {
             "vibecrafted": product["git_sha"],
-            "vc-terminal": modules["vc-terminal"]["git_sha"],
-            "vc-frame": modules["vc-frame"]["git_sha"],
+            "vc-terminal": product["source_revisions"]["vc-terminal"],
+            "vc-frame": product["source_revisions"]["vc-frame"],
         },
         "notarization": {
             "app": {"ticket": True, "gatekeeper": True},
@@ -551,8 +535,6 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     app = commands.add_parser("app")
     app.add_argument("--app", type=Path, required=True)
-    app.add_argument("--terminal-source", type=Path, required=True)
-    app.add_argument("--frame-source", type=Path, required=True)
     app.add_argument("--version", required=True)
     app.add_argument("--build", required=True)
     app.add_argument("--vibecrafted-sha", required=True)

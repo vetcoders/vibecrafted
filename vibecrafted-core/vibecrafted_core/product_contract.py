@@ -47,10 +47,10 @@ except ImportError:  # Direct execution from a sealed runtime verifier snapshot.
 
 MODULE_SCHEMA = "io.vetcoders.vibecrafted.module.v1"
 ASSEMBLY_SCHEMA = "io.vetcoders.vibecrafted.module-assembly.v1"
-PRODUCT_SCHEMA = "io.vetcoders.vibecrafted.product.v1"
+PRODUCT_SCHEMA = "io.vetcoders.vibecrafted.product.v2"
 TRANSACTION_SCHEMA = "io.vetcoders.vibecrafted.transaction.v1"
 WALKAROUND_SCHEMA = "io.vetcoders.vibecrafted.walkaround.v1"
-LAUNCH_SCHEMA = "io.vetcoders.vibecrafted.launch.v1"
+LAUNCH_SCHEMA = "io.vetcoders.vibecrafted.launch.v2"
 RELEASE_OUTPUT_SCHEMA = "io.vetcoders.vibecrafted.release-output.v1"
 RELEASE_POLICY_SCHEMA = "io.vetcoders.vibecrafted.release-policy.v1"
 TRUST_PROBE_SCHEMA = "io.vetcoders.vibecrafted.trust-probe.v1"
@@ -193,7 +193,7 @@ _EMBEDDED_DOCUMENTATION_PATHS = {
     "Contents/Resources/runtime/python/lib/libpython3.14.dylib": _LIBPYTHON_DOCUMENTATION_PATHS,
 }
 _FILE_KINDS = frozenset({"executable", "dylib", "resource", "config"})
-_APP_ENTRYPOINTS = frozenset({"app", "terminal", "frame"})
+_APP_ENTRYPOINTS = frozenset({"app"})
 _WALKAROUND_CHECKS = frozenset(
     {
         "one_app",
@@ -247,9 +247,9 @@ _LAUNCH_ENV_DENYLIST = frozenset(
     }
 )
 _WALKAROUND_TEMP_PARENT = Path("/tmp")
-_LAUNCH_TERMINAL = "Contents/MacOS/vc-terminal"
+_LAUNCH_TERMINAL = "Contents/Resources/runtime/bin/vc-terminal"
 _LAUNCH_FRAME = "Contents/Helpers/vc-frame"
-_LAUNCH_CONFIG = "Contents/Resources/terminal/vibecrafted.toml"
+_LAUNCH_CONFIG = "Contents/Resources/runtime/config/vc-terminal/vibecrafted.toml"
 _LAUNCH_SHELL = "Contents/Resources/runtime/bin/vc-start"
 _LAUNCH_PRIMARY_SHELL = (
     "Contents/Resources/runtime/config/alacritty/launch-primary-shell.zsh"
@@ -1483,8 +1483,6 @@ def _canonical_launch_contract() -> dict[str, Any]:
         "schema": LAUNCH_SCHEMA,
         "program": _LAUNCH_TERMINAL,
         "argv": [
-            "--config-file",
-            _LAUNCH_CONFIG,
             "-e",
             _LAUNCH_PRIMARY_SHELL,
             _LAUNCH_SHELL,
@@ -1502,7 +1500,6 @@ def _canonical_launch_contract() -> dict[str, Any]:
             "inject_literal": {"PATH": _LAUNCH_SYSTEM_PATH},
             "inject_bundle_paths": {
                 "VIBECRAFTED_APP_ROOT": ".",
-                "VIBECRAFTED_VC_FRAME_BIN": _LAUNCH_FRAME,
             },
             "resolve_writable": {
                 "VIBECRAFTED_RUNTIME_HOME": {
@@ -1587,8 +1584,7 @@ def _validate_launch_contract(
     if environment != expected_environment:
         _fail(E_SCHEMA, "launch_contract.environment is not the closed v1 environment")
     required_files = {
-        _LAUNCH_TERMINAL: "executable",
-        _LAUNCH_FRAME: "executable",
+        _LAUNCH_TERMINAL: "resource",
         _LAUNCH_CONFIG: "config",
         _LAUNCH_PRIMARY_SHELL: "resource",
         _LAUNCH_SHELL: "executable",
@@ -1603,11 +1599,6 @@ def _validate_launch_contract(
     primary_entry = files[_LAUNCH_PRIMARY_SHELL]
     if int(str(primary_entry["mode"]), 8) & 0o111 == 0:
         _fail(E_ENTRYPOINT, "primary-shell launcher is not executable")
-    if (
-        entrypoints["terminal"] != _LAUNCH_TERMINAL
-        or entrypoints["frame"] != _LAUNCH_FRAME
-    ):
-        _fail(E_ENTRYPOINT, "launch_contract disagrees with product entrypoints")
     return raw
 
 
@@ -1851,7 +1842,6 @@ def build_launch_environment(
             "PATH": _launch_child_path(app, user_path),
             "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
             "VIBECRAFTED_APP_ROOT": str(app),
-            "VIBECRAFTED_VC_FRAME_BIN": str(app / _LAUNCH_FRAME),
         }
     )
     # Accessing the field after verification keeps this builder bound to the manifest.
@@ -1962,41 +1952,9 @@ def verify_module(root: str | Path, *, require_clean: bool = False) -> dict[str,
 
 
 def _validate_product_modules(raw_modules: Any) -> dict[str, Mapping[str, Any]]:
-    if not isinstance(raw_modules, list) or len(raw_modules) != 2:
-        _fail(E_SCHEMA, "product modules must contain terminal and frame receipts")
-    modules: dict[str, Mapping[str, Any]] = {}
-    required = {
-        "module",
-        "manifest_path",
-        "manifest_sha256",
-        "assembly_receipt_path",
-        "assembly_receipt_sha256",
-        "git_sha",
-    }
-    for index, item in enumerate(raw_modules):
-        if not isinstance(item, dict):
-            _fail(E_SCHEMA, f"modules[{index}] must be an object")
-        _expect_keys(item, required=required, context=f"modules[{index}]")
-        name = _expect_string(item["module"], field=f"modules[{index}].module")
-        if name not in SUPPORTED_MODULES or name in modules:
-            _fail(E_SCHEMA, f"invalid or duplicate product module: {name!r}")
-        _relative_path(item["manifest_path"], field=f"modules[{index}].manifest_path")
-        _expect_sha256(
-            item["manifest_sha256"], field=f"modules[{index}].manifest_sha256"
-        )
-        _relative_path(
-            item["assembly_receipt_path"],
-            field=f"modules[{index}].assembly_receipt_path",
-        )
-        _expect_sha256(
-            item["assembly_receipt_sha256"],
-            field=f"modules[{index}].assembly_receipt_sha256",
-        )
-        _expect_git_sha(item["git_sha"], field="git_sha")
-        modules[name] = item
-    if set(modules) != SUPPORTED_MODULES:
-        _fail(E_SCHEMA, "product must bind vc-terminal and vc-frame")
-    return modules
+    if raw_modules != []:
+        _fail(E_SCHEMA, "product v2 carries no terminal or frame module receipts")
+    return {}
 
 
 def _validate_assembly_receipt(
@@ -2221,6 +2179,8 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         "architecture",
         "minimum_macos",
         "modules",
+        "external_products",
+        "source_revisions",
         "outer_bundle_code",
         "files",
         "entrypoints",
@@ -2244,6 +2204,30 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_PROOF, "release policy rejects a dirty product receipt")
     architecture, minimum_macos = _validate_platform(payload, context="product")
     modules = _validate_product_modules(payload["modules"])
+    from .external_products import PRODUCTS
+
+    if payload["external_products"] != PRODUCTS:
+        _fail(E_SCHEMA, "external product identity/version/resolution policy differs")
+    revisions = payload["source_revisions"]
+    if not isinstance(revisions, dict) or set(revisions) != {
+        "vibecrafted",
+        "vc-terminal",
+        "vc-frame",
+    }:
+        _fail(E_SCHEMA, "product source revisions must retain transitional feed keys")
+    for name, revision in revisions.items():
+        _expect_git_sha(revision, field=f"source_revisions.{name}")
+    if revisions["vibecrafted"] != payload["git_sha"]:
+        _fail(E_PROOF, "product source revision disagrees with git_sha")
+    for forbidden in (
+        "Contents/MacOS/vc-terminal",
+        "Contents/Helpers/vc-frame",
+        "Contents/Resources/terminal",
+        "Contents/Resources/runtime/libexec/vc-terminal",
+        "Contents/Resources/runtime/libexec/vc-frame",
+    ):
+        if (app / forbidden).exists():
+            _fail(E_BUNDLE, f"external product payload is forbidden: {forbidden}")
     plist_path = app / "Contents/Info.plist"
     outer_relative, outer_entry, outer_macho = _validate_outer_bundle_code(
         app,
@@ -2321,15 +2305,8 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
     )
     if nested_apps:
         _fail(E_BUNDLE, f"nested customer app bundles are forbidden: {nested_apps}")
-    if plist.get("ATSApplicationFontsPath") != "fonts":
-        _fail(E_BUNDLE, "main app must declare its private terminal font directory")
-    for relative in _TERMINAL_FONT_FILES:
-        entry = validated.entries.get(relative)
-        if entry is None or entry["kind"] != "resource" or entry["size"] == 0:
-            _fail(
-                E_INVENTORY,
-                f"terminal font resource is absent from signed inventory: {relative}",
-            )
+    if "ATSApplicationFontsPath" in plist:
+        _fail(E_BUNDLE, "terminal font resources belong to vc-terminal.app")
     _verify_product_module_receipts(
         app,
         modules,
@@ -2453,9 +2430,7 @@ def _verify_host_permission_signatures(
     app: Path, *, targets: tuple[Path, ...] | None = None
 ) -> None:
     """Read the final signatures; a signing plan is not entitlement evidence."""
-    for target in (
-        targets if targets is not None else (app, app / "Contents/MacOS/vc-terminal")
-    ):
+    for target in targets if targets is not None else (app,):
         result = subprocess.run(
             ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(target)],
             check=False,
@@ -2720,33 +2695,9 @@ def _verify_release_artifacts(
     if resources["sha256"] != _sha256(resources_path):
         _fail(E_HASH, "release output CodeResources hash mismatch")
 
-    product_modules = {item["module"]: item for item in product["modules"]}
-    for name in sorted(SUPPORTED_MODULES):
-        binding = product_modules[name]
-        expected = {
-            "manifest": {
-                "path": binding["manifest_path"],
-                "sha256": binding["manifest_sha256"],
-            },
-            "assembly_receipt": {
-                "path": binding["assembly_receipt_path"],
-                "sha256": binding["assembly_receipt_sha256"],
-            },
-            "git_sha": binding["git_sha"],
-        }
-        if payload["modules"][name] != expected:
-            _fail(E_PROOF, f"release output module identity mismatch: {name}")
-        for field_name in ("manifest", "assembly_receipt"):
-            referent = expected[field_name]
-            artifact = app / referent["path"]
-            if _sha256(artifact) != referent["sha256"]:
-                _fail(E_HASH, f"release output module referent mismatch: {name}")
-
-    expected_revisions = {
-        "vibecrafted": product["git_sha"],
-        "vc-terminal": product_modules["vc-terminal"]["git_sha"],
-        "vc-frame": product_modules["vc-frame"]["git_sha"],
-    }
+    if payload["modules"] != {}:
+        _fail(E_PROOF, "release output v2 must not bind bundled external modules")
+    expected_revisions = product["source_revisions"]
     if payload["source_revisions"] != expected_revisions:
         _fail(E_PROOF, "release output source revisions do not match the product")
 
@@ -4777,6 +4728,39 @@ def _self_test() -> int:
             },
             "launch_contract": _canonical_launch_contract(),
         }
+        # The assembled v2 product carries its runtime only. Exercise the same
+        # closed inventory after removing historical terminal/frame receipts.
+        frame.unlink()
+        shutil.rmtree(app / "Contents/Resources/module-receipts")
+        shutil.rmtree(app / "Contents/Resources/fonts")
+        terminal.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        info = plistlib.loads(plist_path.read_bytes())
+        info.pop("ATSApplicationFontsPath", None)
+        plist_path.write_bytes(plistlib.dumps(info))
+        from .external_products import PRODUCTS
+
+        product_manifest.update(
+            modules=[],
+            external_products=PRODUCTS,
+            source_revisions={
+                "vibecrafted": "2" * 40,
+                "vc-terminal": "4" * 40,
+                "vc-frame": "6" * 40,
+            },
+            entrypoints={"app": "Contents/MacOS/Vibecrafted"},
+        )
+        product_manifest["outer_bundle_code"]["info_plist_sha256"] = _sha256(plist_path)
+        product_manifest["files"] = [
+            _fixture_entry(app, relative, kind=kind)
+            for relative, kind in (
+                ("Contents/Info.plist", "config"),
+                (f"Contents/Resources/{PRODUCT_ICON_FILE}", "resource"),
+                (_LAUNCH_TERMINAL, "resource"),
+                (_LAUNCH_CONFIG, "config"),
+                (_LAUNCH_SHELL, "executable"),
+                (_LAUNCH_PRIMARY_SHELL, "resource"),
+            )
+        ]
         _write_json(app / "Contents/Resources/product-manifest.json", product_manifest)
         _run_tool(
             [codesign, "--force", "--sign", "-", str(app)],
@@ -4789,6 +4773,10 @@ def _self_test() -> int:
         transaction_runtime = root / "manifests/runtime-manifest.json"
         transaction_product_payload = dict(product_manifest)
         transaction_product_payload["git_sha"] = "c" * 40
+        transaction_product_payload["source_revisions"] = {
+            **product_manifest["source_revisions"],
+            "vibecrafted": "c" * 40,
+        }
         _write_json(transaction_product, transaction_product_payload)
         _write_json(
             transaction_runtime,

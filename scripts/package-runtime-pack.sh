@@ -107,13 +107,18 @@ for required in \
   bin/vc-admin bin/vc-procs bin/vc-terminal bin/vc-frame \
   bin/scaffold-doctor \
   bin/control-observe \
-  libexec/vc-frame libexec/vc-terminal \
   scripts/vibecrafted scripts/vetcoders_install.py \
   scripts/vc-terminal-product-entry.sh \
   vibecrafted-mcp/vibecrafted_mcp bin/vibecrafted-mcp \
   vibecrafted-core/vibecrafted_core/runtime_pack_contract.py; do
   [[ -e "$root/$required" ]] || die "standalone Runtime Pack is missing $required"
 done
+
+if [[ "$platform" == darwin-* ]]; then
+  for forbidden in libexec/vc-terminal libexec/vc-frame libexec/vc-terminal.app; do
+    [[ ! -e "$root/$forbidden" ]] || die "external product must not be carried: $forbidden"
+  done
+fi
 
 # The pack staging tree is the final byte owner. Sign only after every helper
 # has reached its canonical Runtime Pack path, then verify those exact bytes
@@ -137,7 +142,7 @@ if [[ -n "$codesign_identity" ]]; then
   PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions \
     --runtime-root "$root" --entitlements-output "$host_entitlements" >/dev/null
-  sign_macho_tree "$root" "" "$root/libexec/vc-terminal" "$host_entitlements" \
+  sign_macho_tree "$root" "" "" "$host_entitlements" \
     || die "could not sign final Runtime Pack Mach-O payload"
   # Seal any nested helper bundles inside-out, retaining the policy assigned
   # above. The flat terminal is internal code, not a second GUI app identity.
