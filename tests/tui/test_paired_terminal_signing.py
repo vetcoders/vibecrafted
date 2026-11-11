@@ -86,7 +86,8 @@ exec /usr/bin/codesign "${args[@]}"
         ROOT / "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py",
         payload / "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py",
     )
-    terminal = payload / "libexec/vc-terminal"
+    terminal = payload / "libexec/vc-runtime-probe"
+    terminal.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(native, terminal)
     for name in runtime_pack_contract.REQUIRED_FOUNDATION_EXECUTABLES | {
         "vc-frame",
@@ -164,7 +165,7 @@ exec /usr/bin/codesign "${args[@]}"
     app = tmp_path / "Vibecrafted.app"
     macos = app / "Contents/MacOS"
     macos.mkdir(parents=True)
-    for name in ("Vibecrafted", "vc-terminal", "unrelated"):
+    for name in ("Vibecrafted", "unrelated"):
         shutil.copy2(native, macos / name)
     (app / "Contents/Info.plist").write_bytes(
         plistlib.dumps(
@@ -228,8 +229,8 @@ def test_final_app_and_pack_share_native_code_identity_and_exact_permissions(
     signed_pair,
 ):
     app, runtime, _, _, env, archive = signed_pair
-    host = app / "Contents/MacOS/vc-terminal"
-    candidate = runtime / "libexec/vc-terminal"
+    host = app / "Contents/MacOS/Vibecrafted"
+    candidate = runtime / "libexec/vc-runtime-probe"
     embedded = app / "Contents/Resources/runtime-pack/pack.tar.gz"
     assert embedded.read_bytes() == archive.read_bytes()
     embedded_root = runtime.parent / "embedded"
@@ -245,15 +246,18 @@ def test_final_app_and_pack_share_native_code_identity_and_exact_permissions(
         ],
         env=env,
     )
-    embedded_terminal = embedded_root / "VibecraftedRuntime/libexec/vc-terminal"
-    assert _identity(embedded_terminal) == _identity(host)
-    assert _permissions(embedded_terminal) == contract.HOST_ENTITLEMENTS
-    assert _identity(host) == _identity(candidate)
-    assert _identity(host) == _identity(
-        app / "Contents/Resources/runtime/libexec/vc-terminal"
+    embedded_terminal = embedded_root / "VibecraftedRuntime/libexec/vc-runtime-probe"
+    assert _identity(embedded_terminal) == _identity(candidate)
+    assert _permissions(embedded_terminal) == {}
+    assert _run([str(candidate), "native-smoke"]).stdout.strip() == "native-smoke"
+    assert _identity(candidate) == _identity(
+        app / "Contents/Resources/runtime/libexec/vc-runtime-probe"
     )
+    assert not (app / "Contents/MacOS/vc-terminal").exists()
+    assert not (runtime / "libexec/vc-terminal").exists()
+    assert _permissions(host) == contract.HOST_ENTITLEMENTS
+    assert _permissions(candidate) == {}
     for path in (host, candidate):
-        assert _permissions(path) == contract.HOST_ENTITLEMENTS
         assert _run([str(path), "native-smoke"]).stdout.strip() == "native-smoke"
     contract._verify_host_permission_signatures(app)
     _run(
@@ -269,7 +273,7 @@ def test_final_app_and_pack_share_native_code_identity_and_exact_permissions(
         env=env,
     )
     for root in (runtime, app / "Contents/Resources/runtime"):
-        assert _permissions(root / "libexec/vc-frame") == {}
+        assert not (root / "libexec/vc-frame").exists()
         assert _permissions(root / "libexec/Helper.app") == {}
     assert _permissions(app / "Contents/MacOS/unrelated") == {}
     print(
@@ -286,8 +290,8 @@ def test_final_app_and_pack_share_native_code_identity_and_exact_permissions(
 
 @pytest.mark.parametrize("drift", ["missing", "extra", "code"])
 def test_final_pair_refuses_permission_or_code_drift(signed_pair, drift):
-    app, runtime, _, entitlement_file, _env, _archive = signed_pair
-    candidate = runtime / "libexec/vc-terminal"
+    app, _runtime, _, entitlement_file, _env, _archive = signed_pair
+    candidate = app / "Contents/MacOS/Vibecrafted"
     if drift == "code":
         data = bytearray(candidate.read_bytes())
         data[4096] ^= 1
@@ -301,6 +305,7 @@ def test_final_pair_refuses_permission_or_code_drift(signed_pair, drift):
         with pytest.raises(installer.RuntimeInstallRefusal, match="unproven"):
             installer._signed_terminal_identity(candidate)
         return
+    candidate = app
     args = []
     if drift == "extra":
         entitlement_file.write_bytes(
@@ -327,9 +332,8 @@ def test_final_pair_refuses_permission_or_code_drift(signed_pair, drift):
             str(candidate),
         ]
     )
-    assert _identity(app / "Contents/MacOS/vc-terminal") != _identity(candidate)
     with pytest.raises(contract.ProductContractError):
-        contract._verify_host_permission_signatures(runtime, targets=(candidate,))
+        contract._verify_host_permission_signatures(app)
     # Ad-hoc fixtures can never pass production owner admission.
     with pytest.raises(installer.RuntimeInstallRefusal, match="unproven"):
         installer._signed_terminal_identity(candidate)

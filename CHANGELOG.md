@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Vibecrafted.app and its macOS Runtime Pack no longer bundle vc-terminal,
+  vc-frame, or terminal fonts. Install [vc-terminal](https://github.com/vetcoders/vc-terminal/releases)
+  0.18.0 or newer in `/Applications/vc-terminal.app` and [vc-frame](https://github.com/vetcoders/vc-frame/releases)
+  4.5.1 or newer (below 5.0.0) on your PATH. The runtime checks product identity
+  and compatibility and reports an install hint when a dependency is missing;
+  its installer leaves both independent products in their own release channels.
+
 - The terminal font chooser offers a curated set only: the five Monaspace NF
   families, then Anonymous Pro. Other fixed-width fonts installed on the Mac are
   no longer listed; a policy that already names one keeps it as current.

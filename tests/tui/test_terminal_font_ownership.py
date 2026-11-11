@@ -156,25 +156,15 @@ def test_parent_app_does_not_register_fonts_for_the_login_session() -> None:
     assert "Contents/Resources/fonts/SpotMono.ttc" not in delegate
 
 
-def test_builder_binds_the_font_to_the_bundle_that_draws_it() -> None:
-    """Canonical OFL font resources belong to the rendering process."""
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
-    assert "embed_terminal_font_resources() {" in builder
-    assert (
-        'install -m 0644 "$TERMINAL_FONT_DIR/$font" "$resources/fonts/$font"' in builder
-    )
-    assert "SourceCodePro[wght].ttf" in builder
-    assert "SourceCodePro-Italic[wght].ttf" in builder
-    assert "OFL.txt" in builder
-    assert "SPOT_MONO_FONT" not in builder
-    assert "Add :ATSApplicationFontsPath string fonts" in builder
-    assert 'embed_terminal_font_resources "$APP"' in builder
-    # The font is bound before any signature is spent on the helper bundle.
-    assert builder.index('embed_terminal_font_resources "$APP"') < builder.index(
-        "sign_nested_app_bundles\n"
-    )
+def test_runtime_builder_leaves_font_ownership_with_independent_terminal() -> None:
+    builder = BUILDER.read_text()
+    assert "embed_terminal_font_resources()" not in builder
+    assert "ATSApplicationFontsPath" not in builder
+    assert '"$resources/fonts/$font"' not in builder
+    assert 'install -m 0755 "$terminal_source"' not in builder
+    from vibecrafted_core.external_products import PRODUCTS
+
+    assert PRODUCTS["vc-terminal"]["resolve"] == "/Applications/vc-terminal.app"
 
 
 def test_product_terminal_config_asks_for_the_bundled_family() -> None:
@@ -246,111 +236,55 @@ def test_bundled_font_never_shadows_a_system_installed_family(tmp_path):
 BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
 
 
-def _builder_function(name: str) -> str:
-    """The shipped source of one builder function, lifted verbatim.
-
-    The release builder is a single top-level script: sourcing it would run a
-    build. Lifting the function bodies keeps the assertion on the bytes that
-    actually ship instead of on a paraphrase maintained beside them.
-    """
-    builder = BUILDER.read_text(encoding="utf-8")
-    start = builder.index(f"\n{name}() {{\n") + 1
-    end = builder.index("\n}\n", start) + len("\n}\n")
-    return builder[start:end]
-
-
-def _licensed_font_preflight_condition() -> str:
-    """The `[[ ... ]]` test that decides whether the font input is required."""
-    lines = BUILDER.read_text(encoding="utf-8").splitlines()
-    failure = next(
-        index
-        for index, line in enumerate(lines)
-        if "missing Source Code Pro input" in line
-    )
-    guard = next(
-        lines[index]
-        for index in range(failure, -1, -1)
-        if lines[index].startswith("if [[")
-    )
-    return guard[len("if [[") : guard.rindex("]]; then")].strip()
-
-
 @pytest.mark.parametrize(
     ("mode", "platform_", "required"),
     [
-        ("app", "darwin-arm64", True),
-        ("runtime-pack", "darwin-arm64", True),
+        ("app", "darwin-arm64", False),
+        ("runtime-pack", "darwin-arm64", False),
         ("runtime-pack", "linux-arm64", False),
     ],
 )
-def test_licensed_font_preflight_covers_every_darwin_payload(
+def test_runtime_payload_does_not_consume_external_terminal_fonts(
     mode: str, platform_: str, required: bool
 ) -> None:
-    """A Runtime Pack that materializes a .app consumes the canonical OFL family.
-
-    Evaluated, not read: the shipped condition is handed to bash under each
-    payload shape. While it was `MODE != runtime-pack` the Darwin pack built
-    its whole native payload and only then died inside the bundle walk.
-    """
-    condition = _licensed_font_preflight_condition()
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"set -eu\nif [[ {condition} ]]; then echo require; else echo skip; fi",
-        ],
-        env={"MODE": mode, "RUNTIME_PACK_PLATFORM": platform_, "PATH": "/usr/bin:/bin"},
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.stdout.strip() == ("require" if required else "skip")
+    builder = BUILDER.read_text()
+    assert not required
+    assert "missing Source Code Pro input" not in builder
+    assert "TERMINAL_FONT_DIR=" not in builder
+    assert mode in {"app", "runtime-pack"}
+    assert platform_.startswith(("darwin-", "linux-"))
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="PlistBuddy and ditto are macOS")
-def test_main_app_receives_terminal_font_before_signature(tmp_path: Path) -> None:
-    """The exact resource helper binds fonts to the sole physical main app."""
-    if sys.platform != "darwin":
-        pytest.skip("PlistBuddy fixture is macOS only")
+def test_runtime_host_assembly_does_not_adopt_terminal_font_metadata(
+    tmp_path: Path,
+) -> None:
     bundle = tmp_path / "Vibecrafted.app"
-    (bundle / "Contents/MacOS").mkdir(parents=True)
+    (bundle / "Contents").mkdir(parents=True)
     (bundle / "Contents/Info.plist").write_bytes(
         plistlib.dumps(
             {
                 "CFBundleIdentifier": "io.vetcoders.vibecrafted",
                 "CFBundleExecutable": "Vibecrafted",
-                "CFBundleName": "Vibecrafted",
             }
         )
     )
-    fonts = REPO_ROOT / "assets/fonts/source-code-pro"
-    driver = (
-        "set -euo pipefail\n"
-        + _builder_function("die")
-        + _builder_function("embed_terminal_font_resources")
-        + 'embed_terminal_font_resources "$1"\n'
+    from argparse import Namespace
+
+    from scripts import unified_product_manifest
+
+    unified_product_manifest.configure_host_permissions(
+        Namespace(
+            app=bundle,
+            runtime_root=None,
+            verify_only=False,
+            verify_signatures=False,
+            entitlements_output=tmp_path / "entitlements.plist",
+        )
     )
-    result = subprocess.run(
-        ["bash", "-c", driver, "fonts", str(bundle)],
-        env={"PATH": "/usr/bin:/bin", "TERMINAL_FONT_DIR": str(fonts)},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    for name in (
-        "SourceCodePro[wght].ttf",
-        "SourceCodePro-Italic[wght].ttf",
-        "OFL.txt",
-    ):
-        assert (bundle / "Contents/Resources/fonts" / name).read_bytes() == (
-            fonts / name
-        ).read_bytes()
-    document = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
-    assert document["ATSApplicationFontsPath"] == "fonts"
-    assert document["CFBundleIdentifier"] == "io.vetcoders.vibecrafted"
-    assert not (bundle / "Contents/_CodeSignature").exists()
+    info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+    assert "ATSApplicationFontsPath" not in info
+    assert not (bundle / "Contents/Resources/fonts").exists()
 
 
 def test_hosted_release_uses_repository_font_inputs_without_a_private_font_secret():
@@ -361,75 +295,30 @@ def test_hosted_release_uses_repository_font_inputs_without_a_private_font_secre
 
 
 @pytest.mark.parametrize("damage", [None, "normal", "italic", "license"])
-def test_font_preflight_reads_captured_commit_before_snapshot_exists(tmp_path, damage):
-    source = tmp_path / "source"
-    fonts = source / "assets/fonts/source-code-pro"
-    shutil.copytree(REPO_ROOT / "assets/fonts/source-code-pro", fonts)
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    if damage:
-        name = {
-            "normal": "SourceCodePro[wght].ttf",
-            "italic": "SourceCodePro-Italic[wght].ttf",
-            "license": "OFL.txt",
-        }[damage]
-        (fonts / name).write_bytes(b"invalid input\n")
-    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(source),
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.com",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "-qm",
-            "fixture",
-        ],
-        check=True,
-    )
-    revision = subprocess.check_output(
-        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
-    ).strip()
-    # Repair or damage live files after capture: preflight must still inspect
-    # exactly the captured commit, independently of this mutable checkout.
-    for name in (
-        "SourceCodePro[wght].ttf",
-        "SourceCodePro-Italic[wght].ttf",
-        "OFL.txt",
-    ):
-        (fonts / name).write_bytes(b"uncommitted live bytes\n")
-    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text()
-    preflight = builder.split("# Darwin terminal bundles carry", 1)[1].split(
-        "\nprepare_signing_identity", 1
-    )[0]
-    preflight = preflight[preflight.index('if [[ "$MODE"') :]
+def test_darwin_source_pack_check_does_not_consume_external_font_files(
+    tmp_path, damage
+):
+    import sys
+
+    fonts = tmp_path / "external-terminal-fonts"
+    fonts.mkdir()
+    (fonts / "SourceCodePro.ttf").write_bytes(b"broken" if damage else b"independent")
+    driver = "import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.platform='darwin'; sys.argv=[sys.argv[1], '--check']; raise SystemExit(m['main']())"
     result = subprocess.run(
         [
-            "bash",
+            sys.executable,
             "-c",
-            'set -euo pipefail\ndie() { echo "$*" >&2; exit 2; }\n' + preflight,
+            driver,
+            str(REPO_ROOT / "scripts/build-source-runtime-pack.py"),
         ],
-        env={
-            "PATH": "/usr/bin:/bin",
-            "MODE": "app",
-            "RUNTIME_PACK_PLATFORM": "darwin-arm64",
-            "REPO_ROOT": str(source),
-            "ROOT_SHA": revision,
-            "SOURCE_ROOT": str(tmp_path / "not-yet-materialized"),
-        },
         capture_output=True,
         text=True,
         check=False,
+        timeout=20,
     )
-    assert result.returncode == (0 if damage is None else 2), result.stderr
-    if damage:
-        assert "Source Code Pro" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "vc-terminal: external product declaration" in result.stdout
+    assert "Source Code Pro" not in result.stdout + result.stderr
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="CoreText is macOS")

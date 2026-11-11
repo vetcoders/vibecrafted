@@ -1723,11 +1723,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
     assert _snapshot(home) == before
     if accepted:
         capture = json.loads(result.stdout)
-        expected_prefix = (
-            ["--vibecrafted-hosted", "--config-file", str(entry)]
-            if sys.platform == "darwin"
-            else ["--config-file", str(entry)]
-        )
+        expected_prefix = ["--config-file", str(entry)]
         assert capture["argv"] == [*expected_prefix, *arguments]
         environment = capture["env"]
         for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
@@ -1803,7 +1799,7 @@ def _terminal_wrapper_generation(tmp_path: Path) -> tuple[Path, Path, Path]:
     sys.platform != "darwin",
     reason=".app is a Darwin identity mechanism; other platforms keep the flat host",
 )
-def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
+def test_terminal_wrapper_execs_only_independent_host(tmp_path, monkeypatch):
     home = tmp_path / "home"
     entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     entry.parent.mkdir(parents=True)
@@ -1832,7 +1828,6 @@ def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
     captured = json.loads(result.stdout)
     assert captured["host"] == str(host)
     assert captured["argv"] == [
-        "--vibecrafted-hosted",
         "--config-file",
         str(entry),
         "-e",
@@ -1847,11 +1842,12 @@ def test_terminal_wrapper_execs_only_fixed_main_host(tmp_path, monkeypatch):
         refused = subprocess.run(
             [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
         )
-        assert refused.returncode == 78, refused.stderr
+        assert refused.returncode == 69, refused.stderr
         assert not refused.stdout
-        assert "fixed signed host missing" in refused.stderr
+        assert "independent vc-terminal missing or aliased" in refused.stderr
 
-    # Standalone vc-terminal.app is preferred and runs without --vibecrafted-hosted.
+    # Restoring the independent product restores launch without a bundle flag.
+    host.unlink()
     standalone_host = host.parents[3] / "vc-terminal.app/Contents/MacOS/vc-terminal"
     standalone_host.parent.mkdir(parents=True, exist_ok=True)
     standalone_host.write_text(paired.read_text())

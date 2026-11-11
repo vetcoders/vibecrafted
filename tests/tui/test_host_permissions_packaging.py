@@ -75,7 +75,7 @@ def test_actual_assembly_propagates_privacy_and_exact_signing_plan(
     for key in contract.HOST_USAGE_DESCRIPTION_KEYS:
         assert built[key] == canonical[key] and built[key].strip()
     assert plistlib.loads(entitlements.read_bytes()) == contract.HOST_ENTITLEMENTS
-    assert plan["signing_targets"] == ["Vibecrafted.app", "Contents/MacOS/vc-terminal"]
+    assert plan["signing_targets"] == ["Vibecrafted.app"]
     assert plan["entitlements"] == {"com.apple.security.device.audio-input": True}
     assert plan["hardened_runtime"] is True
     assert plan["signatures_verified"] is plan["live_consent_verified"] is False
@@ -239,7 +239,9 @@ def test_final_signature_verifier_refuses_each_host_regression(
 
     monkeypatch.setattr(contract.subprocess, "run", codesign)
     with pytest.raises(contract.ProductContractError):
-        contract._verify_host_permission_signatures(app)
+        contract._verify_host_permission_signatures(
+            app, targets=(app, app / "Contents/MacOS/vc-terminal")
+        )
 
 
 def test_final_product_manifest_generation_preserves_host_metadata(
@@ -294,5 +296,5 @@ def test_final_signature_verifier_accepts_exact_audio_policy(
 
     monkeypatch.setattr(contract.subprocess, "run", codesign)
     contract._verify_host_permission_signatures(_bundle(tmp_path))
-    assert len(seen) == 4
-    assert {Path(argv[-1]).name for argv in seen} == {"Vibecrafted.app", "vc-terminal"}
+    assert len(seen) == 2
+    assert {Path(argv[-1]).name for argv in seen} == {"Vibecrafted.app"}

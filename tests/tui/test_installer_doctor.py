@@ -1352,6 +1352,8 @@ def test_release_contract_inventory_names_runner_schema_policy_and_key() -> None
     assert "verify-vibecrafted-walkaround" in installer.PYTHON_ENTRYPOINT_LAUNCHERS
     assert installer.RELEASE_CONTRACT_PACKAGE_ASSETS == (
         "product_contract.py",
+        "external_products.py",
+        "terminal_host.py",
         "runtime_pack_contract.py",
         "walkaround_runner.py",
         "schemas/unified_product.schema.v1.json",
