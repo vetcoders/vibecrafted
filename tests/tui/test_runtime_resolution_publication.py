@@ -90,7 +90,8 @@ def test_copied_child_host_admission_precedes_drift_refusal(installed, damage):
     paths, payload, result = installed
     host = installer._FIXED_TERMINAL_HOST
     generation = Path(result["root"])
-    assert host.read_bytes() == (generation / "libexec/vc-terminal").read_bytes()
+    assert not (generation / "libexec/vc-terminal").exists()
+    assert host.is_file()
     script = """
 import importlib.util, sys
 from pathlib import Path
@@ -126,12 +127,7 @@ except owner.RuntimeInstallRefusal as error:
         host.write_bytes(host.read_bytes() + b"fixture code drift")
     negative = subprocess.run(command, capture_output=True, text=True, check=False)
     assert negative.returncode == 23, negative.stderr
-    reason = (
-        "differs from this Runtime Pack's signed terminal"
-        if damage == "code"
-        else "host missing or malformed"
-    )
-    assert reason in negative.stderr
+    assert "Install vc-terminal" in negative.stderr
     assert _snapshot(paths["runtime_home"]) == prior
 
 

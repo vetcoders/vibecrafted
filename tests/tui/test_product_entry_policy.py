@@ -159,6 +159,7 @@ def _stage_generation(
     config: str = "installed",
     generation: str = "release",
     with_start: bool = False,
+    external: bool = False,
 ) -> Generation:
     """Stage one physical generation plus its mandatory installed config view.
 
@@ -176,7 +177,11 @@ def _stage_generation(
     home = (tmp_path / "home").resolve()
     root = (tmp_path / generation).resolve()
     wrapper = root / "bin" / "vc-frame"
-    engine_path = root / "libexec" / "vc-frame"
+    engine_path = (
+        tmp_path / "external-bin" / "vc-frame"
+        if external
+        else root / "libexec" / "vc-frame"
+    ).resolve()
     record = (tmp_path / "engine-record").resolve()
     view = home / ".config/vibecrafted/vc-frame"
 
@@ -195,7 +200,16 @@ def _stage_generation(
         )
 
     if engine == "recording":
-        engine_path.write_text(_recorder_body(record), encoding="utf-8")
+        engine_path.write_text(
+            _recorder_body(record).replace(
+                "#!/bin/sh\n",
+                '#!/bin/sh\nif [ "${1-}" = "--version" ]; then echo "vc-frame 4.5.1"; exit 0; fi\n',
+                1,
+            )
+            if external
+            else _recorder_body(record),
+            encoding="utf-8",
+        )
         engine_path.chmod(0o755)
     elif engine == "native":
         shutil.copyfile(_NATIVE_DONOR, engine_path)
@@ -236,12 +250,28 @@ def _stage_generation(
         elif config != "installed":  # construction error
             raise ValueError(f"unknown config mode: {config}")
 
-    path_entries = ["/usr/bin", "/bin"]
-    if engine == "recording":
-        tool_bin = (tmp_path / "tool-bin").resolve()
-        tool_bin.mkdir(parents=True, exist_ok=True)
-        _write_file_shim(tool_bin, engine_path)
-        path_entries.insert(0, str(tool_bin))
+    tool_bin = (tmp_path / "tool-bin").resolve()
+    tool_bin.mkdir(parents=True, exist_ok=True)
+    path_entries = [str(tool_bin), "/usr/bin", "/bin"]
+    if external:
+        import sys
+
+        python = root / "bin/python3"
+        python.write_text(
+            f'#!/bin/sh\nexec {installer.shlex_quote(sys.executable)} -B "$@"\n'
+        )
+        python.chmod(0o755)
+        for name in ("external_products.py", "terminal_host.py"):
+            destination = root / "vibecrafted-core/vibecrafted_core" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / "vibecrafted-core/vibecrafted_core" / name, destination)
+        path_entries.insert(0, str(engine_path.parent))
+    else:
+        # The generation-local engine is the retained Linux contract. Exercise
+        # those controls on any test host, independently of Darwin PATH admission.
+        _write_fake_bin(tool_bin, "uname", "#!/bin/sh\necho Linux\n")
+        if engine == "recording":
+            _write_file_shim(tool_bin, engine_path)
 
     env = {
         "PATH": ":".join(path_entries),
@@ -684,7 +714,7 @@ def test_wrapper_pin_replaces_incoming_client_zdotdir_for_this_process(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="darwin socket namespace")
 def test_wrapper_pins_darwin_socket_dir_when_unset(tmp_path: Path) -> None:
-    generation = _stage_generation(tmp_path, engine="recording")
+    generation = _stage_generation(tmp_path, engine="recording", external=True)
     proc = _run_wrapper(generation, "list-sessions")
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     record = _read_record(generation.record)
@@ -696,7 +726,7 @@ def test_wrapper_pins_darwin_socket_dir_when_unset(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform != "darwin", reason="darwin socket namespace")
 def test_wrapper_keeps_an_explicit_socket_override(tmp_path: Path) -> None:
     """Explicit session overrides survive; the pin only fills a vacuum."""
-    generation = _stage_generation(tmp_path, engine="recording")
+    generation = _stage_generation(tmp_path, engine="recording", external=True)
     chosen = str(tmp_path / "chosen-sockets")
     proc = _run_wrapper(
         generation, "list-sessions", env={"VC_FRAME_SOCKET_DIR": chosen}
@@ -1612,3 +1642,16 @@ def test_foundations_does_not_own_launcher_retirement() -> None:
     assert "_reclaim_foreign_launcher_names" in (
         REPO / "scripts/vetcoders_install.py"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="Darwin external product integration"
+)
+def test_darwin_wrapper_executes_external_path_engine(tmp_path: Path) -> None:
+    generation = _stage_generation(tmp_path, external=True)
+    result = _run_wrapper(generation, "list-sessions")
+    assert result.returncode == 0, result.stderr
+    record = _read_record(generation.record)
+    assert record["ENGINE"] == str(generation.engine)
+    assert not generation.engine.is_relative_to(generation.root)
+    assert record["VIBECRAFTED_VC_FRAME_BIN"] == str(generation.engine)

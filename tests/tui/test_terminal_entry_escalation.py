@@ -3248,17 +3248,10 @@ def test_terminal_path_fence_admits_only_the_exact_framework_delegate(
 
 
 def _terminal_path_bind_bundle(source: str, bundle: Path) -> str:
-    """Bind both fixed-host checks in the test copy; fail on source drift."""
-    bindings = {
-        'local candidate="${1:-}" bundle=/Applications/Vibecrafted.app': f'local candidate="${{1:-}}" bundle={shlex.quote(str(bundle))}',
-        'local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal': f'local fallback="$1" candidate={shlex.quote(str(bundle / "Contents/MacOS/vc-terminal"))}',
-    }
-    for original, replacement in bindings.items():
-        assert source.count(original) == 1, (
-            f"fixed-host fixture binding drift: {original}"
-        )
-        source = source.replace(original, replacement, 1)
-    return source
+    """Bind the copied resolver boundary; fail closed on source drift."""
+    original = "$root/vibecrafted-core/vibecrafted_core/external_products.py"
+    assert source.count(original) == 2, "external resolver fixture binding drift"
+    return source.replace(original, "$root/scripts/private-external-products.py")
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS execution sandbox")
@@ -3313,7 +3306,7 @@ def test_terminal_path_fence_controls(tmp_path: Path) -> None:
 def test_terminal_path_bundle_binding_fails_closed(tmp_path: Path) -> None:
     source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text()
     for changed in (
-        source.replace("bundle=/Applications", "bundle=/changed"),
+        source.replace("external_products.py", "changed.py"),
         source + source,
     ):
         with pytest.raises(AssertionError, match="fixture binding drift"):
@@ -3337,17 +3330,24 @@ def _run_terminal_path_entry(
     source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
         encoding="utf-8"
     )
-    bundle = tmp_path / "private applications/Vibecrafted.app"
+    bundle = tmp_path / "private applications/vc-terminal.app"
     host = generation / "libexec/vc-terminal"
     if sys.platform == "darwin":
         source = _terminal_path_bind_bundle(source, bundle)
         host = bundle / "Contents/MacOS/vc-terminal"
         _write(
+            generation / "scripts/private-external-products.py",
+            "import sys\nprint("
+            + repr(str(host))
+            + " if sys.argv[1] == 'terminal' else '/private/frame-fixture')\n",
+        )
+        _write(
             bundle / "Contents/Info.plist",
             plistlib.dumps(
                 {
-                    "CFBundleIdentifier": "io.vetcoders.vibecrafted",
-                    "CFBundleExecutable": "Vibecrafted",
+                    "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                    "CFBundleExecutable": "vc-terminal",
+                    "CFBundleShortVersionString": "0.18.0",
                 }
             ).decode(),
         )
@@ -3459,7 +3459,7 @@ def test_terminal_path_entry_records_private_host_and_exact_argv(
     )
     generation = runtime_home / "releases/4.3.1+gSELECTED"
     host = (
-        tmp_path / "private applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+        tmp_path / "private applications/vc-terminal.app/Contents/MacOS/vc-terminal"
         if sys.platform == "darwin"
         else generation / "libexec/vc-terminal"
     )

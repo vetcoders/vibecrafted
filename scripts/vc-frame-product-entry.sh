@@ -5,12 +5,17 @@
 set -euo pipefail
 
 resolve_real_bin() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    "$root/bin/python3" -I -B "$root/vibecrafted-core/vibecrafted_core/external_products.py" frame
+    return $?
+  fi
   local candidate="$root/libexec/vc-frame"
   if [[ -f "$candidate" && ! -L "$candidate" && -x "$candidate" ]] \
     && file -Lb "$candidate" 2>/dev/null | grep -Eqi 'Mach-O|ELF'; then
     printf '%s\n' "$candidate"
     return 0
   fi
+  printf 'vc-frame: native engine missing from selected generation: %s/libexec/vc-frame\n' "$root" >&2
   return 1
 }
 
@@ -65,10 +70,13 @@ while [[ -L "$entry" ]]; do
 done
 root="$(cd -P "$(dirname "$entry")/.." && pwd -P)"
 real="$(resolve_real_bin)" || {
-  printf 'vc-frame: native engine missing from selected generation: %s/libexec/vc-frame\n' "$root" >&2
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    exit 69
+  fi
   printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
   exit 127
 }
+
 # Identity probe: --version answers from the native engine without a session,
 # config or layouts. The Runtime Pack inventory calls bin/vc-frame --version
 # on build hosts that have no installed ~/.config/vibecrafted at all.

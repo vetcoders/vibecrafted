@@ -9,8 +9,8 @@
 # Alacritty does not expand ${HOME} in [terminal].shell.program; the private
 # config is not a product surface.
 #
-# macOS terminal bytes execute inside the fixed /Applications/Vibecrafted.app
-# main bundle. Generations remain internal; Linux uses the flat native host.
+# macOS resolves the independently signed /Applications/vc-terminal.app.
+# Linux retains the generation-local native host.
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
@@ -115,12 +115,7 @@ export VIBECRAFTED_RUNTIME_BIN="$root/bin"
 export VIBECRAFTED_TERMINAL_HOST="$host"
 export XDG_CONFIG_HOME="$HOME/.config"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
-if [[ "$(/usr/bin/uname -s)" == "Darwin" ]]; then
-  VIBECRAFTED_VC_FRAME_BIN="$("$root/bin/python3" -I -B "$root/vibecrafted-core/vibecrafted_core/external_products.py" frame)"
-  export VIBECRAFTED_VC_FRAME_BIN
-else
-  export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
-fi
+
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
 # The runtime python pin: this terminal's python and python3 are the
@@ -157,6 +152,12 @@ if [[ $# -eq 1 ]]; then
       exec "$root/bin/python3" -B "$root/scripts/vetcoders_install.py" runtime-repair --json
       ;;
   esac
+fi
+if [[ "$(/usr/bin/uname -s)" == "Darwin" ]]; then
+  VIBECRAFTED_VC_FRAME_BIN="$("$root/bin/python3" -I -B "$root/vibecrafted-core/vibecrafted_core/external_products.py" frame)"
+  export VIBECRAFTED_VC_FRAME_BIN
+else
+  export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 fi
 if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
   || -L "$HOME/.config/vibecrafted" || -L "$HOME/.config/vibecrafted/vc-terminal" ]]; then

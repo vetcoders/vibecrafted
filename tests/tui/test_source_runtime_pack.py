@@ -56,10 +56,18 @@ def test_source_check_reports_selected_and_available_head(tmp_path: Path) -> Non
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert (
-        f"selected: 4.3.1 {pins['components']['vc-frame']['revision']}" in result.stdout
-    )
-    assert f"available HEAD: {head}" in result.stdout
+    if sys.platform == "darwin":
+        assert (
+            f"vc-frame: external product declaration 4.3.1 {pins['components']['vc-frame']['revision']}"
+            in result.stdout
+        )
+        assert "available HEAD:" not in result.stdout
+    else:
+        assert (
+            f"selected: 4.3.1 {pins['components']['vc-frame']['revision']}"
+            in result.stdout
+        )
+        assert f"available HEAD: {head}" in result.stdout
 
 
 def test_make_install_forwards_bound_preference_retry() -> None:
@@ -150,9 +158,13 @@ def test_source_check_binds_exact_commits_without_touching_donors(
         text=True,
         check=False,
     )
-    assert (result.returncode == 0) != wrong_version, result.stderr
-    if wrong_version:
-        assert "version at pinned commit is 4.3.1" in result.stderr
+    if sys.platform == "darwin":
+        assert result.returncode == 0, result.stderr
+        assert "external product declaration" in result.stdout
+    else:
+        assert (result.returncode == 0) != wrong_version, result.stderr
+        if wrong_version:
+            assert "version at pinned commit is 4.3.1" in result.stderr
     assert (frame / "uncommitted.txt").read_text() == "Founder's work\n"
     assert (
         subprocess.check_output(
@@ -210,7 +222,10 @@ def test_source_check_fetches_missing_donor_objects_into_temporary_repositories(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "vibecrafted-source-donors-" in result.stdout
+    assert ("vibecrafted-source-donors-" in result.stdout) == (sys.platform != "darwin")
+    assert ("external product declaration" in result.stdout) == (
+        sys.platform == "darwin"
+    )
     assert (
         subprocess.check_output(
             ["git", "-C", str(frame), "rev-parse", "HEAD"],
