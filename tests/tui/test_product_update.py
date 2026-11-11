@@ -1151,11 +1151,13 @@ def _update_owner_functions(*names: str) -> str:
     "metadata_reader",
     ["private"] + (["native"] if Path("/usr/bin/plutil").is_file() else []),
 )
-@pytest.mark.parametrize("mode", ["complete", "recover_fixed", "recover_historical"])
+@pytest.mark.parametrize(
+    "mode", ["complete", "recover_external", "recover_fixed", "recover_historical"]
+)
 @pytest.mark.parametrize(
     "damage", ["none", "missing", "symlink", "not_executable", "unknown_authority"]
 )
-def test_update_owner_executes_exact_existing_terminal_handoff(
+def test_update_owner_routes_runtime_publication_and_legacy_recovery(
     tmp_path: Path, mode: str, damage: str, metadata_reader: str
 ) -> None:
     root = tmp_path.resolve()
@@ -1175,7 +1177,12 @@ def test_update_owner_executes_exact_existing_terminal_handoff(
         helper.chmod(0o755)
     manifest = app / "Contents/Resources/product-manifest.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"launch_contract": {"program": terminal_relative}}))
+    program = (
+        "Contents/Resources/runtime/bin/vc-terminal"
+        if mode in {"complete", "recover_external"}
+        else terminal_relative
+    )
+    manifest.write_text(json.dumps({"launch_contract": {"program": program}}))
     pack_dir = app / "Contents/Resources/runtime-pack"
     pack_dir.mkdir(parents=True)
     pack = pack_dir / "Vibecrafted_RuntimePack_fixture.tar.gz"
@@ -1196,10 +1203,13 @@ def test_update_owner_executes_exact_existing_terminal_handoff(
         + " -c "
         + shlex.quote(
             "import json,os,sys; from pathlib import Path; "
-            "a=sys.argv[1:]; terminal=Path(a[a.index('--terminal-host')+1]); "
-            "frame=Path(a[a.index('--frame-helper')+1]); "
-            "assert terminal.is_file() and not terminal.is_symlink() and os.access(terminal,os.X_OK); "
-            "assert frame.is_file() and os.access(frame,os.X_OK); "
+            "a=sys.argv[1:]; mode=os.environ['HANDOFF_MODE']; "
+            "external=mode in ('complete','recover_external'); "
+            "assert ('--terminal-host' not in a and '--frame-helper' not in a) if external else True; "
+            "terminal=None if external else Path(a[a.index('--terminal-host')+1]); "
+            "frame=None if external else Path(a[a.index('--frame-helper')+1]); "
+            "assert external or (terminal.is_file() and not terminal.is_symlink() and os.access(terminal,os.X_OK)); "
+            "assert external or (frame.is_file() and os.access(frame,os.X_OK)); "
             "Path(os.environ['HANDOFF_ARGV']).write_text(json.dumps(a)); "
             "Path(os.environ['HANDOFF_PUBLISHED']).write_text('prior-generation')"
         )
@@ -1277,6 +1287,7 @@ if [[ "$4" == complete ]]; then complete_replacement; else restore_prior_runtime
             mode,
         ],
         env=_helper_env(
+            HANDOFF_MODE=mode,
             HANDOFF_ARGV=str(capture),
             HANDOFF_PUBLISHED=str(published),
             HANDOFF_PHASES=str(phases),
@@ -1286,15 +1297,25 @@ if [[ "$4" == complete ]]; then complete_replacement; else restore_prior_runtime
         text=True,
         timeout=15,
     )
-    if damage != "none":
+    # Complete v2 publication ignores legacy helper bytes. V2 recovery still
+    # refuses an unknown launch authority; v1 recovery retains all host checks.
+    refused = damage != "none" and (
+        mode in {"recover_fixed", "recover_historical"}
+        or (mode == "recover_external" and damage == "unknown_authority")
+    )
+    if refused:
         assert result.returncode != 0, result.stdout
         assert not capture.exists()
         assert published.read_text() == "candidate-generation"
         return
     assert result.returncode == 0, result.stderr
     argv = json.loads(capture.read_text())
-    assert argv[argv.index("--terminal-host") + 1] == str(terminal)
-    assert argv[argv.index("--frame-helper") + 1] == str(frame)
+    if mode in {"complete", "recover_external"}:
+        assert "--terminal-host" not in argv
+        assert "--frame-helper" not in argv
+    else:
+        assert argv[argv.index("--terminal-host") + 1] == str(terminal)
+        assert argv[argv.index("--frame-helper") + 1] == str(frame)
     assert argv[argv.index("--pack") + 1] == str(pack)
     assert argv[argv.index("--app-root") + 1] == str(app)
     assert ("--allow-older-runtime" in argv) == (mode != "complete")
