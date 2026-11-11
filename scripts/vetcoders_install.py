@@ -9710,6 +9710,27 @@ def _runtime_terminal_launcher_environment(
     }
 
 
+def _refuse_embedded_darwin_products(root: Path) -> None:
+    """Admit a runtime source or pack without staging independent products."""
+    if sys.platform != "darwin":
+        return
+    for relative in (
+        "libexec/vc-terminal",
+        "libexec/vc-terminal.app",
+        "libexec/vc-frame",
+    ):
+        if (root / relative).exists():
+            product = Path(relative).name.removesuffix(".app")
+            raise RuntimeInstallRefusal(
+                f"external {product} must not be staged in a Darwin Runtime Pack: {relative}"
+            )
+    for name in ("vc-terminal", "vc-frame"):
+        if _is_native_executable(root / "bin" / name):
+            raise RuntimeInstallRefusal(
+                f"external {name} must not be staged in a Darwin Runtime Pack"
+            )
+
+
 def _materialize_runtime_generation_vc_terminal_entry(
     runtime_root: Path, *, require_native_host: bool = True
 ) -> None:
@@ -9726,12 +9747,7 @@ def _materialize_runtime_generation_vc_terminal_entry(
     source = runtime_root / "scripts" / "vc-terminal-product-entry.sh"
     bin_term = runtime_root / "bin" / "vc-terminal"
     libexec = runtime_root / "libexec" / "vc-terminal"
-    if sys.platform == "darwin" and (
-        libexec.exists() or _is_native_executable(bin_term)
-    ):
-        raise OSError(
-            "external vc-terminal must not be staged in a Darwin Runtime Pack"
-        )
+    _refuse_embedded_darwin_products(runtime_root)
     libexec.parent.mkdir(parents=True, exist_ok=True)
     if bin_term.is_file() and _is_native_executable(bin_term):
         if libexec.exists() and _is_native_executable(libexec):
@@ -28364,8 +28380,9 @@ def _install_runtime_pack(
         raise RuntimeInstallRefusal(f"invalid Runtime Pack VERSION: {version!r}")
     _assert_runtime_tree_has_no_symlinks(payload_root)
 
-    # Admission precedes rescue/config staging, selector publication and service
-    # activation. A pack-only upgrade may require a Founder-gated matching app.
+    # Reject carried products before staging or writing an install receipt.
+    # Missing independent products are reported; headless runtime install works.
+    _refuse_embedded_darwin_products(payload_root)
     if sys.platform == "darwin":
         for name, state in _external_products().product_status().items():
             message = state.get("path") or state.get("message", "")

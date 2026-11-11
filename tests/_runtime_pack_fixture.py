@@ -309,9 +309,12 @@ def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
     # Explicit resolver boundary double for argv/env tests; the admission
     # helper still proves the actual private ad-hoc host through kernel facts.
     resolver.write_text(
-        "import sys\nprint("
-        + repr(str(host))
-        + " if sys.argv[1] == 'terminal' else "
+        "import sys\nfrom pathlib import Path\n"
+        + f"host = Path({str(host)!r})\n"
+        + "if sys.argv[1] == 'terminal' and (not host.is_file() or host.is_symlink()):\n"
+        + "    print('independent vc-terminal missing or aliased; install vc-terminal.app', file=sys.stderr)\n"
+        + "    raise SystemExit(69)\n"
+        + "print(str(host) if sys.argv[1] == 'terminal' else "
         + repr(str(generation / "libexec/vc-frame"))
         + ")\n"
     )

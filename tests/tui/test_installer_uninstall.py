@@ -671,7 +671,10 @@ def test_runtime_install_selects_platform_host_without_app_root(
     _write_terminal_bundle_host(payload_host)
 
     if sys.platform == "darwin":
-        with pytest.raises(OSError, match="external vc-terminal must not be staged"):
+        with pytest.raises(
+            installer.RuntimeInstallRefusal,
+            match="external vc-terminal must not be staged",
+        ):
             installer.cmd_runtime_install(
                 Namespace(
                     payload_root=str(payload),
