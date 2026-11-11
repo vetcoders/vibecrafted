@@ -131,13 +131,10 @@ def _write_complete_source(
         root / "bin" / "python3",
         f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
     )
-    # The source fixture must carry its native terminal donor, as a real pack does.
-    # Git never tracks the Mach-O host, so a staged checkout alone leaves the
-    # generation materializer without one. It accepts only real executable magic,
-    # so a shell stub would bypass the check instead of satisfying it. Seed the
-    # donor before minting provenance: the carrier must describe the final tree.
-    shutil.copyfile("/usr/bin/true", root / "bin" / "vc-terminal")
-    (root / "bin" / "vc-terminal").chmod(0o755)
+    # Darwin source generations carry a resolver, not an independent product.
+    if sys.platform != "darwin":
+        shutil.copyfile("/usr/bin/true", root / "bin" / "vc-terminal")
+        (root / "bin" / "vc-terminal").chmod(0o755)
     _write_source_provenance_fixture(root)
 
 

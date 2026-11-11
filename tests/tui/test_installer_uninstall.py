@@ -208,7 +208,6 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     )
     expected = [
         f"aicx={user_aicx}",
-        "--vibecrafted-hosted",
         "--config-file",
         str(entry),
     ]
@@ -420,7 +419,11 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert operator_skill.read_bytes() == original_skill_bytes
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
-    assert Path(installed["frame"]) == generation / "libexec/vc-frame"
+    assert Path(installed["frame"]) == (
+        tmp_path / "external-bin/vc-frame"
+        if sys.platform == "darwin"
+        else generation / "libexec/vc-frame"
+    )
     assert Path(installed["terminal_host"]) == (
         installer._FIXED_TERMINAL_HOST
         if sys.platform == "darwin"
@@ -430,12 +433,16 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
     )
-    assert (generation / "libexec/vc-frame").read_bytes() == (
-        payload / "libexec/vc-frame"
-    ).read_bytes()
-    assert (generation / "libexec/vc-terminal").read_bytes() == (
-        payload / "bin/vc-terminal"
-    ).read_bytes()
+    if sys.platform == "darwin":
+        assert not (generation / "libexec/vc-frame").exists()
+        assert not (generation / "libexec/vc-terminal").exists()
+    else:
+        assert (generation / "libexec/vc-frame").read_bytes() == (
+            payload / "libexec/vc-frame"
+        ).read_bytes()
+        assert (generation / "libexec/vc-terminal").read_bytes() == (
+            payload / "bin/vc-terminal"
+        ).read_bytes()
     terminal_entry = (generation / "bin/vc-terminal").read_text(encoding="utf-8")
     assert "--config-file" in terminal_entry
     assert "libexec/vc-terminal" in terminal_entry
@@ -443,7 +450,7 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert "alacritty.toml" not in terminal_entry
     assert "terminal-entry.toml" not in terminal_entry
     assert "launch-alt-screen" not in terminal_entry
-    assert (generation / "libexec/vc-frame").read_bytes() != frame_helper.read_bytes()
+    assert Path(installed["frame"]).read_bytes() != frame_helper.read_bytes()
     assert (generation / "bin/vc-terminal").read_bytes() != terminal_host.read_bytes()
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
     current = runtime_home / "tools/vibecrafted-current"
@@ -468,13 +475,17 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert str(product_config / "terminal-policy.toml") in terminal_entry
     assert str(product_config / "terminal-theme.toml") in terminal_entry
     assert str(generation / "config/vc-terminal/vibecrafted.toml") not in terminal_entry
-    path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
-    assert "--config-file" not in path_wrapper
-    assert str(generation / "bin/vc-terminal") in path_wrapper
-    assert str(terminal_host) not in path_wrapper
-    assert f'export PATH="{generation / "bin"}:' not in path_wrapper
-    assert "terminal-entry.toml" not in path_wrapper
-    assert "alacritty.toml" not in path_wrapper
+    if sys.platform == "darwin":
+        assert not (launcher_home / "vc-terminal").exists()
+        assert not (launcher_home / "vc-frame").exists()
+    else:
+        path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+        assert "--config-file" not in path_wrapper
+        assert str(generation / "bin/vc-terminal") in path_wrapper
+        assert str(terminal_host) not in path_wrapper
+        assert f'export PATH="{generation / "bin"}:' not in path_wrapper
+        assert "terminal-entry.toml" not in path_wrapper
+        assert "alacritty.toml" not in path_wrapper
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"
@@ -591,6 +602,13 @@ def test_runtime_install_selects_platform_host_over_legacy_helper_override(
     )
     assert Path(installed["terminal_host"]) == expected_host
     assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
+    if sys.platform == "darwin":
+        assert not (generation / "libexec/vc-terminal").exists()
+        assert not (launcher_home / "vc-terminal").exists()
+        assert not (launcher_home / "vc-frame").exists()
+        # The generation-local product entry is the launch boundary on Darwin.
+        # Independent release argv/admission is exercised in product entry tests.
+        return
     assert (generation / "libexec/vc-terminal").is_file()
     path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
     assert str(helper) not in path_wrapper
@@ -652,6 +670,19 @@ def test_runtime_install_selects_platform_host_without_app_root(
     payload_host = payload / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     _write_terminal_bundle_host(payload_host)
 
+    if sys.platform == "darwin":
+        with pytest.raises(OSError, match="external vc-terminal must not be staged"):
+            installer.cmd_runtime_install(
+                Namespace(
+                    payload_root=str(payload),
+                    app_root=None,
+                    terminal_host=None,
+                    frame_helper=None,
+                )
+            )
+        assert not (runtime_home / "active.json").exists()
+        shutil.rmtree(payload / "libexec/vc-terminal.app")
+
     assert (
         installer.cmd_runtime_install(
             Namespace(
@@ -673,6 +704,11 @@ def test_runtime_install_selects_platform_host_without_app_root(
         else generation / "libexec/vc-terminal"
     )
     assert Path(installed["terminal_host"]) == expected_host
+    if sys.platform == "darwin":
+        assert not generation_host.exists()
+        assert not (launcher_home / "vc-terminal").exists()
+        assert Path(installed["terminal_host"]).is_file()
+        return
     assert not installer._is_product_bundle_terminal_host(generation_host)
     assert (generation_host.parents[1] / "Info.plist").is_file()
     assert (generation_host.parents[1] / "Resources/Vibecrafted.icns").is_file()
@@ -1087,9 +1123,11 @@ def test_public_launcher_keeps_user_foundations_and_removes_retired_generation_b
     # added; retain that production ordering when this test changes vc-start.
     native_donor = payload / "libexec"
     staged_donor = tmp_path / "native-donor"
-    native_donor.rename(staged_donor)
+    if native_donor.exists():
+        native_donor.rename(staged_donor)
     _write_test_source_provenance(payload)
-    staged_donor.rename(native_donor)
+    if staged_donor.exists():
+        staged_donor.rename(native_donor)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),

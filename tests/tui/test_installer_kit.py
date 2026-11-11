@@ -203,6 +203,8 @@ def test_detached_kit_installs_signed_pack(tmp_path: Path, key_mode: str) -> Non
         if not key.startswith(("VIBECRAFTED_", "VC_", "XDG_", "PYTHON"))
     }
     env.update(HOME=str(home), VIBECRAFTED_HOME=str(home / ".vibecrafted"))
+    if platform.system() == "Darwin":
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     # Exercise the stable-Xcode guard without selecting a host toolchain.
     developer = tmp_path / "Xcode.app/Contents/Developer"
     developer.mkdir(parents=True)
@@ -235,16 +237,16 @@ def test_detached_kit_installs_signed_pack(tmp_path: Path, key_mode: str) -> Non
         assert result.returncode != 0
         assert "signature verification failed" in result.stderr
         assert not active.exists()
-    elif platform.system() == "Darwin":
-        # A trusted standalone carrier cannot publish an unusable GUI front
-        # door. The paired matching fixed app is a separate Founder handoff.
-        assert result.returncode != 0
-        assert "pending paired notarized app handoff" in result.stdout + result.stderr
-        assert not active.exists()
-        assert not (home / ".local/bin/vibecrafted").exists()
     else:
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert active.is_file(), result.stdout
         receipt = json.loads(active.read_text())
         assert "9.9.9+kit" in json.dumps(receipt)
         assert (home / ".local/bin/vibecrafted").is_file()
+        if platform.system() == "Darwin":
+            assert "Install vc-frame >=4.5.1,<5.0.0 on PATH" in result.stderr
+            assert not (home / ".local/bin/vc-frame").exists()
+            assert not (home / ".local/bin/vc-terminal").exists()
+            generation = Path(json.loads(active.read_text())["runtime_root"])
+            assert not (generation / "libexec/vc-terminal").exists()
+            assert not (generation / "libexec/vc-frame").exists()

@@ -652,9 +652,10 @@ def test_cmd_doctor_fix_launchers_repairs_missing_wrappers(
         detached_source / "bin/python3",
         f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
     )
-    # The source fixture must carry its native terminal donor, as a real pack does.
-    shutil.copyfile("/usr/bin/true", detached_source / "bin/vc-terminal")
-    (detached_source / "bin/vc-terminal").chmod(0o755)
+    # Darwin resolves the independent App; Linux retains its flat native host.
+    if sys.platform != "darwin":
+        shutil.copyfile("/usr/bin/true", detached_source / "bin/vc-terminal")
+        (detached_source / "bin/vc-terminal").chmod(0o755)
     _write_test_source_provenance(detached_source)
     monkeypatch.setattr(
         installer, "_doctor_launcher_source_root", lambda _store: detached_source
@@ -990,7 +991,7 @@ def _write_release_contract_runtime_manifest(
     current_tools: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 13
+    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 15
     assert (
         frozenset(_RUNTIME_GENERATION_FIXTURE_SOURCES)
         == installer._RUNTIME_GENERATION_REQUIRED_HASHES

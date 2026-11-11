@@ -34,23 +34,19 @@ def _seal_runtime_pack_for_admission(payload: Path) -> Path:
     (payload / "bin").mkdir(parents=True, exist_ok=True)
     (payload / "libexec").mkdir(parents=True, exist_ok=True)
     (payload / "scripts").mkdir(parents=True, exist_ok=True)
-    frame_wrapper = payload / "bin/vc-frame"
-    frame_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    frame_wrapper.chmod(0o755)
-    terminal_src = (
-        Path(installer.__file__).resolve().parent / "vc-terminal-product-entry.sh"
-    )
-    (payload / "bin/vc-terminal").write_text(
-        terminal_src.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    (payload / "bin/vc-terminal").chmod(0o755)
-    donor = Path("/usr/bin/true")
-    native = payload / "libexec/vc-terminal"
-    if donor.is_file():
-        shutil.copyfile(donor, native)
-    else:
-        native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
-    native.chmod(0o755)
+    scripts = Path(installer.__file__).resolve().parent
+    for product in ("vc-terminal", "vc-frame"):
+        wrapper = payload / "bin" / product
+        wrapper.write_text((scripts / f"{product}-product-entry.sh").read_text())
+        wrapper.chmod(0o755)
+    if sys.platform != "darwin":
+        donor = Path("/usr/bin/true")
+        native = payload / "libexec/vc-terminal"
+        if donor.is_file():
+            shutil.copyfile(donor, native)
+        else:
+            native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+        native.chmod(0o755)
     files: dict[str, str] = {}
     for name in sorted(contract.REQUIRED_FOUNDATION_EXECUTABLES):
         executable = payload / "bin" / name
