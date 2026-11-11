@@ -21,26 +21,32 @@ RELEASE_TOOLCHAIN_CONTRACT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/re
 . "$RELEASE_TOOLCHAIN_CONTRACT"
 
 MODE="release"
+ADHOC_BUILD=0
 UNPROVISIONED_UPDATE_CHANNEL=0
 for argument in "$@"; do
   case "$argument" in
     --app-only) MODE="app" ;;
+    --ad-hoc) ADHOC_BUILD=1 ;;
     --runtime-pack-only) MODE="runtime-pack" ;;
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) : ;; # compatibility: only runtime source is snapshotted
     --unprovisioned-update-channel) UNPROVISIONED_UPDATE_CHANNEL=1 ;;
     --help|-h)
-      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel] [--ad-hoc (app-only)]" >&2
       echo "App builds use the approved GitHub Releases feed; VIBECRAFTED_UPDATE_FEED_URL can explicitly override it. Unprovisioned is for developer app/dmg only." >&2
       exit 0
       ;;
     *)
-      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors] [--unprovisioned-update-channel] [--ad-hoc (app-only)]" >&2
       exit 2
       ;;
   esac
 done
+
+if (( ADHOC_BUILD )) && [[ "$MODE" != "app" ]]; then
+  die "--ad-hoc is limited to --app-only developer artifacts; release and install selection remain signed"
+fi
 
 prefer_rustup_cargo() {
   # Homebrew `rust` (helix-db/pake) often shadows rustup on login PATH and
@@ -112,6 +118,9 @@ release_single_flight_acquire "$REPO_ROOT" \
   || die "another release already owns this checkout's shared build state"
 
 cleanup() {
+  if [[ "${ADHOC_BUILD:-0}" == "1" && -n "${BUILD_DIR:-}" ]]; then
+    rm -f -- "$BUILD_DIR/ad-hoc-runtime-pack.key"
+  fi
   # Host-wide resources first. The keychain session mutates state that outlives
   # this process and affects every application on the machine; the donor
   # snapshots are directories under this repo's own build/ and a stale one is
@@ -444,6 +453,13 @@ read_trimmed_file() {
 }
 
 prepare_signing_identity() {
+  if (( ADHOC_BUILD )); then
+    SIGNING_IDENTITY="-"
+    mkdir -p "$BUILD_DIR"
+    SIGNING_KEY="$BUILD_DIR/ad-hoc-runtime-pack.key"
+    (umask 077; /usr/bin/openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$SIGNING_KEY" 2>/dev/null)
+    return
+  fi
   SIGNING_IDENTITY="$(read_trimmed_file "$SIGNING_IDENTITY_FILE")"
   [[ -n "$SIGNING_IDENTITY" ]] || die "signing identity is empty"
   if [[ -f "$CERT_P12" && -f "$CERT_PASSWORD_FILE" ]]; then
@@ -493,7 +509,7 @@ if [[ "$MODE" != "runtime-pack" ]]; then
     require "$command"
   done
 fi
-[[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
+(( ADHOC_BUILD )) || [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
 prepare_signing_identity
 
 # normalize_embedded_python_paths <runtime-root> <seed-dir>
@@ -715,7 +731,7 @@ sign_helper_scripts() {
     if is_macho_file "$helper"; then
       continue
     fi
-    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+    codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
       "${CODESIGN_KEYCHAIN_ARGS[@]}" "$helper" \
       || die "could not sign helper ${helper#"$APP"/}"
   done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
@@ -792,6 +808,11 @@ produce_runtime_pack() {
   # verified, its detached signature written. Only now may `make install` treat
   # this exact path as the artifact the Founder just built. The packager prints
   # the path much earlier, before signing, which is too early to publish.
+  if (( ADHOC_BUILD )); then
+    log "Developer ad-hoc carrier verified; excluded from install selection and release publication"
+    rm -f "$SIGNING_KEY"
+    return
+  fi
   runtime_pack_selection_publish "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
     "$RUNTIME_PACK" "$RUNTIME_VERSION" "$RUNTIME_PACK_PLATFORM" \
     "$RUNTIME_PACK_ARCHITECTURE" "$ROOT_SHA" "$terminal_revision" \
@@ -1132,7 +1153,7 @@ build_product() {
     --vibecrafted-sha "$ROOT_SHA" \
     --terminal-sha "$TERMINAL_SHA" \
     --frame-sha "$FRAME_SHA"
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+  codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
     "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"
   log "Probing the signed bundled Python without mutating the app seal"
   "$runtime/bin/python3" -c 'import jsonschema, yaml, vibecrafted_core.product_contract'
@@ -1157,7 +1178,7 @@ create_dmg() {
   /usr/bin/ditto "$APP" "$staging/Vibecrafted.app"
   ln -s /Applications "$staging/Applications"
   hdiutil create -volname Vibecrafted -srcfolder "$staging" -ov -format UDZO "$DMG"
-  codesign --force --timestamp --sign "$SIGNING_IDENTITY" \
+  codesign --force "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
     "${CODESIGN_KEYCHAIN_ARGS[@]}" "$DMG"
 }
 

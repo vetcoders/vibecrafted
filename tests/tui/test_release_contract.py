@@ -2730,3 +2730,27 @@ def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:
     assert "$1/build/$RUNTIME_PACK_SELECTION_BASENAME" in selection or (
         "printf '%s\\n' \"$1/build/$RUNTIME_PACK_SELECTION_BASENAME\"" in selection
     )
+
+
+@pytest.mark.parametrize(
+    "mode", [[], ["--runtime-pack-only"], ["--no-notarize"], ["--notarize-only"]]
+)
+def test_ad_hoc_mode_cannot_enter_release_or_install_carrier_lanes(
+    tmp_path: Path, mode: list[str]
+) -> None:
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(REPO_ROOT / "scripts/build-vibecrafted-release.sh"),
+            "--ad-hoc",
+            *mode,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "limited to --app-only developer artifacts" in result.stderr
+    assert not (tmp_path / "build").exists()

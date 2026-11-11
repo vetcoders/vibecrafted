@@ -1893,99 +1893,6 @@ bootstrap_python_usable=1
 # workers survive; the helper never touches them. Starting a new App
 # generation is Founder-gated and never forced from a bootstrap.
 # shellcheck disable=SC2034  # reserved for the GUI/manifest lane pairing state
-PAIRED_APP_ROOT="/Applications/Vibecrafted.app"
-PAIRED_TERMINAL_HOST="$PAIRED_APP_ROOT/Contents/MacOS/vc-terminal"
-PAIRED_FRAME_HELPER="$PAIRED_APP_ROOT/Contents/Helpers/vc-frame"
-
-# app_pairing_args prints the --app-root trio for install-runtime-pack.sh when
-# the installed App already carries the channel pack's signed helpers. Empty
-# output means the App does not match; the caller then installs the DMG first.
-# codesign is a macOS system tool; this block never runs off Darwin.
-app_pairing_args() {
-  [[ -f "$PAIRED_TERMINAL_HOST" && -x "$PAIRED_TERMINAL_HOST" ]] || return 1
-  [[ -f "$PAIRED_FRAME_HELPER" && -x "$PAIRED_FRAME_HELPER" ]] || return 1
-  local pack_dir="$1"
-  [[ -f "$pack_dir/libexec/vc-terminal" && -f "$pack_dir/libexec/vc-frame" ]] || return 1
-  local py="$pack_dir/bin/python3"
-  [[ -x "$py" ]] || return 1
-  PYTHONPATH="$pack_dir/vibecrafted-core" "$py" \
-    -m vibecrafted_core.runtime_pack_contract helpers-agree \
-    --app-copy "$PAIRED_TERMINAL_HOST" --pack-copy "$pack_dir/libexec/vc-terminal" \
-    || return 1
-  PYTHONPATH="$pack_dir/vibecrafted-core" "$py" \
-    -m vibecrafted_core.runtime_pack_contract helpers-agree \
-    --app-copy "$PAIRED_FRAME_HELPER" --pack-copy "$pack_dir/libexec/vc-frame" \
-    || return 1
-  printf '%s\n' "--app-root" "$PAIRED_APP_ROOT" \
-    "--terminal-host" "$PAIRED_TERMINAL_HOST" \
-    "--frame-helper" "$PAIRED_FRAME_HELPER"
-}
-
-# install_channel_dmg mounts the channel DMG read-only, verifies the App bundle
-# signature, and hands it to the journaled transaction helper. The helper is
-# the sole UI-bundle mutation owner: it refuses to replace a bundle whose Main
-# role is live without the Founder gate. A refusal here is final and named.
-install_channel_dmg() {
-  local dmg_url="$1" helper="$2"
-  [[ -n "$dmg_url" ]] || die "macOS needs the channel dmg_url to pair a new App generation; refusing an unpaired Runtime Pack install"
-  stage_channel_app
-  local staged_app="$staged_channel_app"
-  # A live Main instance of the App would survive the file swap and then hold
-  # the old binary open; --relaunch (open -n) would start a second instance —
-  # two generations at once. Mirror install-app.sh: gracefully quit the Main
-  # role first (Frame sessions, PTYs and workers survive), then bind the
-  # transaction to its pid/start so the swap waits for a clean exit.
-  local helper_args=()
-  local quit_identity=""
-  quit_identity="$("$bootstrap_python" -I -S "$candidate_root/scripts/lib/app-main-identity.py" "$PAIRED_APP_ROOT" --quit)" \
-    || die "Could not establish exact App Main ownership; prior App preserved"
-  if [[ -n "$quit_identity" ]]; then
-    local quit_pid quit_start
-    quit_pid="${quit_identity%%$'\n'*}"
-    quit_start="${quit_identity#*$'\n'}"
-    if [[ "$quit_pid" =~ ^[1-9][0-9]*$ && "$quit_start" != "$quit_identity" && -n "$quit_start" ]]; then
-      info "▸ Gracefully quitting the running App Main (pid $quit_pid) — frame sessions survive"
-      helper_args+=(--wait-pid "$quit_pid" --wait-start "$quit_start" --wait-timeout 60)
-    else
-      die "Malformed Main ownership receipt; prior App preserved"
-    fi
-  fi
-  # vc-app-update.sh is the sole UI-bundle mutation owner and requires the full
-  # argument set (usage exits 2 without it): --source/--destination/--receipt
-  # plus --mode replace --complete --relaunch, mirroring install-app.sh. The
-  # state dir keeps the transaction receipts for recovery.
-  local state_dir="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/vibecrafted-product-update"
-  local transaction
-  transaction="install-app-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
-  local transaction_dir="$state_dir/transactions/$transaction"
-  mkdir -p "$transaction_dir"
-  VIBECRAFTED_UPDATE_PYTHON="$bootstrap_python" installer_capture bash "$helper" \
-    --source "$staged_app" \
-    --destination "$PAIRED_APP_ROOT" \
-    --receipt "$transaction_dir/receipt.json" \
-    --admission "$transaction_dir/admission.json" \
-    --journal "$transaction_dir/journal.json" \
-    --transaction "$transaction" \
-    --mode replace \
-    --complete \
-    --relaunch \
-    ${helper_args[@]+"${helper_args[@]}"} \
-    || {
-      # The refusal message must match what actually happened: once the
-      # receipt says replaced=true the App IS swapped — "prior App preserved"
-      # would be a lie. The prior binary survives in the capture directory.
-      local receipt_file="$transaction_dir/receipt.json"
-      local replaced="unknown"
-      if [[ -f "$receipt_file" ]]; then
-        replaced="$("$bootstrap_python" -I -S -c 'import json,sys; print(json.load(open(sys.argv[1])).get("replaced"))' "$receipt_file" 2>/dev/null || echo unknown)"
-      fi
-      if [[ "$replaced" == "True" ]]; then
-        die "App transaction failed AFTER the swap (receipt: $receipt_file says replaced=true). The new App is installed; the prior binary is preserved in the capture directory. Inspect the journal: $transaction_dir/journal.json"
-      fi
-      die "App transaction refused before any swap (receipt: $receipt_file); prior App preserved"
-    }
-  info "▸ App installed via $transaction (receipt: $transaction_dir/receipt.json)"
-}
 if [[ "$channel_mode" == "1" ]]; then
 
   # Resolve latest version from the channel manifest instead of hard-pinning.
@@ -2176,44 +2083,11 @@ run_candidate_command() {
 # install the channel DMG first through the journaled transaction helper, then
 # re-probe. The helper is the sole UI-bundle mutation owner and its refusal is
 # final; the prior App is preserved either way.
-macos_pair_channel_app() {
-  # Authenticate the supplied pack and its closed inventory before any pairing
-  # decision or App mutation. The candidate source signature was checked with
-  # the publisher key sealed in the authenticated App.
-  bash "$candidate_root/scripts/install-runtime-pack.sh" --pack "$selected_runtime_pack" \
-    --verify-only --expected-source-revision "$expected_revision" >"$tmpdir/runtime-pack-verification.json" \
-    || die "Channel Runtime Pack failed authentication/provenance; prior App preserved"
-  local bundled_packs=("$staged_channel_app"/Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_*.tar.gz)
-  [[ ${#bundled_packs[@]} -eq 1 && -f "${bundled_packs[0]}" ]] \
-    || die "Authenticated App must contain exactly one Runtime Pack"
-  [[ "$(sha256_of_file "${bundled_packs[0]}")" == "$(sha256_of_file "$selected_runtime_pack")" ]] \
-    || die "Channel App/Runtime Pack mismatch; prior App and runtime preserved"
-  local payload="$staged_channel_app/Contents/Resources/runtime"
-  local pairing=""
-  local installed_packs=("$PAIRED_APP_ROOT"/Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_*.tar.gz)
-  # Donor helpers can be identical across App releases. Only a valid App with
-  # this exact embedded pack is already the channel's complete generation.
-  if [[ ${#installed_packs[@]} -eq 1 && -f "${installed_packs[0]}" && ! -L "${installed_packs[0]}" ]] \
-    && verify_channel_app "$PAIRED_APP_ROOT" \
-    && [[ "$(sha256_of_file "${installed_packs[0]}")" == "$(sha256_of_file "$selected_runtime_pack")" ]]; then
-    pairing="$(app_pairing_args "$payload" 2>/dev/null)" || pairing=""
-  fi
-  if [[ -n "$pairing" ]]; then
-    while IFS= read -r arg; do macos_app_args+=("$arg"); done <<< "$pairing"
-    return 0
-  fi
-  # App does not match the channel pack: install the channel DMG first.
-  local helper="$candidate_root/scripts/vc-app-update.sh"
-  [[ -f "$helper" ]] || helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/scripts/vc-app-update.sh"
-  [[ -f "$helper" ]] || return 1
-  info "▸ Installed App does not match the channel; installing the signed App from DMG first…"
-  install_channel_dmg "$channel_dmg_url" "$helper" || return 1
-  app_pairing_via_dmg=1
-  # The updater installs the pack sealed in the App. It must be the exact
-  # channel pack, not a second generation selected just because it is signed.
-  [[ -n "$(app_pairing_args "$PAIRED_APP_ROOT/Contents/Resources/runtime")" ]] \
-    || die "App transaction completed but installed helper pairing is unverified; inspect its journal"
-
+report_external_products() {
+  "$bootstrap_python" -I -B "$candidate_root/vibecrafted-core/vibecrafted_core/external_products.py" status \
+    | "$bootstrap_python" -I -S -c 'import json,sys
+for name,state in json.load(sys.stdin).items():
+    print(name + ": " + state["status"] + ": " + (state.get("path") or state["message"]))'
 }
 
 # Install the verified, supplied Runtime Pack without make: the Makefile
@@ -2225,27 +2099,10 @@ macos_pair_channel_app() {
 # newer releases flag the function (SC2329), older ones its body (SC2317).
 # shellcheck disable=SC2317,SC2329
 install_selected_runtime_pack() {
-  # When the App transaction ran with --complete, vc-app-update.sh already
-  # installed this exact Runtime Pack from the App's bundled copy — a second
-  # install here would be a duplicate publication, not a no-op worth risking.
-  # app_pairing_via_dmg is set by macos_pair_channel_app when the DMG path ran.
-  if [[ "${app_pairing_via_dmg:-0}" == "1" ]]; then
-    info "▸ Runtime Pack already installed by the App transaction (--complete); skipping duplicate"
-    (cd "$candidate_root" \
-      && bash scripts/install-foundations.sh loctree aicx prview screenscribe) \
-      || return $?
-    return 0
-  fi
-  # macOS App pairing is prepared by macos_pair_channel_app (top-level, after
-  # the pack download); here we only forward the prepared args.
-  # macOS App pairing is prepared by macos_pair_channel_app (top-level, after
-  # the pack download); here we only forward the prepared args.
-  # `make -C <candidate>` runs its recipes from the candidate root; so do these.
   (cd "$candidate_root" \
     && VIBECRAFTED_RUNTIME_PACK="$selected_runtime_pack" \
       bash scripts/install-runtime-pack.sh \
-      --expected-source-revision "$expected_revision" \
-      ${macos_app_args[@]+"${macos_app_args[@]}"}) || return $?
+      --expected-source-revision "$expected_revision") || return $?
   (cd "$candidate_root" \
     && bash scripts/install-foundations.sh loctree aicx prview screenscribe) \
     || return $?
@@ -2463,13 +2320,11 @@ info "✓ Verified vibecrafted $_installed_version candidate; transactional inst
 # channel DMG is installed first through the journaled transaction helper and
 # the pairing is re-probed. Off macOS, or without a verified channel pack,
 # this is a no-op: macos_app_args stays empty.
-macos_app_args=()
-app_pairing_via_dmg=0
 if [[ "$PLATFORM_OS" == "macos" && "$channel_mode" == "1" && -n "$selected_runtime_pack" && "$use_gui" != "1" ]]; then
   if [[ "$installer_output" == "1" ]]; then
     installer_stage 2 "Install Vibecrafted and command-line tools"
   fi
-  macos_pair_channel_app || die "macOS App pairing failed; completed steps may remain"
+  report_external_products || die "Could not inspect external terminal/frame products"
 fi
 
 

@@ -1278,6 +1278,8 @@ bind_resume_journal() {
 
 restore_prior_runtime() {
   local installer published terminal_host frame_helper public_key terminal_program
+  local -a product_args=()
+  local external_products=0
   installer="$(resolve_pack_installer)" || {
     write_journal "failed" "Runtime Pack installer owner is missing"
     write_admission "rejected" "historical rollback cannot find the installer owner"
@@ -1314,6 +1316,8 @@ restore_prior_runtime() {
       exit 19
     }
     case "$terminal_program" in
+      Contents/Resources/runtime/bin/vc-terminal)
+        external_products=1 ;;
       Contents/MacOS/vc-terminal|Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty)
         terminal_host="$SOURCE/$terminal_program" ;;
       *)
@@ -1327,6 +1331,7 @@ restore_prior_runtime() {
     # sealed carrier as authority. The installer proves their helper pairing.
     terminal_host="${SOURCE}/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
   fi
+  if (( ! external_products )); then
   assert_no_symlink_components "$terminal_host"
   frame_helper="${SOURCE}/Contents/Helpers/vc-frame"
   assert_no_symlink_components "$frame_helper"
@@ -1335,6 +1340,8 @@ restore_prior_runtime() {
     write_admission "rejected" "owned prior.app is missing matching helper binaries"
     echo "missing historical rollback data: prior.app helpers are not executable" >&2
     exit 19
+  fi
+    product_args=(--terminal-host "$terminal_host" --frame-helper "$frame_helper")
   fi
   write_journal "runtime_recovering" "restoring prior runtime ${PRIOR_GENERATION} through the installer owner"
   fail_after_if "runtime_recovering"
@@ -1368,8 +1375,7 @@ restore_prior_runtime() {
   without_update_lock_fd /bin/bash "$installer" \
     --pack "$PRIOR_PACK" \
     --app-root "$live_root" \
-    --terminal-host "$terminal_host" \
-    --frame-helper "$frame_helper" \
+    ${product_args[@]+"${product_args[@]}"} \
     --allow-older-runtime
   INSTALLER_STATUS="$?"
   set -e
@@ -2038,7 +2044,7 @@ PY
 }
 
 complete_replacement() {
-  local pack installer terminal_host frame_helper
+  local pack installer
   pack="$(pack_payload_in_dir "$DESTINATION/Contents/Resources/runtime-pack")" || {
     echo "replacement incomplete: no unique bundled Runtime Pack; rollback retained" >&2
     return 20
@@ -2046,16 +2052,10 @@ complete_replacement() {
   installer="$DESTINATION/Contents/Resources/runtime-pack/install-runtime-pack.sh"
   assert_no_symlink_components "$installer"
   [[ -x "$installer" ]] || { echo "replacement incomplete: bundled installer missing" >&2; return 20; }
-  terminal_host="$DESTINATION/Contents/MacOS/vc-terminal"
-  frame_helper="$DESTINATION/Contents/Helpers/vc-frame"
-  assert_no_symlink_components "$terminal_host"
-  assert_no_symlink_components "$frame_helper"
-  [[ -f "$terminal_host" && -x "$terminal_host" && -f "$frame_helper" && -x "$frame_helper" ]] || {
-    echo "replacement incomplete: fixed main-app terminal or vc-frame missing; rollback retained" >&2
-    return 20
-  }
-  without_update_lock_fd /bin/bash "$installer" --pack "$pack" --app-root "$DESTINATION" \
-    --terminal-host "$terminal_host" --frame-helper "$frame_helper" || return "$?"
+  # v2 runtime publication resolves independent products and reports missing
+  # prerequisites. The App transaction never stages or replaces those products.
+  without_update_lock_fd /bin/bash "$installer" --pack "$pack" --app-root "$DESTINATION" || return "$?"
+
 }
 
 finish_replacement() {

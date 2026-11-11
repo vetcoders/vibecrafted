@@ -1,4 +1,4 @@
-"""Build the canonical Runtime Pack from this checkout and pinned donors."""
+"""Build the Runtime Pack; macOS declares independently released products."""
 
 from __future__ import annotations
 
@@ -269,7 +269,7 @@ def main() -> int:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="verify pins and donor availability without building",
+        help="validate declarations; verify donor availability only on platforms that carry them",
     )
     mode.add_argument(
         "--materialize",
@@ -279,6 +279,19 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_PINS)
     args = parser.parse_args()
     pins = load_pins(args.manifest)
+    if sys.platform == "darwin" and not args.materialize:
+        for name, pin in pins.items():
+            print(
+                f"{name}: external product declaration {pin['version']} {pin['revision']}"
+            )
+        if not args.check:
+            subprocess.run(
+                ["make", "--no-print-directory", "runtime-pack"],
+                cwd=ROOT,
+                env=repository_environment(),
+                check=True,
+            )
+        return 0
     with tempfile.TemporaryDirectory(prefix="vibecrafted-source-donors-") as temp:
         scratch = Path(temp)
         primary = primary_checkout()
