@@ -26,17 +26,14 @@ macOS proof only: kernel PID/UID/start token and executable path come from
 libproc, socket peers from ``LOCAL_PEERPID``/``LOCAL_PEERCRED``. Linux has no
 equivalent proof here and is refused (the wrapper keeps the flat host there).
 
-Code identity: before any decision the host bytes must carry a valid static
-signature (Security.framework, strict) whose CodeDirectory hash and Team equal
-the selected generation's own ``libexec/vc-terminal``, located from this
-helper's physical path, never from caller environment. The fixed
-``/Applications`` host additionally needs a Team (no ad-hoc code) shared with
-its main app, as the installer pairs them. Any other host path is a private
-ad-hoc control: exact pairing still holds, a Team may be absent. A reused
-host must still run, per the kernel (``csops``), that exact admitted code: a
-path or inode is not loaded code identity. The static pair decides only as
-read under the admission lock, and is read again after delivery: a receipt
-never names code that is no longer the current admitted pair.
+Code identity: the independent vc-terminal.app must have the declared bundle
+identity and minimum version, with strict static signatures from Team
+MW223P3NPX on both bundle and executable. It is never hash-paired to runtime
+bytes. Historical bundled hosts retain their exact-pair proof for ownership
+checks, and private ad-hoc controls retain kernel and IPC identity checks.
+A reused host must still run that exact admitted CodeDirectory hash according
+to the kernel (``csops``). Static identity is checked under the admission lock
+and again after delivery; a receipt never names replaced code.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -413,13 +410,12 @@ def admitted_code_identity(host: str) -> CodeIdentity:
         require_standalone_bundle_metadata(host)
         if production_policy(host):
             require_paired_developer_id(host, identity)
-        else:
-            expected = static_code_identity(generation_terminal())
-            if identity.team != expected.team:
-                raise Refusal(
-                    EX_CONFIG,
-                    f"standalone terminal host team {identity.team} differs from selected generation terminal {expected.team}",
-                )
+        elif identity.team is not None and identity.team != "MW223P3NPX":
+            raise Refusal(
+                EX_CONFIG, "standalone terminal must be signed by Team MW223P3NPX"
+            )
+        # Private ad-hoc controls prove their own loaded code and IPC owner.
+        # Independent products have no generation-local binary to pair with.
         return identity
     expected = static_code_identity(generation_terminal())
     identity = static_code_identity(host)

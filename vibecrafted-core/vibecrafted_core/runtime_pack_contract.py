@@ -163,10 +163,26 @@ def _native_executable(path: Path) -> bool:
     )
 
 
-def _runtime_product_payload(root: Path) -> None:
+def _runtime_product_payload(root: Path, *, platform: str = "") -> None:
     """Close the carrier: a product wrapper without its frame is not a pack."""
+    if platform.startswith("darwin-"):
+        for relative in (
+            "libexec/vc-terminal",
+            "libexec/vc-frame",
+            "libexec/vc-terminal.app",
+        ):
+            path = root / relative
+            if path.exists() or path.is_symlink():
+                raise RuntimePackContractError(
+                    f"external product must not be carried: {relative}"
+                )
+        for name in ("external_products.py", "terminal_host.py"):
+            if not (root / "vibecrafted-core/vibecrafted_core" / name).is_file():
+                raise RuntimePackContractError(
+                    f"external product resolver is missing: {name}"
+                )
     native_frame = root / "libexec/vc-frame"
-    if not _native_executable(native_frame):
+    if not platform.startswith("darwin-") and not _native_executable(native_frame):
         raise RuntimePackContractError(
             "Runtime Pack native vc-frame is missing or is not Mach-O/ELF: "
             "libexec/vc-frame"
@@ -183,7 +199,7 @@ def _runtime_product_payload(root: Path) -> None:
             "Runtime Pack product wrapper is not executable: bin/vc-frame"
         )
     native_terminal = root / "libexec/vc-terminal"
-    if not _native_executable(native_terminal):
+    if not platform.startswith("darwin-") and not _native_executable(native_terminal):
         raise RuntimePackContractError(
             "Runtime Pack native vc-terminal is missing or is not Mach-O/ELF: "
             "libexec/vc-terminal"
@@ -220,7 +236,12 @@ def _runtime_product_payload(root: Path) -> None:
         raise RuntimePackContractError(
             "Runtime Pack bin/vc-terminal does not pin vc-terminal.toml"
         )
-    if "libexec/vc-terminal" not in terminal_wrapper_text:
+    required_target = (
+        "external_products.py"
+        if platform.startswith("darwin-")
+        else "libexec/vc-terminal"
+    )
+    if required_target not in terminal_wrapper_text:
         raise RuntimePackContractError(
             "Runtime Pack bin/vc-terminal does not exec libexec/vc-terminal"
         )
@@ -636,7 +657,7 @@ def write_provenance(
                 "Windows Runtime Pack must be the win32-x64 target slug"
             )
     else:
-        _runtime_product_payload(payload_root)
+        _runtime_product_payload(payload_root, platform=platform)
         _runtime_foundations(payload_root)
         if platform.startswith("linux-"):
             _linux_inventory(payload_root, platform=platform, architecture=architecture)
@@ -759,7 +780,7 @@ def verify_provenance(
                 "Windows Runtime Pack must be the win32-x64 target slug"
             )
     else:
-        _runtime_product_payload(payload_root)
+        _runtime_product_payload(payload_root, platform=str(provenance["platform"]))
         _runtime_foundations(payload_root)
         if provenance["platform"].startswith("linux-"):
             _linux_inventory(

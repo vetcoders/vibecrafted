@@ -236,7 +236,7 @@ def private_child_command(
             + verbs
             + "|"
             + re.escape(installer.SECURE_WALKAROUND_LAUNCHER)
-            + r")|libexec/(vc-frame|vc-terminal)|(config/alacritty|vc-terminal)/launch-primary-shell[.]zsh)$"
+            + r")|libexec/(vc-frame|vc-terminal)|external-bin/vc-frame|(config/alacritty|vc-terminal)/launch-primary-shell[.]zsh)$"
         )
         literals += f" (regex {json.dumps(pattern)})"
     signals = "(allow signal (target same-sandbox))" if same_sandbox_signals else ""
@@ -280,8 +280,8 @@ def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
     Production paths and signer policy remain untouched.
     """
     assert wrapper != REPO_ROOT / "scripts/vc-terminal-product-entry.sh"
-    bundle = wrapper.parents[2] / "Applications/Vibecrafted.app"
-    assert bundle.is_absolute() and bundle != Path("/Applications/Vibecrafted.app")
+    bundle = wrapper.parents[2] / "Applications/vc-terminal.app"
+    assert bundle.is_absolute() and bundle != Path("/Applications/vc-terminal.app")
     host = bundle / "Contents/MacOS/vc-terminal"
     host.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(native, host)
@@ -291,25 +291,31 @@ def bind_private_terminal_wrapper(wrapper: Path, native: Path) -> Path:
     (bundle / "Contents/Info.plist").write_bytes(
         plistlib.dumps(
             {
-                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
-                "CFBundleExecutable": "Vibecrafted",
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "vc-terminal",
+                "CFBundleShortVersionString": "0.18.0",
             }
         )
     )
-    text = wrapper.read_text()
-    for old, replacement in (
-        (
-            "bundle=/Applications/Vibecrafted.app",
-            "bundle=" + installer.shlex_quote(str(bundle)),
-        ),
-        (
-            "candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal",
-            "candidate=" + installer.shlex_quote(str(host)),
-        ),
-    ):
-        assert text.count(old) == 1
-        text = text.replace(old, replacement, 1)
-    wrapper.write_text(text)
+    generation = wrapper.parents[1]
+    resolver = generation / "private-external-products.py"
+    resolver.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        wrapper.read_text().replace(
+            "$root/vibecrafted-core/vibecrafted_core/external_products.py",
+            "$root/private-external-products.py",
+        )
+    )
+    # Explicit resolver boundary double for argv/env tests; the admission
+    # helper still proves the actual private ad-hoc host through kernel facts.
+    resolver.write_text(
+        "import sys\nprint("
+        + repr(str(host))
+        + " if sys.argv[1] == 'terminal' else "
+        + repr(str(generation / "libexec/vc-frame"))
+        + ")\n"
+    )
+
     # The private bundle host is admitted like the fixed one: the generation
     # carries its admission helper and interpreter. Admission state is keyed
     # by this private host path, never the installed host's namespace.
@@ -338,6 +344,7 @@ def bind_private_child_installer(
     root = (fixture_root or host.parents[4]).resolve()
     assert host.is_relative_to(root) and root != Path("/")
     assert host != Path("/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal")
+    expected_host_digest = hashlib.sha256(host.read_bytes()).hexdigest()
     target = payload / "scripts/vetcoders_install.py"
     source = target.read_text(encoding="utf-8")
     guard = 'if __name__ == "__main__":\n    sys.exit(main())\n'
@@ -346,6 +353,7 @@ def bind_private_child_installer(
 # Test-private binding, included in source provenance before publication.
 _FIXED_TERMINAL_HOST = Path({str(host)!r})
 _VC_FIXTURE_ROOT = Path({str(root)!r})
+_VC_FIXTURE_HOST_DIGEST = {expected_host_digest!r}
 def _vc_fixture_signed_terminal_identity(path):
     path = Path(path)
     if path == _FIXED_TERMINAL_HOST.parents[2]:
@@ -357,6 +365,23 @@ def _vc_fixture_signed_terminal_identity(path):
         raise RuntimeInstallRefusal("fixture signer requires real native terminal bytes")
     return hashlib.sha256(path.read_bytes()).hexdigest(), "FIXTURE_TEAM"
 _signed_terminal_identity = _vc_fixture_signed_terminal_identity
+
+_vc_fixture_products = _external_products()
+_vc_fixture_products.terminal_host.STANDALONE_HOST = str(_FIXED_TERMINAL_HOST)
+def _vc_fixture_product_identity(path):
+    try:
+        digest, _ = _vc_fixture_signed_terminal_identity(Path(path))
+        if digest != _VC_FIXTURE_HOST_DIGEST:
+            raise RuntimeInstallRefusal("fixture signature unproven after code drift")
+    except RuntimeError as error:
+        raise _vc_fixture_products.terminal_host.Refusal(78, str(error)) from error
+    return _vc_fixture_products.terminal_host.CodeIdentity(digest[:40], _vc_fixture_products.TEAM_ID, False)
+_vc_fixture_products.terminal_host.static_code_identity = _vc_fixture_product_identity
+_vc_fixture_frame_resolver = _vc_fixture_products.resolve_frame
+def _vc_fixture_frame(**kwargs):
+    return _vc_fixture_frame_resolver(search_path=str(_VC_FIXTURE_ROOT / "external-bin"), runtime=kwargs.get("runtime"))
+_vc_fixture_products.resolve_frame = _vc_fixture_frame
+_external_products = lambda: _vc_fixture_products
 
 """
     target.write_text(source.replace(guard, binding + guard, 1), encoding="utf-8")
@@ -377,37 +402,57 @@ def private_runtime_pack_seed(host: Path, *, fixture_root: Path | None = None):
 
 
 def fixed_terminal_fixture(monkeypatch, tmp_path: Path) -> None:
-    """Pair installer fixtures with a private main app, never /Applications.
+    """Independent product fixture; only the signer boundary is doubled.
 
-    The signer's CodeDirectory/Team probe is a test boundary double; native
-    signature/process acceptance is separately tested and remains parent-owned.
+    Product metadata, version parsing and external PATH selection remain real.
+    No installed product or Founder PATH command is read or executed.
     """
-    host = tmp_path / "Applications/Vibecrafted.app/Contents/MacOS/vc-terminal"
+    host = tmp_path / "Applications/vc-terminal.app/Contents/MacOS/vc-terminal"
     host.parent.mkdir(parents=True)
     shutil.copyfile("/usr/bin/true", host)
     host.chmod(0o755)
-    contents = host.parent.parent
-    (contents / "Resources").mkdir()
-    (contents / "Resources/Vibecrafted.icns").write_bytes(b"fixture-icon")
-    (contents / "Info.plist").write_bytes(
+    (host.parents[1] / "Info.plist").write_bytes(
         plistlib.dumps(
             {
-                "CFBundleIdentifier": "io.vetcoders.vibecrafted",
-                "CFBundleExecutable": "Vibecrafted",
-                "CFBundleName": "Vibecrafted",
-                "CFBundleDisplayName": "Vibecrafted",
-                "CFBundleIconFile": "Vibecrafted.icns",
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "vc-terminal",
+                "CFBundleShortVersionString": "0.18.0",
             }
         )
     )
+    frame = tmp_path / "external-bin/vc-frame"
+    frame.parent.mkdir()
+    frame.write_text('#!/bin/sh\necho "vc-frame 4.5.1"\n')
+    frame.chmod(0o755)
+    module = installer._external_products()
+    monkeypatch.setattr(installer, "_external_products", lambda: module)
     monkeypatch.setattr(installer, "_FIXED_TERMINAL_HOST", host)
+    monkeypatch.setattr(module.terminal_host, "STANDALONE_HOST", str(host))
 
     def code_identity(path):
-        if path.is_dir():
-            return hashlib.sha256(host.read_bytes()).hexdigest(), "FIXTURE_TEAM"
-        return hashlib.sha256(path.read_bytes()).hexdigest(), "FIXTURE_TEAM"
+        target = host if Path(path).is_dir() else Path(path)
+        return hashlib.sha256(target.read_bytes()).hexdigest(), "FIXTURE_TEAM"
+
+    expected_host_digest = hashlib.sha256(host.read_bytes()).hexdigest()
+
+    def product_identity(path):
+        digest, _ = code_identity(path)
+        if digest != expected_host_digest:
+            raise module.terminal_host.Refusal(
+                78, "fixture signature unproven after code drift"
+            )
+        return module.terminal_host.CodeIdentity(digest[:40], module.TEAM_ID, False)
 
     monkeypatch.setattr(installer, "_signed_terminal_identity", code_identity)
+    monkeypatch.setattr(module.terminal_host, "static_code_identity", product_identity)
+    frame_resolver = module.resolve_frame
+    monkeypatch.setattr(
+        module,
+        "resolve_frame",
+        lambda **kwargs: frame_resolver(
+            search_path=str(frame.parent), runtime=kwargs.get("runtime")
+        ),
+    )
 
 
 def _write_test_source_provenance(
@@ -464,6 +509,10 @@ _RUNTIME_GENERATION_FIXTURE_SOURCES = {
     ),
 }
 
+for _resolver_asset in ("external_products.py", "terminal_host.py"):
+    _resolver_relative = Path("vibecrafted-core/vibecrafted_core") / _resolver_asset
+    _RUNTIME_GENERATION_FIXTURE_SOURCES[_resolver_relative] = _resolver_relative
+
 
 SYNTHETIC_FOUNDATIONS_INSTALLER_BODY = """#!/bin/sh
 # Synthetic test-only foundations installer (offline fixture).
@@ -513,6 +562,7 @@ def seed_runtime_pack(
         "vibecrafted-core/vibecrafted_core/vc_frame_staging.py",
         "vibecrafted-core/vibecrafted_core/runtime_paths.py",
         "vibecrafted-core/vibecrafted_core/terminal_host.py",
+        "vibecrafted-core/vibecrafted_core/external_products.py",
         "scripts/vc-terminal-product-entry.sh",
         "scripts/vc-frame-product-entry.sh",
         "scripts/lib/runtime-roots.sh",
@@ -592,6 +642,11 @@ def seed_runtime_pack(
         before_source_seal(payload)
     # Bind the distribution input before adding native donor payload.
     _write_test_source_provenance(payload)
+    if sys.platform == "darwin":
+        for name in ("vc-terminal", "vc-frame"):
+            target = payload / "bin" / name
+            shutil.copy2(REPO_ROOT / f"scripts/{name}-product-entry.sh", target)
+        return payload
     for relative in ("bin/vc-terminal", "libexec/vc-frame"):
         target = payload / relative
         target.parent.mkdir(parents=True, exist_ok=True)

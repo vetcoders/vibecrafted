@@ -45,6 +45,17 @@ except ImportError:  # Direct execution from a sealed runtime verifier snapshot.
     runtime_pack_contract = importlib.util.module_from_spec(_runtime_pack_spec)
     _runtime_pack_spec.loader.exec_module(runtime_pack_contract)
 
+try:
+    from . import external_products
+except ImportError:  # The installer also executes the captured verifier as a file.
+    _external_spec = importlib.util.spec_from_file_location(
+        "external_products", Path(__file__).with_name("external_products.py")
+    )
+    if _external_spec is None or _external_spec.loader is None:
+        raise
+    external_products = importlib.util.module_from_spec(_external_spec)
+    _external_spec.loader.exec_module(external_products)
+
 MODULE_SCHEMA = "io.vetcoders.vibecrafted.module.v1"
 ASSEMBLY_SCHEMA = "io.vetcoders.vibecrafted.module-assembly.v1"
 PRODUCT_SCHEMA = "io.vetcoders.vibecrafted.product.v2"
@@ -133,6 +144,8 @@ RUNTIME_GENERATION_REQUIRED_HASHES = frozenset(
         RUNTIME_GENERATION_CANONICAL_CONFIG,
         RUNTIME_GENERATION_ENTRYPOINT,
         "vibecrafted-core/vibecrafted_core/product_contract.py",
+        "vibecrafted-core/vibecrafted_core/external_products.py",
+        "vibecrafted-core/vibecrafted_core/terminal_host.py",
         "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py",
         "vibecrafted-core/vibecrafted_core/walkaround_runner.py",
         "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json",
@@ -2204,9 +2217,7 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_PROOF, "release policy rejects a dirty product receipt")
     architecture, minimum_macos = _validate_platform(payload, context="product")
     modules = _validate_product_modules(payload["modules"])
-    from .external_products import PRODUCTS
-
-    if payload["external_products"] != PRODUCTS:
+    if payload["external_products"] != external_products.PRODUCTS:
         _fail(E_SCHEMA, "external product identity/version/resolution policy differs")
     revisions = payload["source_revisions"]
     if not isinstance(revisions, dict) or set(revisions) != {
@@ -3624,7 +3635,7 @@ def _walkaround_scenario(app: Path, dmg: Path):
             ),
         }
 
-        frame = app / "Contents/Helpers/vc-frame"
+        frame = external_products.resolve_frame()
         session_socket = temporary / "s.sock"
         server = subprocess.run(
             [str(frame), "--server", str(session_socket)],
@@ -4195,7 +4206,7 @@ def _scenario_rollback(
 def _scenario_reattach(
     scenario: _WalkaroundScenario,
 ) -> Mapping[str, bytes | str]:
-    frame = scenario.app / "Contents/Helpers/vc-frame"
+    frame = external_products.resolve_frame()
     if _socket_owner_pid(scenario.session_socket, frame) != scenario.session_pid:
         raise RuntimeError("preserved session PID changed after update")
     connected = _connect_session_socket(scenario.session_socket)
@@ -4213,8 +4224,8 @@ def _scenario_one_outer_writer(
         or manifest["bundle_id"] != PRODUCT_BUNDLE_ID
     ):
         raise RuntimeError("outer product identity is not canonical")
-    if modules != ["vc-terminal", "vc-frame"]:
-        raise RuntimeError("module ownership tuple is not canonical")
+    if modules or set(manifest["external_products"]) != {"vc-terminal", "vc-frame"}:
+        raise RuntimeError("external product ownership tuple is not canonical")
     return {
         "single_app_builder": f"{manifest['product']}:{manifest['git_sha']}",
         "single_dmg_builder": f"{scenario.dmg.name}:{_sha256(scenario.dmg)}",
@@ -4737,11 +4748,10 @@ def _self_test() -> int:
         info = plistlib.loads(plist_path.read_bytes())
         info.pop("ATSApplicationFontsPath", None)
         plist_path.write_bytes(plistlib.dumps(info))
-        from .external_products import PRODUCTS
 
         product_manifest.update(
             modules=[],
-            external_products=PRODUCTS,
+            external_products=external_products.PRODUCTS,
             source_revisions={
                 "vibecrafted": "2" * 40,
                 "vc-terminal": "4" * 40,

@@ -3156,6 +3156,8 @@ PYTHON_ENTRYPOINT_LAUNCHERS = [
 
 RELEASE_CONTRACT_PACKAGE_ASSETS = (
     "product_contract.py",
+    "external_products.py",
+    "terminal_host.py",
     "runtime_pack_contract.py",
     "walkaround_runner.py",
     "schemas/unified_product.schema.v1.json",
@@ -3755,7 +3757,6 @@ _RUNTIME_VERIFIER_OBJECT_SCHEMA_DEFS = frozenset(
     {
         "assemblyReceipt",
         "fileEntry",
-        "launchContract",
         "moduleBinding",
         "moduleManifest",
         "outerBundleCode",
@@ -3778,52 +3779,46 @@ _RUNTIME_VERIFIER_OBJECT_SCHEMA_DEFS = frozenset(
 )
 _RUNTIME_VERIFIER_TYPED_OBJECT_SCHEMA_PATHS = frozenset(
     {
+        "$defs/assemblyReceipt",
         "$defs/fileEntry",
+        "$defs/moduleBinding",
         "$defs/moduleManifest",
         "$defs/moduleManifest/properties/entrypoints",
-        "$defs/signedFileTransformation",
-        "$defs/assemblyReceipt",
-        "$defs/moduleBinding",
         "$defs/outerBundleCode",
-        "$defs/launchContract",
-        "$defs/launchContract/properties/primary_shell",
-        "$defs/launchContract/properties/shell",
-        "$defs/launchContract/properties/environment",
-        "$defs/productManifest",
-        "$defs/productManifest/properties/modules/allOf/0/contains",
-        "$defs/productManifest/properties/modules/allOf/1/contains",
-        "$defs/productManifest/properties/entrypoints",
         "$defs/productIdentity",
-        "$defs/runtimeIdentity",
-        "$defs/releasePair",
-        "$defs/releaseAbsent",
-        "$defs/transactionReceipt",
+        "$defs/productManifest",
+        "$defs/productManifest/properties/entrypoints",
+        "$defs/productManifest/properties/source_revisions",
         "$defs/proofArtifact",
+        "$defs/releaseAbsent",
         "$defs/releaseModuleIdentity",
-        "$defs/releaseModuleIdentity/properties/manifest",
         "$defs/releaseModuleIdentity/properties/assembly_receipt",
+        "$defs/releaseModuleIdentity/properties/manifest",
         "$defs/releaseOutput",
-        "$defs/releaseOutput/properties/signature_policy",
-        "$defs/releaseOutput/properties/product",
-        "$defs/releaseOutput/properties/product/properties/manifest",
-        "$defs/releaseOutput/properties/outer_executable",
-        "$defs/releaseOutput/properties/outer_executable/properties/signer_policy",
         "$defs/releaseOutput/properties/code_resources",
         "$defs/releaseOutput/properties/dmg",
-        "$defs/releaseOutput/properties/runtime_pack",
-        "$defs/releaseOutput/properties/runtime_pack/properties/provenance",
-        "$defs/releaseOutput/properties/runtime_pack/properties/provenance/properties/source_revisions",
-        "$defs/releaseOutput/properties/modules",
-        "$defs/releaseOutput/properties/source_revisions",
         "$defs/releaseOutput/properties/notarization",
         "$defs/releaseOutput/properties/notarization/properties/app",
         "$defs/releaseOutput/properties/notarization/properties/dmg",
-        "$defs/runnerAssertionObservation",
+        "$defs/releaseOutput/properties/outer_executable",
+        "$defs/releaseOutput/properties/outer_executable/properties/signer_policy",
+        "$defs/releaseOutput/properties/product",
+        "$defs/releaseOutput/properties/product/properties/manifest",
+        "$defs/releaseOutput/properties/runtime_pack",
+        "$defs/releaseOutput/properties/runtime_pack/properties/provenance",
+        "$defs/releaseOutput/properties/runtime_pack/properties/provenance/properties/source_revisions",
+        "$defs/releaseOutput/properties/signature_policy",
+        "$defs/releaseOutput/properties/source_revisions",
+        "$defs/releasePair",
         "$defs/runnerArgvObservation",
-        "$defs/runnerSemanticObservation",
+        "$defs/runnerAssertionObservation",
         "$defs/runnerProbeObservations",
+        "$defs/runnerSemanticObservation",
         "$defs/runnerWalkaroundReceipt",
         "$defs/runnerWalkaroundReceipt/properties/observations",
+        "$defs/runtimeIdentity",
+        "$defs/signedFileTransformation",
+        "$defs/transactionReceipt",
     }
 )
 _RUNTIME_VERIFIER_UNTYPED_OBJECT_MATCHER_PATHS = frozenset(
@@ -9664,54 +9659,48 @@ def _signed_terminal_identity(path: Path) -> tuple[str, str]:
     return code, team
 
 
+def _external_products() -> Any:
+    """Load the stdlib-only external product owner from this physical runtime."""
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted-core/vibecrafted_core/external_products.py"
+    )
+    spec = importlib.util.spec_from_file_location("_installer_external_products", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeInstallRefusal(f"external product resolver missing: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _product_frame(generation: Path) -> Path:
+    if sys.platform != "darwin":
+        return generation / "libexec/vc-frame"
+    try:
+        return _external_products().resolve_frame(runtime=generation)
+    except RuntimeError as exc:
+        raise RuntimeInstallRefusal(str(exc)) from exc
+
+
 def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
     """Admit a matching fixed signed host before publishing a usable GUI entry."""
     if sys.platform == "darwin":
-        standalone = _standalone_terminal_host()
-        if _is_standalone_bundle_terminal_host(standalone):
-            _, host_team = _signed_terminal_identity(standalone)
-            _, bundle_team = _signed_terminal_identity(standalone.parents[2])
-            if bundle_team != host_team:
-                raise RuntimeInstallRefusal(
-                    "pending paired notarized app handoff: main app and terminal signing owners differ"
-                )
-            return standalone
-        host = _FIXED_TERMINAL_HOST
-        if not _is_product_bundle_terminal_host(host):
-            raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app host missing or malformed; no prior runtime was touched. "
-                "Install the matching notarized Vibecrafted.app first (open the DMG from https://vibecrafted.io and drag Vibecrafted to /Applications), "
-                "or rerun `curl -fsSL https://vibecrafted.io/install.sh | bash` — the bootstrap installs the paired App from the channel DMG before the Runtime Pack"
-            )
-        candidate = generation / "libexec/vc-terminal"
-        if not candidate.exists():
-            # Older admitted carriers put the native host at bin/vc-terminal;
-            # publication moves these exact bytes to libexec before launchers.
-            candidate = generation / "bin/vc-terminal"
-        if not _is_native_executable(candidate) or candidate.is_symlink():
-            raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: candidate terminal native bytes missing"
-            )
-        if _signed_terminal_identity(host) != _signed_terminal_identity(candidate):
-            raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: fixed /Applications/Vibecrafted.app differs from this Runtime Pack's signed terminal; no prior runtime was touched. "
-                "Install the matching notarized Vibecrafted.app from the channel DMG first — rerun `curl -fsSL https://vibecrafted.io/install.sh | bash`, "
-                "which installs the paired App before the Runtime Pack"
-            )
-        if (
-            _signed_terminal_identity(host.parents[2])[1]
-            != _signed_terminal_identity(host)[1]
-        ):
-            raise RuntimeInstallRefusal(
-                "pending paired notarized app handoff: main app and terminal signing owners differ"
-            )
-        return host
+        try:
+            return _external_products().resolve_terminal()
+        except RuntimeError as exc:
+            raise RuntimeInstallRefusal(str(exc)) from exc
     return generation / "libexec" / "vc-terminal"
 
 
 def _runtime_terminal_launcher_environment(
     *, generation: Path, app_root: Path | None
 ) -> dict[str, str] | None:
+    if sys.platform == "darwin":
+        # Installation reports prerequisites, while launch admission verifies
+        # the then-current independent product. No binary hash pairing remains.
+        return {
+            "VIBECRAFTED_TERMINAL_HOST": _external_products().terminal_host.STANDALONE_HOST
+        }
     host = _product_terminal_host(generation=generation, app_root=app_root)
     if host == generation / "libexec" / "vc-terminal":
         return None
@@ -9737,6 +9726,12 @@ def _materialize_runtime_generation_vc_terminal_entry(
     source = runtime_root / "scripts" / "vc-terminal-product-entry.sh"
     bin_term = runtime_root / "bin" / "vc-terminal"
     libexec = runtime_root / "libexec" / "vc-terminal"
+    if sys.platform == "darwin" and (
+        libexec.exists() or _is_native_executable(bin_term)
+    ):
+        raise OSError(
+            "external vc-terminal must not be staged in a Darwin Runtime Pack"
+        )
     libexec.parent.mkdir(parents=True, exist_ok=True)
     if bin_term.is_file() and _is_native_executable(bin_term):
         if libexec.exists() and _is_native_executable(libexec):
@@ -9746,7 +9741,7 @@ def _materialize_runtime_generation_vc_terminal_entry(
             libexec.chmod(0o755)
     has_native_host = libexec.is_file() and _is_native_executable(libexec)
     if not has_native_host:
-        if require_native_host:
+        if require_native_host and sys.platform != "darwin":
             raise OSError(
                 f"candidate runtime has no native vc-terminal host: {libexec}. "
                 "A source checkout is not a Runtime Pack; install a verified "
@@ -9994,7 +9989,7 @@ def _validate_runtime_verifier_ast(
 
 
 def _validate_runtime_verifier_schema(raw: bytes) -> None:
-    """Require the captured W0 schema's closed, canonical product-contract shape."""
+    """Require the captured schema's closed, canonical v2 product-contract shape."""
     try:
         schema = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -10042,18 +10037,7 @@ def _validate_runtime_verifier_schema(raw: bytes) -> None:
     if object_definitions != _RUNTIME_VERIFIER_OBJECT_SCHEMA_DEFS:
         raise OSError("candidate unified-product schema object inventory drifted")
 
-    partial_object_matchers = {
-        (
-            "$defs",
-            "productManifest",
-            "properties",
-            "modules",
-            "allOf",
-            str(index),
-            "contains",
-        )
-        for index in range(2)
-    }
+    partial_object_matchers: set[tuple[str, ...]] = set()
     observed_partial_matchers: set[tuple[str, ...]] = set()
     observed_typed_object_paths: set[str] = set()
     observed_untyped_object_matcher_paths: set[str] = set()
@@ -19175,7 +19159,13 @@ def _runtime_launcher_body(
         f"export VIBECRAFTED_ROOT={shlex_quote(str(generation))}",
         f"export VIBECRAFTED_PYTHON={shlex_quote(str(generation / 'bin/python3'))}",
         f"export VIBECRAFTED_RUNTIME_BIN={shlex_quote(str(generation / 'bin'))}",
-        f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}",
+        *(
+            []
+            if sys.platform == "darwin"
+            else [
+                f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}"
+            ]
+        ),
         f"export VC_FRAME_CONFIG_DIR={shlex_quote(str(frame_config))}",
     ]
     for name, value in sorted((environment or {}).items()):
@@ -23827,7 +23817,9 @@ def _runtime_rescue_verify_destination(
             if not path.is_dir() or path.is_symlink():
                 errors.append(f"owned directory is missing or not a directory: {path}")
         expected_names = set(_RUNTIME_WRAPPER_VERBS)
-        expected_names.update({"vc-terminal", SECURE_WALKAROUND_LAUNCHER})
+        expected_names.add(SECURE_WALKAROUND_LAUNCHER)
+        if sys.platform != "darwin":
+            expected_names.add("vc-terminal")
         bin_dir = generation / "bin"
         if bin_dir.is_dir():
             expected_names.update(_runtime_published_launcher_names(bin_dir))
@@ -25703,6 +25695,8 @@ def _runtime_launcher_public_name(name: str) -> str | None:
             base = base[: -len(suffix)]
             lowered = base.lower()
             break
+    if sys.platform == "darwin" and lowered in {"vc-terminal", "vc-frame"}:
+        return None
     if (
         lowered.startswith(_RUNTIME_NAMESPACE_PREFIXES)
         or lowered in _RUNTIME_NAMESPACE_NAMES
@@ -25713,10 +25707,9 @@ def _runtime_launcher_public_name(name: str) -> str | None:
 
 def _runtime_published_launcher_names(bin_dir: Path) -> set[str]:
     """Launcher names the current install publishes into the launcher home."""
-    names = {
-        launcher_name("vc-terminal"),
-        *(launcher_name(name) for name in _RUNTIME_WRAPPER_VERBS),
-    }
+    names = {launcher_name(name) for name in _RUNTIME_WRAPPER_VERBS}
+    if sys.platform != "darwin":
+        names.add(launcher_name("vc-terminal"))
     names.add(launcher_name(SECURE_WALKAROUND_LAUNCHER))
     for entry in bin_dir.iterdir():
         if not entry.is_file():
@@ -26293,21 +26286,32 @@ def _runtime_install_result(
     generation: Path,
     app_root: Path | None,
     paths: Mapping[str, Path],
+    require_products: bool = True,
 ) -> dict[str, Any]:
     product_config = paths["product_config"]
+    states = _external_products().product_status() if sys.platform == "darwin" else {}
+    terminal_host = (
+        _product_terminal_host(generation=generation, app_root=app_root)
+        if require_products or sys.platform != "darwin"
+        else Path(_external_products().terminal_host.STANDALONE_HOST)
+    )
+    frame = (
+        str(_product_frame(generation))
+        if require_products or sys.platform != "darwin"
+        else states.get("vc-frame", {}).get("path", "")
+    )
     result = {
         "schema": "vibecrafted.runtime-install-result.v1",
+        "external_products": states,
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
-        "terminal_host": str(
-            _product_terminal_host(generation=generation, app_root=app_root)
-        ),
+        "terminal_host": str(terminal_host),
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
         # product entry. Point it at the native provider, never back at the
         # wrapper itself, or the first `vc-frame ls` recursively execs the
         # wrapper forever.
-        "frame": str(generation / "libexec/vc-frame"),
+        "frame": frame,
         "start": str(generation / "bin/vc-start"),
         "primary_shell": str(
             product_config / "vc-terminal" / "launch-primary-shell.zsh"
@@ -26456,12 +26460,18 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                 "bin/vc-server-supervisor",
             )
             for relative in required_executables:
+                if sys.platform == "darwin" and relative.startswith("libexec/"):
+                    continue
                 path = generation / relative
                 if not path.is_file() or not os.access(path, os.X_OK):
                     raise RuntimeError(
                         f"selected generation entry is unusable: {relative}"
                     )
-            for relative in ("libexec/vc-terminal", "libexec/vc-frame"):
+            for relative in (
+                ()
+                if sys.platform == "darwin"
+                else ("libexec/vc-terminal", "libexec/vc-frame")
+            ):
                 if not _is_native_executable(generation / relative):
                     raise RuntimeError(f"selected native host is unusable: {relative}")
             if not (generation / "scripts/vetcoders_install.py").is_file():
@@ -26525,8 +26535,14 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
             required_owned = (
                 active_path,
                 paths["launcher_home"] / "vibecrafted",
-                paths["launcher_home"] / "vc-terminal",
-                paths["launcher_home"] / "vc-frame",
+                *(
+                    []
+                    if sys.platform == "darwin"
+                    else [
+                        paths["launcher_home"] / "vc-terminal",
+                        paths["launcher_home"] / "vc-frame",
+                    ]
+                ),
                 product / "vc-terminal/vc-terminal.toml",
                 product / "vc-terminal/launch-primary-shell.zsh",
             )
@@ -26545,7 +26561,11 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                         f"required product entry is not executable: {path.name}"
                     )
             resolve_app_root = _receipt_app_root(receipt)
-            for name in ("vibecrafted", "vc-terminal", "vc-frame"):
+            for name in (
+                ("vibecrafted",)
+                if sys.platform == "darwin"
+                else ("vibecrafted", "vc-terminal", "vc-frame")
+            ):
                 expected = _runtime_launcher_body(
                     generation=generation,
                     config_home=paths["config_home"],
@@ -28183,13 +28203,16 @@ def _runtime_pack_required_paths(generation: Path, terminal_host: Path) -> list[
         generation / "bin/vibecrafted",
         generation / "bin/vibecrafted-mcp",
         generation / "bin/vc-frame",
-        generation / "libexec/vc-frame",
         generation / "bin/vc-server",
         generation / "bin/vc-server-supervisor",
         generation / "bin/vc-start",
         generation / "bin/vc-workflow",
         generation / "bin/vc-terminal",
-        terminal_host,
+        *(
+            []
+            if sys.platform == "darwin"
+            else [terminal_host, generation / "libexec/vc-frame"]
+        ),
         generation / "config/alacritty/launch-primary-shell.zsh",
         skills,
     ]
@@ -28343,7 +28366,12 @@ def _install_runtime_pack(
 
     # Admission precedes rescue/config staging, selector publication and service
     # activation. A pack-only upgrade may require a Founder-gated matching app.
-    _product_terminal_host(generation=payload_root, app_root=app_root)
+    if sys.platform == "darwin":
+        for name, state in _external_products().product_status().items():
+            message = state.get("path") or state.get("message", "")
+            print(f"{name}: {state['status']}: {message}", file=sys.stderr)
+    else:
+        _product_terminal_host(generation=payload_root, app_root=app_root)
 
     paths = _runtime_install_paths(getattr(args, "runtime_home", None))
     runtime_home = paths["runtime_home"]
@@ -28798,7 +28826,9 @@ def _install_runtime_pack(
             generation=generation, app_root=app_root
         ),
     )
-    if _runtime_payload_present(generation_terminal_entry) or sys.platform != "win32":
+    if sys.platform != "darwin" and (
+        _runtime_payload_present(generation_terminal_entry) or sys.platform != "win32"
+    ):
         stage_launcher(terminal_launcher, terminal_body)
 
     deck = _runtime_bin_file(generation, "vibecrafted")
@@ -28927,6 +28957,7 @@ def _install_runtime_pack(
         generation=generation,
         app_root=app_root,
         paths=paths,
+        require_products=False,
     )
     result["foundation_service_actions"] = foundation_service_actions
     result["tools_current"] = str(current_link)

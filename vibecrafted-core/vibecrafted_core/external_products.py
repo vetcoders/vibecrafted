@@ -12,14 +12,16 @@ import sys
 from pathlib import Path
 
 # This file is also called by the bootstrap installer before package deps exist.
-_spec = importlib.util.spec_from_file_location(
-    "_external_terminal_host", Path(__file__).with_name("terminal_host.py")
-)
-if _spec is None or _spec.loader is None:
-    raise ImportError("cannot load terminal admission owner")
-terminal_host = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = terminal_host
-_spec.loader.exec_module(terminal_host)
+terminal_host = None
+if sys.platform != "win32":
+    _spec = importlib.util.spec_from_file_location(
+        "_external_terminal_host", Path(__file__).with_name("terminal_host.py")
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError("cannot load terminal admission owner")
+    terminal_host = importlib.util.module_from_spec(_spec)
+    sys.modules[_spec.name] = terminal_host
+    _spec.loader.exec_module(terminal_host)
 
 TEAM_ID = "MW223P3NPX"
 FRAME_MIN = (4, 5, 1)
@@ -49,6 +51,8 @@ class ProductUnavailable(RuntimeError):
 
 
 def resolve_terminal() -> Path:
+    if terminal_host is None:
+        raise ProductUnavailable(f"vc-terminal.app requires macOS. {TERMINAL_HINT}")
     path = Path(terminal_host.STANDALONE_HOST)
     try:
         for node in (path, *path.parents[:4]):
@@ -81,15 +85,19 @@ def resolve_frame(
         candidate = Path(directory) / "vc-frame"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        physical = candidate.resolve()
-        if physical.is_relative_to(runtime):
-            continue
-        # Ignore launchers from older owned runtime generations, never follow
-        # them back into a stale bundled engine or recurse into this resolver.
-        with physical.open("rb") as stream:
-            prefix = stream.read(4096)
+        try:
+            physical = candidate.resolve()
+            if physical.is_relative_to(runtime):
+                continue
+            # Ignore old runtime launchers to prevent recursion or stale engines.
+            with physical.open("rb") as stream:
+                prefix = stream.read(4096)
+        except (OSError, RuntimeError) as exc:
+            raise ProductUnavailable(
+                f"cannot inspect vc-frame at {candidate}: {exc}. {FRAME_HINT}"
+            ) from exc
         if (
-            b"VIBECRAFTED_RUNTIME_ROOT=" in prefix
+            re.search(rb"(?m)^(?:export )?VIBECRAFTED_RUNTIME_ROOT=", prefix)
             or b"vc-frame-product-entry.sh" in prefix
         ):
             continue
