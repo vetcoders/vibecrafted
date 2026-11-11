@@ -731,8 +731,8 @@ sign_helper_scripts() {
     if is_macho_file "$helper"; then
       continue
     fi
-    codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
-      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$helper" \
+    codesign --force "$(macho_runtime_option)" "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
+      ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} "$helper" \
       || die "could not sign helper ${helper#"$APP"/}"
   done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
 }
@@ -1153,8 +1153,8 @@ build_product() {
     --vibecrafted-sha "$ROOT_SHA" \
     --terminal-sha "$TERMINAL_SHA" \
     --frame-sha "$FRAME_SHA"
-  codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" --entitlements "$host_entitlements" "$APP"
+  codesign --force "$(macho_runtime_option)" "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
+    ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} --entitlements "$host_entitlements" "$APP"
   log "Probing the signed bundled Python without mutating the app seal"
   "$runtime/bin/python3" -c 'import jsonschema, yaml, vibecrafted_core.product_contract'
   if find "$APP/Contents" \( -type d -name __pycache__ -o -type f -name '*.py[co]' \) \
@@ -1162,10 +1162,18 @@ build_product() {
     die "bundled Python mutated the signed application payload"
   fi
   codesign --verify --deep --strict --verbose=2 "$APP"
-  PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
-    "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
-    --app "$APP" --verify-only --verify-signatures \
-    > "$BUILD_DIR/host-permissions-receipt.json"
+  if (( ADHOC_BUILD )); then
+    # Developer integrity/metadata proof excludes the production hardened-runtime
+    # attestation. Team-less ad-hoc binaries must load their own private dylibs.
+    PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+      "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+      --app "$APP" --verify-only > "$BUILD_DIR/host-permissions-receipt.json"
+  else
+    PYTHONPATH="$SOURCE_ROOT/vibecrafted-core" "$SOURCE_ROOT/scripts/project-python" \
+      "$SOURCE_ROOT/scripts/unified_product_manifest.py" host-permissions \
+      --app "$APP" --verify-only --verify-signatures \
+      > "$BUILD_DIR/host-permissions-receipt.json"
+  fi
   verify_update_channel
   run_bundled_verifier app "$APP" --require-clean
 }
@@ -1179,7 +1187,7 @@ create_dmg() {
   ln -s /Applications "$staging/Applications"
   hdiutil create -volname Vibecrafted -srcfolder "$staging" -ov -format UDZO "$DMG"
   codesign --force "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
-    "${CODESIGN_KEYCHAIN_ARGS[@]}" "$DMG"
+    ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} "$DMG"
 }
 
 notarize_product() {

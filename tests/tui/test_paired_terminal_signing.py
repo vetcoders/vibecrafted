@@ -58,8 +58,8 @@ def _signed_pair(tmp_path):
     native = private_native_copy(
         Path("/bin/echo"), tmp_path / "native", ("native-smoke",)
     )
-    # All actual signatures are ad-hoc. Only timestamps are disabled: tests
-    # neither contact Apple's timestamp service nor touch signing credentials.
+    # Ad-hoc developer signatures carry no hardened library validation or
+    # timestamp. Production identity policy is checked separately below.
     tools = tmp_path / "tools"
     tools.mkdir()
     signer = tools / "codesign"
@@ -364,3 +364,63 @@ verify_macho_tree "$2" 1
     assert _permissions(executable) == contract.HOST_ENTITLEMENTS
     assert _permissions(bundle) == contract.HOST_ENTITLEMENTS
     assert _identity(executable)[1] == "io.vetcoders.fixture-helper"
+
+
+def test_ad_hoc_signing_loads_its_private_dylib(tmp_path):
+    """A static seal alone misses the Team-less hardened-runtime dyld refusal."""
+    root = tmp_path / "payload"
+    binary = root / "bin/probe"
+    library = root / "lib/libprobe.dylib"
+    binary.parent.mkdir(parents=True)
+    library.parent.mkdir(parents=True)
+    lib_source = tmp_path / "probe.c"
+    lib_source.write_text("int probe(void) { return 17; }\n")
+    main_source = tmp_path / "main.c"
+    main_source.write_text(
+        "int probe(void); int main(void) { return probe() == 17 ? 0 : 1; }\n"
+    )
+    _run(
+        [
+            "/usr/bin/clang",
+            "-dynamiclib",
+            str(lib_source),
+            "-o",
+            str(library),
+            "-Wl,-install_name,@rpath/libprobe.dylib",
+        ]
+    )
+    _run(
+        [
+            "/usr/bin/clang",
+            str(main_source),
+            "-L" + str(library.parent),
+            "-lprobe",
+            "-Wl,-rpath,@executable_path/../lib",
+            "-o",
+            str(binary),
+        ]
+    )
+    _run(
+        [
+            "/bin/bash",
+            "-c",
+            '. "$1"; SIGNING_IDENTITY=-; sign_macho_tree "$2"; verify_macho_tree "$2" 1',
+            "fixture",
+            str(ROOT / "scripts/lib/macho-signing.sh"),
+            str(root),
+        ]
+    )
+    _run([str(binary)])
+    identity = _run(["/usr/bin/codesign", "-d", "--verbose=4", str(binary)]).stderr
+    assert "Signature=adhoc" in identity
+    assert "runtime)" not in identity
+    production = _run(
+        [
+            "/bin/bash",
+            "-c",
+            '. "$1"; SIGNING_IDENTITY=release-fixture; macho_runtime_option',
+            "fixture",
+            str(ROOT / "scripts/lib/macho-signing.sh"),
+        ]
+    )
+    assert production.stdout.strip() == "--options=runtime"

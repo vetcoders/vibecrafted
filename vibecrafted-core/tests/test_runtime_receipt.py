@@ -28,6 +28,8 @@ _RUNTIME_FILE_BYTES = {
     pc.RUNTIME_GENERATION_CANONICAL_CONFIG: b"layout {}\n",
     pc.RUNTIME_GENERATION_ENTRYPOINT: b"#!/usr/bin/env bash\n",
     "vibecrafted-core/vibecrafted_core/product_contract.py": b"contract = True\n",
+    "vibecrafted-core/vibecrafted_core/external_products.py": b"products = True\n",
+    "vibecrafted-core/vibecrafted_core/terminal_host.py": b"admission = True\n",
     "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py": b"pack = True\n",
     "vibecrafted-core/vibecrafted_core/walkaround_runner.py": b"runner = True\n",
     "vibecrafted-core/vibecrafted_core/schemas/unified_product.schema.v1.json": (
@@ -283,7 +285,7 @@ def test_vibecrafted_receipt_uses_checkout_free_runtime_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
     generation, deck, manifest = _runtime_generation_fixture(tmp_path)
-    assert len(manifest["hashes"]) == 13
+    assert len(manifest["hashes"]) == 15
     assert (
         pc.verify_installed_runtime_generation(generation, expected_entrypoint=deck)
         == manifest

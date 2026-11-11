@@ -200,7 +200,7 @@ sign_macho_tree "$2/Contents" "$2/Contents/MacOS/Vibecrafted" "$2/Contents/MacOS
     unrelated = next(line for line in calls if line.endswith("/unrelated-tool"))
     assert f"--entitlements {output}" in terminal
     assert "--entitlements" not in unrelated
-    assert all("--options runtime" in line for line in calls)
+    assert all("--options=runtime" in line for line in calls)
 
 
 @pytest.mark.parametrize(

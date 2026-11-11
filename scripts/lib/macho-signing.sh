@@ -13,6 +13,17 @@ macho_timestamp_option() {
   fi
 }
 
+# Ad-hoc developer code has no Team ID, so hardened library validation cannot
+# admit its private Python dylib. Release identities retain hardened runtime.
+macho_runtime_option() {
+  if [[ "${SIGNING_IDENTITY:-}" == "-" ]]; then
+    printf '%s\n' '--options=0'
+  else
+    printf '%s\n' '--options=runtime'
+  fi
+}
+
+
 macho_signing_die() {
   printf 'Mach-O signing failed: %s\n' "$*" >&2
   return 1
@@ -242,7 +253,7 @@ sign_macho_app_bundles() {
     # Sealing re-signs the bundle's main executable. Keep the
     # exact entitlements assigned by the preceding controlled tree walk. Bundle
     # identifiers still come from their canonical Info.plist, as before.
-    codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
+    codesign --force "$(macho_runtime_option)" "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
       --preserve-metadata=entitlements \
       ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} "$bundle" \
       || macho_signing_die "could not seal bundle ${bundle#"$root"/}" || return 1
@@ -292,7 +303,7 @@ sign_macho_tree() {
             --entitlements "$permission_entitlements")
         fi
       done
-      codesign --force --options runtime "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
+      codesign --force "$(macho_runtime_option)" "$(macho_timestamp_option)" --sign "$SIGNING_IDENTITY" \
         ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
         ${entitlement_args[@]+"${entitlement_args[@]}"} "$candidate" \
         || macho_signing_die "could not sign ${candidate#"$root"/}" || return 1
