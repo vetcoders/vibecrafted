@@ -393,12 +393,10 @@ def test_swift_bootstrap_passes_existing_main_app_helper_argv(tmp_path: Path) ->
         timeout=15,
     )
     argv = json.loads(result.stdout)
-    terminal = Path(argv[argv.index("--terminal-host") + 1])
-    frame = Path(argv[argv.index("--frame-helper") + 1])
-    assert terminal == app / "Contents/MacOS/vc-terminal"
-    assert frame == app / "Contents/Helpers/vc-frame"
-    assert terminal.is_file() and os.access(terminal, os.X_OK)
-    assert frame.is_file() and os.access(frame, os.X_OK)
+    assert "--terminal-host" not in argv
+    assert "--frame-helper" not in argv
+    assert argv[argv.index("--expected-terminal-revision") + 1] == "terminal"
+    assert argv[argv.index("--expected-frame-revision") + 1] == "frame"
     assert argv[argv.index("--app-root") + 1] == str(app)
 
 
@@ -731,9 +729,6 @@ def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
         frame_wrapper = payload / "bin/vc-frame"
         frame_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
         frame_wrapper.chmod(0o755)
-        native_frame = payload / "libexec/vc-frame"
-        native_frame.parent.mkdir(parents=True)
-        shutil.copy2(macho_executable, native_frame)
         terminal_wrapper = payload / "bin/vc-terminal"
         terminal_wrapper.write_text(
             (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
@@ -742,8 +737,12 @@ def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
             encoding="utf-8",
         )
         terminal_wrapper.chmod(0o755)
-        native_terminal = payload / "libexec/vc-terminal"
-        shutil.copy2(macho_executable, native_terminal)
+        for helper_name in ("external_products.py", "terminal_host.py"):
+            target = payload / "vibecrafted-core/vibecrafted_core" / helper_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(
+                REPO_ROOT / "vibecrafted-core/vibecrafted_core" / helper_name, target
+            )
         frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
         (frame_config / "layouts").mkdir(parents=True)
         (frame_config / "themes").mkdir()
@@ -837,194 +836,46 @@ def _terminal_bundle_fixture(
 
 
 def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
-    terminal_relative = "Contents/MacOS/vc-terminal"
-    for relative in (
-        "Contents/MacOS/Vibecrafted",
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        (app / relative).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(macho_executable, app / relative)
-    for relative in (
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        _codesign_macho(app / relative)
-    primary_shell = app / contract._LAUNCH_PRIMARY_SHELL
-    primary_shell.parent.mkdir(parents=True, exist_ok=True)
-    primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
-    primary_shell.chmod(0o755)
-    terminal_files = [_entry(app, terminal_relative, kind="executable")]
-    for name in (
-        "SourceCodePro[wght].ttf",
-        "SourceCodePro-Italic[wght].ttf",
-        "OFL.txt",
-    ):
-        relative = f"Contents/Resources/fonts/{name}"
-        resource = app / relative
-        resource.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO_ROOT / "assets/fonts/source-code-pro" / name, resource)
-        terminal_files.append(_entry(app, relative, kind="resource"))
-    terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
-    terminal_config.parent.mkdir(parents=True, exist_ok=True)
-    terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
+    from argparse import Namespace
+
+    for relative in ("Contents/MacOS/Vibecrafted", contract._LAUNCH_SHELL):
+        target = app / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(macho_executable, target)
+    _codesign_macho(app / contract._LAUNCH_SHELL)
+    for relative in (contract._LAUNCH_TERMINAL, contract._LAUNCH_PRIMARY_SHELL):
+        _write_executable(app / relative)
+    config = app / contract._LAUNCH_CONFIG
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[terminal]\n")
     icon = app / "Contents/Resources" / contract.PRODUCT_ICON_FILE
-    icon.parent.mkdir(parents=True, exist_ok=True)
     icon.write_bytes(b"icns-fixture")
     plist = app / "Contents/Info.plist"
-    plist.parent.mkdir(parents=True, exist_ok=True)
-    with plist.open("wb") as handle:
-        plistlib.dump(
+    plist.write_bytes(
+        plistlib.dumps(
             {
                 "CFBundleIdentifier": contract.PRODUCT_BUNDLE_ID,
                 "CFBundleExecutable": contract.PRODUCT_EXECUTABLE,
                 "CFBundleIconFile": contract.PRODUCT_ICON_FILE,
-                "CFBundleShortVersionString": "1.0.0",
-                "CFBundleVersion": "1",
-                "ATSApplicationFontsPath": "fonts",
                 "NSMicrophoneUsageDescription": "Voice input when requested.",
                 "NSSpeechRecognitionUsageDescription": "Transcribe speech when requested.",
-            },
-            handle,
+            }
         )
-    terminal_product_entry = next(
-        entry for entry in terminal_files if entry["path"] == terminal_relative
     )
-    frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
-
-    def add_module_binding(
-        *,
-        module: str,
-        git_sha: str,
-        entrypoint_name: str,
-        product_entry: dict[str, Any],
-    ) -> dict[str, Any]:
-        module_path = f"bin/{module}"
-        module_entry = _entry_from_path(
-            macho_executable,
-            module_path,
-            kind=str(product_entry["kind"]),
+    _runtime_pack_fixture(app, macho_executable)
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
         )
-        receipt = {
-            "schema": contract.MODULE_SCHEMA,
-            "module": module,
-            "version": "1.0.0",
-            "git_sha": git_sha,
-            "dirty": False,
-            "architecture": "arm64",
-            "minimum_macos": "14.0",
-            "files": [module_entry],
-            "entrypoints": {entrypoint_name: module_path},
-        }
-        relative = f"Contents/Resources/module-receipts/{module}/module-manifest.json"
-        _write_json(app / relative, receipt)
-        receipt_hash = _sha256(app / relative)
-        assembly = {
-            "schema": contract.ASSEMBLY_SCHEMA,
-            "module": module,
-            "module_manifest_sha256": receipt_hash,
-            "files": [
-                {
-                    "module_path": module_path,
-                    "product_path": product_entry["path"],
-                    "unsigned_sha256": module_entry["sha256"],
-                    "product_sha256": product_entry["sha256"],
-                    "transformation": "codesign",
-                }
-            ],
-        }
-        assembly_relative = (
-            f"Contents/Resources/module-receipts/{module}/assembly-receipt.json"
-        )
-        _write_json(app / assembly_relative, assembly)
-        return {
-            "module": module,
-            "manifest_path": relative,
-            "manifest_sha256": receipt_hash,
-            "assembly_receipt_path": assembly_relative,
-            "assembly_receipt_sha256": _sha256(app / assembly_relative),
-            "git_sha": git_sha,
-        }
-
-    terminal_binding = add_module_binding(
-        module="vc-terminal",
-        git_sha="4" * 40,
-        entrypoint_name="terminal",
-        product_entry=terminal_product_entry,
     )
-    frame_binding = add_module_binding(
-        module="vc-frame",
-        git_sha="6" * 40,
-        entrypoint_name="frame",
-        product_entry=frame_product_entry,
+    manifest = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text()
     )
-    runtime_pack_name = _runtime_pack_fixture(app, macho_executable)
-    manifest = {
-        "schema": contract.PRODUCT_SCHEMA,
-        "product": contract.PRODUCT_NAME,
-        "bundle_id": contract.PRODUCT_BUNDLE_ID,
-        "bundle_executable": contract.PRODUCT_EXECUTABLE,
-        "version": "1.0.0",
-        "build": "1",
-        "git_sha": "2" * 40,
-        "dirty": False,
-        "architecture": "arm64",
-        "minimum_macos": "14.0",
-        "modules": [terminal_binding, frame_binding],
-        "outer_bundle_code": {
-            "identity": contract.OUTER_BUNDLE_CODE_IDENTITY,
-            "path": "Contents/MacOS/Vibecrafted",
-            "mode": "0755",
-            "kind": "executable",
-            "architecture": "arm64",
-            "minimum_macos": "14.0",
-            "dylibs": _macho_dependencies(app / "Contents/MacOS/Vibecrafted"),
-            "code_identity": contract.MACHO_CODE_IDENTITY,
-            "code_sha256": contract._macho_code_sha256(
-                app / "Contents/MacOS/Vibecrafted"
-            ),
-            "info_plist_sha256": _sha256(plist),
-            "codesign_identifier": contract.PRODUCT_BUNDLE_ID,
-        },
-        "files": [
-            _entry(app, "Contents/Info.plist", kind="config"),
-            _entry(
-                app,
-                f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
-                kind="resource",
-            ),
-            *terminal_files,
-            frame_product_entry,
-            _entry(app, terminal_binding["manifest_path"], kind="config"),
-            _entry(app, frame_binding["manifest_path"], kind="config"),
-            _entry(app, terminal_binding["assembly_receipt_path"], kind="config"),
-            _entry(app, frame_binding["assembly_receipt_path"], kind="config"),
-            _entry(
-                app,
-                "Contents/Resources/terminal/vibecrafted.toml",
-                kind="config",
-            ),
-            _entry(
-                app,
-                "Contents/Resources/runtime/bin/vc-start",
-                kind="executable",
-            ),
-            _entry(app, contract._LAUNCH_PRIMARY_SHELL, kind="resource"),
-            _entry(
-                app,
-                f"Contents/Resources/runtime-pack/{runtime_pack_name}",
-                kind="resource",
-            ),
-        ],
-        "entrypoints": {
-            "app": "Contents/MacOS/Vibecrafted",
-            "terminal": terminal_relative,
-            "frame": "Contents/Helpers/vc-frame",
-        },
-        "launch_contract": copy.deepcopy(contract._canonical_launch_contract()),
-    }
     _write_app_manifest(app, manifest, sign=True)
     return manifest
 
@@ -1248,8 +1099,8 @@ def _release_output_fixture(
                 "architecture": "arm64",
                 "source_revisions": {
                     "vibecrafted": product["git_sha"],
-                    "vc-terminal": modules["vc-terminal"]["git_sha"],
-                    "vc-frame": modules["vc-frame"]["git_sha"],
+                    "vc-terminal": product["source_revisions"]["vc-terminal"],
+                    "vc-frame": product["source_revisions"]["vc-frame"],
                 },
             },
         },
@@ -1269,8 +1120,8 @@ def _release_output_fixture(
         },
         "source_revisions": {
             "vibecrafted": product["git_sha"],
-            "vc-terminal": modules["vc-terminal"]["git_sha"],
-            "vc-frame": modules["vc-frame"]["git_sha"],
+            "vc-terminal": product["source_revisions"]["vc-terminal"],
+            "vc-frame": product["source_revisions"]["vc-frame"],
         },
         "notarization": {
             "app": {"ticket": True, "gatekeeper": True},
@@ -1506,7 +1357,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         ) : delegate.index("func applicationSupportsSecureRestorableState")
     ]
     assert "    false\n" in termination_handler
-    assert "Contents/MacOS/vc-terminal" in delegate
+    assert "Contents/MacOS/vc-terminal" not in delegate
+    assert (
+        'environment["VIBECRAFTED_TERMINAL_HOST"] = install.terminalHost.path'
+        in delegate
+    )
     # A normal launch first asks the installer-owned read-only resolver which
     # generation is current. Only a truly absent runtime may bootstrap the
     # bundled carrier; an unusable one must be refused rather than overwritten.
@@ -1554,8 +1409,8 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     )
     assert 'arguments: ["--uninstall"]' in delegate
     assert '"--payload-root", runtime.path' not in delegate
-    assert '"--terminal-host", terminalHost.path' in delegate
-    assert '"--frame-helper", frameHelper.path' in delegate
+    assert '"--terminal-host", terminalHost.path' not in delegate
+    assert '"--frame-helper", frameHelper.path' not in delegate
     assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
     native_runner = (
         REPO_ROOT
@@ -2806,7 +2661,6 @@ def test_launch_environment_is_the_users_environment_with_pins_overlaid(
         "GITHUB_TOKEN": "user-owned-flows-through",
         "VIBECRAFTED_RUNTIME_HOME": str(runtime_home),
         "VIBECRAFTED_APP_ROOT": str(resolved),
-        "VIBECRAFTED_VC_FRAME_BIN": str(resolved / "Contents/Helpers/vc-frame"),
     }
 
 
@@ -2995,78 +2849,32 @@ def test_macho_code_digest_fails_closed_on_invalid_container_shapes(
     _assert_error(expected_code, lambda: contract._macho_code_sha256(candidate))
 
 
-def test_app_rejects_byte_identical_macho_identity_transformation(
+def test_app_rejects_reintroduced_embedded_module_identity(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    binding = manifest["modules"][0]
-    receipt_path = app / binding["manifest_path"]
-    assembly_path = app / binding["assembly_receipt_path"]
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assembly = json.loads(assembly_path.read_text(encoding="utf-8"))
-    mapping = assembly["files"][0]
-    product_entry = next(
-        entry for entry in manifest["files"] if entry["path"] == mapping["product_path"]
-    )
-    receipt["files"][0] = {
-        **copy.deepcopy(product_entry),
-        "path": mapping["module_path"],
-    }
-    _write_json(receipt_path, receipt)
-    binding["manifest_sha256"] = _sha256(receipt_path)
-    mapping["unsigned_sha256"] = product_entry["sha256"]
-    mapping["product_sha256"] = product_entry["sha256"]
-    mapping["transformation"] = "identity"
-    assembly["module_manifest_sha256"] = binding["manifest_sha256"]
-    _write_json(assembly_path, assembly)
-    binding["assembly_receipt_sha256"] = _sha256(assembly_path)
-    for relative in (binding["manifest_path"], binding["assembly_receipt_path"]):
-        entry = next(item for item in manifest["files"] if item["path"] == relative)
-        entry.update(_entry(app, relative, kind="config"))
+    manifest["modules"] = [{"module": "vc-terminal", "transformation": "identity"}]
     _write_app_manifest(app, manifest, sign=True)
+    _assert_error(contract.E_SCHEMA, lambda: contract.verify_app(app))
 
-    _assert_error(contract.E_PROOF, lambda: contract.verify_app(app))
 
-
-def test_app_binds_unsigned_module_bytes_to_real_signed_product_bytes(
+def test_app_binds_independent_external_product_policy(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    binding = manifest["modules"][0]
-    receipt = json.loads((app / binding["manifest_path"]).read_text(encoding="utf-8"))
-    assembly_path = app / binding["assembly_receipt_path"]
-    assembly = json.loads(assembly_path.read_text(encoding="utf-8"))
-    transformation = assembly["files"][0]
-    product_entry = next(
-        entry
-        for entry in manifest["files"]
-        if entry["path"] == transformation["product_path"]
-    )
-
-    assert transformation["unsigned_sha256"] == receipt["files"][0]["sha256"]
-    assert transformation["product_sha256"] == product_entry["sha256"]
-    assert transformation["unsigned_sha256"] != transformation["product_sha256"]
-    subprocess.run(
-        ["codesign", "--verify", "--strict", str(app / transformation["product_path"])],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
     assert contract.verify_app(app) == manifest
-
-    assembly["files"][0]["transformation"] = "identity"
-    _write_json(assembly_path, assembly)
-    binding["assembly_receipt_sha256"] = _sha256(assembly_path)
-    assembly_entry = next(
-        entry
-        for entry in manifest["files"]
-        if entry["path"] == binding["assembly_receipt_path"]
-    )
-    assembly_entry.update(_entry(app, binding["assembly_receipt_path"], kind="config"))
-    _write_json(app / "Contents/Resources/product-manifest.json", manifest)
-    _assert_error(contract.E_PROOF, lambda: contract.verify_app(app))
+    assert manifest["modules"] == []
+    for field, value in (
+        ("team_id", "FOREIGN"),
+        ("min_version", "0.1.0"),
+        ("resolve", "Contents/MacOS/vc-terminal"),
+    ):
+        forged = copy.deepcopy(manifest)
+        forged["external_products"]["vc-terminal"][field] = value
+        _write_app_manifest(app, forged, sign=True)
+        _assert_error(contract.E_SCHEMA, lambda: contract.verify_app(app))
 
 
 @pytest.mark.parametrize(
@@ -3092,7 +2900,7 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     elif mutation == "wrong_executable":
         manifest["bundle_executable"] = "vibecrafted-launch"
     elif mutation == "missing_module":
-        manifest["modules"] = manifest["modules"][:1]
+        manifest["external_products"].pop("vc-terminal")
     elif mutation == "undeclared_file":
         (app / "Contents/Resources/ambient-path.txt").write_text(
             "/Applications/Vibecrafted.app\n", encoding="utf-8"
@@ -3113,25 +2921,20 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _assert_error(expected_code, lambda: contract.verify_app(app))
 
 
-def test_app_accepts_fixed_main_app_terminal_and_font_resources(
+def test_app_accepts_external_terminal_without_carried_code_or_fonts(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    assert not any(path.suffix.lower() == ".app" for path in app.rglob("*"))
-    assert manifest["entrypoints"]["terminal"] == "Contents/MacOS/vc-terminal"
-    assert manifest["launch_contract"]["program"] == manifest["entrypoints"]["terminal"]
-    declared = {entry["path"] for entry in manifest["files"]}
-    for name in (
-        "SourceCodePro[wght].ttf",
-        "SourceCodePro-Italic[wght].ttf",
-        "OFL.txt",
-    ):
-        relative = f"Contents/Resources/fonts/{name}"
-        assert relative in declared
-        assert (app / relative).read_bytes() == (
-            REPO_ROOT / "assets/fonts/source-code-pro" / name
-        ).read_bytes()
+    assert manifest["entrypoints"] == {"app": "Contents/MacOS/Vibecrafted"}
+    assert (
+        manifest["external_products"]["vc-terminal"]["resolve"]
+        == "/Applications/vc-terminal.app"
+    )
+    assert manifest["external_products"]["vc-frame"]["resolve"] == "PATH"
+    assert not (app / "Contents/Resources/fonts").exists()
+    assert not (app / "Contents/MacOS/vc-terminal").exists()
+    assert not (app / "Contents/Helpers/vc-frame").exists()
     assert contract.verify_app(app) == manifest
 
 
@@ -3226,8 +3029,8 @@ def test_fixed_terminal_and_resources_fail_closed(
 ) -> None:
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    terminal = app / "Contents/MacOS/vc-terminal"
-    font = "Contents/Resources/fonts/SourceCodePro[wght].ttf"
+    terminal = app / contract._LAUNCH_SHELL
+    font = contract._LAUNCH_CONFIG
     if mutation == "missing":
         terminal.unlink()
     elif mutation == "symlink":
@@ -3240,30 +3043,12 @@ def test_fixed_terminal_and_resources_fail_closed(
             ["/usr/bin/codesign", "--remove-signature", str(terminal)], check=True
         )
         entry = next(
-            item
-            for item in manifest["files"]
-            if item["path"] == "Contents/MacOS/vc-terminal"
+            item for item in manifest["files"] if item["path"] == contract._LAUNCH_SHELL
         )
         entry.update(_entry(app, entry["path"], kind="executable"))
-        binding = next(
-            item for item in manifest["modules"] if item["module"] == "vc-terminal"
-        )
-        assembly = json.loads((app / binding["assembly_receipt_path"]).read_text())
-        assembly["files"][0]["product_sha256"] = entry["sha256"]
-        _write_json(app / binding["assembly_receipt_path"], assembly)
-        binding["assembly_receipt_sha256"] = _sha256(
-            app / binding["assembly_receipt_path"]
-        )
-        receipt_entry = next(
-            item
-            for item in manifest["files"]
-            if item["path"] == binding["assembly_receipt_path"]
-        )
-        receipt_entry.update(_entry(app, receipt_entry["path"], kind="config"))
     elif mutation == "font_missing":
         (app / font).unlink()
     elif mutation == "font_undeclared":
-        (app / font).unlink()
         manifest["files"] = [item for item in manifest["files"] if item["path"] != font]
     elif mutation == "fonts_path":
         plist = app / "Contents/Info.plist"
@@ -3314,8 +3099,9 @@ def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
 
     declared = {entry["path"] for entry in produced["files"]}
     assert intruder in declared
-    assert "Contents/MacOS/vc-terminal" in declared
-    assert "Contents/Resources/fonts/SourceCodePro[wght].ttf" in declared
+    assert "Contents/MacOS/vc-terminal" not in declared
+    assert contract._LAUNCH_TERMINAL in declared
+    assert "Contents/Resources/fonts/SourceCodePro[wght].ttf" not in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(
@@ -3323,18 +3109,8 @@ def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(
 ) -> None:
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
-    binding = manifest["modules"][0]
-    receipt_path = app / binding["manifest_path"]
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    receipt["git_sha"] = "e" * 40
-    _write_json(receipt_path, receipt)
-    binding["manifest_sha256"] = _sha256(receipt_path)
-    receipt_entry = next(
-        item for item in manifest["files"] if item["path"] == binding["manifest_path"]
-    )
-    receipt_entry.update(_entry(app, binding["manifest_path"], kind="config"))
-    _write_json(app / "Contents/Resources/product-manifest.json", manifest)
-
+    manifest["source_revisions"]["vibecrafted"] = "e" * 40
+    _write_app_manifest(app, manifest, sign=True)
     _assert_error(contract.E_PROOF, lambda: contract.verify_app(app))
 
 
@@ -3390,7 +3166,7 @@ def test_schema_and_runtime_reject_the_same_module_and_binding_shapes(
 
     app = tmp_path / "Vibecrafted.app"
     product = _app_fixture(app, macho_executable)
-    product["modules"][1] = copy.deepcopy(product["modules"][0])
+    product["modules"] = [{"module": "vc-terminal"}, {"module": "vc-terminal"}]
     _write_json(app / "Contents/Resources/product-manifest.json", product)
     assert list(validator.iter_errors(product))
     _assert_error(contract.E_SCHEMA, lambda: contract.verify_app(app))
@@ -3407,30 +3183,30 @@ def test_schema_and_runtime_reject_the_same_module_and_binding_shapes(
         lambda: contract.verify_module(duplicate_module_root),
     )
 
-    duplicate_app = tmp_path / "Duplicate.app"
-    duplicate_product = _app_fixture(duplicate_app, macho_executable)
-    binding = duplicate_product["modules"][0]
-    assembly_path = duplicate_app / binding["assembly_receipt_path"]
-    assembly = json.loads(assembly_path.read_text(encoding="utf-8"))
-    duplicate_mapping = copy.deepcopy(assembly["files"][0])
-    duplicate_mapping["unsigned_sha256"] = "0" * 64
-    assembly["files"].append(duplicate_mapping)
+    # Legacy assembly manifests remain schema checked as standalone receipts,
+    # but a v2 App rejects every attempt to introduce one as embedded ownership.
+    assembly = {
+        "schema": contract.ASSEMBLY_SCHEMA,
+        "module": "vc-terminal",
+        "module_manifest_sha256": "a" * 64,
+        "files": [
+            {
+                "module_path": "bin/vc-terminal",
+                "product_path": "Contents/MacOS/vc-terminal",
+                "unsigned_sha256": digest,
+                "product_sha256": "b" * 64,
+                "transformation": "codesign",
+            }
+            for digest in ("a" * 64, "c" * 64)
+        ],
+    }
     assert list(validator.iter_errors(assembly))
-    _write_json(assembly_path, assembly)
-    binding["assembly_receipt_sha256"] = _sha256(assembly_path)
-    assembly_entry = next(
-        entry
-        for entry in duplicate_product["files"]
-        if entry["path"] == binding["assembly_receipt_path"]
+    _assert_error(
+        contract.E_INVENTORY,
+        lambda: contract._validate_assembly_receipt(
+            assembly, module="vc-terminal", manifest_sha256="a" * 64
+        ),
     )
-    assembly_entry.update(
-        _entry(duplicate_app, binding["assembly_receipt_path"], kind="config")
-    )
-    _write_json(
-        duplicate_app / "Contents/Resources/product-manifest.json",
-        duplicate_product,
-    )
-    _assert_error(contract.E_INVENTORY, lambda: contract.verify_app(duplicate_app))
 
     noncanonical = _module_fixture(tmp_path / "noncanonical-module", macho_executable)
     noncanonical["entrypoints"] = {"terminal": "bin//vc-terminal"}
@@ -4046,16 +3822,16 @@ def test_walkaround_scenario_provider_normalizes_only_contract_failures(
         ("signer_entitlements", contract.E_SCHEMA, contract.E_SCHEMA),
         ("code_resources_path", contract.E_SCHEMA, contract.E_SCHEMA),
         ("code_resources_hash", None, contract.E_HASH),
-        ("module_manifest_path", None, contract.E_PROOF),
-        ("module_manifest_hash", None, contract.E_PROOF),
-        ("module_receipt_path", None, contract.E_PROOF),
-        ("module_receipt_hash", None, contract.E_PROOF),
-        ("module_git_sha", None, contract.E_PROOF),
-        ("frame_manifest_path", None, contract.E_PROOF),
-        ("frame_manifest_hash", None, contract.E_PROOF),
-        ("frame_receipt_path", None, contract.E_PROOF),
-        ("frame_receipt_hash", None, contract.E_PROOF),
-        ("frame_git_sha", None, contract.E_PROOF),
+        ("module_manifest_path", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("module_manifest_hash", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("module_receipt_path", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("module_receipt_hash", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("module_git_sha", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("frame_manifest_path", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("frame_manifest_hash", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("frame_receipt_path", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("frame_receipt_hash", contract.E_SCHEMA, contract.E_SCHEMA),
+        ("frame_git_sha", contract.E_SCHEMA, contract.E_SCHEMA),
         ("source_revision", None, contract.E_PROOF),
         ("source_terminal", None, contract.E_PROOF),
         ("source_frame", None, contract.E_PROOF),
@@ -4082,6 +3858,15 @@ def test_release_schema_and_runtime_boundary_mutation_matrix(
     dmg.write_bytes(b"synthetic-dmg\n")
     receipt, signature, payload, signer = _release_output_fixture(tmp_path, app, dmg)
 
+    if mutation.startswith(("module_", "frame_")):
+        payload["modules"] = {
+            name: {
+                "manifest": {"path": "legacy.json", "sha256": "1" * 64},
+                "assembly_receipt": {"path": "legacy-receipt.json", "sha256": "1" * 64},
+                "git_sha": "1" * 40,
+            }
+            for name in ("vc-terminal", "vc-frame")
+        }
     if mutation == "signature_algorithm":
         payload["signature_policy"]["algorithm"] = "attacker"
     elif mutation == "signature_key_id":
@@ -4839,20 +4624,20 @@ def test_unified_release_has_one_top_level_owner() -> None:
     )
 
     assert "release:\n\t@zsh -ic" in makefile
-    assert 'make -C "$TERMINAL_REPO"' in builder
-    assert "release-bins" in builder
-    assert 'chmod 0755 "$terminal_source"' in builder
+    assert 'make -C "$TERMINAL_REPO"' not in builder
+    assert "release-bins" not in builder
+    assert 'chmod 0755 "$terminal_source"' not in builder
     assert (
         'install -m 0755 "$terminal_source" "$APP/Contents/MacOS/vc-terminal"'
-        in builder
+        not in builder
     )
-    assert 'embed_terminal_font_resources "$APP"' in builder
+    assert 'embed_terminal_font_resources "$APP"' not in builder
     assert "materialize_vc_terminal_app_bundle" not in builder
     terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
         encoding="utf-8"
     )
-    assert "/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal" in terminal_entry
-    assert "_vc_terminal_is_bundle_host" in terminal_entry
+    assert "external_products.py" in terminal_entry
+    assert "_vc_terminal_is_bundle_host" not in terminal_entry
     assert "unset VIBECRAFTED_TERMINAL_LAUNCH_RECEIPT" in terminal_entry
     assert 'host_tail=(${1+"$@"})' in terminal_entry
     assert (
@@ -4862,10 +4647,8 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert (
         '"${admission_args[@]}" -- ${host_tail[@]+"${host_tail[@]}"}' in terminal_entry
     )
-    assert (
-        'fresh) exec "$host" --vibecrafted-hosted --config-file "$config" '
-        '${host_tail[@]+"${host_tail[@]}"} ;;' in terminal_entry
-    )
+    assert 'exec "$host" --vibecrafted-hosted --config-file "$config"' in terminal_entry
+    assert 'exec "$host" --config-file "$config"' in terminal_entry
     assert "--config-file | --config-file=*)" in terminal_entry
     assert "--socket | --socket=*)" in terminal_entry
     assert "sign_nested_app_bundles" in builder
@@ -4875,8 +4658,8 @@ def test_unified_release_has_one_top_level_owner() -> None:
     )
     assert builder.index("sign_helper_scripts") < builder.index("embed_runtime_pack")
     assert '"$APP/Contents/Helpers/vc-app-update"' in builder
-    assert 'make -C "$FRAME_REPO" release-binary' in builder
-    assert 'chmod 0755 "$frame_source"' in builder
+    assert 'make -C "$FRAME_REPO" release-binary' not in builder
+    assert 'chmod 0755 "$frame_source"' not in builder
     assert "build-server-release" in builder
     assert '"$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
@@ -5117,10 +4900,6 @@ def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
             "app",
             "--app",
             str(app),
-            "--terminal-source",
-            str(macho_executable),
-            "--frame-source",
-            str(macho_executable),
             "--version",
             "1.0.0",
             "--build",
@@ -5141,10 +4920,8 @@ def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
     assert result.returncode == 0, result.stderr
     _codesign_app(app)
     product = contract.verify_app(app, require_clean=True)
-    assert [item["module"] for item in product["modules"]] == [
-        "vc-terminal",
-        "vc-frame",
-    ]
+    assert product["modules"] == []
+    assert set(product["external_products"]) == {"vc-terminal", "vc-frame"}
 
 
 def test_production_release_receipt_platform_passes_staged_bundled_schema_verifier(

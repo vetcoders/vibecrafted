@@ -491,6 +491,19 @@ func deriveProductUpdateProgress(
   }
 }
 
+/// Source pins describe independent products during the feed transition;
+/// they no longer imply that either product's bytes live in this App.
+func decodeProductSourceRevisions(_ data: Data) throws -> (source: String, terminal: String, frame: String) {
+  guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    manifest["schema"] as? String == "io.vetcoders.vibecrafted.product.v2",
+    let revisions = manifest["source_revisions"] as? [String: String],
+    let source = revisions["vibecrafted"], source == manifest["git_sha"] as? String,
+    let terminal = revisions["vc-terminal"], let frame = revisions["vc-frame"],
+    [source, terminal, frame].allSatisfy({ $0.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil })
+  else { throw ProductUpdateFeedError.malformed("signed product manifest has no v2 Runtime Pack source tuple") }
+  return (source, terminal, frame)
+}
+
 func decodeProductUpdateFeed(_ data: Data) throws -> ProductUpdateCandidate {
   let object = try JSONSerialization.jsonObject(with: data)
   guard let root = object as? [String: Any] else {

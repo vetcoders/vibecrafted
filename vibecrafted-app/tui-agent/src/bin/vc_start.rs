@@ -74,6 +74,9 @@ fn app_root() -> Result<PathBuf, String> {
         }
         return Err("VIBECRAFTED_APP_ROOT must be an absolute .app path".into());
     }
+    // Discovery hint, not code identity: caller-supplied runtime roots are also
+    // supported. The selected runtime's admission owner establishes trust.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     app_root_from_executable(&executable)
         .ok_or_else(|| "vc-start is not inside Vibecrafted.app".to_string())
@@ -93,17 +96,24 @@ fn runtime_root(app: Option<&Path>) -> Result<PathBuf, String> {
     Ok(app.join("Contents/Resources/runtime"))
 }
 
-fn frame_binary(app: Option<&Path>, runtime: &Path) -> Result<PathBuf, String> {
-    if let Some(explicit) = env::var_os("VIBECRAFTED_VC_FRAME_BIN") {
-        let path = PathBuf::from(explicit);
-        if path.is_absolute() {
-            return Ok(path);
+fn frame_binary(_app: Option<&Path>, runtime: &Path) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
+        let output = Command::new(runtime.join("bin/python3"))
+            .args(["-I", "-B"])
+            .arg(runtime.join("vibecrafted-core/vibecrafted_core/external_products.py"))
+            .arg("frame")
+            .output()
+            .map_err(|error| format!("could not resolve vc-frame: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
-        return Err("VIBECRAFTED_VC_FRAME_BIN must be absolute".into());
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if !path.is_absolute() || !path.is_file() {
+            return Err("vc-frame resolver returned an invalid executable path".into());
+        }
+        return Ok(path);
     }
-    Ok(app
-        .map(|root| root.join("Contents/Helpers/vc-frame"))
-        .unwrap_or_else(|| runtime.join("bin/vc-frame")))
+    Ok(runtime.join("libexec/vc-frame"))
 }
 
 fn runtime_shell(runtime: &Path) -> PathBuf {
@@ -122,7 +132,10 @@ fn run() -> Result<(), String> {
         ));
     }
     if !frame.is_file() {
-        return Err(format!("bundled vc-frame is missing: {}", frame.display()));
+        return Err(format!(
+            "vc-frame is missing; install from https://github.com/vetcoders/vc-frame/releases: {}",
+            frame.display()
+        ));
     }
 
     let home = env::var_os("HOME").map(PathBuf::from);
@@ -142,6 +155,9 @@ fn run() -> Result<(), String> {
             "vc-start",
         ])
         .arg(&shell)
+        // argv[0] is discarded; these are opaque user arguments, never an
+        // executable path or a source of runtime identity.
+        // nosemgrep: rust.lang.security.args-os.args-os
         .args(env::args_os().skip(1))
         .env("PATH", runtime_path)
         .env("PYTHONNOUSERSITE", "1")

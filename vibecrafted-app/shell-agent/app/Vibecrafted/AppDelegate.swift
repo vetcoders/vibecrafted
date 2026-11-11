@@ -160,6 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
   private var workspaceLaunchFailureReported = false
   private var eyeReconcileProcess: Process?
+  private var runtimeResolvePathPending = false
   private var runtimeResolveProcess: Process?
   /// Callers that asked while a resolve was already in flight. They join the
   /// one invocation instead of racing a second resolver against it.
@@ -551,7 +552,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       process.executableURL = python
       process.arguments = runtimeRepairArguments(
         installer: installer, runtimeHome: runtimeHome, plan: plan)
-      process.environment = runtimeResolverEnvironment()
+      process.environment = runtimeResolverEnvironment(generation: python.deletingLastPathComponent().deletingLastPathComponent())
       do {
         try runBounded(
           process, timeout: plan ? 20 : 180,
@@ -1017,14 +1018,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   /// read the installation, not whatever the host session had loaded. No user
   /// site packages, and no bytecode written into the installation being
   /// inspected. Built from an allow-list so a new host variable cannot leak in.
-  private func runtimeResolverEnvironment() -> [String: String] {
+  private func runtimeResolverEnvironment(generation: URL) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
     let inherited = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]
     var environment = Dictionary(
       uniqueKeysWithValues: inherited.compactMap { key in host[key].map { (key, $0) } })
-    // No PATH at all. Both the interpreter and the installer script are given
-    // as absolute paths, so a read-only resolve that needed to look an
-    // executable up in PATH would be doing something it is not allowed to do.
+    // The runtime owner resolves independent vc-frame from the Founder's PATH.
+    // Interpreter and installer remain absolute and PYTHON* stays isolated.
+    environment["PATH"] = userShellPath.cachedPath(generation: generation, environment: host) ?? host["PATH"] ?? ""
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
@@ -1059,7 +1060,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     let runtimeHome = currentRuntimeHome()
     let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
-    if runtimeResolveProcess != nil {
+    if runtimeResolveProcess != nil || runtimeResolvePathPending {
       runtimeResolveWaiters.append(preparedCompletion)
       return
     }
@@ -1115,10 +1116,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       cacheResolution(resolution, fingerprint: fingerprint)
       deliverResolution(resolution)
     case .ask(let python, let installer):
+      let generation = python.deletingLastPathComponent().deletingLastPathComponent()
+      runtimeResolvePathPending = true
+      userShellPath.resolve(generation: generation, environment: ProcessInfo.processInfo.environment) { [weak self] _ in
+        guard let self else { return }
+        self.runtimeResolvePathPending = false
+        guard fingerprint == self.identityFingerprint(runtimeHome: runtimeHome) else {
+          self.restartRuntimeResolve(attempt: attempt + 1)
+          return
+        }
+        self.launchRuntimeResolver(python: python, installer: installer, runtimeHome: runtimeHome,
+          fingerprint: fingerprint, attempt: attempt)
+      }
+
+    }
+  }
+
+  private func launchRuntimeResolver(python: URL, installer: URL, runtimeHome: URL,
+    fingerprint: RuntimeIdentityFingerprint, attempt: Int) {
       let process = Process()
       process.executableURL = python
       process.arguments = runtimeResolveArguments(installer: installer, runtimeHome: runtimeHome)
-      process.environment = runtimeResolverEnvironment()
+      process.environment = runtimeResolverEnvironment(generation: python.deletingLastPathComponent().deletingLastPathComponent())
       do {
         try runBounded(process, timeout: 20, label: "runtime-resolve") { [weak self] result in
           guard let self else { return }
@@ -1160,7 +1179,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         cacheResolution(resolution, fingerprint: fingerprint)
         deliverResolution(resolution)
       }
-    }
   }
 
   /// Ask again, about the identity that is installed now, keeping the callers
@@ -1383,21 +1401,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       "Contents/Resources", isDirectory: true)
     let manifestData = try Data(
       contentsOf: resources.appendingPathComponent("product-manifest.json"))
-    guard
-      let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
-      let sourceRevision = manifest["git_sha"] as? String,
-      let modules = manifest["modules"] as? [[String: Any]],
-      let terminalRevision = modules.first(where: { $0["module"] as? String == "vc-terminal" })?[
-        "git_sha"] as? String,
-      let frameRevision = modules.first(where: { $0["module"] as? String == "vc-frame" })?[
-        "git_sha"] as? String
-    else {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.install", code: 1,
-        userInfo: [
-          NSLocalizedDescriptionKey: "signed product manifest has no Runtime Pack source tuple"
-        ])
-    }
+    let (sourceRevision, terminalRevision, frameRevision) = try decodeProductSourceRevisions(manifestData)
     signedCarrierRevisions = (sourceRevision, terminalRevision, frameRevision)
     return (sourceRevision, terminalRevision, frameRevision)
   }
@@ -1484,14 +1488,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     frameRevision: String,
     preferenceChoice: PreferenceResolutionChoice? = nil
   ) throws -> [String] {
-    let terminalHost = appRoot.appendingPathComponent(
-      "Contents/MacOS/vc-terminal")
-    let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
     var arguments = [
       "--pack", pack.path,
       "--app-root", appRoot.path,
-      "--terminal-host", terminalHost.path,
-      "--frame-helper", frameHelper.path,
       "--expected-source-revision", sourceRevision,
       "--expected-terminal-revision", terminalRevision,
       "--expected-frame-revision", frameRevision,

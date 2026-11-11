@@ -177,6 +177,21 @@ struct ProductUpdatePolicyTests {
     try require(allowed.fixtureAllowed, "fixture flag was ignored")
   }
 
+  static func testIndependentProductsKeepTransitionalFeedRevisions() throws {
+    let product: [String: Any] = ["schema": "io.vetcoders.vibecrafted.product.v2", "git_sha": source,
+      "source_revisions": ["vibecrafted": source, "vc-terminal": terminal, "vc-frame": frame], "modules": []]
+    let pins = try decodeProductSourceRevisions(JSONSerialization.data(withJSONObject: product))
+    try require(pins.source == source && pins.terminal == terminal && pins.frame == frame,
+      "v2 source tuple must come from source_revisions without embedded module receipts")
+    let candidate = try decodeProductUpdateFeed(feedJSON(signatureValid: false, ticket: false))
+    try require(candidate.terminalRevision == terminal, "terminal feed key must survive unbundling")
+    try require(candidate.frameRevision == frame, "frame feed key must survive unbundling")
+    var feed = try JSONSerialization.jsonObject(with: feedJSON(signatureValid: false, ticket: false)) as! [String: Any]
+    feed["modules"] = [:]
+    let independent = try decodeProductUpdateFeed(JSONSerialization.data(withJSONObject: feed))
+    try require(independent.sourceRevision == candidate.sourceRevision, "external products must not require module receipts")
+  }
+
   static func testForgedSignatureValidAndTicketsAreIgnored() throws {
     let forged = try decodeProductUpdateFeed(feedJSON(signatureValid: true, ticket: true))
     try require(forged.keyID == productUpdateExpectedKeyID, "key id lost")
@@ -1613,6 +1628,7 @@ struct ProductUpdatePolicyTests {
     try testMissingFeedIsUnavailable()
     try testHTTPFeedIsRejected()
     try testFixtureFileURLRequiresExplicitEnv()
+    try testIndependentProductsKeepTransitionalFeedRevisions()
     try testForgedSignatureValidAndTicketsAreIgnored()
     try testTamperedSignatureBytesAreRefused()
     try testMixedDonorRevisionsAreRefused()

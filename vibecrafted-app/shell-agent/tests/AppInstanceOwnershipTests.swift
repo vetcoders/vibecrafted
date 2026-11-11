@@ -11,6 +11,7 @@ struct AppInstanceOwnershipTests {
   }
 
   static func main() throws {
+    try independentTerminalCannotOwnMain()
     try terminalCannotOwnMain()
     try mainAndTerminalShareBundleWithoutSharingOwnership()
     try missingAndForeignRoleEvidenceFailsClosed()
@@ -22,6 +23,19 @@ struct AppInstanceOwnershipTests {
     try specialCliModesSkipPeerHandoff()
     try lockRecordRoundTripAndMalformedStayHonest()
     print("AppInstanceOwnershipTests passed")
+  }
+
+  static func independentTerminalCannotOwnMain() throws {
+    let runtime = URL(fileURLWithPath: "/Applications/Vibecrafted.app")
+    let terminal = URL(fileURLWithPath: "/Applications/vc-terminal.app")
+    let peer = AppInstancePeer(
+      pid: 5, bundleURL: terminal,
+      executableURL: terminal.appendingPathComponent("Contents/MacOS/vc-terminal"),
+      signedMainExecutableURL: terminal.appendingPathComponent("Contents/MacOS/vc-terminal"))
+    let decision = AppInstanceOwnership.decide(mainContext(
+      selfPid: 80, selfBundleURL: runtime, arguments: [], peers: [peer],
+      lockOwnerPid: 5, livePids: [5, 80]))
+    try require(decision == .becomeOwner, "independent terminal cannot own runtime Main")
   }
 
   static func terminalCannotOwnMain() throws {
