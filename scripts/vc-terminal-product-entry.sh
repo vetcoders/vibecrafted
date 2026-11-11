@@ -94,52 +94,20 @@ _vc_terminal_sanitize_inherited_path() {
   export PATH
 }
 
-_vc_terminal_is_standalone_bundle_host() {
-  local candidate="${1:-}" bundle="${2:-/Applications/vc-terminal.app}"
-  [[ "$candidate" == "$bundle/Contents/MacOS/vc-terminal" ]] || return 1
-  [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
-  [[ ! -L "$bundle" && ! -L "$bundle/Contents" && ! -L "$bundle/Contents/MacOS" ]] || return 1
-  [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist" 2>/dev/null)" == "io.vetcoders.vc-terminal" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist" 2>/dev/null)" == "vc-terminal" ]] || return 1
-}
-
-_vc_terminal_is_bundle_host() {
-  local candidate="${1:-}" bundle=/Applications/Vibecrafted.app
-  [[ "$candidate" == "$bundle/Contents/MacOS/vc-terminal" ]] || return 1
-  [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
-  [[ ! -L "$bundle" && ! -L "$bundle/Contents" && ! -L "$bundle/Contents/MacOS" ]] || return 1
-  [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist" 2>/dev/null)" == "io.vetcoders.vibecrafted" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist" 2>/dev/null)" == "Vibecrafted" ]] || return 1
-}
-
 _vc_terminal_select_host() {
-  local fallback="$1" candidate=/Applications/Vibecrafted.app/Contents/MacOS/vc-terminal
-  local standalone_bundle="${candidate%/Vibecrafted.app/Contents/MacOS/vc-terminal}/vc-terminal.app"
-  local standalone_candidate="$standalone_bundle/Contents/MacOS/vc-terminal"
+  local fallback="$1"
   [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || { printf '%s\n' "$fallback"; return 0; }
-  if _vc_terminal_is_standalone_bundle_host "$standalone_candidate" "$standalone_bundle"; then
-    printf '%s\n' "$standalone_candidate"
-    return 0
-  fi
-  if _vc_terminal_is_bundle_host "$candidate"; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  printf 'vc-terminal: fixed signed host missing at /Applications/vc-terminal.app or /Applications/Vibecrafted.app; install the reviewed notarized app before opening a terminal.\n' >&2
-  return 78
+  "$root/bin/python3" -I -B "$root/vibecrafted-core/vibecrafted_core/external_products.py" terminal
 }
 
 _vc_terminal_sanitize_inherited_path
-if [[ "$native_host" != /* || ! -x "$native_host" || -L "$native_host" || -L "$root/libexec" ]]; then
+if [[ "$(/usr/bin/uname -s)" != "Darwin" ]] && [[ "$native_host" != /* || ! -x "$native_host" || -L "$native_host" || -L "$root/libexec" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$native_host" >&2
   exit 127
 fi
 host="$(_vc_terminal_select_host "$native_host")"
 unset -f _vc_terminal_runtime_home _vc_terminal_is_owned_generation_bin \
-  _vc_terminal_sanitize_inherited_path _vc_terminal_is_standalone_bundle_host \
-  _vc_terminal_is_bundle_host _vc_terminal_select_host
+  _vc_terminal_sanitize_inherited_path _vc_terminal_select_host
 
 export VIBECRAFTED_RUNTIME_ROOT="$root"
 export VIBECRAFTED_ROOT="$root"
@@ -147,7 +115,12 @@ export VIBECRAFTED_RUNTIME_BIN="$root/bin"
 export VIBECRAFTED_TERMINAL_HOST="$host"
 export XDG_CONFIG_HOME="$HOME/.config"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
-export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
+if [[ "$(/usr/bin/uname -s)" == "Darwin" ]]; then
+  VIBECRAFTED_VC_FRAME_BIN="$("$root/bin/python3" -I -B "$root/vibecrafted-core/vibecrafted_core/external_products.py" frame)"
+  export VIBECRAFTED_VC_FRAME_BIN
+else
+  export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
+fi
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
 # The runtime python pin: this terminal's python and python3 are the

@@ -1070,7 +1070,15 @@ def test_product_entry_routes_bundle_host_through_admission() -> None:
         in entry
     )
     assert "reused) exit 0 ;;" in entry
-    assert 'fresh) exec "$host" --vibecrafted-hosted --config-file "$config"' in entry
+    fresh = entry.split("      fresh)\n", 1)[1].split("        ;;", 1)[0]
+    assert (
+        'if [[ "$host" == */Vibecrafted.app/Contents/MacOS/vc-terminal ]]; then'
+        in fresh
+    )
+    bundled, standalone = fresh.split("        fi\n", 1)
+    assert 'exec "$host" --vibecrafted-hosted --config-file "$config"' in bundled
+    assert 'exec "$host" --config-file "$config"' in standalone
+    assert "--vibecrafted-hosted" not in standalone
     assert "the hosted application role is product-owned" in entry
     assert "host admission helper missing" in entry and "exit 78" in entry
 

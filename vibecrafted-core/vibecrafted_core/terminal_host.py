@@ -392,6 +392,8 @@ def require_paired_developer_id(host: str, identity: CodeIdentity) -> None:
             EX_CONFIG,
             f"fixed terminal host is not Developer ID signed (ad-hoc or no Team): {host}",
         )
+    if host == STANDALONE_HOST and identity.team != "MW223P3NPX":
+        raise Refusal(EX_CONFIG, "vc-terminal must be signed by Team MW223P3NPX")
     bundle = static_code_identity(str(Path(host).parents[2]), basic=True)
     if bundle.team != identity.team:
         raise Refusal(EX_CONFIG, "main app and terminal signing owners differ")
