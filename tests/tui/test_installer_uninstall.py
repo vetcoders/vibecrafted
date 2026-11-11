@@ -3764,3 +3764,57 @@ def test_request_uninstall_run_stop_signals_swarm_process_group(
     assert "no worker_pgid" in installer._request_uninstall_run_stop(
         launcher, {"run_id": "rese-2", "agent": "swarm"}, timeout_seconds=1
     )
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="independent Darwin product commands"
+)
+@pytest.mark.parametrize("name", ["vc-terminal", "vc-frame"])
+@pytest.mark.parametrize("replacement", ["same", "file", "symlink"])
+def test_retired_independent_product_command_is_receipt_gated(
+    tmp_path, name, replacement
+):
+    """A previous runtime claim never authorizes deleting a new product release."""
+    runtime = tmp_path / "runtime"
+    generation_bin = runtime / "releases/new/bin"
+    generation_bin.mkdir(parents=True)
+    launcher_home = tmp_path / "launchers"
+    stale = launcher_home / name
+    _write_executable(stale, "#!/bin/sh\necho old-runtime-wrapper\n")
+    digest = installer._sha256_path(stale)
+    backup = runtime / ".installer-backups/original/prior-product"
+    original = "#!/bin/sh\necho prior-independent-product\n"
+    _write_executable(backup, original)
+    receipt = {
+        "owned_files": {str(stale): digest},
+        "owned_symlinks": {},
+        "backups": {str(stale): str(backup)},
+    }
+    previous = json.loads(json.dumps(receipt))
+    external = "#!/bin/sh\necho new-independent-product\n"
+    if replacement == "file":
+        stale.write_text(external)
+    elif replacement == "symlink":
+        target = tmp_path / "new-product" / name
+        _write_executable(target, external)
+        stale.unlink()
+        stale.symlink_to(target)
+    retired = installer._reclaim_foreign_launcher_names(
+        generation_bin,
+        launcher_home,
+        runtime_home=runtime,
+        receipt=receipt,
+        previous=previous,
+    )
+    assert str(stale) not in receipt["owned_files"]
+    assert str(stale) not in receipt["owned_symlinks"]
+    assert str(stale) not in receipt["backups"]
+    assert backup.read_text() == original
+    if replacement == "same":
+        assert retired == [stale]
+        assert stale.read_text() == original
+    else:
+        assert retired == []
+        assert stale.read_text() == external
+        assert stale.is_symlink() == (replacement == "symlink")
+        assert str(backup) in receipt["drift_backup_history"][str(stale)]

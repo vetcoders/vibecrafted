@@ -25805,10 +25805,9 @@ def _reclaim_foreign_launcher_names(
             identical = _symlink_target(stale) == Path(
                 previous_links[stale_key]
             ).resolve(strict=False)
-        ours_regardless = (
-            stale.name.startswith(_RUNTIME_NAMESPACE_PREFIXES)
-            or stale.name in _RUNTIME_NAMESPACE_NAMES
-        )
+        # Publication and retirement share one owner map. Independent Darwin
+        # products are foreign even though their historical names start vc-.
+        ours_regardless = _runtime_launcher_public_name(stale.name) is not None
         if not identical and not ours_regardless:
             occupant = _runtime_owned_occupant_state(stale)
             receipt.setdefault("owned_files", {}).pop(stale_key, None)
