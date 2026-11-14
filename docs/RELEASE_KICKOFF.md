@@ -15,11 +15,36 @@
 - Entry: bundled `vc-start` with durable `workspace_id`
 
 The public donor repositories supply source, not separate app, DMG, MSI,
-installer or update channels. Tag builds use the same immutable donor commits
-as the Linux and Windows builders: vc-frame `0b91c4f0806356b5c92e46c82bf0fdf0310c0222`
-and vc-terminal `38ef2f918383ca4dde797d22869b619097c81d05`. The public source
-archive digests are pinned in those builders. Manual DMG rehearsals may select
-different donor refs; their signed receipts record the actual revisions.
+installer or update channels. Linux and Windows Runtime Pack builders resolve
+Frame and Terminal through `scripts/build-source-runtime-pack.py` and the full
+commit SHAs in `config/source-components.json`. Local source overrides
+`VIBECRAFTED_FRAME_REPO` and `VIBECRAFTED_TERMINAL_REPO` must contain those
+commits; their branches, index and working files stay intact. Missing donors
+are fetched by exact commit into temporary repositories. The selected package
+identity and version are checked in both the pinned Git object and the exported
+manifest consumed by the build; invalid selections refuse
+without falling back to an older donor.
+
+These builders compile isolated `git archive` exports and record the actual
+archive SHA-256 and selected revision in their inventories. Export uses only
+committed Git attributes: donor-local, global and system attributes cannot change
+the selected source. The archive digest identifies the exported bytes; it is not
+independent proof of the commit. To materialize and
+inspect the same source path before native compilation:
+
+```bash
+bash scripts/build-linux-runtime-pack.sh --prepare-sources /path/to/new-sources
+```
+
+```powershell
+.\scripts\build-windows-x64-runtime-pack.ps1 -PrepareSources C:\build\new-sources
+```
+
+The destination must be new. It contains the exported component trees, Git tar
+archives and `selection.json`. This is source-selection evidence; full packs
+still require the corresponding native builder and toolchain. Hosted DMG
+rehearsals retain their explicit workflow donor refs; their signed receipts
+record the actual revisions. Reconcile those refs before a release.
 
 Foundations use their own public channels: npm `@loctree/loctree` and
 `@loctree/aicx`, PyPI `screenscribe`, and GitHub Releases

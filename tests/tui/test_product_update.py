@@ -762,6 +762,96 @@ def test_product_update_helper_refuses_unsigned_source(tmp_path: Path) -> None:
     assert not receipt.exists()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires native codesign refusal")
+@pytest.mark.parametrize("mode", ["replace", "restore", "recover"])
+@pytest.mark.parametrize("runtime_app", ["source", "destination"])
+@pytest.mark.parametrize("explicit_unusable_python", [False, True])
+def test_product_update_bootstrap_signature_refusal_contract(
+    tmp_path: Path, mode: str, runtime_app: str, explicit_unusable_python: bool
+) -> None:
+    env = _isolated_product_env(tmp_path)
+    env.pop("VIBECRAFTED_UPDATE_HELPER_HARNESS", None)
+    env.pop("VIBECRAFTED_UPDATE_PYTHON", None)
+    transaction = "bootstrap-refusal-123"
+    source = _unsigned_app(
+        tmp_path / f".vc-update-capture-{transaction}/prior.app", "prior"
+    )
+    dest = _unsigned_app(tmp_path / "Installed.app", "current")
+    app = source if runtime_app == "source" else dest
+    interpreter = app / "Contents/Resources/runtime/bin/python3"
+    interpreter.parent.mkdir(parents=True)
+    executed = tmp_path / "untrusted-python-executed"
+    interpreter.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(executed))}\nexit 1\n")
+    interpreter.chmod(0o755)
+    if explicit_unusable_python:
+        # Explicit selection must still fail on its own merits, with no fallback.
+        explicit = tmp_path / "unusable-python"
+        explicit.write_text("#!/bin/sh\nexit 1\n")
+        explicit.chmod(0o755)
+        env["VIBECRAFTED_UPDATE_PYTHON"] = str(explicit)
+    publication = Path(env["VIBECRAFTED_RUNTIME_HOME"]) / "active.json"
+    publication.write_text('{"version":"preserve-current"}\n')
+    (publication.parent / "install-receipt.json").write_text(publication.read_text())
+    before = {
+        path: path.read_bytes()
+        for root in (source, dest, publication.parent)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    receipt, admission, journal = (
+        tmp_path / name for name in ("receipt.json", "admission.json", "journal.json")
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-x",
+            str(HELPER),
+            "--source",
+            str(source),
+            "--destination",
+            str(dest),
+            "--receipt",
+            str(receipt),
+            "--admission",
+            str(admission),
+            "--journal",
+            str(journal),
+            "--transaction",
+            transaction,
+            "--mode",
+            mode,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    historical_source = runtime_app == "source" and mode in ("restore", "recover")
+    expected = 15 if historical_source and not explicit_unusable_python else 1
+    assert result.returncode == expected, result.stderr[-2000:]
+    error = (
+        "explicit App update Python is unusable"
+        if explicit_unusable_python
+        else "codesign --verify --strict failed"
+    )
+    assert error in result.stderr
+    assert not executed.exists()
+    # Trace the real helper: cleanup cannot hide an attempted interpreter copy.
+    assert "/usr/bin/ditto " not in result.stderr
+    assert "locate_prior_pack" not in result.stderr
+    assert not list(Path(env["TMPDIR"]).iterdir())
+    assert not receipt.exists() and not admission.exists() and not journal.exists()
+    assert not (tmp_path / ".vc-update.lock").exists()
+    assert not (tmp_path / f".vc-update-prepared-{transaction}.app").exists()
+    assert before == {
+        path: path.read_bytes()
+        for root in (source, dest, publication.parent)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_product_update_helper_times_out_live_parent(tmp_path: Path) -> None:
     dest = tmp_path / "Installed.app"
     dest.mkdir()
@@ -1313,13 +1403,14 @@ def _isolated_product_env(
     tmp_path: Path, *, frame_socket_dir: Path | None = None
 ) -> dict[str, str]:
     home = tmp_path / "isolated-home"
-    runtime = tmp_path / "isolated-runtime"
-    crafted = tmp_path / "isolated-crafted"
-    launcher = tmp_path / "isolated-launcher"
-    xdg_config = tmp_path / "isolated-xdg-config"
-    xdg_data = tmp_path / "isolated-xdg-data"
-    xdg_cache = tmp_path / "isolated-xdg-cache"
-    xdg_state = tmp_path / "isolated-xdg-state"
+    # Foundations enforce the real HOME layout even for private carrier tests.
+    xdg_config = home / ".config"
+    xdg_data = home / ".local/share"
+    xdg_cache = home / ".cache"
+    xdg_state = home / ".local/state"
+    runtime = xdg_data / "vibecrafted"
+    crafted = home / ".vibecrafted"
+    launcher = home / ".local/bin"
     sockets = (
         frame_socket_dir
         if frame_socket_dir is not None
@@ -1367,6 +1458,73 @@ def _isolated_product_env(
         }
     )
     return env
+
+
+@pytest.mark.parametrize("custom_sockets", [False, True])
+def test_isolated_product_env_obeys_runtime_root_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_sockets: bool
+) -> None:
+    root_keys = (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_LAUNCHER_BIN",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    )
+    directory_keys = (
+        "HOME",
+        *root_keys,
+        "VC_FRAME_SOCKET_DIR",
+        "ZELLIJ_SOCKET_DIR",
+        "TMPDIR",
+    )
+    for key in directory_keys:
+        monkeypatch.setenv(key, str(tmp_path / "ambient-root"))
+    sockets = tmp_path / "private-frame-sockets" if custom_sockets else None
+    env = _isolated_product_env(
+        tmp_path / "private fixture with spaces", frame_socket_dir=sockets
+    )
+    checked = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            (
+                'source "$1"\n'
+                'enforce_runtime_root_contract || exit "$?"\n'
+                "default_vibecrafted_home\n"
+                "default_vibecrafted_runtime_home\n"
+                "default_vibecrafted_launcher_bin\n"
+                "default_vibecrafted_tools_home\n"
+            ),
+            "fixture-root-contract",
+            str(REPO_ROOT / "scripts/lib/runtime-roots.sh"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    resolved = checked.stdout.splitlines()
+    assert resolved[:3] == [env[key] for key in root_keys[:3]]
+    home = Path(env["HOME"]).resolve()
+    assert home.is_relative_to(tmp_path.resolve())
+    assert home != _founder_home().resolve()
+    for path in (*resolved, *(env[key] for key in root_keys)):
+        assert Path(path).resolve().is_relative_to(home), path
+    assert Path(env["XDG_DATA_HOME"]) / "vibecrafted" == Path(
+        env["VIBECRAFTED_RUNTIME_HOME"]
+    )
+    for key in directory_keys:
+        path = Path(env[key])
+        assert path.resolve().is_relative_to(tmp_path.resolve()), key
+        assert path.is_dir() and stat.S_IMODE(path.stat().st_mode) == 0o700, key
+    assert env["VC_FRAME_SOCKET_DIR"] == env["ZELLIJ_SOCKET_DIR"]
+    if sockets is not None:
+        assert Path(env["VC_FRAME_SOCKET_DIR"]) == sockets
 
 
 def _read_installer_publication(runtime_home: Path) -> dict[str, object]:
@@ -3230,6 +3388,7 @@ def _run_relaunch_harness(
             f"OPEN_BIN={json.dumps(str(opener))}",
             "RELAUNCH=1",
             "UPDATE_LOCK_FD=",
+            f"UPDATE_PYTHON={shlex.quote(sys.executable)}",
         ]
     )
     script = "\n".join(

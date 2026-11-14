@@ -382,6 +382,7 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     capture = tmp_path / "curl-args.txt"
     fake_bin.mkdir()
     home.mkdir()
+    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
     _write_executable(
         fake_bin / "curl",
         "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -438,7 +439,10 @@ def _path_without_make(tmp_path: Path, fake_bin: Path) -> str:
     tools.mkdir()
     for directory in ("/usr/bin", "/bin", "/usr/sbin", "/sbin"):
         for entry in Path(directory).iterdir():
-            if entry.name in {"make", "gmake"} or (tools / entry.name).exists():
+            # lexists: a broken symlink still owns the name. /bin and /usr/bin
+            # are the same directory on a merged /usr, and exists() follows a
+            # dangling link and reports it missing, so the second pass crashes.
+            if entry.name in {"make", "gmake"} or os.path.lexists(tools / entry.name):
                 continue
             (tools / entry.name).symlink_to(entry)
     return f"{fake_bin}:{tools}"
@@ -523,6 +527,7 @@ def test_channel_archive_checksum_is_matched_by_release_name(
     fake_bin.mkdir()
     home.mkdir()
     _write_fake_release_curl(fake_bin)
+    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -598,6 +603,8 @@ def test_missing_runtime_dependency_is_named_before_the_channel_manifest_is_fetc
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    (tool_bin / "uname").unlink(missing_ok=True)
+    _write_executable(tool_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
     env["PATH"] = str(tool_bin)
     env["CURL_CAPTURE"] = str(capture)
 
@@ -641,6 +648,7 @@ def _run_portable_install(
     make_capture = tmp_path / "make-args.txt"
     fake_bin.mkdir(exist_ok=True)
     home.mkdir(exist_ok=True)
+    _write_executable(fake_bin / "uname", '#!/bin/sh\nprintf "Linux\\n"\n')
     _write_executable(
         fake_bin / "curl",
         "#!/usr/bin/env bash\n"

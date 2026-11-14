@@ -409,7 +409,7 @@ def hydrate_main(argv: Sequence[str] | None = None) -> int:
 def marbles_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted marbles`: control subcommands (pause/stop/resume/
     session/inspect/delete/gc) route to the legacy deck script; everything else
-    runs the `vc-marbles` lifecycle manifest.
+    uses the public admission path and its `vc-marbles` lifecycle owner.
     """
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in {
@@ -422,12 +422,23 @@ def marbles_main(argv: Sequence[str] | None = None) -> int:
         "gc",
     }:
         return subprocess.call([str(deck_path()), "marbles", *args])
-    return _lifecycle_main("vc-marbles", args)
+    from .cli import main
+    from .lifecycle_control import CONTROL_VERBS
+
+    if args and args[0] in CONTROL_VERBS:
+        return _lifecycle_main("vc-marbles", args)
+    return main(["marbles", *args])
 
 
 def polarize_main(argv: Sequence[str] | None = None) -> int:
     """CLI entry for `vibecrafted polarize` (lifecycle manifest `vc-polarize`)."""
-    return _lifecycle_main("vc-polarize", argv)
+    from .cli import main
+    from .lifecycle_control import CONTROL_VERBS
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in CONTROL_VERBS:
+        return _lifecycle_main("vc-polarize", args)
+    return main(["polarize", *args])
 
 
 def prune_main(argv: Sequence[str] | None = None) -> int:

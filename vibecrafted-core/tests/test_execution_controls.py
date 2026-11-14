@@ -191,7 +191,7 @@ def test_codex_bypass_with_sandbox_true_keeps_the_sandbox() -> None:
         ("codex", "read-only", False, "--sandbox true"),
         ("junie", "", True, "Omit --sandbox"),
         ("junie", "auto", False, "Omit --sandbox"),
-        ("junie", "bypass", None, "supported: auto"),
+        ("junie", "read-only", None, "supported: auto"),
         ("agy", "", False, "Omit --sandbox to keep agy's own setting"),
         ("agy", "auto", False, "or pass --sandbox true"),
         ("codex", "accept-edits", None, "supported: bypass, auto, read-only"),
@@ -686,3 +686,61 @@ def test_admission_frozen_decision_survives_a_later_config_flip(
     command = workflow.build_launch_command(spec, tmp_path)
     assert "plan" in command
     assert "bypassPermissions" not in command
+
+
+def test_junie_bypass_adaptation_is_frozen_across_config_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core.execution_controls import controls_from_receipt
+
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[runtime.picking]\npermissions = "bypass"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent.parent))
+    payload = {
+        "agent": "junie",
+        "skill": "workflow",
+        "prompt": "go",
+        "root": str(tmp_path),
+    }
+    spec = workflow.normalize_launch_spec(payload, tmp_path)
+    receipt = spec.execution_controls_frozen
+    assert receipt["permissions_requested"] == "bypass"
+    assert receipt["permissions_effective"] == "auto"
+    assert receipt["permissions_reason"] == "junie-headless-no-bypass"
+    config.write_text(
+        '[runtime.picking]\npermissions = "read-only"\n', encoding="utf-8"
+    )
+    restored = controls_from_receipt(json.loads(json.dumps(receipt)))
+    assert restored.receipt() == receipt
+    assert workflow.launch_execution_controls(spec).receipt() == receipt
+    assert workflow.build_launch_command(spec, tmp_path) == spawn._stdin_command(
+        "junie", controls=restored
+    )
+    assert "--brave" not in workflow.build_launch_command(spec, tmp_path)
+    with pytest.raises(
+        ExecutionControlsError, match="cannot enforce --permissions read-only"
+    ):
+        workflow.normalize_launch_spec(payload, tmp_path)
+
+
+def test_junie_bypass_adaptation_does_not_change_interactive_or_restricted_modes() -> (
+    None
+):
+    interactive = resolve_execution_controls(
+        "junie", permissions="bypass", mode="interactive"
+    )
+    assert interactive.permissions_effective == "bypass"
+    assert interactive.provider_flags == ("--brave",)
+    assert interactive.receipt()["permissions_reason"] == ""
+    auto = resolve_execution_controls("junie", permissions="auto")
+    assert auto.permissions_effective == "auto"
+    assert auto.receipt()["permissions_reason"] == ""
+    for permissions in ("read-only", "accept-edits"):
+        with pytest.raises(
+            ExecutionControlsError, match=f"cannot enforce --permissions {permissions}"
+        ):
+            resolve_execution_controls("junie", permissions=permissions)
+    for sandbox in (True, False):
+        with pytest.raises(ExecutionControlsError, match="no sandbox control"):
+            resolve_execution_controls("junie", permissions="bypass", sandbox=sandbox)

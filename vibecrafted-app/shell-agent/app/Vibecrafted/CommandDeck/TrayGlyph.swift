@@ -57,12 +57,42 @@ struct TrayActivityFrame {
   mutating func reset() { step = 0 }
 }
 
+/// The white activity circle moves position instead of the whole mark
+/// rotating. Founder direction 2026-10-22: the three-circle shape is the
+/// static mark; the filled circle is the state indicator. Working advances
+/// the filled circle one slot clockwise per tick; idle, unavailable and
+/// reduce-motion keep the reference slot. `step` is a 60-degree slot index
+/// (three circles sit on a triangle ring), but only the circle is redrawn.
+struct TrayActivitySlots {
+  /// The reference slot: the lower-center circle of the mark (as in TrayIcon).
+  static let referenceSlot = 0
+
+  /// The three source-mark circle centers on the 88px TrayIcon mask,
+  /// measured by flood-fill of the enclosed interiors. In mask coordinates
+  /// (y grows downward) they form a triangle pointing up; with the menu-bar
+  /// render's `respectFlipped: true` the visual result is two upper circles
+  /// and one lower-center — the reference. Advance order is clockwise from
+  /// the reference on screen: lower → upper right → upper left.
+  static let circleCenters: [(x: Int, y: Int)] = [
+    (43, 28),  // slot 0: lower-center on screen (reference)
+    (61, 60),  // slot 1: upper right on screen
+    (25, 60),  // slot 2: upper left on screen
+  ]
+
+  static func slot(for step: Int, activity: TrayWorkActivity) -> Int {
+    guard activity.isRunning else { return referenceSlot }
+    let normalized = ((step % 3) + 3) % 3
+    return normalized
+  }
+}
+
+
+
 @MainActor
 enum TrayGlyph {
   static let minimumPointSize: CGFloat = 16
   static let preferredPointSize: CGFloat = 18
   private static let source = Bundle.main.image(forResource: "TrayIcon")
-  private static let workingSource = source.map { fillingActivityCircle(in: $0) }
 
   static func clampedPointSize(_ requested: CGFloat) -> CGFloat {
     min(max(requested, minimumPointSize), preferredPointSize)
@@ -83,14 +113,18 @@ enum TrayGlyph {
   ) -> NSImage {
     let side = clampedPointSize(requested)
     let size = NSSize(width: side, height: side)
+    // Founder direction 2026-10-22: the three-circle mark is static; the
+    // white activity circle moves to the active slot instead of the whole
+    // glyph rotating. `step` is a 60-degree slot index (three circles sit on
+    // a hexagon ring), advancing one slot per tick while work is running.
+    let slot = TrayActivitySlots.slot(for: step, activity: activity)
     let base: NSImage
     if let suppliedSource {
-      base = activity.isRunning ? fillingActivityCircle(in: suppliedSource) : suppliedSource
+      base = activity.isRunning ? fillingActivityCircle(at: slot, in: suppliedSource) : suppliedSource
     } else {
-      base = (activity.isRunning ? workingSource : source) ?? fallbackImage(size: size)
+      base = (activity.isRunning ? workingSource(at: slot) : source) ?? fallbackImage(size: size)
     }
-    let rotation = activity.isRunning ? (step % 6) * 60 : 0
-    let image = renderMask(source: base, side: side, rotation: rotation)
+    let image = renderMask(source: base, side: side, rotation: 0)
     image.isTemplate = true
     image.accessibilityDescription = "\(accessibilityLabel(for: health)) — \(activity.description)"
     return image
@@ -125,6 +159,20 @@ enum TrayGlyph {
   /// interior preserves the exact hand-drawn contour, with no guessed oval,
   /// corner badge, halo, replacement artwork or theme-specific paint.
   static func fillingActivityCircle(in source: NSImage) -> NSImage {
+    fillingActivityCircle(at: TrayActivitySlots.referenceSlot, in: source)
+  }
+
+  static func workingSource(at slot: Int) -> NSImage? {
+    guard let base = source else { return nil }
+    return fillingActivityCircle(at: slot, in: base)
+  }
+
+  /// Fill the enclosed eye of the circle at `slot` (0…5 on the 6-slot ring;
+  /// the three source circles sit at slots 1, 3, 5). Slotting the seed into
+  /// the chosen circle's interior keeps the fill inside exactly one circle
+  /// while the other two contours stay unchanged. A non-enclosed or foreign
+  /// seed never fills the background.
+  static func fillingActivityCircle(at slot: Int, in source: NSImage) -> NSImage {
     guard let data = source.tiffRepresentation,
       let bitmap = NSBitmapImageRep(data: data), bitmap.hasAlpha,
       bitmap.bitsPerSample == 8, !bitmap.isPlanar, bitmap.samplesPerPixel >= 2
@@ -134,7 +182,14 @@ enum TrayGlyph {
     guard width > 0, height > 0 else { return source }
     let alphaIndex = bitmap.bitmapFormat.contains(.alphaFirst) ? 0 : bitmap.samplesPerPixel - 1
     var pixel = [Int](repeating: 0, count: bitmap.samplesPerPixel)
-    let seed = (x: width * 25 / 88, y: height * 61 / 88)
+    // Slot centers on the 88px source mask, measured by flood-fill of the
+    // three enclosed interiors (pinned by the CommandDeck integration test).
+    // In mask coordinates y grows downward; the menu-bar render flips
+    // vertically (`respectFlipped: true`), so mask (43, 28) is the
+    // lower-center circle on screen — the reference slot from TrayIcon.
+    let clampedSlot = min(max(slot, 0), TrayActivitySlots.circleCenters.count - 1)
+    let center = TrayActivitySlots.circleCenters[clampedSlot]
+    let seed = (x: center.x * width / 88, y: center.y * height / 88)
     var visited = Set<Int>()
     var pending = [seed]
     while let point = pending.popLast() {

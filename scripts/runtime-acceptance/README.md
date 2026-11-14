@@ -23,7 +23,7 @@ scripts/runtime-acceptance/vc-runtime-acceptance.zsh --upgrade
 scripts/runtime-acceptance/vc-runtime-acceptance.zsh --frame-bin=path/to/vc-frame
 ```
 
-## Reguły kanonu (ustalone 2026-10-04, dragon)
+## Reguły kanonu (ustalone 2026-10-04, host-b)
 
 - **Prawo zasiedlonego świata**: sceny nawigacyjne biegną z ≥2 sesjami.
   Werdykt „martwe" ze świata jednoelementowego nie jest werdyktem —

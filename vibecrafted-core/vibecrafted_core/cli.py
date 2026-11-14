@@ -620,6 +620,20 @@ def _build_parser() -> argparse.ArgumentParser:
     add_repo_arguments(resume)
     resume.add_argument("--source-dir", default="")
     resume.add_argument("--model", default=None)
+    resume.add_argument(
+        "--permissions",
+        default="",
+        metavar="bypass|auto|accept-edits|read-only",
+        help="current explicit policy; omitted inherits the session's admitted one",
+    )
+    resume.add_argument(
+        "--sandbox",
+        nargs="?",
+        const="true",
+        default="",
+        metavar="true|false",
+        help="current explicit sandbox; omitted inherits the session's admitted one",
+    )
     resume.add_argument("--json", action="store_true")
     fork_source = sub.add_parser(
         "fork-source",
@@ -1244,6 +1258,8 @@ def _continue_launcher_named_session(
         skill=LAUNCH_ALIASES.get(command, command),
         launch_meta={"session_selection": selection},
         source_path=source_path,
+        permissions=str(getattr(args, "permissions", "") or ""),
+        sandbox=getattr(args, "sandbox", "") or None,
     )
     if args.await_completion:
         return _emit_launch_result(
@@ -2865,6 +2881,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_path=str(Path(args.prompt_file).expanduser().resolve())
             if args.prompt_file
             else "",
+            permissions=args.permissions,
+            sandbox=args.sandbox or None,
         )
         if args.json:
             print(json.dumps(resume_result, ensure_ascii=False, indent=2))

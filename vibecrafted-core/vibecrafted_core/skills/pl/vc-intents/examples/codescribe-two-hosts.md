@@ -11,16 +11,16 @@
    pięć tożsamości; najnowsza intencja 2026-09-18 i commit 2026-09-18 — zgodne.
 2. `sweep --since 2026-01-01 --source dir:~/.codescribe/transcriptions --source aicx`
    → katalog transkryptów 1 900 plików na tym hoście; aicx 3 254 wiersze,
-   **truncated**. Drugi host ma kolejne 900: `rsync dragon:.codescribe/transcriptions/ …`,
+   **truncated**. Drugi host ma kolejne 900: `rsync host-b:.codescribe/transcriptions/ …`,
    powtórny sweep daje 2 842 pliki, `--shard-size 120` → 24 shardy.
 3. `plan --stage extract --agent '*=junie:gemini-3.8-flash'` → doctor czysty →
    `vibecrafted dispatch … --json`. `verify-quotes --strict` → 974 dosłowne, 0 odrzuconych.
-4. `lanes` (sześć według subject) → `plan --stage confront --host div0` z kimi /
-   cursor / grok / junie na tor; ten sam plan na dragon z `--host dragon`, katalogi
+4. `lanes` (sześć według subject) → `plan --stage confront --host host-a` z kimi /
+   cursor / grok / junie na tor; ten sam plan na host-b z `--host host-b`, katalogi
    werdyktów wykluczone z rsync workdiru.
-5. `merge --verdicts div0=… --verdicts dragon=… --primary div0` → zgodność
+5. `merge --verdicts host-a=… --verdicts host-b=… --primary host-a` → zgodność
    550/756 = 72.8 %, największa różnica `partial→landed` (47). Jeden tor nie
-   dotarł na dragon, 218 intencji bez drugiego werdyktu, raportowane na stderr.
+   dotarł na host-b, 218 intencji bez drugiego werdyktu, raportowane na stderr.
 6. `reclassify` → +410 override'ów, 43 % host-level `landed` spadło przez dwie reguły.
 7. `render --html --transcripts … --blob-base https://github.com/vetcoders/codescribe/blob/<sha>/`
    → Founder filtruje „W kodzie, Founder: nie działa” (126), decyduje, eksportuje
@@ -30,10 +30,10 @@
 
 ## Acceptance evidence
 
-- `<workdir>/LEDGER.json` z `hosts: ["div0","dragon"]`, `replication-report.json`
+- `<workdir>/LEDGER.json` z `hosts: ["host-a","host-b"]`, `replication-report.json`
   z liczbą `agreement` dla każdej pary
 - `<workdir>/overrides.jsonl` z wierszami `by: rule` i co najmniej jednym `by: founder`
-- `intents-implement.div0.dispatch.toml` przechodzący `vibecrafted dispatch --doctor --json`
+- `intents-implement.host-a.dispatch.toml` przechodzący `vibecrafted dispatch --doctor --json`
 - `status` exit 1 z nazwanymi powodami (otwarte dispositions, `runtime_verified != yes`)
 - Najwyższa prawda w raporcie: „43 % `landed` podważają własne słowa Foundera;
   runtime_verified jest `unknown` dla wszystkich 974 — żadna flota nie uruchomiła produktu”.

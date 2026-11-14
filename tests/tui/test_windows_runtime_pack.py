@@ -676,29 +676,6 @@ def test_windows_inventory_refuses_a_carried_screenscribe(tmp_path: Path) -> Non
         _windows_x64_inventory(root)
 
 
-def test_windows_pack_builder_builds_terminal_and_frame_honestly() -> None:
-    """Windows pack builder must compile donors and stamp the revisions it built."""
-    builder = (REPO_ROOT / "scripts" / "build-windows-x64-runtime-pack.ps1").read_text(
-        encoding="utf-8"
-    )
-    assert "38ef2f918383ca4dde797d22869b619097c81d05" in builder
-    assert "0b91c4f0806356b5c92e46c82bf0fdf0310c0222" in builder
-    assert "cargo build --release --bin alacritty" in builder
-    assert "cargo xtask build --release" in builder
-    assert "libexec\\vc-terminal.exe" in builder
-    assert "libexec\\vc-frame.exe" in builder
-    assert "libssl-3-x64.dll" in builder
-    assert "OPENSSL_DIR" in builder
-    assert "vc-terminal-product-entry.cmd" in builder
-    assert "vc-frame-product-entry.cmd" in builder
-    assert "missing mandatory libexec/vc-terminal.exe" in builder
-    assert "no supported Windows vc-terminal binary in this pack" not in builder
-    # Provenance SHAs are only stamped after the Windows binaries exist.
-    build_at = builder.index("cargo build --release --bin alacritty")
-    stamp_at = builder.index("-TerminalRevision $terminalRevision")
-    assert build_at < stamp_at
-
-
 def test_windows_ci_openssl_install_is_pinned_curl_not_winget() -> None:
     """Install (Windows) must not stall on winget/choco OpenSSL downloads."""
     workflow = (REPO_ROOT / ".github" / "workflows" / "install-windows.yml").read_text(

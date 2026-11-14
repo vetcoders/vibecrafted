@@ -133,17 +133,21 @@ if [[ -n "$codesign_identity" ]]; then
     # shellcheck disable=SC2034
     CODESIGN_KEYCHAIN_ARGS=(--keychain "$codesign_keychain")
   fi
-  sign_macho_tree "$root" || die "could not sign final Runtime Pack Mach-O payload"
-  # libexec/vc-terminal.app is the pack's own Finder/Dock identity, so the pack
-  # must seal it as a BUNDLE. Signing the inner Mach-O covers the executable
-  # and nothing else: Info.plist and the icon — the identity itself — are
-  # sealed only by codesign on the bundle directory. Runs after the loose
-  # Mach-O files and before verification, so the inside-out order matches the
-  # release builder's sign_macho_tree → sign_nested_app_bundles.
+  host_entitlements="$work/host-entitlements.plist"
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --runtime-root "$root" --entitlements-output "$host_entitlements" >/dev/null
+  sign_macho_tree "$root" "" "$root/libexec/vc-terminal" "$host_entitlements" \
+    || die "could not sign final Runtime Pack Mach-O payload"
+  # Seal any nested helper bundles inside-out, retaining the policy assigned
+  # above. The flat terminal is internal code, not a second GUI app identity.
   sign_macho_app_bundles "$root" \
     || die "could not seal the final Runtime Pack .app bundles"
   verify_macho_tree "$root" 1 \
     || die "final Runtime Pack Mach-O signature preflight failed"
+  PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/unified_product_manifest.py" host-permissions \
+    --runtime-root "$root" --verify-only --verify-signatures >/dev/null
 elif [[ -n "$codesign_keychain" ]]; then
   die "--codesign-keychain requires --codesign-identity"
 fi

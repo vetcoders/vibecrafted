@@ -7,15 +7,15 @@
 #
 # - classic: the CLT 26 clang/ld-classic pair. Apple ld64 1230.1 and 27037.1
 #   assert in makeSymbolStringInPlace on the Vibecrafted Server entry object;
-#   ld-classic 956.6 links the captured input (bc25aa6e, measured on div0).
+#   ld-classic 956.6 links the captured input (bc25aa6e, measured on host-a).
 # - xcode: Command Line Tools 27 ship no ld-classic at all, so a host on CLT 27
 #   links with the selected Xcode's own clang/ld pair instead. MEASURED
-#   2026-09-25 on dragon (Xcode 27 beta: clang-2100.3.27.1 + ld-27036.1): the
+#   2026-09-25 on host-b (Xcode 27 beta: clang-2100.3.27.1 + ld-27036.1): the
 #   assertion is a symbol-name limit. Rust 1.96 mangles crate symbols legacy
 #   style and spells the whole Leptos view type into drop glue (111k-character
 #   names); ld-27036.1 asserts on them exactly as 1230.1/27037.1 did. With v0
 #   mangling, which the release applies to the server build, the pair links
-#   vibecrafted-server-web. RE-MEASURED 2026-09-29 on dragon after Apple
+#   vibecrafted-server-web. RE-MEASURED 2026-09-29 on host-b after Apple
 #   promoted Xcode 27 to stable (27A266a): the stable pair clang-2100.3.34.2 +
 #   ld-27037.1 links vibecrafted-server-web with v0 mangling (build-server-release
 #   leg, DEVELOPER_DIR=/Applications/Xcode.app, PROBE-LINK-OK in 2m56s), so the

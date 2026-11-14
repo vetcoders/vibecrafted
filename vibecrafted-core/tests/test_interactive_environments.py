@@ -1078,6 +1078,6 @@ def test_interactive_cli_omission_honors_durable_readonly(
     admission = _admission(command)
     assert _flag(command, "--permissions") == "read-only"
     controls = admission["execution_controls"]
-    assert controls["permissions_requested"] == ""
+    assert controls["permissions_requested"] == "read-only"
     assert controls["permissions_source"] == "config:global"
     assert controls["provider_flags"][-2:] == ["--sandbox", "read-only"]

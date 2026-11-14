@@ -288,10 +288,11 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
         source_door = payload / "config/runtime-pin/bin" / name
         assert installed_door.read_bytes() == source_door.read_bytes()
         assert installed_door.stat().st_mode & 0o777 == 0o755
-    # Nested zsh inside product shells restores the pinned door after startup.
-    for stage in (".zshenv", ".zprofile", ".zlogin"):
-        assert (product_config / "vc-terminal" / stage).read_text() == (
-            installer._PRODUCT_ZDOTDIR_PIN_STAGE
+    # Nested zsh inside product shells composes the user's login startup and
+    # restores the pinned door; the stages are the generation's own files.
+    for stage, source in installer._product_zdotdir_stage_sources(payload).items():
+        assert (product_config / "vc-terminal" / stage).read_bytes() == (
+            source.read_bytes()
         )
     assert not (debris_dir / "alacritty.toml").exists()
     assert not (debris_dir / "launch-alt-screen.zsh").exists()
@@ -1705,7 +1706,9 @@ def _setup_installed_surface(
     zshrc = home / ".zshrc"
     path_line = installer._launcher_path_line()
     zshrc.write_text(
-        f"# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher\n{path_line}\n",
+        f"# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher\n{path_line}\n"
+        f"# {installer._USER_RC_GUEST_COMMENT}\n"
+        f"{installer._user_rc_guest_line()}\n",
         encoding="utf-8",
     )
 
@@ -1746,7 +1749,10 @@ def test_cmd_uninstall_removes_launchers_and_compat_pack_wrappers(
     assert exit_code == 0
     assert not helper_file.exists()
     assert not retired_frame.exists()
-    assert installer._launcher_path_line() not in zshrc.read_text(encoding="utf-8")
+    zshrc_after = zshrc.read_text(encoding="utf-8")
+    assert installer._launcher_path_line() not in zshrc_after
+    assert installer._user_rc_guest_line() not in zshrc_after
+    assert installer._USER_RC_GUEST_COMMENT not in zshrc_after
     assert not (store_path / "vc-init").exists()
     assert not (home / ".codex" / "skills" / "vc-init").exists()
 

@@ -16,8 +16,9 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
 * **root** -- explicit `--repo` (legacy `--root`) wins; otherwise the Git
   top-level of the caller's directory (a subdirectory names the SAME
   workspace); outside Git, the directory itself. Never the runtime generation.
-* **name** -- the explicit bare argument or the root's basename, verbatim,
-  validated once (exit 2), never truncated, normalized or suffixed.
+* **name** -- an explicit bare argument stays verbatim and is validated once
+  (exit 2). Automatic entry treats the basename as a request; the catalog
+  resolver reports its effective owned or free project destination and reason.
 * **inventory first** -- the engine's own `list-sessions` is read before any
   window. An unreadable inventory refuses with exit 4. A known WES binding
   for another repository keeps the name collision as an explicit choice.
@@ -502,13 +503,21 @@ if [[ "$1 $2" == "workspace session-attach" ]]; then
 fi
 if [[ "$1 $2" == "workspace resolve" ]]; then
   shift 2
-  root=""
+  root="" destination=0 requested=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --root) root="$2"; shift 2 ;;
+      --destination) destination=1; shift ;;
+      --requested-session) requested="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
+  if ((destination)); then
+    echo "VIBECRAFTED_REQUESTED_FRAME_SESSION=$requested"
+    echo "VIBECRAFTED_OPERATOR_SESSION=$requested"
+    echo "VIBECRAFTED_FRAME_DESTINATION_REASON=fixture-owned-route"
+    exit 0
+  fi
   tag="$(basename "$root")"
   tag="$(printf '%s' "$tag" | tr -c 'A-Za-z0-9\\n' '-')"
   echo "VIBECRAFTED_WORKSPACE_ID=ws-$tag"
@@ -618,6 +627,7 @@ class Scene:
             PRIMARY_SHELL.read_text(encoding="utf-8"),
         )
         self.config_dir = self.home / ".config" / "vibecrafted" / "vc-frame"
+        _write(self.config_dir / "config.kdl", "// installed product fixture\n")
         _write(self.config_dir / "layouts" / "operator.kdl", "layout {\n}\n")
         for alias in ("dashboard", "marbles", "research", "workflow"):
             _write(self.config_dir / "layouts" / f"{alias}.kdl", "layout {\n}\n")
@@ -1120,6 +1130,153 @@ def test_wes_public_start_build_transition_preserves_exact_seat(
         for folder in [wc.instances_dir(), wc.sessions_dir()]
         for p in folder.glob("*.json")
     } == snapshot
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("condition", ["stale", "unbound", "ambiguous", "corrupt"])
+def test_public_return_refusal_offers_executable_preserving_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str, condition: str
+) -> None:
+    """A refused return leaves a shell and an exact, opt-in physical entry."""
+    from vibecrafted_core import workspace_catalog as wc
+
+    name = "seat ' $(false)"
+    scene = Scene(tmp_path, live=(name,), clients=(name,), git=True)
+    env = scene.env({"SSH_TTY": "/dev/private-fixture"})
+    # Spaces and quotes must survive the suggested command as single values.
+    socket = tmp_path / "socket ' root"
+    socket.mkdir()
+    env.update(VC_FRAME_SOCKET_DIR=str(socket), ZELLIJ_SOCKET_DIR=str(socket))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    first = wc.resolve_run_workspace_identity(root=scene.root, env={})
+    if condition != "unbound":
+        wc.record_runtime_session_attachment(
+            workspace_id=first.workspace_id,
+            vibecrafted_session_id=first.vibecrafted_session_id,
+            workspace_instance_id=first.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=name,
+            state="live",
+            socket_dir=str(socket),
+        )
+    if condition == "stale":
+        path = wc.instance_path(first.workspace_instance_id)
+        payload = json.loads(path.read_text())
+        payload["status"] = wc.INSTANCE_STATUS_STALE
+        path.write_text(json.dumps(payload))
+    elif condition == "ambiguous":
+        second = wc.materialize_instance(
+            workspace_id=first.workspace_id,
+            root=scene.root,
+            vibecrafted_session_id=wc.new_uuid7(),
+            build_id=first.build_id,
+        )
+        wc.record_runtime_session_attachment(
+            workspace_id=second.workspace_id,
+            vibecrafted_session_id=second.vibecrafted_session_id,
+            workspace_instance_id=second.workspace_instance_id,
+            runtime="vc-frame",
+            runtime_session_id=name,
+            state="live",
+            socket_dir=str(socket),
+        )
+    elif condition == "corrupt":
+        wc.workspace_session_path(first.vibecrafted_session_id).write_text("{broken")
+    _write(
+        scene.owner,
+        f"#!{sys.executable}\nimport sys\n"
+        f"sys.path.insert(0, {str(SOURCE_CORE_DIR)!r})\n"
+        "from vibecrafted_core.workspace_catalog import workspace_cli_main\n"
+        "sys.exit(workspace_cli_main(sys.argv[2:]))\n",
+    )
+    preserved = {
+        str(p): p.read_bytes()
+        for folder in (wc.instances_dir(), wc.sessions_dir(), scene.table)
+        for p in folder.rglob("*")
+        if p.is_file()
+    }
+    invocation = f"vc-start {shlex.quote(name)} --repo {shlex.quote(str(scene.root))}"
+    script = _entry_script(scene, invocation) + '\nprintf "SHELL_USABLE\\n"\n'
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    expected_rc = 2 if condition in ("stale", "unbound") else 4
+    assert f"RC=[{expected_rc}]" in output, output
+    assert "SHELL_USABLE" in output
+    assert not _creates(scene.calls()) and not _attaches(scene.calls())
+    assert scene.terminal_launches(wait=0) == []
+    assert "From another terminal, inspect the existing session" in output, output
+    command = next(
+        line.strip() for line in output.splitlines() if line.startswith("    env ")
+    )
+    words = shlex.split(command)
+    assert words[-3:] == [str(scene.generation / "bin/vc-frame"), "attach", name]
+    assert f"VC_FRAME_SOCKET_DIR={socket}" in words
+    assert f"ZELLIJ_SOCKET_DIR={socket}" in words
+    # Check the suggested command itself under a real private PTY. It must
+    # clear inherited Frame markers and use the observed socket namespace.
+    env.update(VC_FRAME="1", VC_FRAME_SESSION_NAME=name, ZELLIJ_SESSION_NAME=name)
+    inspection = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pty,sys;sys.exit(pty.spawn("
+            + repr(_shell_argv(shell, command))
+            + "))",
+        ],
+        check=False,
+        env=env,
+        cwd=scene.root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert inspection.returncode == 0, inspection.stdout + inspection.stderr
+    assert [call["attached"] for call in _attaches(scene.calls())] == [name]
+    assert _attaches(scene.calls())[0]["VC_FRAME_SOCKET_DIR"] == str(socket)
+    assert not _creates(scene.calls())
+    assert {
+        str(p): p.read_bytes()
+        for folder in (wc.instances_dir(), wc.sessions_dir(), scene.table)
+        for p in folder.rglob("*")
+        if p.is_file()
+    } == preserved
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("state", ["dead", "missing", "error", "unavailable-engine"])
+def test_preserving_return_hint_requires_observed_live_session_and_owned_engine(
+    tmp_path: Path, shell: str, state: str
+) -> None:
+    scene = Scene(tmp_path)
+    if state == "unavailable-engine":
+        (scene.generation / "libexec/vc-frame").unlink()
+    script = _entry_script(
+        scene,
+        "_vetcoders_start_preserving_return_hint project "
+        + ("live" if state == "unavailable-engine" else state),
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        env=scene.env(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "RC=[0]" in result.stdout
+    assert "attach" not in result.stdout
+    assert scene.calls() == []
 
 
 def _shell_argv(shell: str, script: str) -> list[str]:
@@ -2143,11 +2300,10 @@ def test_engine_create_failure_is_reported_as_the_engines_words_not_as_a_conflic
 # --------------------------------------------------------------------------
 
 
-def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_option(
+def test_explicit_same_name_from_a_different_repository_is_a_conflict_with_a_rename_option(
     tmp_path: Path,
 ) -> None:
-    """Baseline let the catalogue append `-token` silently. Now: `mlx` from
-    repo A owns the name; `mlx` from repo B is refused with the rename form
+    """An explicit `mlx` from repo A owns the name; `mlx` from repo B is refused with the rename form
     quoting repo B, and nothing is created under any other name."""
     repo_a = tmp_path / "a" / "mlx"
     repo_b = tmp_path / "b" / "mlx"
@@ -2155,7 +2311,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     repo_b.mkdir(parents=True)
     scene = Scene(tmp_path, project="unused")
 
-    first = _run(scene, "vc-start", cwd=repo_a)
+    first = _run(scene, "vc-start mlx", cwd=repo_a)
     assert _rc(first) == 0, first.stderr
     assert scene.workspaces() == ["mlx"]
     _assert_host_first(scene, "mlx")
@@ -2163,7 +2319,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     # repository with the same basename tries to enter.
     child = _run(
         scene,
-        f"vc-start --repo {shlex.quote(str(repo_a))}",
+        f"vc-start mlx --repo {shlex.quote(str(repo_a))}",
         cwd=repo_a,
         tty=True,
         owned_terminal=True,
@@ -2175,7 +2331,7 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
     )
     assert _rc(child) == 0, child.stdout + child.stderr
 
-    second = _run(scene, "vc-start", cwd=repo_b)
+    second = _run(scene, "vc-start mlx", cwd=repo_b)
     assert _rc(second) == EXIT_EXISTS, second.stdout + second.stderr
     assert "workspace mlx already exists in vc-frame" in second.stderr
     assert (
@@ -2642,6 +2798,15 @@ def test_the_terminal_child_enters_the_session_its_parent_created(
     owners = [c for c in scene.owner_calls() if c.startswith("workspace session-owner")]
     assert owners and all("--runtime-state live" in call for call in owners)
     resolves = [c for c in scene.owner_calls() if c.startswith("workspace resolve")]
+    assert resolves, scene.owner_calls()
+    routes = [call for call in resolves if "--destination" in call]
+    assert routes, scene.owner_calls()
+    for route in routes:
+        assert f"--root {scene.root}" in route, route
+        assert "--requested-session mlx-batch-runner" in route, route
+        assert "--live-session mlx-batch-runner" in route, route
+        assert f"--socket-dir {scene.tmp_path / 'sock'}" in route, route
+    resolves = [call for call in resolves if "--destination" not in call]
     assert resolves, scene.owner_calls()
     for resolve in resolves:
         assert f"--root {scene.root}" in resolve, resolve
@@ -3267,6 +3432,26 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
             time.sleep(0.25)
 
     try:
+        # Register the project through the canonical owner without assigning a
+        # Frame seat. An unregistered folder must still be allowed to route
+        # around a foreign basename collision; this case protects an already
+        # known project's original unbound native session instead.
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; from pathlib import Path; "
+                    "from vibecrafted_core.workspace_catalog import create_workspace; "
+                    "create_workspace(root=Path(sys.argv[1]), select=True)"
+                ),
+                str(repo),
+            ],
+            env={**env, "PYTHONPATH": str(SOURCE_CORE_DIR)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         assert state() == "missing"
 
         create = "\n".join(
@@ -3306,10 +3491,13 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         entry = shell(
             f'vc-start --repo {shlex.quote(str(repo))}\nprintf "RC=[%s]\\n" "$?"'
         )
-        assert "RC=[2]" in entry.stdout, entry.stdout + entry.stderr
-        assert "no consistent live WES identity" in entry.stderr
+        assert "RC=[4]" in entry.stdout, entry.stdout + entry.stderr
+        assert "no verified Frame binding" in entry.stderr
         assert "no installed vc-start front door" not in entry.stderr
         assert state() == "live"
+        names = frame("list-sessions", "--short", "--no-formatting").stdout.splitlines()
+        assert names.count(session) == 1
+        assert not any(name.startswith(session + "-") for name in names)
 
         # Do not race the serializer: the EXITED record asserted below is a
         # real file this engine wrote for THIS session, proven present before
@@ -3515,20 +3703,18 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
         return
     if route == "prepare" or route.startswith("live-"):
         admitted = workshop.ensure_live_destination(
-            scene.root, "selected", ["workday-440"]
+            scene.root, "selected", scene.live()
         )
         assert admitted.session == "selected"
-        assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
         if route.startswith("live-"):
-            assert (
-                admitted.environment[wc.ENV_VIBECRAFTED_SESSION_ID]
-                == identity.vibecrafted_session_id
+            actual = resolve_run_workspace_identity(
+                root=scene.root,
+                env={},
+                runtime_session_id="selected",
+                socket_dir=env["VC_FRAME_SOCKET_DIR"],
+                runtime_state="live",
             )
-            assert (
-                admitted.environment[wc.ENV_WORKSPACE_INSTANCE_ID]
-                == identity.workspace_instance_id
-            )
-            assert admitted.environment[wc.ENV_BUILD_ID] == identity.build_id.rendered
+            assert actual.to_env() == identity.to_env()
             assert {
                 str(p): p.read_bytes()
                 for folder in [wc.instances_dir(), wc.sessions_dir()]
@@ -3541,6 +3727,7 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
                 for c in scene.calls()
             )
             return
+        assert admitted.environment["VIBECRAFTED_RUNTIME_ROOT"] == str(scene.generation)
     else:
         from types import SimpleNamespace
 
@@ -3575,7 +3762,17 @@ def test_workshop_missing_destination_prepares_in_background_and_switches_once(
             assert "exactly one source client" in launched.error
         else:
             assert launched.error == ""
-    receipt = read_workspace_session(identity.vibecrafted_session_id)
+    # Preparation may materialize a new session/build pair. Read the canonical
+    # owner of the admitted physical seat instead of assuming its preflight id.
+    actual = resolve_run_workspace_identity(
+        root=scene.root,
+        env={},
+        runtime_session_id="selected",
+        socket_dir=env["VC_FRAME_SOCKET_DIR"],
+        runtime_state="live",
+    )
+    assert actual.workspace_id == identity.workspace_id
+    receipt = read_workspace_session(actual.vibecrafted_session_id)
     assert any(
         a.runtime_session_id == "selected" and a.state == "live"
         for a in receipt.attachments

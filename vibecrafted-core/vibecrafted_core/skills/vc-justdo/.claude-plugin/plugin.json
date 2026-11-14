@@ -1,6 +1,6 @@
 {
   "name": "vc-justdo",
-  "description": "\"Nie pierdol, po prostu zrób.\" Standalone no-question posture skill — NOT an alias of vc-implement; task type comes from the prompt (implement/review/audit/research/fix). Non-pipeline daily-rescue. Runtime de-alias is the pending ADR-0001 migration.",
+  "description": "\"Po prostu zrób.\" Standalone no-question posture skill — NOT an alias of vc-implement; task type comes from the prompt (implement/review/audit/research/fix). Non-pipeline daily-rescue. Runtime de-alias is the pending ADR-0001 migration.",
   "author": {
     "name": "Vetcoders",
     "email": "hello@vetcoders.io"

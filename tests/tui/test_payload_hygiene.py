@@ -403,7 +403,7 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
     # `/var/folders` is macOS's per-user confstr temp area — every box has it,
     # and three tracked files document TMPDIR semantics with that literal. Only
     # the randomized bucket below it identifies a host. Measured 2026-10-10 on
-    # div0: a `--snapshot-donors` build put the frame donor under $TMPDIR, the
+    # host-a: a `--snapshot-donors` build put the frame donor under $TMPDIR, the
     # walk generalized it to `/var/folders`, and the gate refused its own
     # committed documentation comments as a build-host leak.
     assert (

@@ -36,7 +36,13 @@ On another branch it installs the current checkout without switching branches.
 For the macOS product, use **Check for Updates** in Vibecrafted.app. That path
 verifies the signed release feed and candidate, publishes the Runtime Pack
 through its installer, and replaces the App through the sole bundle mutation
-helper. CLI source-runtime Update does not replace the App. See
+helper. It can fetch only what the feed actually publishes: when no newer
+release is on the feed, there is nothing to download. To re-pair the App and
+the runtime on a supported Mac at any time, re-run the website one-command
+install (see [Install](/docs/install/)). **Vibecrafted → Republish anyway…**
+reinstalls the runtime generation carried by the App you already have open; it
+does not download a newer App. CLI source-runtime Update does not replace the
+App. See
 [the App update contract](../../installer/IN_APP_UPDATE.md) for receipts and
 recovery requirements.
 

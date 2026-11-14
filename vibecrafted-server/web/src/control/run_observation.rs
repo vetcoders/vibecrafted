@@ -815,15 +815,33 @@ mod tests {
     #[tokio::test]
     async fn writer_boundary_rejects_executable_outside_runtime_home() {
         let home = fixture_home("foreign-path");
+        // `/bin/ls` is a symlink on current Ubuntu images, and a symlink is
+        // rejected as an invalid path before the scope check runs. A regular
+        // file outside the runtime home is what this test is about.
+        let outside = std::env::temp_dir().join(format!(
+            "vc-writer-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::write(&outside, b"#!/bin/sh\nexit 0\n").expect("outside writer");
+        let mut permissions = fs::metadata(&outside)
+            .expect("outside metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&outside, permissions).expect("outside mode");
         let plane = ControlPlane::new(&home);
         let config = WriterConfig {
-            executable: PathBuf::from("/bin/ls"),
+            executable: outside.clone(),
             timeout: Duration::from_secs(1),
         };
 
         let outcome = invoke_python_revalidation(&plane, "run-1", &config, None).await;
 
         assert_eq!(outcome.status, "invalid_writer_scope");
+        fs::remove_file(&outside).expect("remove outside writer");
         fs::remove_dir_all(home).expect("remove fixture");
     }
 

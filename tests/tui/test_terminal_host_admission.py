@@ -913,6 +913,44 @@ def test_reused_pid_with_foreign_start_token_is_stale(fx: Fixture) -> None:
     assert json.loads((fx.state / "host.json").read_text())["pid"] == host.pid
 
 
+@pytest.mark.parametrize(
+    ("age_offset", "expected"),
+    [(-0.5, "starting"), (0.0, "stale"), (0.5, "stale")],
+    ids=["young-wrapper", "startup-boundary", "aged-wrapper"],
+)
+def test_stale_wrapper_record_older_than_startup_wait_is_not_starting(
+    fx: Fixture, monkeypatch, age_offset: float, expected: str
+) -> None:
+    """A matching live wrapper starts only within the bounded startup window.
+
+    Kernel identity must match before the age check is reached: a fabricated
+    start token would classify as stale even if age recovery were removed.
+    Freeze the wall clock around that real token, without sleeping or changing
+    the process identity probe. No listener is bound, and the wrapper survives.
+    """
+    module = _helper_module()
+    inert = subprocess.Popen(["/bin/sleep", "30"])
+    fx.processes.append(inert)
+    identity = module.process_identity(inert.pid)
+    assert identity is not None
+    record = {
+        "schema": "vibecrafted.terminal-host.v1",
+        "pid": inert.pid,
+        "start": identity.start,
+        "uid": identity.uid,
+        "executable": str(fx.host),
+        "executable_file": [0, 0],
+        "code_cdhash": "0" * 40,
+        "wrapper_executable": identity.executable,
+        "socket": str(fx.state / "host-never.sock"),
+    }
+    clock = float(identity.start) + module.STARTUP_WAIT_SECONDS + age_offset
+    monkeypatch.setattr(module.time, "time", lambda: clock)
+    code = module.CodeIdentity(cdhash="0" * 40, team=None, adhoc=True)
+    assert module.host_state(record, str(fx.host), code) == expected
+    assert inert.poll() is None
+
+
 @pytest.mark.parametrize("damage", ["mode", "symlink", "record-symlink", "record-mode"])
 def test_unsafe_state_is_refused_without_a_host(fx: Fixture, damage: str) -> None:
     if damage == "mode":

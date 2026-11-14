@@ -162,7 +162,11 @@ def test_manifest_payload_is_json_ready() -> None:
     assert payload["id"] == "vc-marbles"
     assert payload["entry_stage"] == "marbles"
     stages = payload["stages"]
-    assert payload["human_controls"] == ["interrupt_workflow", "force_audit"]
+    assert payload["human_controls"] == [
+        "approve_transition",
+        "interrupt_workflow",
+        "force_audit",
+    ]
     assert stages[0]["workflow"] == "marbles"
     assert stages[0]["audit_after"] == "audit"
     assert stages[0]["transition_conditions"] == [

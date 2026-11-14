@@ -88,7 +88,7 @@ floty i zapisz reklasyfikację osobno:
 
 ```
 overrides.jsonl   # one JSON object per line, append-only
-{"id":"s4-017","host":"div0","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
+{"id":"s4-017","host":"host-a","from":"landed","to":"landed-contested","rule":"complaint∧landed","by":"rule","reason":"…","at":"2026-09-19"}
 {"id":"s2-052","host":"*","from":"landed","to":"absent","by":"founder","reason":"double control nie działa na drugiej maszynie","at":"2026-09-19"}
 ```
 

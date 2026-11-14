@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "vibecrafted.marbles-reception.v1"
+WRITE_CYCLE_SCHEMA = "vibecrafted.write-cycle.v1"
 WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 SETS = ("attacked", "resolved", "still_open", "discovered", "regressions")
 
@@ -115,7 +116,122 @@ def tree_receipt(root: str) -> dict[str, str]:
         "branch": branch,
         "head": head,
         "source_hash": digest.hexdigest(),
+        "status": git("status", "--porcelain", "--untracked-files=all").decode(),
     }
+
+
+def validate_write_transition(
+    root: str, before: dict[str, str], after: dict[str, str]
+) -> None:
+    """Require committed cumulative output on the exact assigned branch."""
+    if before["branch"] != after["branch"]:
+        raise ValueError("assigned_branch_changed")
+    if before.get("status") or after.get("status"):
+        raise ValueError("candidate_cut_not_committed")
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            root,
+            "merge-base",
+            "--is-ancestor",
+            before["head"],
+            after["head"],
+        ],
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    if ancestry.returncode:
+        raise ValueError("candidate_replaced_baseline_history")
+    if (
+        before["head"] == after["head"]
+        and before["source_hash"] != after["source_hash"]
+    ):
+        raise ValueError("candidate_cut_not_committed")
+
+
+def read_write_cycle(
+    meta_path: str, *, run_id: str, workflow: str, root: str, count: int
+) -> dict[str, Any]:
+    """Require the counted stage's exact terminal receipt before any READ."""
+    if not meta_path:
+        raise ValueError("write_cycle_metadata_missing")
+    data = json.loads(Path(meta_path).read_text())
+    if not isinstance(data, dict):
+        raise TypeError("write_cycle_metadata_not_object")
+    if data.get("run_id") != run_id or data.get("skill") != workflow:
+        raise ValueError("write_cycle_metadata_identity_mismatch")
+    cycle = data.get("write_cycle")
+    if not isinstance(cycle, dict) or cycle.get("schema") != WRITE_CYCLE_SCHEMA:
+        raise ValueError("write_cycle_schema_missing_or_invalid")
+    for key, expected in {"run_id": run_id, "workflow": workflow, "root": root}.items():
+        if cycle.get(key) != expected:
+            raise ValueError(f"write_cycle_identity_mismatch:{key}")
+    if (
+        type(count) is not int
+        or count < 1
+        or type(cycle.get("count")) is not int
+        or cycle["count"] != count
+    ):
+        raise ValueError("write_cycle_count_mismatch")
+    if cycle.get("status") not in {"completed", "failed", "blocked"}:
+        raise ValueError("write_cycle_not_terminal")
+
+    def receipt(value: Any) -> dict[str, str]:
+        if not isinstance(value, dict) or any(
+            not isinstance(value.get(key), str)
+            for key in ("root", "branch", "head", "source_hash", "status")
+        ):
+            raise ValueError("write_cycle_tree_receipt_invalid")
+        if (
+            value["root"] != root
+            or not value["branch"]
+            or not re.fullmatch(r"[0-9a-f]{40}", value["head"])
+            or not re.fullmatch(r"[0-9a-f]{64}", value["source_hash"])
+        ):
+            raise ValueError("write_cycle_tree_identity_invalid")
+        return value
+
+    workers = cycle.get("workers")
+    if not isinstance(workers, list) or len(workers) > count:
+        raise ValueError("write_cycle_workers_invalid")
+    expected = receipt(cycle.get("input"))
+    completed = 0
+    for index, worker in enumerate(workers, 1):
+        if (
+            not isinstance(worker, dict)
+            or worker.get("index") != index
+            or worker.get("input") != expected
+        ):
+            raise ValueError("write_cycle_predecessor_mismatch")
+        output = receipt(worker.get("output"))
+        if worker.get("status") == "completed":
+            if (
+                completed != index - 1
+                or type(worker.get("exit_code")) is not int
+                or worker["exit_code"] != 0
+                or worker.get("artifact_ok") is not True
+                or not worker.get("run_id")
+                or not worker.get("report")
+            ):
+                raise ValueError("write_cycle_worker_unverified")
+            validate_write_transition(root, expected, output)
+            completed += 1
+        elif index != len(workers) or worker.get("status") not in {"failed", "blocked"}:
+            raise ValueError("write_cycle_nonterminal_worker")
+        expected = output
+    if (
+        type(cycle.get("workers_completed")) is not int
+        or cycle["workers_completed"] != completed
+    ):
+        raise ValueError("write_cycle_completed_count_mismatch")
+    output = receipt(cycle.get("output"))
+    if output != expected or tree_receipt(root) != output:
+        raise ValueError("write_cycle_final_source_drift")
+    if cycle["status"] == "completed" and (completed != count or len(workers) != count):
+        raise ValueError("write_cycle_incomplete_success")
+    return cycle
 
 
 def read_evidence(

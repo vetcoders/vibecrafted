@@ -174,11 +174,11 @@ Najgłębsza sprzeczność packagingowa w korpusie (P18):
 
 - 2026-08-29 (9.10):
 
-> _„po eradykacji dmg-first podejscia (…) Server po rozpięciu dmg ma nie być z przypadku tylko ma napierdalać na pierwszych skrzypcach nadzorczych”_
+> _„po eradykacji dmg-first podejscia (…) Server po rozpięciu dmg ma nie być z przypadku tylko ma działać jako pierwsze skrzypce nadzorcze”_
 
 - 2026-09-21 (9.14–9.16): Founder sprecyzował macierz kanałów:
 
-> _„pamiętajmy, że ścieżka `install.sh` musi instalować też @loctree/aicx i loctree z npm oraz prview z gh releases i screenscribe z pipx (…) ale nie budować ich idiotycznie ze źródeł (…) vc-frame i vc-terminal nadal ze źródeł wiadomix (…) i chciałbym, żeby zestaw dmg notarized + tarballe budowały się na tag do main po merge (…) muszę przetestować exactly the same product jaki dostanie każdy i to przez wszystkie platformy”_
+> _„pamiętajmy, że ścieżka `install.sh` musi instalować też @loctree/aicx i loctree z npm oraz prview z gh releases i screenscribe z pipx (…) ale nie budować ich bez potrzeby ze źródeł (…) vc-frame i vc-terminal nadal ze źródeł wiadomix (…) i chciałbym, żeby zestaw dmg notarized + tarballe budowały się na tag do main po merge (…) muszę przetestować exactly the same product jaki dostanie każdy i to przez wszystkie platformy”_
 > Równolegle funkcjonują trzy kanały (DMG, tarball runtime pack, `make install`), których rozjazd powoduje powstawanie generacji-widm.
 
 **Opcje wyboru:**
@@ -211,7 +211,7 @@ Sprzeczność P5 w zestawieniu decyzji:
 - 2026-08-25 (9.7): W wizardzie Founder osobiście zatwierdził: _„local-worktrees (safe default)”_.
   W efekcie liczba niescalonych worktree wzrosła do 25, co doprowadziło do ostrej reakcji Foundera (P25):
 
-> _„one miały być kurwa scalone i zeprunowane!”_
+> _„one miały być scalone i zeprunowane!”_
 
 **Opcje wyboru:**
 

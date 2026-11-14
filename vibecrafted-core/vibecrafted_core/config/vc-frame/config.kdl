@@ -192,6 +192,11 @@ keybinds {
         // inside pane mode below (+/=/- uniform, Shift+H/J/K/L directional).
         bind "Ctrl n" { NewTab; }
 
+        // =/+ main-keyboard and numpad aliases; Shift selects a new tab.
+        // LOCK retains these keys for the application inside the pane.
+        bind "Ctrl =" "Ctrl +" { NewPane "Right"; SwitchToMode "Normal"; }
+        bind "Ctrl Shift =" "Ctrl Shift +" { NewTab; SwitchToMode "Normal"; }
+
         // Unlocked muscle-memory lane: Ctrl+arrows mirror the Super switcher
         // outside LOCK. In LOCK they pass through to the pane.
         bind "Ctrl Left" { GoToPreviousTab; }

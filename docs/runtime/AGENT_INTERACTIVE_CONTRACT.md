@@ -47,6 +47,71 @@ dispatch its provider tab there (P0, Founder 2026-09-06: a resume launched in
 
 ### Project identity (one owner)
 
+Agents restores missing pane exports from the current physical seat's existing
+WES binding before loading project choices. The observed live inventory, socket
+namespace and recorded Frame incarnation determine that context. Conflicting
+exports refuse recovery; a verified bound root wins over an inherited cwd.
+Without a binding, a Git cwd supplies a project path hint only. Starting that
+current project cannot allocate a collision-suffixed replacement: the launcher
+keeps the existing seat and offers the Sessions rail / `vc-frame attach` route.
+An explicit different project still uses the canonical shell preparation owner.
+
+Frame's native rail **Open project** currently creates directly from a folder
+selection, outside that shell owner. Its cwd/name transport cannot establish
+WES ownership retrospectively. That creation path must enter the canonical
+missing → materialize → create → live-attachment lifecycle before switching to
+the returned physical seat. Agents recovery does not certify that origin path.
+
+The selected generation exposes that preparation through its existing Workshop
+entry point, without curses or a terminal:
+
+```text
+<runtime>/bin/python3 <runtime>/vibecrafted-core/vibecrafted_core/config/vc-frame/vc-agent-workshop.py prepare --root <declared-project> [--session <requested-name>] [--layout <absolute-physical-layout>]
+```
+
+The caller supplies an absolute physical `VIBECRAFTED_RUNTIME_ROOT` and its
+existing absolute `VC_FRAME_SOCKET_DIR` (or `ZELLIJ_SOCKET_DIR`). Absolute socket
+aliases such as macOS `/tmp` are valid and retain the same spelling throughout
+preparation. Layout
+is optional creation input; reusing a live destination preserves its layout,
+panes and workloads. The existing resolver, selected-runtime admission,
+workspace materialization, locked background creation and live WES admission
+remain the only owners. This internal entry does not reconcile the host server
+or LaunchAgent. There is no direct-create fallback.
+
+In installed product mode, the missing-seat create owner retains an explicit
+selected layout and its `.swap.kdl` companion as exact content-addressed files
+inside the existing writable product `vc-frame/layouts` directory. Publication
+runs under the create lock after rechecking that the seat is missing. It never
+refreshes product configuration or writes the selected Runtime Pack; absent or
+symlinked product configuration, conflicting retained bytes and symlinked input
+or output refuse creation. The public `bin/vc-frame` wrapper keeps its normal
+installed-layout guard and invokes the generation's distinct native `libexec`
+engine. Reuse does not publish or apply a newly selected layout.
+
+A registered project without a verifiable original Frame binding refuses
+automatic preparation when its requested native name is occupied by an unbound
+live session, including when the caller is in the lobby or has no current
+session marker. It does not adopt that session or silently allocate a hashed
+replacement. A new project or a verified foreign owner still uses the existing
+name-collision route; unrelated unbound names do not block a free destination.
+Root/name similarity cannot prove an arbitrarily renamed unbound session's
+identity.
+
+Success writes one JSON object to stdout with `native_session_name`,
+`session_incarnation`, `socket_dir`, `VIBECRAFTED_OPERATOR_SESSION`,
+`VIBECRAFTED_WORKSPACE_ROOT`, `VIBECRAFTED_WORKSPACE_ID`,
+`VIBECRAFTED_SESSION_ID`, `VIBECRAFTED_WORKSPACE_INSTANCE_ID` and
+`VIBECRAFTED_BUILD_ID`. These describe the admitted seat, which can differ from
+the requested name. Operational refusal exits 4 with stderr and no success
+JSON; invalid command arguments exit 2. The consumer switches only after this
+packet succeeds and uses its exact native name/incarnation/socket namespace.
+
+Native PTY fixtures observe IPC readiness and the intended layout before acting;
+background-create acknowledgement alone is not readiness. Cleanup waits for the
+fixture-owned native server processes to exit before removing their private
+socket/cache trees. Logical session removal alone is not process termination.
+
 `_vetcoders_effective_project_root` resolves the project **once**, at the public
 entry: explicit `--root` (normalized to an absolute physical path _before_ any
 cwd change) → ambient project root → the caller's repository. Terminal cwd,

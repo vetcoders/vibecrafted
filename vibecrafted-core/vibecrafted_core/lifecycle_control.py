@@ -179,6 +179,10 @@ def _continuation_spec(
     agent: str,
 ) -> LifecycleRunSpec:
     """Build the LifecycleRunSpec for a parent-linked continuation run from saved state."""
+    if any(stage.get("cycle_receipt_error") for stage in state.get("stages", [])):
+        raise ValueError(
+            "write_cycle_receipt_invalid: continuation requires verified cycle metadata"
+        )
     spec_data = dict(state.get("spec") or {})
     return LifecycleRunSpec(
         workflow_id=workflow_id,
@@ -191,10 +195,24 @@ def _continuation_spec(
         start_stage=start_stage,
         count=spec_data.get("count"),
         depth=spec_data.get("depth"),
+        effort=str(spec_data.get("effort") or ""),
         parent_run_id=str(state.get("run_id") or ""),
         previous_reports=_baton_previous_reports(state),
         stage_agents=dict(spec_data.get("stage_agents") or {}),
         stage_models=dict(spec_data.get("stage_models") or {}),
+        write_cycle=dict((state.get("baton") or {}).get("write_cycle") or {}),
+        failed_stages=tuple(
+            dict.fromkeys(
+                [
+                    *state.get("failed_stages", []),
+                    *(
+                        str(stage.get("id"))
+                        for stage in state.get("stages", [])
+                        if stage.get("status") == "failed"
+                    ),
+                ]
+            )
+        ),
     )
 
 
@@ -355,6 +373,33 @@ def approve_transition(
         message += "; or approve --force to advance without the fleet"
         raise ValueError(message)
     launcher = run_lifecycle_fn or run_lifecycle
+    stages = state.get("stages") or []
+    target = next(
+        (
+            item
+            for item in (state.get("manifest") or {}).get("stages", [])
+            if item.get("id") == next_stage
+        ),
+        {},
+    )
+    if (
+        any(stage.get("status") == "failed" for stage in stages)
+        or state.get("failed_stages")
+    ) and target.get("phase") != "read":
+        raise ValueError(
+            "failed_stage_cannot_advance: retain evidence; READ diagnosis only"
+        )
+    if (
+        stages
+        and stages[-1].get("workflow") in {"marbles", "polarize"}
+        and stages[-1].get("status") == "launching"
+    ):
+        raise ValueError("counted_cycle_not_settled: await its exact worker completion")
+    cycle = baton.get("write_cycle") or {}
+    if cycle and next_stage in {"marbles", "polarize"}:
+        latest = stages[-1] if stages else {}
+        if (latest.get("cycle_read_evidence") or {}).get("verdict") != "converged":
+            raise ValueError("cycle_read_required_before_next_write")
     spec = _continuation_spec(
         state,
         workflow_id=str(state.get("workflow") or ""),

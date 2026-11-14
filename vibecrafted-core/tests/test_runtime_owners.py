@@ -661,7 +661,7 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
 
     # 5. Foreign Python and screenscribe child isolation
     foreign_pythons = [
-        Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
+        Path.home() / ".local/share/uv/tools/screenscribe/bin/python3",
     ]
     foreign_python = next((p for p in foreign_pythons if p.is_file()), None)
     if foreign_python is None:
@@ -709,7 +709,7 @@ def test_native_host_isolates_environment_from_foreign_children_and_preserves_se
     )
     assert spawned_foreign_named.returncode == 0, spawned_foreign_named.stderr
 
-    screenscribe_bin = Path("/Users/polyversai/.local/bin/screenscribe")
+    screenscribe_bin = Path.home() / ".local/bin/screenscribe"
     if not screenscribe_bin.is_file():
         found = shutil.which("screenscribe")
         if found:
@@ -844,7 +844,6 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
     pbs_stdlib = None
     candidates = [
         Path.home() / ".local/share/vibecrafted/releases",
-        Path("/Users/polyversai/.local/share/vibecrafted/releases"),
     ]
     for candidate in candidates:
         if candidate.is_dir():
@@ -1052,7 +1051,7 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
 
     # 4. Foreign uv Python and screenscribe child isolation
     foreign_pythons = [
-        Path("/Users/polyversai/.local/share/uv/tools/screenscribe/bin/python3"),
+        Path.home() / ".local/share/uv/tools/screenscribe/bin/python3",
     ]
     foreign_python = next((p for p in foreign_pythons if p.is_file()), None)
     if foreign_python:
@@ -1072,7 +1071,7 @@ def test_native_host_with_real_pinned_pbs314_fixture(tmp_path):
         )
         assert spawned_foreign.returncode == 0, spawned_foreign.stderr
 
-    screenscribe_bin = Path("/Users/polyversai/.local/bin/screenscribe")
+    screenscribe_bin = Path.home() / ".local/bin/screenscribe"
     if screenscribe_bin.is_file():
         spawned_ss = subprocess.run(
             [

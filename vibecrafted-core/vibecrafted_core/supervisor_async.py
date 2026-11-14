@@ -7,6 +7,7 @@ import json
 import math
 import os
 import signal
+import stat
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -707,6 +708,7 @@ class AsyncRunHandle:
     meta_path: Path | None = None
     report_path: Path | None = None
     transcript_path: Path | None = None
+    transcript_identity: dict[str, int] | None = None
     pgid: int | None = None
     states: list[RunState] = field(default_factory=lambda: [RunState.CREATED])
     exit_code: int | None = None
@@ -1022,6 +1024,12 @@ class AsyncSupervisor:
                     latest.setdefault("root", str(cwd))
                     latest.setdefault("agent", agent)
                     latest.setdefault("skill", skill)
+                    # These are live execution facts. Await/progress and exact
+                    # child control need them before terminal summary writing.
+                    if handle.report_path is not None:
+                        latest["report"] = str(handle.report_path)
+                    if handle.transcript_path is not None:
+                        latest["transcript"] = str(handle.transcript_path)
                     for field, value in workspace_fields.items():
                         latest.setdefault(field, value)
                     latest["worker_pid"] = handle.process.pid
@@ -1181,6 +1189,22 @@ class AsyncSupervisor:
             await self._settle_cancelled(handle)
             raise
 
+        except OSError as error:
+            # A refused/nonregular raw target must not orphan its provider or
+            # become an optimistic completion receipt.
+            await self._terminate(handle)
+            handle.exit_code = handle.process.returncode
+            handle.completed_at = _utc_now()
+            self._write_meta_summary(handle)
+            self._write_terminal_meta(handle, "failed", "transcript_unavailable")
+            await self._transition(
+                handle,
+                RunState.FAILED,
+                "raw transcript unavailable",
+                payload={"last_error": str(error), "liveness": "terminal"},
+            )
+            return handle
+
         handle.exit_code = handle.process.returncode
         if handle.meta_path is not None:
             try:
@@ -1332,7 +1356,48 @@ class AsyncSupervisor:
         parser = AgentStreamParser(handle.agent, default_model=handle.agent_model)
         human_path = transcript_human_path(handle.transcript_path)
         read_task = asyncio.create_task(handle.process.stdout.readline())
+        raw_fd: int | None = None
         try:
+            if handle.transcript_path is not None:
+                raw_fd = os.open(
+                    handle.transcript_path,
+                    os.O_WRONLY
+                    | os.O_APPEND
+                    | os.O_CREAT
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    0o600,
+                )
+                opened = os.fstat(raw_fd)
+                visible = handle.transcript_path.lstat()
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not stat.S_ISREG(visible.st_mode)
+                    or (opened.st_dev, opened.st_ino)
+                    != (visible.st_dev, visible.st_ino)
+                ):
+                    raise OSError("raw transcript is not the opened regular file")
+                handle.transcript_identity = {
+                    "device": opened.st_dev,
+                    "inode": opened.st_ino,
+                }
+                if handle.meta_path is not None:
+                    try:
+                        mutate_run_meta(
+                            control_plane_home(),
+                            meta_path=handle.meta_path,
+                            mutation_root=handle.meta_path.parent,
+                            run_id=handle.run_id,
+                            mutator=lambda latest: {
+                                **latest,
+                                "transcript_identity": handle.transcript_identity,
+                            },
+                        )
+                    except (OSError, RunMetaMutationError):
+                        # Without the writer receipt, await refuses progress.
+                        # Observational metadata loss cannot justify following
+                        # an unqualified replacement stream.
+                        pass
             while True:
                 completed, _pending = await asyncio.wait(
                     {read_task},
@@ -1371,9 +1436,15 @@ class AsyncSupervisor:
                 if on_output is not None:
                     on_output(chunk)
                 read_task = asyncio.create_task(handle.process.stdout.readline())
-                if handle.transcript_path is not None:
-                    with handle.transcript_path.open("ab") as transcript:
-                        transcript.write(chunk)
+                if raw_fd is not None:
+                    # Retain the same actual writer object for the entire run;
+                    # replacing its pathname cannot redirect output elsewhere.
+                    pending = memoryview(chunk)
+                    while pending:
+                        written = os.write(raw_fd, pending)
+                        if written <= 0:
+                            raise OSError("raw transcript write made no progress")
+                        pending = pending[written:]
                 display_text = parser.feed_line(chunk)
                 if human_path is not None and display_text:
                     with human_path.open("ab") as human:
@@ -1453,6 +1524,7 @@ class AsyncSupervisor:
                             "heartbeat_at": _utc_now().isoformat(),
                         },
                     )
+            await handle.process.wait()
         finally:
             if not read_task.done():
                 read_task.cancel()
@@ -1460,7 +1532,8 @@ class AsyncSupervisor:
                     await read_task
                 except asyncio.CancelledError:
                     pass
-        await handle.process.wait()
+            if raw_fd is not None:
+                os.close(raw_fd)
         self._sync_stream_summary(handle, parser)
 
     def _write_report_fallback(
@@ -1693,6 +1766,11 @@ class AsyncSupervisor:
             "root": str(handle.root),
             "report": str(handle.report_path or ""),
             "transcript": str(handle.transcript_path or ""),
+            **(
+                {"transcript_identity": handle.transcript_identity}
+                if handle.transcript_identity is not None
+                else {}
+            ),
             **telemetry.meta_fields(),
             "resume_command": handle.resume_command,
             "exit_code": handle.exit_code,

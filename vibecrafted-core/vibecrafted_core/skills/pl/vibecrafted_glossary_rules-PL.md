@@ -2446,19 +2446,19 @@ Dopuszczalne PL tylko opisowo, jeśli zdanie tego potrzebuje, ale terminy operac
 
 7. Już po polsku w źródle
 
-| Słowo/fraza                                   | Decyzja                                                                                                                                                                 |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| smaczki                                       | Zostawić PL.                                                                                                                                                            |
-| dyspozytura                                   | Zostawić, jeśli jest w źródle jako metafora dispatch. Nie robić z tego defaultowego tłumaczenia dispatch.                                                               |
-| kronika                                       | Zostawić PL.                                                                                                                                                            |
-| wydmuszka                                     | Zostawić PL. Działa dobrze.                                                                                                                                             |
-| bezpiecznik                                   | Zostawić PL.                                                                                                                                                            |
-| pancerna latarnia                             | Zostawić PL, jeśli źródło ma taką stylizację.                                                                                                                           |
-| dirygentura / conductor                       | Zostawić dirygentura tam, gdzie źródło gra metaforą. conductor można objaśnić jako dyrygent/operator prowadzący.                                                        |
-| Ludzki gust / Agentyczna siła / Rzeczywistość | Zostawić PL. To dobre nazwy osi.                                                                                                                                        |
-| bez odbioru                                   | Zostawić PL.                                                                                                                                                            |
-| się zajebiemy                                 | W internal skill docs można zostawić, jeśli styl źródła jest celowo ostry i roboczy. W public-facing docs złagodzić do rozjedziemy się, polegniemy, wjedziemy w ścianę. |
-| nawowodnij                                    | Zostawić jako trigger/źródłowy żart. Nie generalizować na hydrate. Normalnie używać hydrate albo “uzupełnić onboarding/docs”.                                           |
+| Słowo/fraza                                   | Decyzja                                                                                                                       |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| smaczki                                       | Zostawić PL.                                                                                                                  |
+| dyspozytura                                   | Zostawić, jeśli jest w źródle jako metafora dispatch. Nie robić z tego defaultowego tłumaczenia dispatch.                     |
+| kronika                                       | Zostawić PL.                                                                                                                  |
+| wydmuszka                                     | Zostawić PL. Działa dobrze.                                                                                                   |
+| bezpiecznik                                   | Zostawić PL.                                                                                                                  |
+| pancerna latarnia                             | Zostawić PL, jeśli źródło ma taką stylizację.                                                                                 |
+| dirygentura / conductor                       | Zostawić dirygentura tam, gdzie źródło gra metaforą. conductor można objaśnić jako dyrygent/operator prowadzący.              |
+| Ludzki gust / Agentyczna siła / Rzeczywistość | Zostawić PL. To dobre nazwy osi.                                                                                              |
+| bez odbioru                                   | Zostawić PL.                                                                                                                  |
+| rozjedziemy się                               | Zostawić PL. Neutralne: w razie potrzeby polegniemy, wjedziemy w ścianę.                                                      |
+| nawowodnij                                    | Zostawić jako trigger/źródłowy żart. Nie generalizować na hydrate. Normalnie używać hydrate albo “uzupełnić onboarding/docs”. |
 
 ⸻
 
@@ -2937,8 +2937,8 @@ review `vc-marbles`; tu reszta. Gdyby coś kolidowało, wygrywa nowsza decyzja (
 
 12e. Już po polsku w źródle (zostają PL)
 
-smaczki · dyspozytura · kronika · wydmuszka · bezpiecznik · pancerna latarnia · dirygentura · „bez odbioru" · „się
-zajebiemy" (internal; w public-facing złagodzić) · Ludzki gust / Agentyczna siła / Rzeczywistość · nawodnij (trigger) ·
+smaczki · dyspozytura · kronika · wydmuszka · bezpiecznik · pancerna latarnia · dirygentura · „bez odbioru" · „rozjedziemy
+się" · Ludzki gust / Agentyczna siła / Rzeczywistość · nawodnij (trigger) ·
 mylik / myliki
 
 ⸻

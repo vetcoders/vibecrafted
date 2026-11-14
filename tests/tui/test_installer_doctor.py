@@ -1771,9 +1771,12 @@ def test_cmd_doctor_fix_rc_repairs_compat_shell_lines(
     assert "VETCODERS_CONFIG_DIR" not in repaired
     assert "# >>> vibecrafted >>>" not in repaired
     assert "# <<< vibecrafted <<<" not in repaired
-    assert repaired.count(installer._launcher_path_line()) == 1
+    assert installer._launcher_path_line() not in repaired
+    assert repaired.count(installer._user_rc_guest_line()) == 1
+    assert repaired.count(installer._user_rc_guest_line()) == 1
+    assert repaired.count(f"# {installer._USER_RC_GUEST_COMMENT}") == 1
     assert "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. shell helpers" not in repaired
-    assert "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher" in repaired
+    assert "# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. launcher" not in repaired
     assert (home / ".zshrc.vibecrafted-rc-bak").read_text(encoding="utf-8") == (
         f"# existing user config\n{installer._old_zshrc_source_line()}\n"
         "# >>> vibecrafted >>>\n"
@@ -1806,7 +1809,8 @@ def test_cmd_doctor_fix_rc_repairs_login_startup_file(
     repaired = zprofile.read_text(encoding="utf-8")
     assert installer._shell_source_line() not in repaired
     assert "export KEEP_ME=1" in repaired
-    assert repaired.count(installer._launcher_path_line()) == 1
+    assert installer._launcher_path_line() not in repaired
+    assert repaired.count(installer._user_rc_guest_line()) == 1
     assert (home / ".zprofile.vibecrafted-rc-bak").read_text(
         encoding="utf-8"
     ) == original

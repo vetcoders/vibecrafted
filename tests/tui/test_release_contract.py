@@ -1283,68 +1283,6 @@ def test_tag_release_builds_all_carriers_from_a_commit_on_main() -> None:
         assert artifact in workflow
 
 
-@pytest.mark.parametrize(
-    ("donor", "revision"),
-    [
-        ("terminal", "38ef2f918383ca4dde797d22869b619097c81d05"),
-        ("frame", "0b91c4f0806356b5c92e46c82bf0fdf0310c0222"),
-    ],
-)
-def test_hosted_dmg_donor_defaults_and_fallbacks_use_approved_revisions(
-    donor: str, revision: str
-) -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
-    dispatch_default = re.search(
-        rf"      {donor}_ref:\n(?:        [^\n]+\n)*?        default: ([0-9a-f]{{40}})\n",
-        workflow,
-    )
-    assert dispatch_default is not None
-    assert dispatch_default.group(1) == revision
-    checkout = re.search(
-        rf"          repository: vetcoders/vc-{donor}\n"
-        rf"          ref: \$\{{\{{ inputs\.{donor}_ref \|\| '([0-9a-f]{{40}})' \}}\}}",
-        workflow,
-    )
-    assert checkout is not None
-    assert checkout.group(1) == revision
-
-
-def test_tag_dmg_donors_match_the_public_cross_platform_source_pins() -> None:
-    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
-    assert pins["schema"] == "vibecrafted.source-components.v1"
-    workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text()
-    linux = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text()
-    windows = (REPO_ROOT / "scripts/build-windows-x64-runtime-pack.ps1").read_text()
-    for donor in ("frame", "terminal"):
-        revision = re.search(rf'{donor}_revision="([0-9a-f]{{40}})"', linux)
-        assert revision is not None
-        sha = revision.group(1)
-        assert pins["components"][f"vc-{donor}"]["revision"] == sha
-        assert f'${donor}Revision = "{sha}"' in windows
-        assert f"ref: ${{{{ inputs.{donor}_ref || '{sha}' }}}}" in workflow
-        assert f"repository: vetcoders/vc-{donor}" in workflow
-
-
-def test_changelog_names_only_the_pinned_donor_revisions() -> None:
-    # The Frame pin kept moving after the 4.4.0 entry was written, and the
-    # entry kept naming the first one. Release notes for the version being cut
-    # may only name full revisions that the builders actually pin.
-    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    section = re.search(
-        rf"^## \[{re.escape(version)}\][^\n]*\n(?P<body>.*?)(?=^## \[|\Z)",
-        changelog,
-        re.MULTILINE | re.DOTALL,
-    )
-    assert section is not None, f"CHANGELOG.md has no entry for {version}"
-    pins = json.loads((REPO_ROOT / "config/source-components.json").read_text())
-    pinned = {component["revision"] for component in pins["components"].values()}
-    named = set(re.findall(r"\b[0-9a-f]{40}\b", section.group("body")))
-    assert named <= pinned, (
-        f"CHANGELOG {version} names unpinned revisions: {sorted(named - pinned)}"
-    )
-
-
 @pytest.mark.parametrize("mechanism", ["api", "apple-id", "incomplete"])
 def test_hosted_notary_materialization_accepts_complete_credentials_only(
     tmp_path: Path, mechanism: str

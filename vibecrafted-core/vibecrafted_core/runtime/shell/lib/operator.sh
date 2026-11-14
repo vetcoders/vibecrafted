@@ -117,7 +117,7 @@ _vetcoders_operator_runtime() {
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 _vetcoders_partner_runtime() {
@@ -127,7 +127,7 @@ _vetcoders_partner_runtime() {
 _vetcoders_partner_command_text() {
   local tool="$1"
   local partner_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-auto}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-}" "${5:-unmetered}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }
 
 

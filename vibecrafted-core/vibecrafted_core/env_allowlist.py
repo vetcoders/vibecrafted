@@ -180,6 +180,12 @@ _PROVIDER_ALLOW: frozenset[str] = frozenset(
         "KIMI_API_KEY",
         "MOONSHOT_API_KEY",
         "MOONSHOT_BASE_URL",
+        # Junie's vendor launcher version selector and update policy. A skip
+        # alone does not pin the binary: the launcher applies pending updates
+        # before resolving JUNIE_VERSION. Keep both explicit controls, never
+        # the whole JUNIE_* family (which may contain private provider data).
+        "JUNIE_VERSION",
+        "JUNIE_SKIP_UPDATE_CHECK",
         # OMP profiles carry provider auth, MCP servers, and user settings.
         # Preserve its documented config overrides, not arbitrary PI_/OMP_ vars.
         "OMP_PROFILE",
@@ -341,3 +347,22 @@ def dispatcher_identity(
         "session_id": str(env.get("VIBECRAFTED_SESSION_ID") or "").strip(),
         "pid": os.getpid() if pid is None else int(pid),
     }
+
+
+def provider_launch_environment_receipt(
+    provider: str, environment: Mapping[str, str]
+) -> dict[str, object]:
+    """Record explicit non-secret launcher requests, never a resolved version.
+
+    Junie's launcher consumes these values itself. Preserving or recording
+    them proves neither the effective binary version nor authentication. An
+    empty version is an explicit unpin, not an inferred default version.
+    """
+    if provider != "junie":
+        return {}
+    requested = {
+        key: value
+        for key in ("JUNIE_VERSION", "JUNIE_SKIP_UPDATE_CHECK")
+        if isinstance(value := environment.get(key), str)
+    }
+    return {"provider_launch_environment": requested} if requested else {}

@@ -1824,7 +1824,7 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
 
 
 def test_aicx_discovery_checks_path_before_homebrew_fallbacks() -> None:
-    """div0, 2026-10-10: aicx installed by npm under /opt/homebrew/bin, but the
+    """host-a, 2026-10-10: aicx installed by npm under /opt/homebrew/bin, but the
     product shell's PATH does not carry the Homebrew prefix, so bare resume
     refused workspace entry on a machine with a healthy foundation. Discovery
     must check PATH before probing standard Homebrew bin dirs explicitly, so

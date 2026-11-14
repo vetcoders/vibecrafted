@@ -696,10 +696,16 @@ class DeckScene:
             / "operator.kdl",
             "layout {\n}\n",
         )
+        shutil.copyfile(
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl",
+            self.home / ".config/vibecrafted/vc-frame/config.kdl",
+        )
         self.owner = _root_aware_owner_cli(tmp_path / "owner-cli")
         self.frame_log = tmp_path / "frame.log"
         self.live_file = tmp_path / "live-sessions.txt"
-        self.live_file.write_text("".join(f"{n}\n" for n in live), encoding="utf-8")
+        self.live_file.write_text(
+            "".join(f"{n}\n" for n in ["vc-host", *live]), encoding="utf-8"
+        )
         self.clients_file: Path | None = None
         if clients is not None:
             self.clients_file = tmp_path / "attached-clients.txt"

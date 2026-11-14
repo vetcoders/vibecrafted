@@ -25,8 +25,8 @@ a comma list form a union.
 | `-p /repo`      | **same repo name across every owner** | **default for intent hunting** |
 | `-p name`       | unique exact owner or repo name       | only when unambiguous          |
 
-Substring matching is intentionally unsupported: `-p vista` does not match
-`vista-portal`. Ambiguity fails closed with a candidate list rather than
+Substring matching is intentionally unsupported: `-p demo` does not match
+`demo-portal`. Ambiguity fails closed with a candidate list rather than
 returning silence — treat that error as the answer to "what identities exist".
 
 `--project-fuzzy` opts into project-family matching. Reach for it only after the

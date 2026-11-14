@@ -22,7 +22,7 @@ def _fake_agent(bin_dir: Path, name: str, *, status: str = "completed") -> None:
         report_writer = (
             'printf "%s\\n" "---" "run_id: ${VIBECRAFTED_RUN_ID:-unknown}" '
             f'"agent: {name}" "skill: test" "status: {status}" '
-            f'"claim_status: {status}" "---" "report for $0" '
+            f'"claim_status: {status}" "finalized: true" "claim: fixture verified" "---" "report for $0" '
             '> "$VIBECRAFTED_REPORT_PATH"\n'
         )
     path.write_text(
@@ -40,6 +40,24 @@ def _fake_agent(bin_dir: Path, name: str, *, status: str = "completed") -> None:
 
 
 def _runtime_env(monkeypatch, tmp_path: Path, run_id: str) -> Path:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("*\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", ".gitignore"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+        check=True,
+    )
     home = tmp_path / "home"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -219,7 +237,13 @@ def _write_finished_lane_meta(
 def test_native_resume_argv_is_provider_specific_and_shell_free(
     agent: str, expected: list[str]
 ) -> None:
-    command = workflow_runtime.native_resume_argv(agent, "native-123")
+    from vibecrafted_core.execution_controls import resolve_execution_controls
+
+    command = workflow_runtime.native_resume_argv(
+        agent,
+        "native-123",
+        controls=resolve_execution_controls(agent, permissions="auto"),
+    )
 
     assert command == expected
     assert command[0] != "bash"
@@ -228,8 +252,15 @@ def test_native_resume_argv_is_provider_specific_and_shell_free(
 
 @pytest.mark.parametrize("agent", ["gemini", "junie", "swarm"])
 def test_native_resume_argv_fails_closed_for_unverified_agents(agent: str) -> None:
+    from vibecrafted_core.execution_controls import resolve_execution_controls
+
+    controls = (
+        resolve_execution_controls("junie", permissions="auto")
+        if agent == "junie"
+        else None
+    )
     with pytest.raises(ValueError, match="unsupported"):
-        workflow_runtime.native_resume_argv(agent, "native-123")
+        workflow_runtime.native_resume_argv(agent, "native-123", controls=controls)
 
 
 def test_child_meta_never_promotes_legacy_session_id_to_native_identity(
@@ -1201,7 +1232,27 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
     _runtime_env(monkeypatch, tmp_path, "public-kimi")
     _fake_kimi(tmp_path / "bin")
     candidate = tmp_path / "candidate"
-    baseline = _git_repo(candidate)
+    _git_repo(candidate)
+    (candidate / ".gitignore").write_text(".loctree/\n")
+    subprocess.run(["git", "-C", str(candidate), "add", ".gitignore"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(candidate),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "ignore runtime map",
+        ],
+        check=True,
+    )
+    baseline = subprocess.check_output(
+        ["git", "-C", str(candidate), "rev-parse", "HEAD"], text=True
+    ).strip()
     plan = tmp_path / "common-plan.md"
     plan.write_text("Preserve this complete common plan: żółw\n", encoding="utf-8")
     source_root = Path(__file__).resolve().parents[2]
@@ -1290,16 +1341,21 @@ def test_public_source_marbles_kimi_blocks_unstructured_reception(
     assert os.path.samefile(foreign_python, sys.executable)
     assert not is_source_interpreter(foreign_python)
     parent = json.loads(Path(receipt["meta"]).read_text())
-    assert len(parent["children"]) == 1
-    assert parent["reception"]["verdict"] == "blocked"
+    assert len(parent["lifecycle"]["stages"]) == 2
+    cycle = parent["lifecycle"]["stages"][0]["write_cycle"]
+    assert len(cycle["workers"]) == 2 and cycle["status"] == "completed"
     if sys.platform == "darwin":
-        assert parent["reception"]["reason"] == "reception_block_missing_or_ambiguous"
+        assert (
+            parent["lifecycle"]["stages"][-1]["cycle_read_error"]
+            == "reception_block_missing_or_ambiguous"
+        )
     else:
-        assert parent["reception"]["reason"].startswith(
+        assert (
             "receiver_source_guard_unavailable"
+            in parent["lifecycle"]["stages"][-1]["launch"]["error"]
         )
     assert parent["exit_code"] == 1
-    for child in parent["children"]:
+    for child in cycle["workers"]:
         capture = json.loads(
             Path(child["report"]).with_suffix(".capture.json").read_text()
         )
@@ -1407,7 +1463,7 @@ def test_polarize_loop_stops_on_child_report_status(
     assert (child_dir / "polarize-L3.md").is_file() is (expected_children > 2)
 
 
-def test_polarize_loop_missing_frontmatter_is_not_a_stop(
+def test_polarize_loop_missing_frontmatter_blocks_next_write(
     monkeypatch, tmp_path: Path
 ) -> None:
     """Unreadable/absent frontmatter must not invent a blocked stop."""
@@ -1432,10 +1488,11 @@ def test_polarize_loop_missing_frontmatter_is_not_a_stop(
         ]
     )
 
-    assert rc == 0
+    assert rc == 1
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
-    assert len(meta["children"]) == 3
-    assert meta["status"] == "completed"
+    assert len(meta["children"]) == 1
+    assert meta["status"] == "blocked"
+    assert meta["write_cycle"]["reason"] == "worker_report_unattested"
 
 
 def test_child_prompt_carries_worker_signal_discipline() -> None:
@@ -1491,3 +1548,76 @@ def test_research_invalid_roster_fails_with_selection_report(
     assert "- agents: none" in report
     assert "no supported research agents" in capsys.readouterr().err
     assert not (home / "rsch-invalid-children").exists()
+
+
+def test_counted_cycle_refuses_replay_of_retained_prefix(monkeypatch, tmp_path):
+    home = _runtime_env(monkeypatch, tmp_path, "prefix")
+    args = [
+        "marbles",
+        "--workflow",
+        "polarize",
+        "--agent",
+        "codex",
+        "--root",
+        str(tmp_path),
+        "--prompt",
+        "same task",
+        "--count",
+        "2",
+    ]
+    assert workflow_runtime.main(args) == 0
+    retained = (home / "prefix-children" / "write-cycle.json").read_bytes()
+    with pytest.raises(ValueError, match="write_cycle_already_exists"):
+        workflow_runtime.main(args)
+    assert (home / "prefix-children" / "write-cycle.json").read_bytes() == retained
+
+
+def test_counted_cycle_blocks_source_race_before_second_worker(monkeypatch, tmp_path):
+    home = _runtime_env(monkeypatch, tmp_path, "race")
+    actual_receipt = workflow_runtime.tree_receipt
+    samples = 0
+
+    def racing_receipt(root):
+        nonlocal samples
+        samples += 1
+        if samples == 4:
+            (tmp_path / ".gitignore").write_text("*\n# foreign source commit\n")
+            subprocess.run(["git", "-C", root, "add", ".gitignore"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "-c",
+                    "user.name=Foreign",
+                    "-c",
+                    "user.email=foreign@example.test",
+                    "commit",
+                    "-qm",
+                    "foreign drift",
+                ],
+                check=True,
+            )
+        return actual_receipt(root)
+
+    monkeypatch.setattr(workflow_runtime, "tree_receipt", racing_receipt)
+    assert (
+        workflow_runtime.main(
+            [
+                "marbles",
+                "--root",
+                str(tmp_path),
+                "--agent",
+                "codex",
+                "--prompt",
+                "bounded",
+                "--count",
+                "2",
+            ]
+        )
+        == 1
+    )
+    cycle = json.loads((home / "race-children/write-cycle.json").read_text())
+    assert cycle["reason"] == "write_cycle_predecessor_drift"
+    assert cycle["workers_completed"] == 1 and len(cycle["workers"]) == 1
+    assert not (home / "race-children/marbles-L2.md").exists()

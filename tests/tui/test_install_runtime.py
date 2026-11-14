@@ -177,7 +177,7 @@ def test_foundations_phase_covers_every_terminal_status(tmp_path: Path) -> None:
     """No install scenario may finish green without the foundations phase.
 
     The pack carries the foundations INSTALLER, never the foundations
-    (Maciej, 2026-10-07); each terminal status must be explicit so wrappers
+    (Vetcoders decision, 2026-10-07); each terminal status must be explicit so wrappers
     cannot mistake a silent gap for success.
     """
     generation = tmp_path / "gen"

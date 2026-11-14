@@ -27,6 +27,34 @@ def _run(
     )
 
 
+def test_exact_resolution_refuses_forged_registered_run_and_ambiguous_native(
+    monkeypatch, tmp_path
+):
+    home = tmp_path / "private-home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _run(home, "real-child", session="native-child")
+    root = home / "control_plane/runtime_runs"
+    forged = root / "forged-child/meta.json"
+    forged.parent.mkdir()
+    forged.write_text((root / "real-child/meta.json").read_text())
+    assert message_control.resolve_message_run(session="native-child") == "real-child"
+    with pytest.raises(message_control.MessageControlError, match="identity_mismatch"):
+        message_control.resolve_message_run(run_id="forged-child")
+    with pytest.raises(
+        message_control.MessageControlError, match="session_run_mismatch"
+    ):
+        message_control.resolve_message_run(
+            run_id="real-child", session="parent-native"
+        )
+    with pytest.raises(
+        message_control.MessageControlError, match="session_not_resolved"
+    ):
+        message_control.resolve_message_run(session="missing-native")
+    _run(home, "resumed-child", session="native-child")
+    with pytest.raises(message_control.MessageControlError, match="session_ambiguous"):
+        message_control.resolve_message_run(session="native-child")
+
+
 def test_codex_message_is_recorded_then_queued_without_resume_or_spawn(
     monkeypatch, tmp_path: Path
 ) -> None:

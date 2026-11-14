@@ -318,7 +318,7 @@ def test_invalid_values_are_refused_before_any_control_plane_write(
     ("provider", "args", "fragment"),
     [
         ("junie", ["--sandbox", "true"], "junie 26.8.31 exposes no sandbox control"),
-        ("junie", ["--permissions", "bypass"], "supported: auto"),
+        ("junie", ["--permissions", "read-only"], "supported: auto"),
         (
             "codex",
             ["--permissions", "auto", "--sandbox", "false"],
@@ -594,3 +594,430 @@ def test_native_resume_keeps_admitted_policy_in_provider_argv_and_receipt(
         (_runtime_runs(world.env) / result["run_id"] / "meta.json").read_text()
     )["execution_controls"]
     assert receipt == admitted.receipt()
+
+
+def _seed_admitted_session(
+    world: _World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    native_id: str,
+    run_id: str,
+    admitted_permissions: str,
+    config_permissions: str = "",
+) -> dict[str, object]:
+    """One prior run owning ``native_id`` plus an in-process probe of the stub."""
+    admitted = resolve_execution_controls("claude", permissions=admitted_permissions)
+    source = _runtime_runs(world.env) / run_id / "meta.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "agent": "claude",
+                "agent_session_id": native_id,
+                "root": str(world.repo),
+                "execution_controls": admitted.receipt(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_home = tmp_path / "xdg"
+    if config_permissions:
+        config = config_home / "vibecrafted" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(f'permissions = "{config_permissions}"\n', encoding="utf-8")
+    for key in ("VIBECRAFTED_HOME", "PATH", "HOME"):
+        monkeypatch.setenv(key, world.env[key])
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: ProbeResult(
+            agent=agent,
+            state="confirmed",
+            executable=str(world.bin / agent),
+            version="fixture",
+        ),
+    )
+    return admitted.receipt()
+
+
+def _child_meta(world: _World, run_id: str) -> dict[str, object]:
+    return json.loads((_runtime_runs(world.env) / run_id / "meta.json").read_text())
+
+
+@pytest.mark.parametrize(
+    ("verb", "identity"),
+    [("implement", "--session"), ("resume-session", "--agent-session-id")],
+)
+def test_review_session_continued_as_bypass_implement_honours_current_choice(
+    world: _World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+    identity: str,
+) -> None:
+    """`implement claude --session N --permissions bypass` after a read-only review."""
+    from vibecrafted_core import cli
+
+    native_id = "review-native-session"
+    _seed_admitted_session(
+        world,
+        tmp_path,
+        monkeypatch,
+        native_id=native_id,
+        run_id="revi-admitted",
+        admitted_permissions="read-only",
+    )
+    rc = cli.main(
+        [
+            verb,
+            "claude",
+            identity,
+            native_id,
+            "--permissions",
+            "bypass",
+            "--prompt",
+            "now implement the reviewed cut",
+            "--root",
+            str(world.repo),
+            "--json",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0, result
+    argv = _await_argv(world.argv_file)
+    expected = resolve_execution_controls("claude", permissions="bypass")
+    assert argv[argv.index("--resume") + 1] == native_id
+    assert "plan" not in argv
+    for flag in expected.provider_flags:
+        assert flag in argv
+    meta = _child_meta(world, result["run_id"])
+    controls = meta["execution_controls"]
+    assert controls["permissions_requested"] == "bypass"
+    assert controls["permissions_effective"] == "bypass"
+    assert controls["permissions_source"] == "dispatch"
+    assert controls["provider_flags"] == list(expected.provider_flags)
+    # Identity stays pinned to the continued provider session and checkout.
+    assert meta["agent"] == "claude"
+    assert meta["agent_session_id"] == native_id
+    assert meta["resume_mode"] == "manual_explicit"
+    # The detached launcher keeps rewriting meta; the synchronous receipt owns root.
+    assert Path(str(result["root"])).resolve() == world.repo.resolve()
+
+
+def test_prior_bypass_session_continued_read_only_drops_to_plan(
+    world: _World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native_id = "bypass-native-session"
+    _seed_admitted_session(
+        world,
+        tmp_path,
+        monkeypatch,
+        native_id=native_id,
+        run_id="impl-admitted",
+        admitted_permissions="bypass",
+    )
+    result = workflow.manual_resume_session(
+        "claude",
+        native_id,
+        CORE_ROOT,
+        prompt="review only",
+        root=world.repo,
+        permissions="read-only",
+    )
+    assert result["accepted"] is True, result
+    argv = _await_argv(world.argv_file)
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in argv
+    assert "bypassPermissions" not in argv
+    controls = _child_meta(world, result["run_id"])["execution_controls"]
+    assert controls["permissions_effective"] == "read-only"
+    assert controls["permissions_source"] == "dispatch"
+
+
+def test_omitted_override_inherits_admitted_bypass_not_live_config(
+    world: _World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native_id = "inherit-native-session"
+    admitted = _seed_admitted_session(
+        world,
+        tmp_path,
+        monkeypatch,
+        native_id=native_id,
+        run_id="impl-inherit",
+        admitted_permissions="bypass",
+        config_permissions="read-only",
+    )
+    result = workflow.manual_resume_session(
+        "claude", native_id, CORE_ROOT, prompt="keep going", root=world.repo
+    )
+    assert result["accepted"] is True, result
+    _await_argv(world.argv_file)
+    assert _child_meta(world, result["run_id"])["execution_controls"] == admitted
+
+
+def test_explicit_sandbox_override_is_honoured_and_keeps_admitted_permissions(
+    world: _World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native_id = "sandbox-native-session"
+    admitted = _seed_admitted_session(
+        world,
+        tmp_path,
+        monkeypatch,
+        native_id=native_id,
+        run_id="revi-sandbox",
+        admitted_permissions="read-only",
+    )
+    result = workflow.manual_resume_session(
+        "claude",
+        native_id,
+        CORE_ROOT,
+        prompt="sandboxed review",
+        root=world.repo,
+        sandbox="true",
+    )
+    assert result["accepted"] is True, result
+    argv = _await_argv(world.argv_file)
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert json.loads(argv[argv.index("--settings") + 1]) == CLAUDE_SANDBOX_ON_SETTINGS
+    controls = _child_meta(world, result["run_id"])["execution_controls"]
+    assert controls["sandbox_requested"] == "true"
+    assert controls["permissions_effective"] == "read-only"
+    assert controls["permissions_requested"] == admitted["permissions_requested"]
+    assert controls["permissions_source"] == admitted["permissions_source"]
+
+
+@pytest.mark.parametrize(
+    ("permissions", "sandbox"), [("everything", None), ("", "maybe")]
+)
+def test_malformed_session_override_refuses_before_any_run_is_reserved(
+    world: _World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    permissions: str,
+    sandbox: str | None,
+) -> None:
+    native_id = "malformed-native-session"
+    _seed_admitted_session(
+        world,
+        tmp_path,
+        monkeypatch,
+        native_id=native_id,
+        run_id="revi-malformed",
+        admitted_permissions="read-only",
+    )
+    before = sorted(_runtime_runs(world.env).iterdir())
+    result = workflow.manual_resume_session(
+        "claude",
+        native_id,
+        CORE_ROOT,
+        prompt="x",
+        root=world.repo,
+        permissions=permissions,
+        sandbox=sandbox,
+    )
+    assert result["accepted"] is False
+    assert result["reason"] == "launch_spec_invalid"
+    assert sorted(_runtime_runs(world.env).iterdir()) == before
+    assert not world.argv_file.exists()
+
+
+def test_unsupported_session_override_fails_closed_with_policy_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex cannot enforce accept-edits: refused, never silently downgraded."""
+    codex = _World(tmp_path, provider="codex")
+    native_id = "codex-native-thread"
+    admitted = resolve_execution_controls("codex", permissions="read-only")
+    for key in ("VIBECRAFTED_HOME", "PATH", "HOME"):
+        monkeypatch.setenv(key, codex.env[key])
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: ProbeResult(
+            agent=agent,
+            state="confirmed",
+            executable=str(codex.bin / agent),
+            version="fixture",
+        ),
+    )
+    with pytest.raises(workflow._NativeResumeCommandRejected) as refused:
+        workflow._verified_native_resume_command(
+            "codex",
+            native_id,
+            parent_meta={"execution_controls": admitted.receipt()},
+            permissions="accept-edits",
+        )
+    assert refused.value.reason == "native_resume_policy_unavailable"
+    assert "accept-edits" in refused.value.detail
+
+
+def test_tracked_continuation_without_override_reuses_frozen_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Automatic/tracked resume passes no override: the frozen receipt rides."""
+    world = _World(tmp_path)
+    admitted = resolve_execution_controls("claude", permissions="read-only")
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('permissions = "bypass"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config.parent.parent))
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: ProbeResult(
+            agent=agent,
+            state="confirmed",
+            executable=str(world.bin / agent),
+            version="fixture",
+        ),
+    )
+    command, _state, _version, controls = workflow._verified_native_resume_command(
+        "claude",
+        "tracked-native-session",
+        parent_meta={"execution_controls": admitted.receipt()},
+    )
+    assert controls == admitted
+    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert command[command.index("--resume") + 1] == "tracked-native-session"
+
+
+@pytest.mark.parametrize(
+    ("body", "override", "effective", "source"),
+    [
+        ('[runtime.picking]\npermissions = "bypass"\n', "", "bypass", "config:global"),
+        (
+            'permissions = "read-only"\n[runtime.picking]\npermissions = "bypass"\n',
+            "",
+            "bypass",
+            "config:global",
+        ),
+        (
+            'permissions = "bypass"\n[runtime.picking]\npermissions = "auto"\n',
+            "",
+            "auto",
+            "config:global",
+        ),
+        (
+            'permissions = "bypass"\n[runtime.picking]\npermissions = ""\n',
+            "",
+            "auto",
+            "default",
+        ),
+        ('permissions = "bypass"\n', "", "bypass", "config:global"),
+        (
+            (
+                '[runtime.picking]\npermissions = "bypass"\n'
+                '[agents.claude]\npermissions = "read-only"\n'
+            ),
+            "",
+            "read-only",
+            "config:agents.claude",
+        ),
+        (
+            (
+                '[runtime.picking]\npermissions = "bypass"\n'
+                '[agents.claude]\npermissions = "read-only"\n'
+            ),
+            "auto",
+            "auto",
+            "dispatch",
+        ),
+    ],
+)
+def test_ui_permission_precedence_reaches_public_launch_and_metadata(
+    world: _World, tmp_path: Path, body: str, override: str, effective: str, source: str
+) -> None:
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(body, encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    args = ["--permissions", override] if override else []
+    result = world.launch(
+        "workflow", "claude", *args, "--repo", str(world.repo), "-p", "configured run"
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["accepted"] is True
+    controls = receipt["execution_controls"]
+    assert controls["permissions_effective"] == effective
+    assert controls["permissions_source"] == source
+    assert controls["permissions_requested"] == (
+        "" if source == "default" else effective
+    )
+    argv = _await_argv(world.argv_file)
+    assert argv == receipt["worker_command"][1:]
+    expected_flag = {"bypass": "bypassPermissions", "auto": "auto", "read-only": "plan"}
+    assert argv[argv.index("--permission-mode") + 1] == expected_flag[effective]
+    meta = json.loads(
+        (_runtime_runs(world.env) / receipt["run_id"] / "meta.json").read_text()
+    )
+    assert meta["execution_controls"] == controls
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'permissions = "bypass"\n[runtime.picking]\npermissions = "yolo"\n',
+        "[runtime.picking]\npermissions = false\n",
+        '[runtime.picking]\npermissions = ["bypass"]\n',
+        'runtime = "bypass"\n',
+        '[runtime]\npicking = "bypass"\n',
+    ],
+)
+def test_malformed_ui_permission_refuses_before_launch(
+    world: _World, tmp_path: Path, body: str
+) -> None:
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(body, encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    result = world.launch("workflow", "claude", "--repo", str(world.repo), "-p", "x")
+    assert result.returncode == 2, result.stdout
+    assert "runtime" in result.stderr
+    assert not world.argv_file.exists()
+    runs = _runtime_runs(world.env)
+    assert not runs.exists() or not any(runs.iterdir())
+
+
+@pytest.mark.parametrize("selection", ["dispatch", "global", "agent"])
+def test_junie_bypass_launch_records_honest_auto_adaptation(
+    tmp_path: Path, selection: str
+) -> None:
+    world = _World(tmp_path, provider="junie")
+    config = tmp_path / "xdg" / "vibecrafted" / "config.toml"
+    config.parent.mkdir(parents=True)
+    table = "agents.junie" if selection == "agent" else "runtime.picking"
+    config.write_text(f'[{table}]\npermissions = "bypass"\n', encoding="utf-8")
+    world.env["XDG_CONFIG_HOME"] = str(config.parent.parent)
+    args = ["--permissions", "bypass"] if selection == "dispatch" else []
+    result = world.launch(
+        "workflow", "junie", *args, "--repo", str(world.repo), "-p", "x"
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["accepted"] is True
+    controls = receipt["execution_controls"]
+    assert controls["permissions_requested"] == "bypass"
+    assert controls["permissions_effective"] == "auto"
+    assert (
+        controls["permissions_source"]
+        == {
+            "dispatch": "dispatch",
+            "global": "config:global",
+            "agent": "config:agents.junie",
+        }[selection]
+    )
+    assert controls["permissions_reason"] == "junie-headless-no-bypass"
+    assert controls["provider_flags"] == []
+    argv = _await_argv(world.argv_file)
+    assert "--brave" not in argv
+    assert "--plan" not in argv
+    assert argv == receipt["worker_command"][1:]
+    meta = json.loads(
+        (_runtime_runs(world.env) / receipt["run_id"] / "meta.json").read_text()
+    )
+    assert meta["execution_controls"] == controls

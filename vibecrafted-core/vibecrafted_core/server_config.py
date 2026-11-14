@@ -192,14 +192,25 @@ def load_agent_launch_config(
 def load_global_permission_default(
     path: Path | None = None, *, operator_home: Path | None = None
 ) -> str:
-    """Read the top-level ``permissions`` word applying to every provider.
+    """Read Settings' canonical ``runtime.picking.permissions`` default.
 
-    Founder decision 13716da4a2b8af7049ea1565: the fleet default is ``auto``;
-    this key is the one durable place to choose another mode once. Empty when
-    unset; a malformed word refuses (never silently reverts to a default).
+    The UI key wins over legacy top-level ``permissions``, including an empty
+    UI value clearing the override back to product auto. Legacy is read only
+    when the UI key is absent. Malformed selected settings refuse launch.
     """
     resolved = path or config_path(operator_home=operator_home)
     payload = _load_config_payload(resolved)
+    runtime = payload.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ServerConfigError("[runtime] must be a TOML table")
+    picking = runtime.get("picking", {})
+    if not isinstance(picking, dict):
+        raise ServerConfigError("[runtime.picking] must be a TOML table")
+    if "permissions" in picking:
+        value = picking["permissions"]
+        if isinstance(value, str) and not value.strip():
+            return ""
+        return validate_permissions_word(value, "runtime.picking.permissions")
     if "permissions" not in payload:
         return ""
     return validate_permissions_word(payload["permissions"], "permissions")
@@ -211,8 +222,9 @@ def durable_permission_selection(
     """Resolve the durable permission opt-in for one provider.
 
     Precedence inside the config: ``[agents.<agent>].permissions`` beats the
-    top-level ``permissions``. Returns ``(word, source)``; ``("", "")`` when no
-    durable selection exists (the caller's fleet default then applies).
+    canonical UI/global setting (legacy top-level only when absent). Returns
+    ``(word, source)``; ``("", "")`` when no durable selection exists (the
+    caller's fleet default then applies).
     """
     agent_config = load_agent_launch_config(agent, path, operator_home=operator_home)
     if agent_config.permissions:

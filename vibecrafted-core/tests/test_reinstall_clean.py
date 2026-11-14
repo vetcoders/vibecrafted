@@ -2386,6 +2386,162 @@ def test_resurrect_workspace_lobby_and_unknown_cwd_do_not_guess_agent_owner(
     assert not wc.list_instances()
 
 
+def test_resurrect_operator_host_cannot_borrow_layout_project_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    project.mkdir()
+    wc.resolve_run_workspace_identity(root=project, env={})
+    before = {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    }
+    runner = Runner()
+    manifest = {
+        "runtime": {"running_roots": []},
+        "frame": {
+            "sessions": [
+                {
+                    "name": "vc-host",
+                    "cwd": str(project),
+                    "layout": f'layout {{ cwd "{project}"; tab {{ pane }} }}',
+                    "panes": [],
+                    "unplaced_agents": [],
+                }
+            ]
+        },
+        "headless_runs": [],
+    }
+    restored = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )["sessions"][0]
+    assert restored["frame_result"] == "live"
+    assert restored["workspace"]["result"] == "not-applicable"
+    assert len([a for a, _ in runner.calls if "--create-background" in a]) == 1
+    assert {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == before
+
+
+@pytest.mark.parametrize("layout_available", [True, False])
+@pytest.mark.parametrize("bound_incarnation", [False, True])
+def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout_available: bool,
+    bound_incarnation: bool,
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    inherited = tmp_path / "inherited-server-cwd"
+    project.mkdir()
+    if layout_available:
+        inherited.mkdir()
+    runner = Runner()
+    incarnation = "ae07cbd1-0a61-4232-9745-b7f1a744d140" if bound_incarnation else None
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
+    owner = wc.resolve_run_workspace_identity(root=project, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=owner.workspace_id,
+        vibecrafted_session_id=owner.vibecrafted_session_id,
+        workspace_instance_id=owner.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="custom-project-seat",
+        socket_dir=str(SOCKETS),
+        state="live",
+    )
+    old = wc.read_workspace_session(owner.vibecrafted_session_id)
+    assert old.attachments[0].session_incarnation == incarnation
+    incarnation_probes = []
+
+    def observe_incarnation(*_):
+        created = any("--create-background" in argv for argv, _ in runner.calls)
+        incarnation_probes.append(created)
+        return "dc39584d-4242-44e6-b33a-a0abac310aba" if created else None
+
+    monkeypatch.setattr(wc, "_frame_session_incarnation", observe_incarnation)
+    manifest = {
+        "runtime": {"running_roots": []},
+        "frame": {
+            "sessions": [
+                {
+                    "name": "custom-project-seat",
+                    "cwd": str(inherited),
+                    "layout": f'layout {{ cwd "{inherited}"; tab {{ pane }} }}',
+                    "panes": [],
+                    "unplaced_agents": [],
+                }
+            ]
+        },
+        "headless_runs": [],
+    }
+    restored = reinstall_clean.resurrect(
+        manifest, ctx_for(tmp_path, runner, monkeypatch=monkeypatch)
+    )["sessions"][0]
+    assert restored["result"] == "live"
+    assert restored["workspace"]["root"] == str(project)
+    assert restored["workspace"]["root_source"] == "catalog-owner"
+    assert restored["workspace"]["workspace_id"] == owner.workspace_id
+    assert (
+        restored["workspace"]["vibecrafted_session_id"] != owner.vibecrafted_session_id
+    )
+    assert len([a for a, _ in runner.calls if "--create-background" in a]) == 1
+    assert len(wc.read_catalog().workspaces) == 1
+    old = wc.read_workspace_session(owner.vibecrafted_session_id)
+    assert old.attachments[0].state == "missing"
+    assert old.attachments[0].session_incarnation == incarnation
+    current = wc.read_workspace_session(restored["workspace"]["vibecrafted_session_id"])
+    assert (
+        current.attachments[0].session_incarnation
+        == "dc39584d-4242-44e6-b33a-a0abac310aba"
+    )
+    assert wc.runtime_session_owner_root(
+        "custom-project-seat", str(SOCKETS), runtime_state="live"
+    ) == str(project)
+    assert incarnation_probes and all(incarnation_probes), (
+        "historical lookup must not probe an absent seat; live publication must probe"
+    )
+
+
+def test_resurrect_unreadable_owner_never_falls_back_to_layout_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import workspace_catalog as wc
+
+    project = tmp_path / "project"
+    project.mkdir()
+    owner = wc.resolve_run_workspace_identity(root=project, env={})
+    wc.record_runtime_session_attachment(
+        workspace_id=owner.workspace_id,
+        vibecrafted_session_id=owner.vibecrafted_session_id,
+        workspace_instance_id=owner.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id="unreadable-seat",
+        socket_dir=str(SOCKETS),
+        state="live",
+    )
+    wc.workspace_session_path(owner.vibecrafted_session_id).write_text("{broken")
+    before = {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    }
+    runner = Runner()
+    with pytest.raises(wc.WorkspaceCatalogError, match="ownership is unreadable"):
+        reinstall_clean._prepare_restored_workspace(
+            ctx_for(tmp_path, runner, monkeypatch=monkeypatch),
+            {"name": "unreadable-seat", "cwd": str(project)},
+        )
+    assert not runner.calls
+    assert {
+        path: path.read_bytes()
+        for path in Path(os.environ["VIBECRAFTED_HOME"]).rglob("*.json")
+    } == before
+
+
 @pytest.fixture
 def recovery_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from contextlib import contextmanager

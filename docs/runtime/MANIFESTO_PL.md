@@ -90,6 +90,6 @@ Vibecrafted. działa jak rzeźbiarz pracujący w kamieniu: najpierw zarysowuje b
 
 Vibecrafted. jest żywym dowodem na własną poprawność. Pełen framework zaprojektował dla siebie skille, mechanizmy działania, CI (Continuous Integration), installer oraz landing page. Każda zmiana realizowana za pomocą tego systemu posiada konkretny "evidence chain" — agent najpierw znajduje powód odrzucenia (counterexample), a potem potrafi empirycznie udowodnić spójność.
 
-Framework w wersji 2.0.0 sam przeszedł własny pipeline: marbles wpierdoliły nadmiar pomysłów w taksonomię skilli, audit zweryfikował co realnie wylądowało, polarize wybrał jedną oś (READ-ONLY vs WRITE) i odrzucił konkurujące framing'i. Manifest który czytasz jest output'em tego cyklu.
+Framework w wersji 2.0.0 sam przeszedł własny pipeline: marbles wcisnęły nadmiar pomysłów w taksonomię skilli, audit zweryfikował co realnie wylądowało, polarize wybrał jedną oś (READ-ONLY vs WRITE) i odrzucił konkurujące framing'i. Manifest który czytasz jest output'em tego cyklu.
 
 _Produced with ⚒🅅·🄸·🄱·🄴·🄲·🅡·🄰·🄵·🅃·🄴·🄳·_
