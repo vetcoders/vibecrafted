@@ -439,7 +439,10 @@ def _path_without_make(tmp_path: Path, fake_bin: Path) -> str:
     tools.mkdir()
     for directory in ("/usr/bin", "/bin", "/usr/sbin", "/sbin"):
         for entry in Path(directory).iterdir():
-            if entry.name in {"make", "gmake"} or (tools / entry.name).exists():
+            # lexists: a broken symlink still owns the name. /bin and /usr/bin
+            # are the same directory on a merged /usr, and exists() follows a
+            # dangling link and reports it missing, so the second pass crashes.
+            if entry.name in {"make", "gmake"} or os.path.lexists(tools / entry.name):
                 continue
             (tools / entry.name).symlink_to(entry)
     return f"{fake_bin}:{tools}"
