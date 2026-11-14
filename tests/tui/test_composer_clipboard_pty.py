@@ -204,7 +204,16 @@ class EditorPTY:
             self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 18, columns, 0, 0)
         )
         os.killpg(self.process.pid, signal.SIGWINCH)
-        assert self.sync() == [columns, 18]
+        # SIGWINCH can land after the first size probe. Keep probing until
+        # Vim reports the new size instead of the size it still had.
+        deadline = time.monotonic() + 8
+        observed: list[int] = []
+        while time.monotonic() < deadline:
+            observed = self.sync()
+            if observed == [columns, 18]:
+                return
+            time.sleep(0.05)
+        assert observed == [columns, 18], observed
 
     def yank(self, keys: bytes) -> bytes:
         start = len(self.output)
