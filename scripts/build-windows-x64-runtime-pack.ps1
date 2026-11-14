@@ -259,10 +259,23 @@ if (-not (Test-Path -LiteralPath $terminalBuilt -PathType Leaf)) {
 }
 
 Write-Host "Building vc-frame for win32-x64 at $frameRevision"
+$frameDirty = "0"
+# 4f689254 calls the Unix-only socket probe from project admission. The
+# donor pin stays put; this patch is the Windows compile gate until a
+# later pin includes it. The binary is marked dirty so it does not claim
+# to be a clean build of that revision.
+$framePatch = Join-Path $repoRoot "scripts\patches\vc-frame-4f689254-windows-socket-probe.patch"
+if ($frameRevision -eq "4f689254bd5cad05adee5ab2a8555e9d3b775dfb") {
+    & git -C $frameSrc apply --check $framePatch
+    if ($LASTEXITCODE -ne 0) { Die "vc-frame Windows socket-probe patch does not apply at $frameRevision" }
+    & git -C $frameSrc apply $framePatch
+    if ($LASTEXITCODE -ne 0) { Die "vc-frame Windows socket-probe patch failed at $frameRevision" }
+    $frameDirty = "1"
+}
 Push-Location $frameSrc
 try {
     $env:VC_FRAME_GIT_SHA = $frameRevision
-    $env:VC_FRAME_GIT_DIRTY = "0"
+    $env:VC_FRAME_GIT_DIRTY = $frameDirty
     & cargo xtask build --release
     if ($LASTEXITCODE -ne 0) { Die "vc-frame cargo xtask build failed" }
 }

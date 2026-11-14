@@ -1,0 +1,35 @@
+diff --git a/src/project_prepare.rs b/src/project_prepare.rs
+--- a/src/project_prepare.rs
++++ b/src/project_prepare.rs
+@@ -12,8 +12,12 @@
+     consts::{ZELLIJ_CACHE_DIR, ZELLIJ_SOCK_DIR},
+     data::LayoutInfo,
+     input::{config::Config, layout::Layout},
+-    sessions::{SocketOwnership, probe_socket_ownership, validate_session_name},
++    sessions::validate_session_name,
+ };
++// probe_socket_ownership exists only under cfg(unix). On Windows the
++// session path is a marker file, and list-tabs below is the liveness check.
++#[cfg(unix)]
++use zellij_utils::sessions::{SocketOwnership, probe_socket_ownership};
+ 
+ const ADMISSION_SCHEMA: &str = "vc-frame.project-admission.v1";
+ 
+@@ -408,9 +412,14 @@
+     runtime: &SelectedRuntime,
+     admission: &Admission,
+ ) -> Result<(), String> {
+-    let socket = Path::new(&admission.socket_dir).join(&admission.session_name);
+-    if probe_socket_ownership(&socket) != SocketOwnership::Live {
+-        return Err("admitted native session is not live in its claimed namespace".to_owned());
++    #[cfg(unix)]
++    {
++        let socket = Path::new(&admission.socket_dir).join(&admission.session_name);
++        if probe_socket_ownership(&socket) != SocketOwnership::Live {
++            return Err(
++                "admitted native session is not live in its claimed namespace".to_owned(),
++            );
++        }
+     }
+     let output = Command::new(&runtime.frame_entry)
+         .args([
