@@ -184,9 +184,20 @@ class EditorPTY:
         self.send(
             f"\x1b:call writefile([string(&columns), string(&lines)], '{escaped}')\r".encode()
         )
-        self.wait(marker.exists)
-        self.drain()
-        return [int(x) for x in marker.read_text().splitlines()]
+        # writefile creates the marker before the two lines land. Reading on
+        # the first exists() observation returns an empty file under load.
+        deadline = time.monotonic() + 8
+        while True:
+            self.drain()
+            if marker.is_file():
+                lines = [
+                    line for line in marker.read_text().splitlines() if line.strip()
+                ]
+                if len(lines) >= 2:
+                    return [int(line) for line in lines]
+            assert self.process.poll() is None, bytes(self.output[-2000:])
+            assert time.monotonic() < deadline, bytes(self.output[-2000:])
+            time.sleep(0.01)
 
     def resize(self, columns: int) -> None:
         fcntl.ioctl(

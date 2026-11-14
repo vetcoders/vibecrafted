@@ -106,7 +106,9 @@ jobs:
       - name: Verify VOC against the exact source core
         run: make voc-core-contract-gate
       - name: Run installer tests
-        timeout-minutes: 120
+        # The macOS lane was still passing tests at 92% when 120 minutes
+        # elapsed (about 130 minutes to finish). Stay inside the 180 minute job.
+        timeout-minutes: 150
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then
