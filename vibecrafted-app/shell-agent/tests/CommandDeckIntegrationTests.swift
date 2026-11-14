@@ -1535,9 +1535,8 @@ struct CommandDeckIntegrationTests {
     }
     // Founder direction 2026-10-22: the mark does NOT rotate; the white
     // activity circle moves to a different circle slot. Six step values
-    // must still render distinct glyphs (three circle slots × filled/idle
-    // are the observable states), and idle/unavailable must stay identical
-    // regardless of step or health.
+    // cycle through three distinct filled-circle slots, and idle/unavailable
+    // must stay identical regardless of step or health.
     var slots = Set<Data>()
     for step in 0..<6 {
       let image = TrayGlyph.statusImage(health: .healthy,
@@ -1551,34 +1550,47 @@ struct CommandDeckIntegrationTests {
     }
     try require(slots.count == 3,
       "Working glyph must move the circle across the three mark circles, not rotate the mark")
-    // Each working slot fills exactly one circle: the filled interiors are
-    // disjoint, and together they cover all three circle interiors.
+    // Compare the three unique working slots with the unfilled mark in
+    // the same rendered viewport. Sampling at the source resolution keeps
+    // the circle interiors distinct while still exercising statusImage's
+    // menu-bar scaling and inset.
+    let idle = TrayGlyph.statusImage(health: .healthy, activity: .idle, step: 3, source: source)
+    let unknown = TrayGlyph.statusImage(health: .failed, activity: .unavailable, step: 4, source: source)
+    let rasterSide = original.pixelsWide
+    let idleBitmap = try bitmap(idle, pixels: rasterSide)
     var filledPixels = Set<Int>()
-    for step in 0..<6 {
+    for step in 0..<3 {
       let image = TrayGlyph.statusImage(health: .healthy,
         activity: .running(1), step: step, source: source)
-      guard let data = image.tiffRepresentation,
-        let rendered = NSBitmapImageRep(data: data)
-      else { throw Failure(message: "Work glyph could not be decoded") }
-      for y in 0..<original.pixelsHigh {
-        for x in 0..<original.pixelsWide {
-          if alpha(rendered, x, y) == 255 && alpha(original, x, y) == 0 {
-            try require(!filledPixels.contains(y * original.pixelsWide + x),
-              "Two working slots filled the same circle interior")
-            filledPixels.insert(y * original.pixelsWide + x)
+      let rendered = try bitmap(image, pixels: rasterSide)
+      var slotPixels = Set<Int>()
+      for y in 0..<rasterSide {
+        for x in 0..<rasterSide {
+          let before = alpha(idleBitmap, x, y)
+          let after = alpha(rendered, x, y)
+          if before == 0 && after == 255 {
+            slotPixels.insert(y * rasterSide + x)
           }
         }
       }
+      try require(!slotPixels.isEmpty, "Working slot \(step) filled no circle interior")
+      try require(filledPixels.isDisjoint(with: slotPixels),
+        "Two working slots filled the same circle interior")
+      filledPixels.formUnion(slotPixels)
     }
-    try require(filledPixels.count > 0, "No working slot filled any circle")
     // Idle and unavailable never show the activity circle, independent of
-    // step or health — the static mark is the idle state.
-    let idle = TrayGlyph.statusImage(health: .healthy, activity: .idle, step: 3, source: source)
-    let unknown = TrayGlyph.statusImage(health: .failed, activity: .unavailable, step: 4, source: source)
-    try require(idle.tiffRepresentation == unknown.tiffRepresentation,
-      "Service health or old rotation changed idle contours")
-    try require(idle.tiffRepresentation == source.tiffRepresentation,
-      "Idle glyph must be the untouched static mark")
+    // step or health — the unfilled, unrotated rendered mark is the reference.
+    let reference = try bitmap(TrayGlyph.renderMask(source: source,
+      side: TrayGlyph.preferredPointSize, rotation: 0), pixels: rasterSide)
+    let unknownBitmap = try bitmap(unknown, pixels: rasterSide)
+    for y in 0..<rasterSide {
+      for x in 0..<rasterSide {
+        try require(alpha(idleBitmap, x, y) == alpha(unknownBitmap, x, y),
+          "Service health or old rotation changed idle contours")
+        try require(alpha(idleBitmap, x, y) == alpha(reference, x, y),
+          "Idle glyph must be the unfilled, unrotated rendered mark")
+      }
+    }
     try require(idle.isTemplate && unknown.isTemplate, "Idle image ignores system appearance")
     var now: TimeInterval = 100
     var motionReduced = false

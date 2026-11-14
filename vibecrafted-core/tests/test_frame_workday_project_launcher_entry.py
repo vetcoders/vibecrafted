@@ -46,6 +46,7 @@ def _pane_command(config: Path, script: str) -> str:
 class Terminal:
     def __init__(self, command: str, env: dict[str, str], cwd: Path):
         self.master, slave = pty.openpty()
+        self.initial_mode = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 160, 0, 0))
 
         self.process = subprocess.Popen(
@@ -90,7 +91,9 @@ class Terminal:
                     self.output += os.read(self.master, 65536)
                 except OSError:
                     pass
-        raise AssertionError("pane did not close after terminal input")
+        raise AssertionError(
+            f"pane did not close after terminal input: {self.output.decode(errors='replace')}"
+        )
 
     def close(self) -> None:
         os.close(self.master)
@@ -184,6 +187,12 @@ def test_agents_entry_opens_interactive_launcher(
     try:
         terminal.expect("Choose a provider, then Launch.")
         terminal.expect(str(project))
+        # The PTY starts with XON/XOFF enabled, as a normal terminal does.
+        assert terminal.initial_mode[0] & termios.IXON
+        # Ctrl+Q must reach curses without disabling the existing Ctrl+C signal.
+        mode = termios.tcgetattr(terminal.master)
+        assert not mode[0] & termios.IXON
+        assert mode[3] & termios.ISIG
         terminal.send(b"a")
         terminal.expect("Runtime")
         terminal.send(b"a")
@@ -191,8 +200,11 @@ def test_agents_entry_opens_interactive_launcher(
         # ncurses requests X10 mouse input at the shipped Advanced target.
         terminal.send(b"\x1b[M\x20\x48\x2e\x1b[M\x23\x48\x2e")
         terminal.expect("Runtime")
-        terminal.send(b"\x1b")
+        terminal.send(b"\x11")
+        terminal.expect("Unsaved form changes")
+        terminal.send(b"y")
         assert terminal.finish() == 0
+        assert termios.tcgetattr(terminal.master)[0] & termios.IXON
     finally:
         terminal.close()
 

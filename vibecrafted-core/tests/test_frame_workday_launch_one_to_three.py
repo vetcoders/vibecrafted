@@ -196,12 +196,24 @@ def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: 
     from vibecrafted_core.workspace_catalog import (
         create_workspace,
         operator_session_name,
+        record_runtime_session_attachment,
+        resolve_run_workspace_identity,
     )
 
     config, env, project, _ = pane_runtime
     record = create_workspace(root=project, display_label="selected-project")
     destination = operator_session_name(
         record.workspace_id, display_label=record.display_label
+    )
+    # A listed Frame name is not ownership: bind this rehearsal seat through WES.
+    identity = resolve_run_workspace_identity(root=project, env={})
+    record_runtime_session_attachment(
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        workspace_instance_id=identity.workspace_instance_id,
+        runtime="vc-frame",
+        runtime_session_id=destination,
+        state="live",
     )
     frame = Path(env["VIBECRAFTED_PYTHON"]).parent / "vc-frame"
     capture = tmp_path / "batch.jsonl"
@@ -231,7 +243,9 @@ def test_materialized_launcher_keyboard_batch(pane_runtime, tmp_path):  # noqa: 
         terminal.send(b"\n")
         terminal.expect("All selected agent tabs are already open")
         assert len(capture.read_text().splitlines()) == 3
-        terminal.send(b"\x1b")
+        terminal.send(b"\x11")
+        terminal.expect("Unsaved form changes")
+        terminal.send(b"y")
         assert terminal.finish() == 0
     finally:
         terminal.close()

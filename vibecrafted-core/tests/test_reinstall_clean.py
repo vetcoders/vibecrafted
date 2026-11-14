@@ -2427,8 +2427,12 @@ def test_resurrect_operator_host_cannot_borrow_layout_project_identity(
 
 
 @pytest.mark.parametrize("layout_available", [True, False])
+@pytest.mark.parametrize("bound_incarnation", [False, True])
 def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout_available: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout_available: bool,
+    bound_incarnation: bool,
 ) -> None:
     from vibecrafted_core import workspace_catalog as wc
 
@@ -2437,6 +2441,9 @@ def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
     project.mkdir()
     if layout_available:
         inherited.mkdir()
+    runner = Runner()
+    incarnation = "ae07cbd1-0a61-4232-9745-b7f1a744d140" if bound_incarnation else None
+    monkeypatch.setattr(wc, "_frame_session_incarnation", lambda *_: incarnation)
     owner = wc.resolve_run_workspace_identity(root=project, env={})
     wc.record_runtime_session_attachment(
         workspace_id=owner.workspace_id,
@@ -2447,7 +2454,16 @@ def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
         socket_dir=str(SOCKETS),
         state="live",
     )
-    runner = Runner()
+    old = wc.read_workspace_session(owner.vibecrafted_session_id)
+    assert old.attachments[0].session_incarnation == incarnation
+    incarnation_probes = []
+
+    def observe_incarnation(*_):
+        created = any("--create-background" in argv for argv, _ in runner.calls)
+        incarnation_probes.append(created)
+        return "dc39584d-4242-44e6-b33a-a0abac310aba" if created else None
+
+    monkeypatch.setattr(wc, "_frame_session_incarnation", observe_incarnation)
     manifest = {
         "runtime": {"running_roots": []},
         "frame": {
@@ -2477,9 +2493,18 @@ def test_resurrect_exact_catalog_owner_wins_inherited_layout_cwd(
     assert len(wc.read_catalog().workspaces) == 1
     old = wc.read_workspace_session(owner.vibecrafted_session_id)
     assert old.attachments[0].state == "missing"
+    assert old.attachments[0].session_incarnation == incarnation
+    current = wc.read_workspace_session(restored["workspace"]["vibecrafted_session_id"])
+    assert (
+        current.attachments[0].session_incarnation
+        == "dc39584d-4242-44e6-b33a-a0abac310aba"
+    )
     assert wc.runtime_session_owner_root(
         "custom-project-seat", str(SOCKETS), runtime_state="live"
     ) == str(project)
+    assert incarnation_probes and all(incarnation_probes), (
+        "historical lookup must not probe an absent seat; live publication must probe"
+    )
 
 
 def test_resurrect_unreadable_owner_never_falls_back_to_layout_cwd(

@@ -6,6 +6,7 @@ import json
 import os
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 from argparse import Namespace
@@ -148,9 +149,16 @@ def test_signing_selector_grants_audio_only_to_embedded_terminal(
     app = _bundle(tmp_path)
     output = tmp_path / "entitlements.plist"
     assert _assemble(app, output).returncode == 0
+    # The selector must inspect Mach-O bytes even on a Linux test host.
+    # A header-only executable is an OS file-type boundary double, never run.
+    native_bytes = (
+        Path("/usr/bin/true").read_bytes()
+        if sys.platform == "darwin"
+        else struct.pack("<8I", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0)
+    )
     for name in ("Vibecrafted", "vc-terminal", "unrelated-tool"):
-        # Copy already-existing native bytes, without compiling, signing or executing.
-        shutil.copyfile("/usr/bin/true", app / "Contents/MacOS" / name)
+        (app / "Contents/MacOS" / name).write_bytes(native_bytes)
+    (app / "Contents/MacOS/not-code.txt").write_text("Must not be signed")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     signer = fake_bin / "codesign"

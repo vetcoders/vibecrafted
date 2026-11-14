@@ -2427,10 +2427,12 @@ def _prepare_restored_workspace(
     # The dumped layout may inherit the server's cwd instead of the project's.
     # Read the same strict exact-seat authority used by public project entry;
     # unreadable or ambiguous ownership must not fall back to a different root.
+    # The seat is absent, so consult its historical binding without a live probe.
     seat = wc._runtime_workspace_identity(
         root=None,
         runtime_session_id=name,
         socket_dir=str(ctx.socket_dir),
+        observe_incarnation=False,
     )
     owner = wc.show_workspace(seat[0].workspace_id) if seat is not None else None
     raw = owner.canonical_root if owner is not None else str(session.get("cwd") or "")

@@ -127,7 +127,7 @@ except owner.RuntimeInstallRefusal as error:
     negative = subprocess.run(command, capture_output=True, text=True, check=False)
     assert negative.returncode == 23, negative.stderr
     reason = (
-        "differs from candidate signed terminal code"
+        "differs from this Runtime Pack's signed terminal"
         if damage == "code"
         else "host missing or malformed"
     )

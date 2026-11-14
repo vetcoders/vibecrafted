@@ -119,6 +119,8 @@ def test_runner_launches_primary_from_failover_list(
         "vibecrafted_core.lifecycle_runner.load_context_atlas",
         lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
     )
+    from .test_lifecycle_runner import _with_counted_cycle_fixture
+
     casting: list[tuple[str, str]] = []
 
     def fake_launcher(spec, _source_dir):
@@ -134,7 +136,7 @@ def test_runner_launches_primary_from_failover_list(
         }
 
     runner = LifecycleRunner(
-        launcher=fake_launcher,
+        launcher=_with_counted_cycle_fixture(fake_launcher, tmp_path),
         awaiter=lambda payload: {
             "completed": True,
             "artifact_ok": True,
