@@ -1,6 +1,6 @@
 ---
 name: vc-release
-version: 0.2.1
+version: 0.3.0
 description: >
   Final outward ship skill. Turns "done in the repo" into "safe, visible, deployable,
   discoverable, and launchable in the world." Covers release mechanics, deployment
@@ -83,6 +83,33 @@ scaffold → init → workflow → followup → marbles → dou → decorate →
 ```
 
 Release runs after `vc-dou` verifies the product surface, `vc-decorate` ensures visual coherence, and `vc-hydrate` packages distribution/SEO/onboarding. Release makes hydrated artifacts real: tags, changelogs, registry/binary publication, deployment topology, proxy/TLS, domain/DNS/verification, indexability, security gates, post-release smoke.
+
+## Public-surface floor
+
+Release owns the ship gate. Run it before tagging and before calling the ship done:
+
+```bash
+vc-release --floor
+vc-release --floor --require-release
+```
+
+`vc-release --floor` fails when a required channel, registry, or in-repo
+surface disagrees with the version being cut. A GitHub Release that does not
+exist yet is a warning at preflight, because this stage is what creates it:
+pushing a tag and stopping is not a finished release. `--require-release`
+fails until the Release object for that version exists. `scripts/publish-vibecrafted-release.sh`
+runs the preflight and refuses to open a draft when the floor exits `1`.
+
+Publish when the floor exits 0. `install_cta: no` means do not tell a stranger
+to install; it does not by itself block the Release this stage creates. When
+the only gap is the GitHub Release this publisher is about to create, the floor
+warns and exits 0, and `install_cta` stays `no` until that Release exists.
+`--acknowledge <surface-id>` records an accepted gap; it is the written risk
+acceptance this skill already requires, and it stays in the report.
+`scripts/publish-vibecrafted-release.sh --acknowledge <surface-id>` and
+`make publish-release ACKNOWLEDGE="<surface-id>"` forward that id and reject
+any other floor argument.
+Contract: [`../vc-dou/references/public-surface-floor.md`](../vc-dou/references/public-surface-floor.md).
 
 ## Core Rule
 
@@ -238,6 +265,8 @@ Hosting and bandwidth costs understood, registry/CDN limits known, LICENSE corre
 - Forgetting verification challenge files / TXT records
 - Shipping a JS-only empty shell that crawlers cannot understand
 - Tagging without a changelog
+- Tagging without a GitHub Release (`vc-release --floor --require-release` stays red)
+- Calling the ship done while `vc-release --floor` exits `1`
 - Deploying without post-release smoke checks
 - Treating release as one-time ceremony instead of repeatable discipline
 

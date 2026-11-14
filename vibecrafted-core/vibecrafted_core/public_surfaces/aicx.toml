@@ -1,0 +1,49 @@
+# AICX. npm `aicx` and PyPI `aicx` belong to other people. Never add them.
+# `expect = "agree"` so crates.io, the GitHub Release, main's Cargo.toml,
+# and the README install pin are one comparison, not four separate truths.
+schema = 1
+product = "aicx"
+expect = "agree"
+local_root_file = "Cargo.toml"
+
+[[surface]]
+id = "crates"
+kind = "crates"
+package = "aicx"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_release"
+kind = "github_release"
+repo = "Loctree/aicx"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "orphan_tags"
+kind = "orphan_tags"
+repo = "Loctree/aicx"
+dou = "fail"
+release = "warn"
+
+[[surface]]
+id = "main_cargo"
+kind = "text_url"
+url = "https://raw.githubusercontent.com/Loctree/aicx/main/Cargo.toml"
+pattern = '(?m)^version = "(?P<version>\d+\.\d+\.\d+)"'
+install = false
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "readme"
+kind = "remote_readme"
+url = "https://raw.githubusercontent.com/Loctree/aicx/main/README.md"
+require_install = true
+pin_commands = "fail"
+pin_prose = "warn"
+dou = "fail"
+release = "fail"

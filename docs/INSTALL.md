@@ -12,15 +12,15 @@ inside WSL2; the native CLI does not start WSL2 automatically.
 
 ## Channel matrix
 
-| Channel                      | Platform             | What you get                                                        | Status                                   |
-| ---------------------------- | -------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
-| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending |
-| Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending |
-| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, vc-server, Terminal, Frame; no WSL       | Built from checkout; publication pending |
-| Bootstrap `install.sh`       | macOS, Linux, WSL2   | The version named in `vibecrafted.io/channel/main.json`             | Published; `4.1.0` channel on 2026-10-14 |
-| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                |
-| Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                |
-| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | Published; needs a checkout and a pack   |
+| Channel                      | Platform             | What you get                                                        | Status                                                 |
+| ---------------------------- | -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server              | Build path complete; publication pending               |
+| Portable tarball             | Linux, WSL2, macOS   | Command deck, runtime, control plane, skills — pinned to one commit | Build path complete; publication pending               |
+| Native Runtime Pack          | Windows win32-x64    | Command deck, pack Python, vc-server, Terminal, Frame; no WSL       | Built from checkout; publication pending               |
+| Bootstrap `install.sh`       | macOS, Linux, WSL2   | The version named in `vibecrafted.io/channel/main.json`             | Published; compare it to VERSION with `vc-dou --floor` |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack            | Published                                              |
+| Container                    | anywhere Docker runs | Isolated operator runtime                                           | Published                                              |
+| `install.ps1`                | Windows              | Native Runtime Pack entry (delegates to `install-runtime-pack.ps1`) | Published; needs a checkout and a pack                 |
 
 If you want one sentence: **on macOS and Linux use the bootstrap today; on
 Windows install the win32-x64 Runtime Pack with `install.ps1 -Pack`.**
@@ -144,8 +144,9 @@ curl -fsSL https://vibecrafted.io/install.sh | bash
 The bootstrap reads `https://vibecrafted.io/channel/main.json` and installs the
 release that manifest binds; it no longer falls back to a moving Git branch.
 The website publishes `install.sh` and that manifest separately from GitHub
-Releases. On 2026-10-14 the live `install.sh` was byte-identical to the one at
-tag `v4.1.0`, and the manifest named `4.1.0`. CI does not exercise that
+Releases, so the channel version is not copied into this repo. Compare the
+live channel, GitHub Releases, and `VERSION` with `vc-dou --floor` before
+treating any one of them as current. CI does not exercise that
 published copy: `.github/workflows/install-linux.yml` builds a Linux Runtime
 Pack and runs this tree's `install.sh` with `--archive-file` and
 `--runtime-pack-file`. Confirm what you received with `vibecrafted --version`.

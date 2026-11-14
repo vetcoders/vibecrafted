@@ -22,9 +22,10 @@ curl -fsSL https://vibecrafted.io/install.sh | bash
 ```
 
 The bootstrap installs the version named in that channel manifest, which the
-website publishes separately from GitHub Releases. On 2026-10-14 it named
-`4.1.0`, so the commands in this guide can differ from what you installed;
-`vibecrafted --version` and `vibecrafted help` show what you actually have.
+website publishes separately from GitHub Releases and from this repo's
+`VERSION`. `vc-dou --floor` fails when those three disagree, so read the
+manifest before you run the bootstrap. `vibecrafted --version` and
+`vibecrafted help` show what you actually have.
 
 **Windows (native)** — win32-x64 Runtime Pack via `install.ps1` (no WSL
 required). Artifact names look like

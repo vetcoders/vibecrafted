@@ -23,6 +23,7 @@ flowchart TD
 | ----------------------------- | ---------------------- | ------------------------------------ | --------------- |
 | `vibecrafted release <agent>` | `--prompt` or `--file` | release report, transcript, and meta | `0` on dispatch |
 | `vc-release <agent>`          | same                   | same                                 | `0` on dispatch |
+| `vc-release --floor`          | `--require-release`    | public-surface ship gate             | `1` on drift    |
 
 ### Escalation edges
 

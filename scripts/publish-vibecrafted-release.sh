@@ -12,11 +12,51 @@
 # exact: a release that grew an asset nobody named is a release nobody audited.
 set -euo pipefail
 
+die() {
+  printf 'publish-release: %s\n' "$*" >&2
+  exit 1
+}
+
+# Only surface ids. A free-form floor argument could retarget --repo or
+# --product and publish a different checkout. Repeat --acknowledge <id>.
+ACKNOWLEDGE=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --acknowledge)
+      shift
+      [[ $# -gt 0 ]] || die "--acknowledge expects a surface id"
+      [[ "$1" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || die "--acknowledge expects a surface id, not a floor flag"
+      ACKNOWLEDGE+=(--acknowledge "$1")
+      shift
+      ;;
+    *)
+      die "unknown argument: $1 (only --acknowledge <surface-id> is accepted)"
+      ;;
+  esac
+done
+
 REPO="${VIBECRAFTED_RELEASE_REPO:-vetcoders/vibecrafted}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 TAG="v$VERSION"
+
+# Public-surface floor, before any draft or upload. Read-only. A missing
+# GitHub Release for $TAG is a warning here because this script is what
+# creates it; channel, site, and registry disagreement still refuses the
+# publish. After the Release exists, `vc-release --floor --require-release`
+# is the "done" check. Re-run is the way past a known gap:
+#   bash scripts/publish-vibecrafted-release.sh --acknowledge <surface-id>
+FLOOR_CMD=(
+  release --repo "$ROOT" --product vibecrafted
+  --allow-missing-release "$TAG"
+)
+if [[ ${#ACKNOWLEDGE[@]} -gt 0 ]]; then
+  FLOOR_CMD+=("${ACKNOWLEDGE[@]}")
+fi
+uv run --project "$ROOT/vibecrafted-core" python -m vibecrafted_core.public_surface \
+  "${FLOOR_CMD[@]}" \
+  || die "public-surface floor failed; refusing to publish"
 RELEASE_OUTPUT="$DIST/release-output.json"
 RELEASE_SIGNATURE="$DIST/release-output.json.sig"
 PORTABLE_OUTPUT="$DIST/portable-output.json"
@@ -25,11 +65,6 @@ REPORT_DATE="$(date +%Y_%m%d)"
 REPORT_ROOT="${VIBECRAFTED_ARTIFACT_ROOT:-$HOME/.vibecrafted/artifacts}"
 REPORT_DIR="$REPORT_ROOT/vetcoders/vibecrafted/$REPORT_DATE/reports"
 REPORT="$REPORT_DIR/release-$TAG.md"
-
-die() {
-  printf 'publish-release: %s\n' "$*" >&2
-  exit 1
-}
 
 for command_name in git gh uv shasum openssl xcrun spctl hdiutil; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"

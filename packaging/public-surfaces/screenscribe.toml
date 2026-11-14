@@ -1,0 +1,21 @@
+# Screenscribe. A product whose registry and GitHub Release already agree,
+# so a green floor is possible. Site copy intentionally has no version.
+schema = 1
+product = "screenscribe"
+expect = "agree"
+
+[[surface]]
+id = "pypi"
+kind = "pypi"
+package = "screenscribe"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_release"
+kind = "github_release"
+repo = "vetcoders/screenscribe"
+install = true
+dou = "fail"
+release = "fail"

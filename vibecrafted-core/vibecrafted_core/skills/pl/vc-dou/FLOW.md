@@ -22,6 +22,7 @@ flowchart TD
 | ------------------------- | ----------------------- | --------------------------------------- | ------------------ |
 | `vibecrafted dou <agent>` | `--prompt` lub `--file` | raport audytu DoU z transkryptem i meta | `0` przy dispatchu |
 | `vc-dou <agent>`          | to samo                 | to samo                                 | `0` przy dispatchu |
+| `vc-dou --floor`          | `--product`, `--json`   | raport powierzchni publicznej           | `1` przy rozjeździe |
 
 ### Krawędzie eskalacji
 

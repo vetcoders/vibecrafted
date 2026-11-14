@@ -84,6 +84,14 @@ scaffold → init → workflow → followup → marbles → dou → decorate →
 
 Release uruchamia się po tym, jak `vc-dou` zweryfikuje powierzchnię produktu, `vc-decorate` zapewni spójność wizualną, a `vc-hydrate` opakuje dystrybucję/SEO/onboarding. Release urealnia artefakty po hydrate: tagi, changelogi, publikację rejestru/binarek, topologię deploya, proxy/TLS, domenę/DNS/weryfikację, indeksowalność, bramki bezpieczeństwa, post-release smoke.
 
+## Podłoga powierzchni publicznej
+
+`vc-release --floor` jest bramką wydania. Sam tag bez obiektu GitHub Release nie kończy etapu; `--require-release` zostaje czerwone, dopóki Release nie istnieje.
+
+Publikuj, gdy podłoga kończy się kodem 0. `install_cta: no` znaczy: nie mów obcemu, żeby instalował. Samo to nie blokuje Release, które ten etap dopiero tworzy. Gdy jedyną luką jest GitHub Release, które wydawca zaraz utworzy, podłoga ostrzega i kończy się kodem 0, a `install_cta` zostaje `no`, dopóki ten Release nie istnieje. `--acknowledge <surface-id>` zapisuje świadomie przyjętą lukę i zostaje w raporcie. `scripts/publish-vibecrafted-release.sh --acknowledge <surface-id>` oraz `make publish-release ACKNOWLEDGE="<surface-id>"` przekazują tylko identyfikator powierzchni i odrzucają każdą inną flagę podłogi.
+
+Kontrakt: [`../../vc-dou/references/public-surface-floor.md`](../../vc-dou/references/public-surface-floor.md).
+
 ## Główna zasada
 
 **Jeśli poniższy kanon release'u nie jest spełniony, release jest no-opem.** Nie myl „umiem to zdeployować" z „jest bezpieczne, widoczne i gotowe, by wyjść do obcych".

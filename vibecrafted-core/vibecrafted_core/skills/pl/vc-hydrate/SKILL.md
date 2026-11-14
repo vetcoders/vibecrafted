@@ -84,6 +84,10 @@ zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted
 scaffold → init → workflow → followup → marbles → dou → decorate → [HYDRATE] → release
 ```
 
+## Podłoga powierzchni publicznej
+
+`vc-hydrate --floor` sprawdza checkout: zgodność wersji, sekcję instalacji w README i pisownię marki (`Vetcoders`, bez wielkiego C w środku). Nie odpytuje rejestrów. Kontrakt: [`../../vc-dou/references/public-surface-floor.md`](../../vc-dou/references/public-surface-floor.md).
+
 ## Kiedy używać
 
 - Po tym, jak audyt `vc-dou` zidentyfikuje luki w pakowaniu
