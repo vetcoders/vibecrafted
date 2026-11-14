@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +24,8 @@ struct Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         for (key, previous) in self.saved.drain(..).rev() {
+            // This integration-test binary has one test and owns these variables.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 if let Some(value) = previous {
                     std::env::set_var(key, value);
@@ -75,6 +78,8 @@ async fn post(payload: &Value, peer: Option<&str>, origin: Option<&str>) -> (Sta
 #[tokio::test]
 async fn claim_post_is_a_python_owned_unverified_receipt() {
     // A single test owns process environment in this integration-test binary.
+    // create_dir below fails if the unique test path already exists, including a symlink.
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     let root = std::env::temp_dir().join(format!(
         "vc-claim-http-{}-{}",
         std::process::id(),
@@ -83,7 +88,7 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&root).unwrap();
+    fs::create_dir(&root).unwrap();
     let mut fixture = Fixture {
         root: root.clone(),
         saved: Vec::new(),
@@ -140,6 +145,7 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
         ("VIBECRAFTED_RUNTIME_ROOT", generation.as_os_str()),
     ] {
         fixture.saved.push((key, std::env::var_os(key)));
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- single test owns the process environment
         unsafe {
             std::env::set_var(key, value);
         }
@@ -149,6 +155,7 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
     fixture
         .saved
         .push(("PYTHONPATH", std::env::var_os("PYTHONPATH")));
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- single test owns the process environment
     unsafe {
         std::env::set_var("PYTHONPATH", root.join("untrusted"));
     }
@@ -173,6 +180,7 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
         post(&oversized, Some("127.0.0.1:4000"), None).await.0,
         StatusCode::PAYLOAD_TOO_LARGE
     );
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- single test owns the process environment
     unsafe {
         std::env::set_var("VIBECRAFTED_PYTHON", root.join("missing-python"));
     }
@@ -180,6 +188,7 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
         post(&payload, Some("127.0.0.1:4000"), None).await.0,
         StatusCode::SERVICE_UNAVAILABLE
     );
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- single test owns the process environment
     unsafe {
         std::env::set_var("VIBECRAFTED_PYTHON", &python);
     }
@@ -218,11 +227,10 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
 
     let mut checkpoint = payload.clone();
     checkpoint["cut_id"] = json!("cut-embargo");
-    assert_eq!(
-        post(&checkpoint, Some("[::1]:4000"), None).await.0,
-        StatusCode::BAD_REQUEST,
-        "an embargo cut must enumerate its skipped controls"
-    );
+    let before_refusal = fs::read_to_string(&receipts).unwrap();
+    let (checkpoint_status, checkpoint_refusal) = post(&checkpoint, Some("[::1]:4000"), None).await;
+    assert_eq!(checkpoint_status, StatusCode::BAD_REQUEST);
+    assert_eq!(fs::read_to_string(&receipts).unwrap(), before_refusal);
     checkpoint["checkpoint"] =
         json!({"owned_scope":["src/editor.rs"], "skipped_controls":["cargo test", "semgrep"]});
     let (status, body) = post(&checkpoint, Some("[::1]:4000"), None).await;
@@ -249,11 +257,105 @@ async fn claim_post_is_a_python_owned_unverified_receipt() {
 
     let mut foreign = payload.clone();
     foreign["run_id"] = json!("disp-unknown");
-    assert_eq!(
-        post(&foreign, Some("127.0.0.1:4000"), None).await.0,
-        StatusCode::BAD_REQUEST
-    );
+    let (foreign_status, foreign_refusal) = post(&foreign, Some("127.0.0.1:4000"), None).await;
+    assert_eq!(foreign_status, StatusCode::BAD_REQUEST);
     assert!(!home.join("control_plane/dispatches/disp-unknown").exists());
+    assert_eq!(
+        [
+            checkpoint_refusal["error"].as_str(),
+            foreign_refusal["error"].as_str()
+        ],
+        [
+            Some("structural cut requires an unverified embargo checkpoint"),
+            Some("dispatch receipt ledger not found"),
+        ],
+        "distinct Python process refusals must survive HTTP transport"
+    );
+    // Exercise the fixed process boundary with malformed or misleading output.
+    // None of it may become a trusted rejection or a successful claim.
+    let fake_python = root.join("fake-python");
+    unsafe { std::env::set_var("VIBECRAFTED_PYTHON", &fake_python) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- single test owns the process environment
+    let receipt_before_fakes = fs::read_to_string(&receipts).unwrap();
+    for (output, exit_code, expected_status, expected_error) in [
+        (
+            "",
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            "not-json",
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"claim_received","error":"forged"}"#,
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"rejected","error":" "}"#,
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"rejected","error":"forged","extra":"secret"}"#,
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"rejected","error":"forged","error":"duplicate"}"#,
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"rejected","error":"bad\nline"}"#,
+            2,
+            StatusCode::BAD_REQUEST,
+            "canonical writer rejected the claim",
+        ),
+        (
+            r#"{"status":"rejected","error":"wrong exit"}"#,
+            1,
+            StatusCode::BAD_GATEWAY,
+            "canonical writer did not acknowledge an unverified claim",
+        ),
+    ] {
+        fs::write(
+            &fake_python,
+            format!("#!/bin/sh\nprintf '%s' '{output}'\nexit {exit_code}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_python, fs::Permissions::from_mode(0o700)).unwrap();
+        let (status, body) = post(&payload, Some("127.0.0.1:4000"), None).await;
+        assert_eq!(status, expected_status, "output {output}");
+        assert_eq!(body["error"], expected_error, "output {output}");
+    }
+    let too_long = format!(
+        "{{\"status\":\"rejected\",\"error\":\"{}\"}}",
+        "x".repeat(4096)
+    );
+    fs::write(
+        &fake_python,
+        format!("#!/bin/sh\nprintf '%s' '{too_long}'\nexit 2\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_python, fs::Permissions::from_mode(0o700)).unwrap();
+    let (status, body) = post(&payload, Some("127.0.0.1:4000"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "canonical writer rejected the claim");
+    fs::write(&fake_python, "#!/bin/sh\nhead -c 65537 /dev/zero\nexit 2\n").unwrap();
+    fs::set_permissions(&fake_python, fs::Permissions::from_mode(0o700)).unwrap();
+    let (status, body) = post(&payload, Some("127.0.0.1:4000"), None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "canonical writer transport failed");
+    assert_eq!(fs::read_to_string(&receipts).unwrap(), receipt_before_fakes);
+    assert_eq!(fs::read_to_string(&tracker).unwrap(), tracker_before);
     let handler = include_str!("../src/dispatch.rs");
     assert!(
         !handler.contains("fs::write"),

@@ -281,7 +281,7 @@ _verify_rescue_manifest() {
 
 _extract_signed_archive_into() {
   local dest="$1"
-  tar -xpzf "$pack" -C "$dest" \
+  runtime_pack_tar -xpzf "$pack" -C "$dest" \
     || die "Runtime Pack archive extraction failed"
   find "$dest" -type f -name .DS_Store -delete
 }
@@ -599,13 +599,6 @@ if [[ "$operation" == "install" && "$verify_only" != "1" ]]; then
   vibecrafted_xcode_report_channel >&2
 fi
 
-if [[ -z "$expected_platform" ]]; then
-  case "$(uname -s)" in
-    Darwin) expected_platform="darwin-$(uname -m | sed 's/^aarch64$/arm64/; s/^x86_64$/x64/')" ;;
-    Linux) expected_platform="linux-$(uname -m | sed 's/^aarch64$/arm64/; s/^x86_64$/x64/')" ;;
-    *) die "unsupported Runtime Pack platform: $(uname -s)" ;;
-  esac
-fi
 if [[ -z "$expected_architecture" ]]; then
   case "$(uname -m)" in
     x86_64|amd64)
@@ -617,6 +610,30 @@ if [[ -z "$expected_architecture" ]]; then
     *) die "unsupported Runtime Pack architecture: $(uname -m)" ;;
   esac
 fi
+case "$(uname -m)" in
+  x86_64|amd64) host_architecture=x64 ;;
+  arm64|aarch64) host_architecture=arm64 ;;
+  *) die "unsupported Runtime Pack architecture: $(uname -m)" ;;
+esac
+case "$(uname -s)" in
+  Darwin) host_platform="darwin-$host_architecture" ;;
+  Linux) host_platform="linux-$host_architecture" ;;
+  *) die "unsupported Runtime Pack platform: $(uname -s)" ;;
+esac
+[[ -z "$expected_platform" ]] && expected_platform="$host_platform"
+# Explicit expectations constrain the pack but cannot authorize foreign code.
+[[ "$expected_platform" == "$host_platform" && "$expected_architecture" == "$host_architecture" ]] \
+  || die "Runtime Pack target $expected_platform/$expected_architecture is incompatible with host $host_platform/$host_architecture"
+
+# GNU tar emits one warning per unknown macOS PAX key; retain all other
+# diagnostics and exit statuses. BSD tar does not accept this warning option.
+runtime_pack_tar() {
+  if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    tar --warning=no-unknown-keyword "$@"
+  else
+    COPYFILE_DISABLE=1 tar "$@"
+  fi
+}
 if [[ "$operation" == "uninstall" && "$verify_only" == "1" ]]; then
   die "--verify-only cannot be combined with --uninstall"
 fi
@@ -786,7 +803,7 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     || die "Runtime Pack checksum is not a sha256"
   [[ "$archive_sha256" == "$checksum_hex" ]] \
     || die "Runtime Pack checksum digest mismatch"
-  tar -tzf "$pack" >/dev/null \
+  runtime_pack_tar -tzf "$pack" >/dev/null \
     || die "Runtime Pack archive cannot be listed"
   archive_root=""
   while IFS= read -r member; do
@@ -802,14 +819,14 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     elif [[ "$member_root" != "$archive_root" ]]; then
       die "Runtime Pack archive must contain one root directory"
     fi
-  done < <(tar -tzf "$pack")
+  done < <(runtime_pack_tar -tzf "$pack")
   [[ -n "$archive_root" ]] || die "Runtime Pack archive is empty"
   while IFS= read -r mode _rest; do
     case "${mode:0:1}" in
       -|d) ;;
       *) die "links/devices are forbidden in Runtime Pack archives" ;;
     esac
-  done < <(tar -tvzf "$pack")
+  done < <(runtime_pack_tar -tvzf "$pack")
   # Rescue plan/apply/resume pin payload_root in the owner digest. Ephemeral
   # mktemp paths cannot carry that identity across two wrapper invocations.
   # Non-rescue installs keep the hidden one-shot extract and still delete it.
@@ -844,9 +861,27 @@ payload_version="$(tr -d '[:space:]' < "$payload_version_file")"
 if [[ -z "$expected_version" ]]; then
   expected_version="$payload_version"
 fi
+# Inspect the authenticated carrier's canonical top-level identity before
+# executing its interpreter. The full provenance/inventory verifier still runs
+# below; this is only a fail-closed host compatibility gate.
+identity="$(awk '
+  /^  "(platform|architecture)": "[a-z0-9-]+",?$/ {
+    line=$0; sub(/^  "/, "", line); sub(/",?$/, "", line)
+    split(line, parts, "\": \""); print parts[1] "=" parts[2]
+  }
+' "$payload_root/runtime-pack-provenance.json")" \
+  || die "Runtime Pack provenance identity is unreadable"
+[[ "$identity" == $'architecture='"$host_architecture"$'\nplatform='"$host_platform" ]] \
+  || die "Runtime Pack provenance is incompatible with host $host_platform/$host_architecture"
 pack_python="$payload_root/bin/python3"
 pack_installer="$payload_root/scripts/vetcoders_install.py"
 [[ -x "$pack_python" ]] || die "Runtime Pack Python missing: $pack_python"
+command -v file >/dev/null 2>&1 || die "file is required to inspect Runtime Pack Python"
+python_type="$(file -Lb "$pack_python")" || die "cannot inspect Runtime Pack Python"
+case "$host_platform:$python_type" in
+  darwin-arm64:*Mach-O*arm64*|darwin-x64:*Mach-O*x86_64*|linux-arm64:*ELF*ARM\ aarch64*|linux-x64:*ELF*x86-64*|*:*script*) ;;
+  *) die "Runtime Pack Python is incompatible with host $host_platform: $python_type" ;;
+esac
 [[ -f "$pack_installer" ]] || die "Runtime Pack installer missing: $pack_installer"
 contract_arguments=(
   -m vibecrafted_core.runtime_pack_contract verify

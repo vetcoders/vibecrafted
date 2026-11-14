@@ -520,7 +520,9 @@ def test_stopped_owned_worker_recovers_original_baseline_after_projection_drift(
         )
 
         stopped = workflow.stop_run(
-            provider_run_id, reason="test authenticated stop", grace_seconds=1
+            provider_run_id,
+            reason="test authenticated stop",
+            grace_seconds=1,
         )
         assert stopped["accepted"] is True
         assert stopped["signal_sent"] is True

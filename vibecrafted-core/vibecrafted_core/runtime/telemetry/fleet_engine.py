@@ -50,10 +50,17 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    from vibecrafted_core import portable_lock as fcntl
 
 # Tests load this file by path. The deck wrappers put this directory on
 # sys.path first; do the same so `usage_archive` resolves either way.
@@ -61,6 +68,7 @@ _ENGINE_DIR = Path(__file__).resolve().parent
 if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
 usage_archive = importlib.import_module("usage_archive")
+native_quota = importlib.import_module("native_quota")
 
 TAIL_BYTES = 400 * 1024
 # Codex usage is cumulative and usually sits near EOF. A fixed 400 KB window
@@ -165,14 +173,43 @@ def quota_dir(agent: str, override: str | None = None) -> Path:
     return root / "telemetry" / agent
 
 
+class TelemetryBusy(RuntimeError):
+    """Another collector currently owns this provider's projection."""
+
+
+@contextmanager
+def publication_lease(quota_root: Path):
+    """One nonblocking owner across processes for cache plus quota publication."""
+    quota_root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        quota_root / ".publish.lock",
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    with os.fdopen(fd, "a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise TelemetryBusy(
+                "another collector owns this telemetry projection"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def atomic_write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
-    os.replace(temporary, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _load_json(path: Path) -> dict:
@@ -200,6 +237,11 @@ def _omp_profile(value: str | None) -> str | None:
 
 def default_store(agent: str) -> Path:
     home = _home()
+    native_override = os.environ.get(
+        {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}.get(agent, "")
+    )
+    if native_override:
+        return Path(native_override).expanduser()
     if agent == "omp":
         # Native sessions live under the agent data directory, not always
         # <config>/agent: named profiles ignore the default agent override.
@@ -925,6 +967,8 @@ def scan_file(
             "record": record,
             "days": days,
         }
+        if isinstance(cached, dict) and isinstance(cached.get("native_quota"), dict):
+            entry["native_quota"] = cached["native_quota"]
         return record, entry, True
 
     if agent == "grok":
@@ -1146,7 +1190,10 @@ def build_snapshot(
             "fleet_processed_total": fleet_processed,
             "session_count": session_count,
         }
-    quota = {"status": status}
+    quota = {
+        "status": "unavailable",
+        "reason": "Local token counters do not measure subscription quota",
+    }
     if reason:
         quota["reason"] = reason
     if fleet_native is not None and status == "ok":
@@ -1343,6 +1390,7 @@ def snapshot_for(
             session_count=session_count,
             fleet_native=fleet_native if isinstance(fleet_native, dict) else None,
         )
+        snapshot = _attach_native_quota(agent, snapshot, cache)
         return snapshot, records, cache
 
     status = "ok" if last else "empty"
@@ -1360,7 +1408,61 @@ def snapshot_for(
         cache.get("aggregate") if isinstance(cache.get("aggregate"), dict) else None
     )
     snapshot = _apply_aggregate(snapshot, aggregate, last_mtime)
+    snapshot = _attach_native_quota(agent, snapshot, cache)
     return snapshot, records, cache
+
+
+def _attach_native_quota(agent: str, snapshot: dict, cache: dict) -> dict:
+    if agent == "codex":
+        observation = native_quota.collect_codex(
+            _discovered_paths(cache), _file_cache(cache)
+        )
+        snapshot["quota"].pop("reason", None)
+        snapshot["quota"].update(observation)
+    return snapshot
+
+
+def refresh_native_quota(agent: str, store: Path, quota_root: Path) -> bool:
+    """Nonblocking quota publication; busy is distinct from unavailable."""
+    if agent != "codex":
+        return False
+    with publication_lease(quota_root):
+        return _refresh_native_quota_locked(agent, store, quota_root)
+
+
+def _refresh_native_quota_locked(agent: str, store: Path, quota_root: Path) -> bool:
+    """Refresh quota only through the existing cache/projection owner.
+
+    This bounded local path never backfills token histories or the archive.
+    The server's explicit quota refresh can use it without launching providers.
+    """
+    if agent != "codex":
+        return False
+    cache = _load_json(_cache_path(agent, quota_root))
+    observation = native_quota.collect_codex(
+        discover_files(agent, store), _file_cache(cache)
+    )
+    snapshot = _load_json(_quota_path(quota_root))
+    if snapshot.get("agent") != agent:
+        snapshot = {
+            "agent": agent,
+            "status": "ok",
+            "reason": None,
+            "metrics": None,
+            "last_session": None,
+            "cache_semantics": cache_semantics(agent),
+        }
+    previous = snapshot.get("quota")
+    snapshot["quota"] = {
+        key: previous[key]
+        for key in ("fleet_native", "fleet_stale")
+        if isinstance(previous, dict) and key in previous
+    }
+    snapshot["quota"].update(observation)
+    snapshot["generated_at"] = _now_iso()
+    _write_cache(agent, quota_root, cache)
+    atomic_write_json(_quota_path(quota_root), snapshot)
+    return bool(observation["windows"])
 
 
 def _cache_path(agent: str, quota_root: Path) -> Path:
@@ -1609,6 +1711,19 @@ def render_archive_summary(snapshot: dict) -> str:
 def run(
     agent: str, mode: str, store: Path, quota_root: Path, interval: int = 30
 ) -> int:
+    if agent not in FLEET_AGENTS or mode == "daemon":
+        return _run_locked(agent, mode, store, quota_root, interval)
+    try:
+        with publication_lease(quota_root):
+            return _run_locked(agent, mode, store, quota_root, interval)
+    except TelemetryBusy as exc:
+        print(json.dumps({"agent": agent, "status": "busy", "reason": str(exc)}))
+        return 75
+
+
+def _run_locked(
+    agent: str, mode: str, store: Path, quota_root: Path, interval: int = 30
+) -> int:
     if agent not in FLEET_AGENTS:
         print(f"unknown fleet agent: {agent}", file=sys.stderr)
         return 2
@@ -1618,6 +1733,8 @@ def run(
             file=sys.stderr,
         )
         return 2
+    if mode == "daemon":
+        return _daemon(agent, store, quota_root, interval)
     cache = _load_json(_cache_path(agent, quota_root))
     if mode == "archive" and agent == "cursor":
         snapshot = build_snapshot(
@@ -1653,9 +1770,6 @@ def run(
         print(render_sessions(agent, records, snapshot))
         return 0
 
-    if mode == "daemon":
-        return _daemon(agent, store, quota_root, interval)
-
     snapshot, records, cache = snapshot_for(agent, store, mode="once", cache=cache)
     snapshot = annotate_archive(agent, snapshot, records, cache, quota_root, mode=mode)
     _write_cache(agent, quota_root, cache)
@@ -1681,17 +1795,23 @@ def _daemon(agent: str, store: Path, quota_root: Path, interval: int) -> int:
         flush=True,
     )
     while not stop:
-        cache = _load_json(_cache_path(agent, quota_root))
-        snapshot, records, cache = snapshot_for(agent, store, mode="once", cache=cache)
-        snapshot = annotate_archive(
-            agent, snapshot, records, cache, quota_root, mode="daemon"
-        )
-        _write_cache(agent, quota_root, cache)
-        atomic_write_json(_quota_path(quota_root), snapshot)
-        print(
-            f"[{agent}-monitor] {snapshot['generated_at']} {render_statusline(snapshot)}",
-            flush=True,
-        )
+        try:
+            with publication_lease(quota_root):
+                cache = _load_json(_cache_path(agent, quota_root))
+                snapshot, records, cache = snapshot_for(
+                    agent, store, mode="once", cache=cache
+                )
+                snapshot = annotate_archive(
+                    agent, snapshot, records, cache, quota_root, mode="daemon"
+                )
+                _write_cache(agent, quota_root, cache)
+                atomic_write_json(_quota_path(quota_root), snapshot)
+                print(
+                    f"[{agent}-monitor] {snapshot['generated_at']} {render_statusline(snapshot)}",
+                    flush=True,
+                )
+        except TelemetryBusy as exc:
+            print(f"[{agent}-monitor] busy: {exc}", flush=True)
         for _ in range(max(interval, 1) * 4):
             if stop:
                 break
@@ -1740,6 +1860,7 @@ __all__ = [
     "omp_processed",
     "parse_codex_tail",
     "parse_grok_document",
+    "refresh_native_quota",
     "render_statusline",
     "run",
     "scan_file",

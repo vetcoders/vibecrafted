@@ -2635,6 +2635,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
         concurrent
     )
     policy.write_text(user, encoding="utf-8")
+    saved_overrides = None
     for _ in range(2):
         _install(
             payload,
@@ -2646,6 +2647,15 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
         )
         assert _EXPLICIT_CUSTOM_SHELL in policy.read_text(encoding="utf-8")
         assert "padding = { x = 0, y = 0 }" in policy.read_text(encoding="utf-8")
+        receipt = json.loads(
+            installer._runtime_receipt_path(roots["runtime_home"]).read_text()
+        )
+        overrides = receipt["terminal_policy_user_overrides"][str(policy)]
+        if saved_overrides is None:
+            assert overrides
+            saved_overrides = overrides
+        else:
+            assert overrides == saved_overrides
         _resolve(roots, capsys, status="ready")
 
 
@@ -3576,3 +3586,168 @@ def test_missing_previous_generation_bound_choices(tmp_path, roots, choice, bad_
         assert outcome["error"] is None, outcome
         assert outcome["body"] == (current if choice == "keep-current" else incoming)
     assert destination.read_text() == current
+
+
+@pytest.mark.parametrize("choice", ["keep-current", "use-incoming"])
+def test_kdl_preference_stale_current_refused_before_auto_merge(
+    installed, tmp_path, capsys, choice
+):
+    paths, _, result = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    original = config.read_bytes()
+    bound = hashlib.sha256(original).hexdigest()
+    config.write_bytes(original + b"\n// concurrent user edit\n")
+    changed = config.read_bytes()
+    incoming = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    incoming_sha = installer._sha256_path(incoming)
+    payload = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    conflict = _install_conflict(
+        payload,
+        capsys,
+        resolve_preference=choice,
+        preference_current_sha256=bound,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(config),
+    )
+    assert "preference changed during retry" in str(conflict)
+    assert config.read_bytes() == changed
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+
+
+@pytest.mark.parametrize("choice", ["keep-current", "use-incoming"])
+def test_kdl_preference_incoming_binding_refused_before_auto_merge(
+    installed, tmp_path, capsys, choice
+):
+    paths, _, _ = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    before = config.read_bytes()
+    payload = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    conflict = _install_conflict(
+        payload,
+        capsys,
+        resolve_preference=choice,
+        preference_current_sha256=hashlib.sha256(before).hexdigest(),
+        preference_incoming_sha256="0" * 64,
+        preference_path=str(config),
+    )
+    assert "incoming defaults changed during retry" in str(conflict)
+    assert config.read_bytes() == before
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+
+
+@pytest.mark.parametrize("choice", ["keep-current", "use-incoming"])
+def test_kdl_preference_receipted_retry_requires_exact_postimage(
+    installed, tmp_path, capsys, choice
+):
+    paths, _, result = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    _user_edit(config, b"themes {", b"themes {\n    copy_on_select true")
+    original = config.read_bytes()
+    source = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        frame_config=source.read_text().replace("mouse_mode true", "mouse_mode false"),
+    )
+    conflict = _install_conflict(payload, capsys)
+    hit = next(
+        item for item in conflict.envelope["files"] if item["path"] == str(config)
+    )
+    args = {
+        "resolve_preference": choice,
+        "preference_path": str(config),
+        "preference_current_sha256": hit["current_sha256"],
+        "preference_incoming_sha256": hit["incoming_sha256"],
+    }
+    _install(payload, capsys, **args)
+    postimage = config.read_bytes()
+    if choice == "keep-current":
+        assert postimage == original
+    else:
+        assert postimage != original
+    receipt = json.loads(
+        installer._runtime_receipt_path(paths["runtime_home"]).read_text()
+    )
+    proof = receipt["config_defaults"][str(config)]["resolution"]
+    assert proof == {
+        "choice": choice,
+        "current_sha256": hit["current_sha256"],
+        "incoming_sha256": hit["incoming_sha256"],
+        "postimage_sha256": hashlib.sha256(postimage).hexdigest(),
+    }
+    _install(payload, capsys, **args)
+    assert config.read_bytes() == postimage
+    config.write_bytes(postimage + b"\n// later user change\n")
+    changed = config.read_bytes()
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    refused = _install_conflict(payload, capsys, **args)
+    assert "preference changed during retry" in str(refused)
+    assert config.read_bytes() == changed
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+
+
+@pytest.mark.parametrize("choice", ["keep-current", "use-incoming"])
+@pytest.mark.parametrize("baseline_state", ["missing", "changed"])
+@pytest.mark.parametrize("binding", ["valid", "current", "incoming", "missing-file"])
+def test_kdl_preference_binding_with_missing_or_changed_baseline(
+    tmp_path, roots, monkeypatch, choice, baseline_state, binding
+):
+    destination = roots["product_config"] / "vc-frame/config.kdl"
+    destination.parent.mkdir(parents=True)
+    current = 'theme "user"\n'
+    incoming = 'theme "new"\n'
+    if binding != "missing-file":
+        destination.write_text(current)
+    relative = Path("config.kdl")
+    old_root = roots["runtime_home"] / "releases/old"
+    generation = roots["runtime_home"] / "releases/new"
+    (generation / relative).parent.mkdir(parents=True)
+    (generation / relative).write_text(incoming)
+    if baseline_state == "changed":
+        (old_root / relative).parent.mkdir(parents=True)
+        (old_root / relative).write_text('theme "tampered"\n')
+        monkeypatch.setattr(
+            installer,
+            "_load_runtime_generation_manifest",
+            lambda _root: ({"hashes": {"config.kdl": "f" * 64}}, None),
+        )
+    outcome = installer._reconcile_runtime_preference(
+        destination,
+        relative,
+        generation,
+        runtime_home=roots["runtime_home"],
+        previous={
+            "config_defaults": {
+                str(destination): {
+                    "generation": str(old_root),
+                    "sha256": "f" * 64,
+                }
+            }
+        },
+        choice=choice,
+        expected_current_sha256="0" * 64
+        if binding == "current"
+        else hashlib.sha256(current.encode()).hexdigest(),
+        expected_incoming_sha256="0" * 64
+        if binding == "incoming"
+        else hashlib.sha256(incoming.encode()).hexdigest(),
+    )
+    if binding == "valid":
+        assert outcome["error"] is None, outcome
+        assert outcome["body"] == (current if choice == "keep-current" else incoming)
+    else:
+        assert "changed during retry" in outcome["error"], outcome
+        assert outcome["body"] is None
+    assert (
+        destination.read_text() == current
+        if destination.exists()
+        else binding == "missing-file"
+    )

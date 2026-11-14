@@ -1568,7 +1568,47 @@ struct ProductUpdatePolicyTests {
     try require(!progress.title.lowercased().contains("runtime pack owner"), progress.title)
   }
 
+  static func testDMGAttachCapabilityAndRefusal() throws {
+    let dmg = URL(fileURLWithPath: "/fixture/signed.dmg")
+    let mount = URL(fileURLWithPath: "/fixture/private mount")
+    for modern in [false, true] {
+      for status: Int32 in [0, 41] {
+        var calls: [(String, [String])] = []
+        let result = runProductUpdateDMGAttach(dmg: dmg, mount: mount) { path, args, _ in
+          calls.append((path, args))
+          if args == ["image", "attach", "--help"] {
+            return .success(ProductUpdateBoundProcessResult(
+              stdout: Data("--readOnly --nobrowse --mountPoint".utf8), stderr: Data(),
+              status: modern ? 0 : 1, timedOut: false))
+          }
+          return .success(ProductUpdateBoundProcessResult(
+            stdout: Data(), stderr: Data("fixture mount refused".utf8),
+            status: status, timedOut: false))
+        }
+        try require(calls.count == 2, "a mount refusal must never trigger fallback/retry")
+        try require(calls[1].0 == (modern ? "/usr/sbin/diskutil" : "/usr/bin/hdiutil"),
+          "wrong attach capability selected")
+        try require(calls[1].1.contains(modern ? "--readOnly" : "-readonly"), "writable attach")
+        try require(calls[1].1.contains(modern ? "--nobrowse" : "-nobrowse"), "browsable attach")
+        try require(calls[1].1.suffix(2) == [mount.path, dmg.path], "mount/image changed")
+        guard case .success(let value) = result else { throw Failure(message: "lost mount result") }
+        try require(value.status == status, "mount refusal status changed")
+      }
+    }
+    for error in [ProductUpdateProcessError.startFailed, .timedOut] {
+      var calls = 0
+      let result = runProductUpdateDMGAttach(dmg: dmg, mount: mount) { _, _, _ in
+        calls += 1
+        return .failure(error)
+      }
+      try require(calls == 1, "uncertain probe must not start a mount")
+      guard case .failure(let actual) = result else { throw Failure(message: "lost probe failure") }
+      try require(actual == error, "probe failure changed")
+    }
+  }
+
   static func main() throws {
+    try testDMGAttachCapabilityAndRefusal()
     try testStagedRelativePathRejectsBuildAuthority()
     try testMissingFeedIsUnavailable()
     try testHTTPFeedIsRejected()

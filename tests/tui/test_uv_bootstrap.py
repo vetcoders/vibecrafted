@@ -488,12 +488,12 @@ def test_install_sh_reports_version_from_staged_tree(tmp_path: Path) -> None:
     )
 
     banner = result.stdout + result.stderr
-    assert "vibecrafted 9.9.9-test" in banner, (
+    assert "  ✓ Installed Vibecrafted 9.9.9-test" in banner.splitlines(), (
         "install.sh banner should reflect the staged VERSION file content; "
         f"got:\n{banner}"
     )
     # Must not fall back to the archive basename.
-    assert "vibecrafted vibecrafted-main" not in banner
+    assert "  ✓ Installed Vibecrafted vibecrafted-main" not in banner.splitlines()
 
 
 def test_install_sh_rejects_distribution_without_required_version(

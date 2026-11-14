@@ -531,14 +531,59 @@ def _comparison_summary(comparison: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _worktree_summary(payload: dict[str, Any]) -> str:
+    """Render the shared read-only inventory without implying an apply action."""
+    lines = [f"Target: {payload['target_ref']} ({payload['target_sha']})", ""]
+    for item in payload["worktrees"]:
+        lines.append(
+            f"{item['triage']}: {item['path']} [{item['branch'] or 'detached'}] "
+            f"{item['head'] or 'unknown'}; integration={item['integration']}; "
+            f"ahead/behind={item['divergence'] or 'unknown'}"
+        )
+        lines.append(f"  payload: {item['payload']}; holders: {item['holders']}")
+        for owner in item["owners"]:
+            lines.append(
+                f"  {owner['kind']}: run={owner.get('run_id') or 'unknown'} "
+                f"agent={owner.get('agent') or 'unknown'} state={owner.get('state') or 'unknown'} "
+                f"baseline={owner.get('baseline') or 'unknown'} report={owner.get('report') or 'unknown'}"
+            )
+        if item["reasons"]:
+            lines.append("  reason: " + "; ".join(item["reasons"]))
+        if item["durable_paths"]:
+            lines.append("  durable paths: " + ", ".join(item["durable_paths"]))
+    lines.extend(
+        (
+            "",
+            "Read-only inspection. Cleanup, pruning and merge preparation are not available.",
+        )
+    )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Expose the original rich repo renderer as a checkout-free executable."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["worktrees"]:
+        arguments = ["--worktrees", *arguments[1:]]
     parser = argparse.ArgumentParser(
         prog="vc-git",
         description="Show full Git context, including every worktree.",
+        epilog=(
+            "Read-only worktree reception: vc-git worktrees list|triage [PROJECT] "
+            "[--target BRANCH] [--json]. The spelling --worktrees list|triage is also accepted. "
+            "Cleanup, pruning and merge preparation are deferred and unavailable."
+        ),
     )
     parser.add_argument("project", nargs="?", default=".", help="repository path")
     parser.add_argument("--json", action="store_true", help="emit structured JSON")
+    parser.add_argument(
+        "--worktrees",
+        choices=("list", "triage"),
+        help="read-only worktree inventory and reception triage",
+    )
+    parser.add_argument(
+        "--target", help="local branch to inspect worktree integration against"
+    )
     parser.add_argument(
         "--compare",
         metavar="DISPATCH_RUN_ID",
@@ -550,10 +595,24 @@ def main(argv: list[str] | None = None) -> int:
         metavar=("LEFT", "RIGHT"),
         help="two settled, verified dispatch cuts",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if bool(args.compare) != bool(args.cuts):
         parser.error("--compare and --cuts must be supplied together")
+    if args.worktrees and args.compare:
+        parser.error("--worktrees cannot be combined with --compare")
+    if args.target and not args.worktrees:
+        parser.error("--target requires --worktrees")
     try:
+        if args.worktrees:
+            from .git_worktrees import worktree_inventory
+
+            inventory = worktree_inventory(args.project, target=args.target)
+            print(
+                json.dumps(inventory, indent=2, sort_keys=True)
+                if args.json
+                else _worktree_summary(inventory)
+            )
+            return 0
         if args.compare:
             comparison = compare_parallel_work(args.project, args.compare, args.cuts)
             print(

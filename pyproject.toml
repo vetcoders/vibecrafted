@@ -10,11 +10,16 @@ members = [
 dev = [
     "mypy>=1.13,<2",
     "pytest>=8,<10",
-    "ruff>=0.8,<1",
+    "ruff==0.17.2",
     "textual>=8.2.3",
 ]
 
 [tool.ruff]
+# One ruff for every host and entry point. Any other version refuses to run
+# here instead of judging the tree by its own rules. The hooks read this pin
+# through scripts/lib/ruff-spec.sh; docs/runtime/CONTRACT.md names it and
+# tests/tui/test_living_tree_hooks.py keeps all three equal.
+required-version = "==0.17.2"
 # ruff 0.16+ includes Markdown and formats fenced Python. Pre-push is a
 # Python gate (`scripts/hooks/pre-push` lists `*.py`). Keep docs out so
 # `ruff format --check .` (husky full / a manual whole-tree run) cannot

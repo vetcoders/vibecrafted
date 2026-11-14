@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -453,11 +454,68 @@ def test_unshared_path_is_refused_before_any_container_mounts_it(
         dev_container.ensure_container(root, env=engine.env, log=lambda _line: None)
 
     assert raised.value.stage == "mount"
-    assert "colima start --profile ci --mount" in str(raised.value)
+    assert "colima start --profile=ci --edit" in str(raised.value)
+    assert "preserve all existing mounts" in str(raised.value)
     assert not any(
         entry["argv"][0] == "compose" and "up" in entry["argv"]
         for entry in engine.calls()
     )
+
+
+@pytest.mark.parametrize(
+    ("context", "config", "expected_argv"),
+    [
+        ("colima", "mounts: []\n", ["colima", "start", "--edit"]),
+        (
+            "colima-ci",
+            "mounts:\n  - location: /other\n    writable: false\n",
+            ["colima", "start", "--profile=ci", "--edit"],
+        ),
+        (
+            "colima-team '$(touch nope)",
+            None,
+            ["colima", "start", "--profile=team '$(touch nope)", "--edit"],
+        ),
+    ],
+)
+def test_colima_visibility_advice_preserves_shares_and_fails_closed(
+    tmp_path: Path,
+    context: str,
+    config: str | None,
+    expected_argv: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This is deliberately not evidence about the running VM: saved config may
+    # be absent or differ from its effective shares. Advice must ask the user.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    profile_dir = (
+        tmp_path
+        / ".colima"
+        / (context.removeprefix("colima-") if context != "colima" else "default")
+    )
+    config_path = profile_dir / "colima.yaml"
+    if config is not None:
+        profile_dir.mkdir(parents=True)
+        config_path.write_text(config, encoding="utf-8")
+    root = tmp_path / "project's $(touch nope)"
+    message = str(dev_container._visibility_error(root, context))
+
+    assert "/workspace would be empty" in message
+    assert "preserve all existing mounts" in message
+    assert "mounts: []" in message
+    assert "HOME" in message
+    assert "if you cannot verify" in message.lower()
+    assert "do not restart" in message.lower()
+    assert json.dumps(str(root), ensure_ascii=True) in message
+    command = next(
+        part for part in message.split("`") if part.startswith("colima start")
+    )
+    assert shlex.split(command) == expected_argv
+    assert "--mount" not in command
+    if config is None:
+        assert not config_path.exists()
+    else:
+        assert config_path.read_text(encoding="utf-8") == config
 
 
 def test_restart_loop_is_reported_with_logs_not_as_ready(tmp_path: Path) -> None:

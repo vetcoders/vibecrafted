@@ -2,8 +2,8 @@
 
 # Single source of truth for local and hosted macOS release toolchains. Keep the
 # Rust compiler and its cross targets separate from Xcode: Swift, codesign and
-# notarytool follow DEVELOPER_DIR, while native Rust links with one of two
-# measured linker pairs:
+# notarytool follow DEVELOPER_DIR, while native Rust links with one of the
+# measured linker pairs below:
 #
 # - classic: the CLT 26 clang/ld-classic pair. Apple ld64 1230.1 and 27037.1
 #   assert in makeSymbolStringInPlace on the Vibecrafted Server entry object;
@@ -19,7 +19,11 @@
 #   promoted Xcode 27 to stable (27A266a): the stable pair clang-2100.3.34.2 +
 #   ld-27037.1 links vibecrafted-server-web with v0 mangling (build-server-release
 #   leg, DEVELOPER_DIR=/Applications/Xcode.app, PROBE-LINK-OK in 2m56s), so the
-#   pin moves to the stable pair and the beta channel stays refused.
+#   stable pair remains admitted and the beta channel stays refused.
+#   MEASURED 2026-10-30: Xcode 27.2 (27B52), clang-2100.4.1.1 +
+#   ld-27106.1, links the server and hydrated site through the same v0 path
+#   (build-server-release, 3m23s). Both stable pairs remain version-exact;
+#   mixing their clang/ld versions is refused.
 #
 # A present ld-classic of another version is drift and stops the release; only
 # an absent ld-classic selects the xcode pair, and that pair is version-exact.
@@ -37,6 +41,8 @@ readonly VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC='/Library/Developer/CommandLineTo
 readonly VIBECRAFTED_RELEASE_DARWIN_LD_CLASSIC_VERSION='@(#)PROGRAM:ld-classic  PROJECT:ld64-956.6'
 readonly VIBECRAFTED_RELEASE_DARWIN_XCODE_CLANG_VERSION='Apple clang version 21.0.0 (clang-2100.3.34.2)'
 readonly VIBECRAFTED_RELEASE_DARWIN_XCODE_LD_VERSION='@(#)PROGRAM:ld PROJECT:ld-27037.1'
+readonly VIBECRAFTED_RELEASE_DARWIN_XCODE_27_2_CLANG_VERSION='Apple clang version 21.0.0 (clang-2100.4.1.1)'
+readonly VIBECRAFTED_RELEASE_DARWIN_XCODE_27_2_LD_VERSION='@(#)PROGRAM:ld PROJECT:ld-27106.1'
 
 readonly VIBECRAFTED_RELEASE_DARWIN_HOSTED_CLANG_VERSION='Apple clang version 17.0.0 (clang-1700.6.4.2)'
 # Measured 2026-10-08 in hosted probe run 37802780433, image 20260907.0337.1.
@@ -162,15 +168,26 @@ vibecrafted_release_verify_xcode_linker() {
   fi
   actual_clang="$("$xcode_clang" --version | sed -n '1p')"
   actual_ld="$("$xcode_ld" -v </dev/null 2>&1 | sed -n '1p')"
-  [ "$actual_clang" = "$VIBECRAFTED_RELEASE_DARWIN_XCODE_CLANG_VERSION" ] || {
-    printf 'FATAL: release xcode clang drift: expected [%s], got [%s] from %s\n' \
-      "$VIBECRAFTED_RELEASE_DARWIN_XCODE_CLANG_VERSION" "$actual_clang" "$xcode_clang" >&2
-    printf '       no ld-classic here; point DEVELOPER_DIR at the measured Xcode\n' >&2
-    return 1
-  }
-  [ "$actual_ld" = "$VIBECRAFTED_RELEASE_DARWIN_XCODE_LD_VERSION" ] || {
+  # Select the paired linker, never two independent version allowlists: a
+  # measured clang with the other stable pair's ld is still unmeasured drift.
+  case "$actual_clang" in
+    "$VIBECRAFTED_RELEASE_DARWIN_XCODE_CLANG_VERSION")
+      expected_xcode_ld="$VIBECRAFTED_RELEASE_DARWIN_XCODE_LD_VERSION"
+      ;;
+    "$VIBECRAFTED_RELEASE_DARWIN_XCODE_27_2_CLANG_VERSION")
+      expected_xcode_ld="$VIBECRAFTED_RELEASE_DARWIN_XCODE_27_2_LD_VERSION"
+      ;;
+    *)
+      printf 'FATAL: release xcode clang drift: expected [%s] or [%s], got [%s] from %s\n' \
+        "$VIBECRAFTED_RELEASE_DARWIN_XCODE_CLANG_VERSION" \
+        "$VIBECRAFTED_RELEASE_DARWIN_XCODE_27_2_CLANG_VERSION" "$actual_clang" "$xcode_clang" >&2
+      printf '       no ld-classic here; point DEVELOPER_DIR at a measured Xcode\n' >&2
+      return 1
+      ;;
+  esac
+  [ "$actual_ld" = "$expected_xcode_ld" ] || {
     printf 'FATAL: release xcode ld drift: expected [%s], got [%s] from %s\n' \
-      "$VIBECRAFTED_RELEASE_DARWIN_XCODE_LD_VERSION" "$actual_ld" "$xcode_ld" >&2
+      "$expected_xcode_ld" "$actual_ld" "$xcode_ld" >&2
     return 1
   }
   VIBECRAFTED_RELEASE_DARWIN_LINKER_MODE=xcode

@@ -119,8 +119,13 @@ for agent in request["agents"]:
                     row["detail"] = "agy keeps estimated transcripts only; no token ledger"
             elif agent in fleet_engine.FLEET_AGENTS:
                 if quota:
-                    row["status"] = "unavailable"
-                    row["detail"] = "provider offers no authoritative quota source"
+                    native = getattr(fleet_engine, "refresh_native_quota", None)
+                    found = agent == "codex" and native and native(
+                        agent, fleet_engine.default_store(agent), fleet_engine.quota_dir(agent)
+                    )
+                    if not found:
+                        row["status"] = "unavailable"
+                        row["detail"] = "no native quota-window observation available"
                 else:
                     code = fleet_engine.run(
                         agent,
@@ -133,7 +138,11 @@ for agent in request["agents"]:
             else:
                 row["status"], row["detail"] = "unavailable", "unknown provider"
     except Exception as exc:  # noqa: BLE001 - one provider must not hide the rest
-        row["status"], row["detail"] = "error", f"{type(exc).__name__}: {exc}"[:200]
+        busy = getattr(fleet_engine, "TelemetryBusy", None)
+        if busy and isinstance(exc, busy):
+            row["status"], row["detail"] = "skipped", "another collector owns this provider projection"
+        else:
+            row["status"], row["detail"] = "error", f"{type(exc).__name__}: {exc}"[:200]
     results.append(row)
 json.dump(results, sys.stdout)
 "#;

@@ -19,6 +19,10 @@ pub mod mcp_aggregator;
 pub mod mcp_bridge;
 pub mod run_detail;
 pub mod scaffold;
+#[cfg(feature = "ssr")]
+pub mod skills_access;
+#[cfg(feature = "ssr")]
+pub mod skills_bridge;
 pub mod theme;
 pub mod tools;
 

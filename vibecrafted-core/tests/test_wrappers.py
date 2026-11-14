@@ -16,6 +16,26 @@ def test_deck_path_resolves_packaged_command_deck() -> None:
     assert deck.is_file()
 
 
+def test_agents_entrypoint_uses_the_native_help_owner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert wrappers.agents_main(["--help"]) == 0
+    assert "Vibecrafted agent helpers" in capsys.readouterr().out
+
+
+def test_agents_entrypoint_is_native_and_does_not_execute_the_shell_deck(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "call",
+        lambda *_args, **_kwargs: pytest.fail("native help must not execute a shell"),
+    )
+    assert wrappers.agents_main([]) == 0
+    assert "vibecrafted init <agent>" in capsys.readouterr().out
+
+
 def test_run_env_uses_current_interpreter_and_packaged_runtime() -> None:
     env = wrappers._env_for_run("impl-test", "impl")
 

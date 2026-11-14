@@ -288,8 +288,15 @@ def main() -> int:
         }
         for name, repository in repositories.items():
             verify_version(name, pins[name], repository)
+            try:
+                available_head = git(
+                    "rev-parse", "--verify", "HEAD^{commit}", cwd=repository
+                )
+            except subprocess.CalledProcessError:
+                available_head = "unavailable (fetched objects only)"
             print(
-                f"{name}: {pins[name]['version']} {pins[name]['revision']} ({repository})",
+                f"{name}: selected: {pins[name]['version']} {pins[name]['revision']} "
+                f"({repository}); available HEAD: {available_head}",
                 flush=True,
             )
         if args.check:

@@ -251,11 +251,19 @@ plan_id: <plan_id>
 run_id: <scaffold run id, when running under a lifecycle>
 session_id: <agent session_id from `aicx sessions current` or raw `.jsonl` filename read>
 role: driver | wave-atlas | brief | tracker | falsification | design-doc | mission | other
-agent: <author agent>
+author: <artifact author>
+agent: <executing agent/provider, if bound>
 date: YYYY-MM-DD
 project: <org>/<repo>
 ---
 ```
+
+`author` records who created the artifact; it never selects its executor. For an
+executable brief, `agent` binds the intended executing agent/provider, which may
+differ from the author. It can be omitted when the launcher or typed dispatch
+plan supplies the executor. When reusing a brief with `agent`, ensure that binding
+matches the selected executor: a conflict is refused. Never infer an executor
+from `author`.
 
 Why this is a hard-gate, not decoration: the settlement contract's rule 6 ("no bare markdown —
 artifact without run_id lands as needs-attention"), retrieval (search/index engines rank and

@@ -27,9 +27,18 @@ pub fn refresh_service_count(count: usize) {
     SERVICE_COUNT.store(count, Ordering::SeqCst);
 }
 
+fn publish_configured_service_count() {
+    refresh_service_count(configured_services().len());
+}
+
 pub fn build_menu() -> Result<(Menu, MenuIds)> {
+    publish_configured_service_count();
     let menu = Menu::new();
-    let status_item = MenuItem::new("Status: Idle (0 services)", false, None);
+    let status_item = MenuItem::new(
+        format!("Status: Idle ({} services)", current_service_count()),
+        false,
+        None,
+    );
     menu.append(&status_item)?;
     STATUS_MENU_ITEM.with(|cell| *cell.borrow_mut() = Some(status_item));
 
@@ -39,7 +48,11 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let open_logs = MenuItem::new("Open Mux Logs", true, None);
     let open_logs_id = open_logs.id().clone();
     menu.append(&open_logs)?;
-    let service_count = MenuItem::new("Services: 0", false, None);
+    let service_count = MenuItem::new(
+        format!("Services: {}", current_service_count()),
+        false,
+        None,
+    );
     menu.append(&service_count)?;
     SERVICE_COUNT_MENU_ITEM.with(|cell| *cell.borrow_mut() = Some(service_count));
     menu.append(&PredefinedMenuItem::separator())?;
@@ -140,6 +153,7 @@ pub fn update_status_label(label: &str) {
 }
 
 pub fn update_service_count_label() {
+    publish_configured_service_count();
     let label = format!("Services: {}", current_service_count());
     SERVICE_COUNT_MENU_ITEM.with(|cell| {
         if let Some(item) = cell.borrow().as_ref() {

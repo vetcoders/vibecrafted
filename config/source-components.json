@@ -3,8 +3,8 @@
   "components": {
     "vc-frame": {
       "repository": "https://github.com/vetcoders/vc-frame.git",
-      "version": "4.5.0",
-      "revision": "4f689254bd5cad05adee5ab2a8555e9d3b775dfb"
+      "version": "4.5.1",
+      "revision": "35165de453e42d8b3c7ac9488f5eae1957e134c8"
     },
     "vc-terminal": {
       "repository": "https://github.com/vetcoders/vc-terminal.git",

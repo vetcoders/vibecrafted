@@ -6,12 +6,7 @@ use vibecrafted_server_web::theme::provide_theme_context;
 
 #[test]
 fn usage_heatmap_lock() {
-    let owner = Owner::new();
-    let html = owner.with(|| {
-        leptos_meta::provide_meta_context();
-        provide_theme_context();
-        UsagePage().to_html()
-    });
+    let html = usage_html();
 
     let heat = element_with_id(&html, "usage-chart-heat");
     assert!(
@@ -65,6 +60,40 @@ fn usage_heatmap_lock() {
         usage_doors[0].1, "Costs & usage",
         "Costs & usage door must point at /usage, found {usage_doors:?}"
     );
+}
+
+fn usage_html() -> String {
+    let owner = Owner::new();
+    owner.with(|| {
+        leptos_meta::provide_meta_context();
+        provide_theme_context();
+        UsagePage().to_html()
+    })
+}
+
+#[test]
+fn usage_first_view_prioritizes_analytics_and_discloses_missing_quota_compactly() {
+    let html = usage_html();
+    let totals = html.find("class=\"usage-summary-grid\"").unwrap();
+    let charts = html.find("class=\"usage-charts\"").unwrap();
+    let quotas = html.find("data-quota-board").unwrap();
+    assert!(
+        totals < charts && charts < quotas,
+        "analytics must precede unavailable quota sources"
+    );
+    assert!(!html[..charts].contains("quota-card"));
+    let unavailable = element_with_class(&html, "quota-unavailable");
+    let tag = unavailable.split('>').next().unwrap();
+    assert!(tag.starts_with("<details"));
+    assert!(
+        !tag.contains(" open"),
+        "missing sources are disclosed on demand"
+    );
+    assert!(html.contains("No fresh remaining-limit measurements available"));
+    assert!(html.contains("Source and scope"));
+    if let Some(path) = std::env::var_os("VIBECRAFTED_USAGE_HTML_ARTIFACT") {
+        std::fs::write(path, &html).unwrap();
+    }
 }
 
 fn element_with_id(html: &str, id: &str) -> String {

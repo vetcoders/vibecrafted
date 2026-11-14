@@ -30,6 +30,19 @@ ARTIFACT="${1:-}"
 [[ -e "$ARTIFACT" ]] || die "no such artifact: $ARTIFACT"
 ARTIFACT="$(cd "$(dirname "$ARTIFACT")" && printf '%s/%s' "$(pwd)" "$(basename "$ARTIFACT")")"
 
+# Capability is selected before the single mount attempt. A mount refusal must
+# propagate; retrying it through another tool would hide the real failure.
+readonly_dmg_attach() {
+  local help=""
+  if command -v diskutil >/dev/null 2>&1 \
+      && help="$(diskutil image attach --help 2>&1)" \
+      && [[ "$help" == *--readOnly* && "$help" == *--nobrowse* && "$help" == *--mountPoint* ]]; then
+    diskutil image attach --readOnly --nobrowse --mountPoint "$2" "$1"
+  else
+    hdiutil attach -readonly -nobrowse -mountpoint "$2" "$1"
+  fi
+}
+
 MOUNT_POINT=""
 SCRATCH=""
 cleanup() {
@@ -48,7 +61,7 @@ case "$ARTIFACT" in
     SCRATCH="$(mktemp -d)"
     MOUNT_POINT="$SCRATCH/mnt"
     mkdir -p "$MOUNT_POINT"
-    hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$ARTIFACT" >/dev/null
+    readonly_dmg_attach "$ARTIFACT" "$MOUNT_POINT" >/dev/null
     ROOT="$MOUNT_POINT"
     ;;
   *.tar.gz|*.tgz)

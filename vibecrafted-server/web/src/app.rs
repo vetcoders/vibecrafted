@@ -973,24 +973,13 @@ pub fn UsagePage() -> impl IntoView {
                         <button type="submit" class="server-console-link server-console-link-primary">"Apply"</button>
                     </form>
                 </header>
-                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
-                    <div class="control-panel-head">
-                        <h2>"Live quota"</h2>
-                        <span id="quota-status">"shared server observation"</span>
-                        <button type="button" id="quota-refresh" class="server-console-link" title="Ask provider-owned quota sources now (explicit request)">"Refresh quota"</button>
-                    </div>
-                    <div id="quota-agents" class="quota-agents"></div>
-                    <p class="control-plane-meta">"One shared observation for all 8 providers: state, source, age and pool/account/model scope. Unknown, stale and exhausted stay distinct; token totals never imply exhaustion. Prices are api-equiv, not a bill."</p>
-                    <script inner_html=quota_dashboard_script()></script>
-                </section>
-                <p class="control-plane-meta" id="usage-local-sources" aria-label="Local collection by provider"></p>
                 <dl class="usage-summary-grid" aria-label="Usage totals">
+                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
+                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
+                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
                     <div class="usage-attention"><dt>"Failed"</dt><dd id="usage-total-failed">"—"</dd></div>
                     <div class="usage-attention"><dt>"Cost unknowns"</dt><dd id="usage-total-cost-unknown">"—"</dd></div>
                     <div class="usage-attention"><dt>"Token unknowns"</dt><dd id="usage-total-token-unknown">"—"</dd></div>
-                    <div class="usage-summary-cost"><dt>"Cost by unit"</dt><dd id="usage-total-cost">"—"</dd></div>
-                    <div><dt>"Runs"</dt><dd id="usage-total-runs">"—"</dd></div>
-                    <div><dt>"Known tokens"</dt><dd id="usage-total-tokens">"—"</dd></div>
                 </dl>
                 <section class="usage-charts" aria-label="Usage over time">
                     <div class="usage-hero">
@@ -1007,6 +996,24 @@ pub fn UsagePage() -> impl IntoView {
                         <div class="usage-chart-plot" id="usage-chart-cost-plot"></div>
                     </figure>
                 </section>
+                <section class="quota-board" aria-label="Live agent quota" data-quota-board>
+                    <div class="control-panel-head">
+                        <h2>"Live quota windows"</h2>
+                        <span id="quota-status" role="status">"Reading provider observations…"</span>
+                        <button type="button" id="quota-refresh" class="server-console-link" title="Read provider-owned quota sources (explicit request)">"Refresh quota"</button>
+                    </div>
+                    <div id="quota-agents" class="quota-agents" aria-label="Measured quota windows"></div>
+                    <p id="quota-empty" class="quota-empty">"No fresh remaining-limit measurements available. Usage totals are measured separately."</p>
+                    <details class="quota-unavailable">
+                        <summary id="quota-unavailable-summary">"Unavailable or stale sources"</summary>
+                        <div id="quota-unmeasured" class="quota-unmeasured"></div>
+                    </details>
+                    <script inner_html=quota_dashboard_script()></script>
+                </section>
+                <details class="usage-source-details">
+                    <summary>"Measurement sources and collection status"</summary>
+                    <p class="control-plane-meta" id="usage-local-sources" aria-label="Local collection by provider"></p>
+                </details>
                 <section class="usage-breakdown" aria-label="Usage dimensions">
                     <div class="usage-breakdown-switch" role="tablist" aria-label="Breakdown">
                         <button type="button" role="tab" aria-selected="true" data-usage-dim="providers">"Providers"</button>
@@ -1063,8 +1070,36 @@ fn quota_dashboard_script() -> &'static str {
     r#"(() => {
   const root = document.querySelector('[data-quota-board]');
   const host = document.getElementById('quota-agents');
+  const unmeasured = document.getElementById('quota-unmeasured');
   const status = document.getElementById('quota-status');
   if (!root || !host || !status) return;
+  const retainedCards = new Map();
+  const text = (node, value) => { const next = String(value); if (node && node.textContent !== next) node.textContent = next; };
+  // Morph only changed fields of this small card tree. Source disclosures and
+  // focused summaries belong to the person, not to the next monitor snapshot.
+  const patch = (current, next) => {
+    if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) { current.replaceWith(next); return; }
+    if (current.nodeType === 3) { if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue; return; }
+    for (const attr of [...current.attributes]) {
+      if (current.tagName === 'DETAILS' && attr.name === 'open') continue;
+      if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+    }
+    for (const attr of [...next.attributes]) {
+      if (current.tagName === 'DETAILS' && attr.name === 'open') continue;
+      if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+    }
+    const old = [...current.childNodes], fresh = [...next.childNodes];
+    fresh.forEach((node, index) => { if (old[index]) patch(old[index], node); else current.append(node); });
+    for (const node of old.slice(fresh.length)) node.remove();
+  };
+  const synchronize = (parent, nodes) => {
+    if (!parent) return;
+    const focused = document.activeElement;
+    let cursor = parent.firstElementChild;
+    for (const node of nodes) { if (node === cursor) cursor = cursor.nextElementSibling; else parent.insertBefore(node, cursor); }
+    while (cursor) { const next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
+    if (focused && focused !== document.activeElement && parent.contains(focused)) focused.focus({ preventScroll: true });
+  };
   const ageText = (seconds) => {
     if (seconds === null || seconds === undefined) return '';
     if (seconds < 60) return seconds + 's ago';
@@ -1072,9 +1107,9 @@ fn quota_dashboard_script() -> &'static str {
     return Math.floor(seconds / 3600) + 'h ago';
   };
   const money = (value) => value === null || value === undefined ? '' : '≈$' + Number(value).toFixed(3) + ' api-equiv';
-  const card = (agent) => {
+  const card = (agent, compact = false) => {
     const article = document.createElement('article');
-    article.className = 'quota-card';
+    article.className = compact ? 'quota-card quota-card-compact' : 'quota-card';
     article.dataset.status = agent.status || 'unknown';
     const head = document.createElement('div');
     head.className = 'quota-card-head';
@@ -1092,6 +1127,7 @@ fn quota_dashboard_script() -> &'static str {
     const detail = document.createElement('p');
     detail.className = 'quota-detail';
     detail.textContent = agent.detail || '';
+    headline.hidden = compact;
     article.append(head, headline, detail);
     const bars = document.createElement('div');
     bars.className = 'quota-bars';
@@ -1109,18 +1145,31 @@ fn quota_dashboard_script() -> &'static str {
       fill.style.setProperty('--ratio', String(ratio));
       track.append(fill);
       const text = document.createElement('span');
-      text.textContent = bar.text || '';
+      text.textContent = (bar.text || '') + (bar.stale ? ' · stale' : '');
       row.append(label, track, text);
       bars.append(row);
+      {
+        const reset = document.createElement('small');
+        reset.className = 'quota-reset';
+        reset.hidden = !bar.resets_at;
+        reset.textContent = bar.resets_at ? 'Resets ' + new Date(bar.resets_at * 1000).toLocaleString() : '';
+        bars.append(reset);
+      }
     }
-    if ((agent.bars || []).length) article.append(bars);
+    bars.hidden = compact || !(agent.bars || []).length;
+    article.append(bars);
     const meta = document.createElement('p');
     meta.className = 'quota-meta';
     const scope = agent.scope || {};
-    const scoped = [scope.pool && 'pool ' + scope.pool, scope.account && 'account ' + scope.account, scope.model && 'model ' + scope.model].filter(Boolean).join(' ');
+    const scoped = [scope.pool && 'pool ' + scope.pool, scope.account && 'account ' + scope.account, scope.model && 'model ' + scope.model, scope.limit_id && 'limit ' + scope.limit_id, scope.plan_type && 'plan ' + scope.plan_type].filter(Boolean).join(' ');
     const bits = [scoped, agent.model, agent.tokens !== null && agent.tokens !== undefined ? String(agent.tokens) + ' tok' : '', money(agent.cost_usd), ageText(agent.age_s), agent.source].filter(Boolean);
     meta.textContent = bits.join(' · ');
-    article.append(meta);
+    const diagnostics = document.createElement('details');
+    diagnostics.className = 'quota-source-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Source and scope';
+    diagnostics.append(summary, meta);
+    article.append(diagnostics);
     return article;
   };
   // An explicit ask is never answered silently: the collector's outcome rides
@@ -1134,12 +1183,43 @@ fn quota_dashboard_script() -> &'static str {
     return 'refresh: ' + bits.join(' · ');
   };
   const render = (payload) => {
-    host.replaceChildren();
-    for (const agent of payload.agents || []) host.append(card(agent));
+    const focused = document.activeElement;
+    const measuredCards = [], missingCards = [], seen = new Set();
+    let measured = 0, missing = 0, stale = 0;
+    for (const agent of payload.agents || []) {
+      // Native token counters are usage. A remaining limit needs an actual
+      // window ratio, or an authoritative fresh exhausted observation.
+      const window = (agent.bars || []).some((bar) => Number.isFinite(bar.ratio));
+      const available = !agent.stale && ['ok', 'low', 'exhausted'].includes(agent.state) && (window || agent.state === 'exhausted');
+      const key = agent.id;
+      seen.add(key);
+      let article = retainedCards.get(key);
+      const next = card(agent, !available);
+      if (!article) { article = next; retainedCards.set(key, article); }
+      else patch(article, next);
+      if (available) { measuredCards.push(article); measured++; }
+      else {
+        // Keep an explicitly opened source visible when its provider moves
+        // from measured to stale/unavailable; later manual closing is kept.
+        if (article.parentElement === host && article.querySelector('details[open]') && unmeasured) {
+          const group = unmeasured.closest('details'); if (group) group.open = true;
+        }
+        missingCards.push(article); missing++; if (agent.stale) stale++;
+      }
+    }
+    synchronize(host, measuredCards); synchronize(unmeasured, missingCards);
+    if (focused && focused !== document.activeElement && root.contains(focused)) focused.focus({ preventScroll: true });
+    for (const key of retainedCards.keys()) if (!seen.has(key)) retainedCards.delete(key);
+    const empty = document.getElementById('quota-empty');
+    if (empty) empty.hidden = measured !== 0;
+    host.hidden = measured === 0;
+    const summary = document.getElementById('quota-unavailable-summary');
+    text(summary, missing + ' source(s) without fresh quota windows' + (stale ? ' · ' + stale + ' stale' : ''));
     const stamp = payload.generated_at ? 'Updated ' + payload.generated_at : 'local monitors';
-    status.textContent = [stamp, refreshText(payload.refresh)].filter(Boolean).join(' · ');
+    text(status, [measured + ' measured window source(s)', stamp, refreshText(payload.refresh)].filter(Boolean).join(' · '));
   };
   const load = async () => {
+    if (document.hidden) return;
     try {
       const response = await fetch('/api/usage/quota', { credentials: 'same-origin', cache: 'no-store' });
       const payload = await response.json();
@@ -1163,6 +1243,7 @@ fn quota_dashboard_script() -> &'static str {
     }
   });
   load();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
   // Local file read only; the network is never touched by this timer.
   setInterval(load, 15000);
 })();"#
@@ -1175,6 +1256,14 @@ fn usage_dashboard_script() -> &'static str {
   const form = document.getElementById('usage-filter-form');
   const status = document.getElementById('usage-status');
   const body = document.getElementById('usage-runs-body');
+  let selectedRunId = '';
+  body.addEventListener('click', (event) => {
+    const row = event.target.closest('tr[data-run-id]');
+    if (!row || event.target.closest('a, button')) return;
+    selectedRunId = row.getAttribute('data-run-id') || '';
+    body.querySelectorAll('tr.is-selected').forEach((item) => { if (item !== row) item.classList.remove('is-selected'); });
+    row.classList.add('is-selected');
+  });
   const empty = document.getElementById('usage-empty');
   const byId = (id) => document.getElementById(id);
   const number = new Intl.NumberFormat();
@@ -1207,36 +1296,58 @@ fn usage_dashboard_script() -> &'static str {
     if (unknown === runs) return 'missing';
     return number.format(totals.tokens_total_known);
   };
-  const set = (id, value) => { const node = byId(id); if (node) node.textContent = value; };
-  const renderLocalSources = (sources) => {
+  const text = (node, value) => { const next = String(value); if (node && node.textContent !== next) node.textContent = next; };
+  const set = (id, value) => text(byId(id), value);
+  const attribute = (node, key, value) => {
+    if (value === null || value === undefined || value === '') { if (node.hasAttribute(key)) node.removeAttribute(key); }
+    else if (node.getAttribute(key) !== String(value)) node.setAttribute(key, String(value));
+  };
+  // Retain attached nodes when the order is unchanged; moving/replacing an
+  // entire collection loses focus, selection and pointer/disclosure state.
+  const synchronize = (parent, nodes) => {
+    const focused = document.activeElement;
+    let cursor = parent.firstElementChild;
+    for (const node of nodes) {
+      if (node === cursor) cursor = cursor.nextElementSibling;
+      else parent.insertBefore(node, cursor);
+    }
+    while (cursor) { const next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
+    if (focused && focused !== document.activeElement && parent.contains(focused)) focused.focus({ preventScroll: true });
+  };
+  const dimensionRows = new Map(), retainedRows = new Map(), pickerStates = new Map();
+  const chartStates = new Map();
+  let lastChartReport = null, availableSnapshot = null;
+  const renderLocalSources = (sources, failureReasons) => {
     const bits = (sources || []).map((item) => {
       const detail = item.source === 'scan_cache' || item.source === 'archive'
         ? item.counted + ' local' + (item.matched_vc ? ' · ' + item.matched_vc + ' already in VC runs' : '') + (item.withheld_days ? ' · ' + item.withheld_days + ' day(s) withheld' : '')
         : item.source + (item.note ? ' (' + item.note + ')' : '');
-      return item.agent + ': ' + detail;
+      const state = (item.refreshing ? ' · updating' : '') + (item.stale ? ' · previous measurements' : '') + (item.error ? ' · ' + item.error : '');
+      return item.agent + ': ' + detail + state;
     });
+    const failures = Object.entries(failureReasons || {}).map(([code, count]) => count + ' ' + code).join(' · ');
+    if (failures) bits.push('Transcript recovery: ' + failures);
     set('usage-local-sources', bits.length ? 'Local collection — ' + bits.join(' · ') : '');
   };
   const renderDimensions = (id, values) => {
     const target = byId(id);
-    target.replaceChildren();
-    if (!values || !values.length) {
-      const p = document.createElement('p'); p.className = 'control-empty'; p.textContent = 'No measured runs.'; target.append(p); return;
+    let state = dimensionRows.get(id);
+    if (!state) { state = { rows: new Map(), empty: document.createElement('p') }; state.empty.className = 'control-empty'; state.empty.textContent = 'No measured runs.'; dimensionRows.set(id, state); }
+    const nodes = [], seen = new Set();
+    for (const item of values || []) {
+      seen.add(item.name);
+      let row = state.rows.get(item.name);
+      if (!row) { row = document.createElement('div'); row.className = 'usage-dimension-row'; for (const tag of ['strong','span','span','span','span','span']) row.append(document.createElement(tag)); state.rows.set(item.name, row); }
+      const failed = item.runs_failed || 0, tokenUnknown = item.runs_tokens_unknown || 0, costUnknown = item.runs_cost_unknown || 0;
+      const cells = row.children;
+      const next = [item.name, number.format(item.runs || 0), number.format(failed), tokensKnownText(item), number.format(tokenUnknown + costUnknown), costsText(item.cost_by_unit)];
+      next.forEach((value, index) => text(cells[index], value));
+      row.classList.toggle('needs-attention', Boolean(failed || tokenUnknown || costUnknown));
+      cells[2].classList.toggle('is-signal', Boolean(failed)); cells[4].classList.toggle('is-signal', Boolean(tokenUnknown || costUnknown));
+      nodes.push(row);
     }
-    for (const item of values) {
-      const row = document.createElement('div'); row.className = 'usage-dimension-row';
-      const failed = item.runs_failed || 0;
-      const tokenUnknown = item.runs_tokens_unknown || 0;
-      const costUnknown = item.runs_cost_unknown || 0;
-      if (failed || tokenUnknown || costUnknown) row.classList.add('needs-attention');
-      const name = document.createElement('strong'); name.textContent = item.name;
-      const runs = document.createElement('span'); runs.textContent = number.format(item.runs || 0);
-      const fail = document.createElement('span'); fail.textContent = number.format(failed); if (failed) fail.className = 'is-signal';
-      const tokens = document.createElement('span'); tokens.textContent = tokensKnownText(item);
-      const unk = document.createElement('span'); unk.textContent = number.format(tokenUnknown + costUnknown); if (tokenUnknown || costUnknown) unk.className = 'is-signal';
-      const cost = document.createElement('span'); cost.textContent = costsText(item.cost_by_unit);
-      row.append(name, runs, fail, tokens, unk, cost); target.append(row);
-    }
+    for (const name of state.rows.keys()) if (!seen.has(name)) state.rows.delete(name);
+    synchronize(target, nodes.length ? nodes : [state.empty]);
   };
   const showDimension = (name) => {
     for (const key of ['providers', 'agents', 'models']) {
@@ -1257,36 +1368,81 @@ fn usage_dashboard_script() -> &'static str {
   // A picker lists the names the API itself reports (unknown included) plus
   // the seeded options; the current selection survives even when the window
   // has no row for it, so a filter always round-trips.
-  const populatePicker = (key, models) => {
+  const populatePicker = (key, models, defer = true) => {
     const select = byId('usage-' + key);
     if (!select) return;
-    const current = select.value || params.get(key) || '';
-    const seen = new Set();
-    select.replaceChildren();
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'all';
-    select.appendChild(defaultOpt);
-    for (const item of models || []) {
-      const name = item.name;
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        if (current === name) opt.selected = true;
-        select.appendChild(opt);
-      }
+    let state = pickerStates.get(key);
+    if (!state) {
+      state = { key: null, pending: null };
+      pickerStates.set(key, state);
+      select.addEventListener('blur', () => { if (state.pending) { const pending = state.pending; state.pending = null; populatePicker(key, pending, false); } });
     }
-    if (current && !seen.has(current)) {
-      const opt = document.createElement('option');
-      opt.value = current;
-      opt.textContent = current;
-      opt.selected = true;
-      select.appendChild(opt);
-    }
+    const current = select.value || '';
+    const names = [...new Set((models || []).map((item) => item.name).filter(Boolean))];
+    if (current && !names.includes(current)) names.push(current);
+    const signature = JSON.stringify(names);
+    if (state.key === signature) { state.pending = null; return; }
+    // Updating choices while a native picker is open can dismiss it even
+    // when the select itself survives. Apply changed choices after blur.
+    if (defer && document.activeElement === select) { state.pending = models || []; return; }
+    const existing = new Map([...select.options].map((option) => [option.value, option]));
+    const options = ['', ...names].map((name) => {
+      const option = existing.get(name) || document.createElement('option');
+      option.value = name; text(option, name || 'all'); return option;
+    });
+    synchronize(select, options); select.value = current; state.key = signature; state.pending = null;
   };
-  const render = (report) => {
+  const renderRows = (report) => {
+    const nodes = [], seen = new Set();
+    for (const run of report.runs || []) {
+      const previousFields = (report.recovery && report.recovery.stale_fields && report.recovery.stale_fields[run.run_id]) || [];
+      const inspectId = (run.vc_run_ids || [])[0] || (run.origin === 'local' ? '' : run.run_id);
+      const signature = JSON.stringify([inspectId, run.run_id, run.recorded_at, run.origin, run.provider, run.agent, run.model, run.tokens && run.tokens.tokens_total, run.cost, run.status, run.failure_kind, run.failure, previousFields]);
+      let item = retainedRows.get(run.run_id);
+      if (!item) {
+        const node = document.createElement('tr');
+        for (let index = 0; index < 6; index++) node.append(document.createElement('td'));
+        item = { node, signature: null }; retainedRows.set(run.run_id, item);
+      }
+      seen.add(run.run_id); nodes.push(item.node);
+      if (item.signature === signature) continue;
+      const tr = item.node, [runCell, identity, model, tokens, cost, state] = tr.children;
+      attribute(tr, 'data-row-key', run.run_id);
+      attribute(tr, 'data-run-id', inspectId); attribute(tr, 'data-href', inspectId ? '/run/' + encodeURIComponent(inspectId) : null);
+      attribute(tr, 'data-transcript-url', inspectId ? '/api/control/runs/' + encodeURIComponent(inspectId) + '/transcript' : null);
+      attribute(tr, 'data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
+      let link = runCell.firstElementChild;
+      if (!link || link.tagName.toLowerCase() !== (inspectId ? 'a' : 'span')) {
+        const next = document.createElement(inspectId ? 'a' : 'span'); next.className = 'control-run-open';
+        if (link) link.replaceWith(next); else runCell.append(next); link = next;
+      }
+      attribute(link, 'href', inspectId ? '/run/' + encodeURIComponent(inspectId) : null); text(link, run.run_id);
+      let stamp = runCell.querySelector('small'); if (!stamp) { stamp = document.createElement('small'); runCell.append(stamp); } text(stamp, run.recorded_at || '');
+      text(identity, label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : ''));
+      text(model, label(run.model)); attribute(model, 'title', reason(run.model));
+      text(tokens, label(run.tokens && run.tokens.tokens_total)); attribute(tokens, 'title', run.tokens && reason(run.tokens.tokens_total));
+      text(cost, costText(run.cost)); attribute(cost, 'title', run.cost && reason(run.cost.amount));
+      attribute(tokens, 'data-stale', previousFields.includes('usage') ? 'true' : null); attribute(cost, 'data-stale', previousFields.includes('cost') ? 'true' : null);
+      if (previousFields.includes('usage')) attribute(tokens, 'title', 'Previous measured tokens; current transcript evidence is incomplete or updating');
+      if (previousFields.includes('cost')) attribute(cost, 'title', 'Previous measured cost; current transcript evidence is incomplete or updating');
+      text(state, run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status); attribute(state, 'title', run.failure);
+      tr.classList.toggle('is-attention', Boolean(run.failure_kind || (run.status && !['completed','ok','observed'].includes(run.status))));
+      tr.classList.toggle('is-unknown', Boolean(unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))));
+      item.signature = signature;
+    }
+    for (const id of retainedRows.keys()) if (!seen.has(id)) retainedRows.delete(id);
+    synchronize(body, nodes);
+  };
+  const render = (incoming, queryKey) => {
+    const loading = (incoming.local_sources || []).some((source) => source.source === 'loading' && source.refreshing);
+    if (availableSnapshot && availableSnapshot.queryKey !== queryKey) availableSnapshot = null;
+    const retained = loading && availableSnapshot !== null;
+    // Keep a coherent previous response, not old local rows mixed with new
+    // recorded twins. Unknown values stay unknown. A non-loading replacement
+    // (including genuine deletions) and a changed filter are always accepted.
+    const report = retained ? availableSnapshot.report : incoming;
+    if (!loading) availableSnapshot = { queryKey, report: incoming };
+    attribute(root, 'data-measurements', retained ? 'previous' : loading ? 'partial' : 'available');
     const totals = report.totals || {};
     set('usage-total-runs', number.format(totals.runs || 0));
     set('usage-total-failed', number.format(totals.runs_failed || 0));
@@ -1303,38 +1459,33 @@ fn usage_dashboard_script() -> &'static str {
     populatePicker('provider', [...providerNames.map((name) => ({name})), ...(pickers.providers || [])]);
     populatePicker('agent', [...agentNames.map((name) => ({name})), ...(pickers.agents || [])]);
     populatePicker('model', pickers.models);
-    renderLocalSources(report.local_sources);
-    body.replaceChildren();
+    renderLocalSources(incoming.local_sources, incoming.recovery && incoming.recovery.failure_reasons);
     const runs = report.runs || [];
-    for (const run of runs) {
-      const tr = document.createElement('tr');
-      const inspectId = (run.vc_run_ids || [])[0] || (run.origin === 'local' ? '' : run.run_id);
-      if (inspectId) {
-        tr.setAttribute('data-run-id', inspectId);
-        tr.setAttribute('data-href', '/run/' + encodeURIComponent(inspectId));
-        tr.setAttribute('data-transcript-url', '/api/control/runs/' + encodeURIComponent(inspectId) + '/transcript');
-      }
-      tr.setAttribute('data-meta', label(run.provider) + ' / ' + label(run.agent) + ' · ' + label(run.model) + ' · ' + (run.status || ''));
-      const runCell = document.createElement('td');
-      const link = document.createElement(inspectId ? 'a' : 'span'); if (inspectId) link.href = '/run/' + encodeURIComponent(inspectId); link.textContent = run.run_id; link.className = 'control-run-open';
-      const stamp = document.createElement('small'); stamp.textContent = run.recorded_at || ''; runCell.append(link, stamp);
-      const identity = document.createElement('td'); identity.textContent = label(run.provider) + ' / ' + label(run.agent) + (run.origin === 'local' ? ' · local' : '');
-      const model = document.createElement('td'); model.textContent = label(run.model); if (reason(run.model)) model.title = reason(run.model);
-      const tokens = document.createElement('td'); tokens.textContent = label(run.tokens && run.tokens.tokens_total); if (run.tokens && reason(run.tokens.tokens_total)) tokens.title = reason(run.tokens.tokens_total);
-      const cost = document.createElement('td'); cost.textContent = costText(run.cost); if (run.cost && reason(run.cost.amount)) cost.title = reason(run.cost.amount);
-      const state = document.createElement('td'); state.textContent = run.failure_kind ? run.status + ' · ' + run.failure_kind : run.status;
-      if (run.failure) state.title = run.failure;
-      if (run.failure_kind || (run.status && run.status !== 'completed' && run.status !== 'ok' && run.status !== 'observed')) tr.className = 'is-attention';
-      if (unknown(run.tokens && run.tokens.tokens_total) || (run.cost && unknown(run.cost.amount))) tr.classList.add('is-unknown');
-      tr.append(runCell, identity, model, tokens, cost, state); body.append(tr);
-    }
+    renderRows(report);
     empty.hidden = runs.length !== 0;
     set('usage-run-count', String(runs.length));
     const first = body.querySelector('tr[data-run-id]');
-    if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const selected = [...body.querySelectorAll('tr[data-run-id]')].find((row) => row.getAttribute('data-run-id') === selectedRunId);
+    if (selected) { if (!selected.classList.contains('is-selected')) selected.classList.add('is-selected'); }
+    else if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    else {
+      selectedRunId = '';
+      const inspector = byId('overview-inspector');
+      if (inspector) inspector.hidden = true;
+    }
     set('usage-schema', report.schema || 'unknown schema');
-    set('usage-generated', report.generated_at ? 'Generated ' + report.generated_at : '');
-    status.textContent = runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window';
+    set('usage-generated', retained ? 'Measurements as of ' + report.generated_at + ' · checked ' + incoming.generated_at : report.generated_at ? 'Generated ' + report.generated_at : '');
+    const bits = [retained ? 'Previous available measurements · ' + runs.length + ' matching run(s)' : runs.length ? 'Live read-only projection · ' + runs.length + ' matching run(s)' : 'Live read-only projection · empty window'];
+    const recovery = incoming.recovery || {}, localSources = incoming.local_sources || [];
+    if (retained) bits.push('recorded and local rows retained together while the local projection updates');
+    if (localSources.some((source) => source.refreshing)) bits.push('local provider measurements updating');
+    if (localSources.some((source) => source.stale)) bits.push('previous local measurements retained');
+    if (recovery.pending_runs) bits.push(recovery.pending_runs + ' transcript(s) updating');
+    if (recovery.stale_runs) bits.push(recovery.stale_runs + ' previous transcript measurement(s) retained');
+    if (recovery.unavailable_runs) bits.push(recovery.unavailable_runs + ' transcript source(s) unavailable');
+    if (recovery.last_error) bits.push(recovery.last_error);
+    text(status, bits.join(' · '));
+    lastChartReport = report;
     drawCharts(report);
   };
   const knownAmount = (cost) => {
@@ -1394,15 +1545,17 @@ fn usage_dashboard_script() -> &'static str {
   const paintChart = (plotId, titleId, caption, built, color) => {
     const host = byId(plotId);
     const title = byId(titleId);
-    if (title) title.textContent = caption;
+    text(title, caption);
     if (!host) return;
-    host.replaceChildren();
+    const key = JSON.stringify([caption, built, color]);
+    if (chartStates.get(plotId) === key) return;
+    chartStates.set(plotId, key);
     const measured = built ? built.buckets.filter((bucket) => bucket.measured) : [];
     if (!built || !measured.length) {
       const note = document.createElement('p');
       note.className = 'usage-chart-empty';
       note.textContent = 'No measured points in this window.';
-      host.append(note);
+      host.replaceChildren(note);
       return;
     }
     const w = 640;
@@ -1422,26 +1575,24 @@ fn usage_dashboard_script() -> &'static str {
       lastMeasured = i;
       coords.push(xAt(i).toFixed(1) + ',' + yAt(bucket.value).toFixed(1));
     });
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    let svg = host.querySelector('svg');
+    if (!svg) { svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); host.replaceChildren(svg); }
+    attribute(svg, 'viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('role', 'img');
-    const area = document.createElementNS(svg.namespaceURI, 'polygon');
+    let area = svg.querySelector('polygon'); if (!area) { area = document.createElementNS(svg.namespaceURI, 'polygon'); svg.append(area); }
     area.setAttribute('points', xAt(firstMeasured).toFixed(1) + ',' + (h - pad) + ' ' + coords.join(' ') + ' ' + xAt(lastMeasured).toFixed(1) + ',' + (h - pad));
     area.setAttribute('fill', color);
     area.setAttribute('fill-opacity', '0.16');
-    const line = document.createElementNS(svg.namespaceURI, 'polyline');
+    let line = svg.querySelector('polyline'); if (!line) { line = document.createElementNS(svg.namespaceURI, 'polyline'); svg.append(line); }
     line.setAttribute('points', coords.join(' '));
     line.setAttribute('fill', 'none');
     line.setAttribute('stroke', color);
     line.setAttribute('stroke-width', '1.5');
-    svg.append(area, line);
-    host.append(svg);
-    const axis = document.createElement('p');
-    axis.className = 'usage-chart-axis';
+    let axis = host.querySelector('.usage-chart-axis');
+    if (!axis) { axis = document.createElement('p'); axis.className = 'usage-chart-axis'; host.append(axis); }
     const first = built.buckets[0];
     const last = built.buckets[built.buckets.length - 1];
-    axis.textContent = axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain);
-    host.append(axis);
+    text(axis, axisLabel(first.t, built.grain) + '  ·  ' + axisLabel(last.t, built.grain));
   };
   const dayStart = (ms) => {
     const date = new Date(ms);
@@ -1468,9 +1619,8 @@ fn usage_dashboard_script() -> &'static str {
     const host = byId('usage-chart-heat-plot');
     const title = byId('usage-chart-heat-title');
     const windowName = since || 'window';
-    if (title) title.textContent = 'Days · ' + windowName;
+    text(title, 'Days · ' + windowName);
     if (!host) return;
-    host.replaceChildren();
     const days = windowDays(since, generated, rows);
     const counts = new Map(days.map((day) => [day, 0]));
     for (const run of rows) {
@@ -1482,6 +1632,9 @@ fn usage_dashboard_script() -> &'static str {
     const light = document.documentElement.dataset.theme === 'light';
     const emptyFill = light ? '#d5d5d5' : '#242424';
     const active = light ? '#2f6b32' : '#90a959';
+    const key = JSON.stringify([light, since, days, [...counts.values()]]);
+    if (chartStates.get('heat') === key) return;
+    chartStates.set('heat', key);
     const max = Math.max(1, ...counts.values());
     const cell = 11;
     const gap = 3;
@@ -1496,7 +1649,10 @@ fn usage_dashboard_script() -> &'static str {
     if (column.length) cols.push(column);
     const w = Math.max(cols.length, 1) * (cell + gap);
     const h = labelH + 7 * (cell + gap);
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    let svg = host.querySelector('svg');
+    if (!svg) { svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); host.replaceChildren(svg); }
+    const retained = new Map([...svg.children].map((node) => [node.getAttribute('data-key'), node]));
+    const nodes = [];
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     svg.setAttribute('role', 'img');
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1505,34 +1661,38 @@ fn usage_dashboard_script() -> &'static str {
       const first = new Date(week[0]);
       if (first.getUTCDate() <= 7 && first.getUTCMonth() !== lastMonth) {
         lastMonth = first.getUTCMonth();
-        const label = document.createElementNS(svg.namespaceURI, 'text');
+        const id = 'month-' + week[0];
+        const label = retained.get(id) || document.createElementNS(svg.namespaceURI, 'text');
+        attribute(label, 'data-key', id);
         label.setAttribute('x', String(col * (cell + gap)));
         label.setAttribute('y', '9');
         label.setAttribute('fill', light ? '#6b6b6b' : '#6b6b6b');
         label.setAttribute('font-size', '9');
         label.textContent = months[lastMonth];
-        svg.append(label);
+        nodes.push(label);
       }
       week.forEach((day) => {
         const count = counts.get(day) || 0;
-        const rect = document.createElementNS(svg.namespaceURI, 'rect');
+        const id = 'day-' + day;
+        const rect = retained.get(id) || document.createElementNS(svg.namespaceURI, 'rect');
+        attribute(rect, 'data-key', id);
         const row = new Date(day).getUTCDay();
         rect.setAttribute('x', String(col * (cell + gap)));
         rect.setAttribute('y', String(labelH + row * (cell + gap)));
         rect.setAttribute('width', String(cell));
         rect.setAttribute('height', String(cell));
         rect.setAttribute('rx', '2');
-        if (count === 0) rect.setAttribute('fill', emptyFill);
+        if (count === 0) { attribute(rect, 'fill', emptyFill); attribute(rect, 'fill-opacity', null); }
         else {
           rect.setAttribute('fill', active);
           rect.setAttribute('fill-opacity', String(0.35 + 0.65 * (count / max)));
         }
         const stamp = new Date(day).toISOString().slice(0, 10);
         rect.setAttribute('title', stamp + ' · ' + count);
-        svg.append(rect);
+        nodes.push(rect);
       });
     });
-    host.append(svg);
+    synchronize(svg, nodes);
   };
   const drawCharts = (report) => {
     const rows = report.runs || [];
@@ -1572,24 +1732,56 @@ fn usage_dashboard_script() -> &'static str {
       '#6a9fb5'
     );
   };
-  const load = async () => {
-    status.textContent = 'Loading canonical telemetry…';
-    const query = new URLSearchParams(new FormData(form));
+  new MutationObserver(() => { if (lastChartReport) drawCharts(lastChartReport); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  let activeRequest = null, activeExplicit = false, requestVersion = 0, recoveryTimer = null, recoveryPolls = 0, hasMeasurements = false, appliedQuery = null;
+  const load = async (explicit = false) => {
+    if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+    if (!explicit && document.hidden) return;
+    if (activeRequest) { if (!explicit) return; activeRequest.abort(); }
+    if (explicit) recoveryPolls = 0;
+    const controller = new AbortController();
+    activeRequest = controller; activeExplicit = explicit;
+    const version = ++requestVersion;
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    if (!hasMeasurements) text(status, 'Loading recorded telemetry…');
+    else if (explicit) text(status, 'Applying selected filters…');
+    const query = !explicit && appliedQuery !== null ? new URLSearchParams(appliedQuery) : new URLSearchParams(new FormData(form));
     for (const [key, value] of [...query.entries()]) if (!String(value).trim()) query.delete(key);
     try {
-      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store' });
+      const response = await fetch('/api/usage?' + query.toString(), { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
       const payload = await response.json();
+      if (version !== requestVersion) return;
       if (!response.ok) throw new Error(payload.error || ('HTTP ' + response.status));
-      history.replaceState(null, '', '/usage?' + query.toString());
-      render(payload);
+      appliedQuery = query.toString();
+      if (location.search !== '?' + appliedQuery) history.replaceState(null, '', '/usage?' + appliedQuery);
+      render(payload, query.toString());
+      hasMeasurements = true;
+      const pending = (payload.recovery && (payload.recovery.pending_runs || payload.recovery.refreshing)) || (payload.local_sources || []).some((source) => source.refreshing);
+      if (pending && !document.hidden) {
+        // All recorded can be a multi-megabyte response. A brief recovery
+        // burst converges quickly, then returns to the ordinary15s cadence.
+        recoveryPolls++;
+        const delay = recoveryPolls <= 4 ? 1500 : recoveryPolls <= 8 ? 5000 : 15000;
+        recoveryTimer = setTimeout(() => load(), delay);
+      } else if (!pending) recoveryPolls = 0;
     } catch (error) {
-      status.textContent = 'Usage telemetry unavailable: ' + error.message;
-      empty.hidden = false;
-      empty.textContent = 'The canonical usage projection could not be read.';
+      if (version !== requestVersion) return;
+      text(status, 'Usage telemetry unavailable: ' + error.message + (hasMeasurements ? ' · showing previous measurements' : ''));
+      if (!hasMeasurements) { empty.hidden = false; empty.textContent = 'The usage projection could not be read. Retry with Apply.'; }
+    } finally {
+      clearTimeout(timeout);
+      if (version === requestVersion) { activeRequest = null; activeExplicit = false; }
     }
   };
-  form.addEventListener('submit', (event) => { event.preventDefault(); load(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+      if (activeRequest && !activeExplicit) { activeRequest.abort(); activeRequest = null; requestVersion++; }
+    } else if (!activeRequest) load();
+  });
+  form.addEventListener('submit', (event) => { event.preventDefault(); load(true); });
   load();
+  setInterval(() => { if (!document.hidden && !activeRequest && !recoveryTimer) load(); }, 15000);
 })();"#
 }
 
@@ -3501,6 +3693,18 @@ struct SkillsSnapshot {
     open: Option<String>,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    read_ok: bool,
+    #[serde(default)]
+    writable: bool,
+    #[serde(default)]
+    expected_sha256: String,
+    #[serde(default)]
+    managed: bool,
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
+    read_error: String,
 }
 
 impl SkillsSnapshot {
@@ -3510,6 +3714,12 @@ impl SkillsSnapshot {
             names: Vec::new(),
             open: None,
             text: String::new(),
+            read_ok: false,
+            writable: false,
+            expected_sha256: String::new(),
+            managed: false,
+            origin: String::new(),
+            read_error: String::new(),
         }
     }
 }
@@ -3537,6 +3747,99 @@ struct SkillFile {
 }
 
 #[cfg(feature = "ssr")]
+fn skill_profile_home(
+    home: Option<std::path::PathBuf>,
+    profile: Option<std::path::PathBuf>,
+    windows: bool,
+) -> Option<std::path::PathBuf> {
+    if windows { profile.or(home) } else { home }
+}
+
+#[cfg(feature = "ssr")]
+fn skill_runtime_home(
+    override_root: Option<std::path::PathBuf>,
+    data: Option<std::path::PathBuf>,
+    profile: Option<std::path::PathBuf>,
+    local_app_data: Option<std::path::PathBuf>,
+    windows: bool,
+) -> Option<std::path::PathBuf> {
+    override_root
+        .or_else(|| data.map(|data| data.join("vibecrafted")))
+        .or_else(|| {
+            if windows {
+                local_app_data
+                    .or_else(|| profile.map(|home| home.join("AppData/Local")))
+                    .map(|data| data.join("Vibecrafted"))
+            } else {
+                profile.map(|home| home.join(".local/share/vibecrafted"))
+            }
+        })
+}
+
+#[cfg(feature = "ssr")]
+fn current_skill_profile() -> Option<std::path::PathBuf> {
+    let path = |key| {
+        std::env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    skill_profile_home(path("HOME"), path("USERPROFILE"), cfg!(windows))
+}
+
+#[cfg(feature = "ssr")]
+fn expand_skill_home(
+    path: std::path::PathBuf,
+    profile: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    match (path.strip_prefix("~"), profile) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path,
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn current_skill_runtime_home() -> Option<std::path::PathBuf> {
+    let path = |key| {
+        std::env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let profile = current_skill_profile();
+    let expand = |value: Option<std::path::PathBuf>| {
+        value.map(|value| expand_skill_home(value, profile.as_deref()))
+    };
+    skill_runtime_home(
+        expand(path("VIBECRAFTED_RUNTIME_HOME")),
+        expand(path("XDG_DATA_HOME")),
+        profile.clone(),
+        expand(path("LOCALAPPDATA")),
+        cfg!(windows),
+    )
+}
+
+#[cfg(feature = "ssr")]
+fn current_local_skills_home() -> Option<std::path::PathBuf> {
+    if let Some(value) = std::env::var_os("VIBECRAFTED_HOME").filter(|value| !value.is_empty()) {
+        return Some(
+            expand_skill_home(
+                std::path::PathBuf::from(value),
+                current_skill_profile().as_deref(),
+            )
+            .join("local-skills"),
+        );
+    }
+    if cfg!(windows) {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| current_skill_profile().map(|home| home.join("AppData/Local")))?;
+        Some(local.join("Vibecrafted/home/local-skills"))
+    } else {
+        current_skill_profile().map(|home| home.join(".vibecrafted/local-skills"))
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn product_skill_roots() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
 
@@ -3544,13 +3847,17 @@ fn product_skill_roots() -> Vec<std::path::PathBuf> {
     // each runtime view, then `$VIBECRAFTED_HOME/skills`. No `env!("CARGO_MANIFEST_DIR")`
     // root: it bakes the build checkout into the signed binary.
     let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = current_skill_profile() {
         roots.push(home.join(".agents/skills"));
         for runtime in ["claude", "codex", "agy", "junie", "grok", "cursor"] {
             roots.push(home.join(format!(".{runtime}/skills")));
         }
     }
-    roots.push(control_core::vibecrafted_home().join("skills"));
+    if let Some(local_home) =
+        current_local_skills_home().and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    {
+        roots.push(local_home.join("skills"));
+    }
     let mut unique = Vec::new();
     for root in roots {
         if !unique.iter().any(|seen: &PathBuf| seen == &root) {
@@ -3592,49 +3899,191 @@ fn discover_skill_files(roots: &[std::path::PathBuf]) -> Vec<SkillFile> {
 }
 
 #[cfg(feature = "ssr")]
-fn save_named_skill_in(roots: &[std::path::PathBuf], name: &str, text: &str) -> Result<(), ()> {
-    if !skill_dir_name_ok(name) {
-        return Err(());
-    }
-    let Some(file) = discover_skill_files(roots)
-        .into_iter()
-        .find(|file| file.name == name)
-    else {
-        return Err(());
-    };
-    let canonical = std::fs::canonicalize(&file.path).map_err(|_| ())?;
+fn writable_skill_path(
+    roots: &[std::path::PathBuf],
+    file: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(file).ok()?;
     let allowed = roots.iter().any(|root| {
         std::fs::canonicalize(root)
             .ok()
-            .is_some_and(|root| canonical.starts_with(&root))
+            .is_some_and(|root| canonical.starts_with(root))
     });
     if !allowed || canonical.file_name().and_then(|part| part.to_str()) != Some("SKILL.md") {
-        return Err(());
+        return None;
     }
-    std::fs::write(&canonical, text).map_err(|_| ())
+    if std::fs::metadata(&canonical).ok()?.permissions().readonly() {
+        return None;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&canonical)
+        .ok()?;
+    Some(canonical)
 }
 
 #[cfg(feature = "ssr")]
-fn save_named_skill(name: &str, text: &str) -> Result<(), ()> {
-    save_named_skill_in(&product_skill_roots(), name, text)
+fn is_managed_skill_path(path: &std::path::Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let under = |root: std::path::PathBuf| {
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|root| path.starts_with(root))
+    };
+    current_skill_runtime_home().is_some_and(|root| under(root.join("releases")))
+        || std::env::var_os("VIBECRAFTED_RUNTIME_ROOT")
+            .filter(|root| !root.is_empty())
+            .is_some_and(|root| under(std::path::PathBuf::from(root)))
+        || current_local_skills_home().is_some_and(under)
+}
+
+#[cfg(feature = "ssr")]
+fn skill_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(feature = "ssr")]
+#[derive(Debug, PartialEq, Eq)]
+enum SaveSkillError {
+    Invalid,
+    Conflict,
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill_in(
+    roots: &[std::path::PathBuf],
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
+) -> Result<String, SaveSkillError> {
+    if !skill_dir_name_ok(name)
+        || expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SaveSkillError::Invalid);
+    }
+    let file = discover_skill_files(roots)
+        .into_iter()
+        .find(|file| file.name == name)
+        .ok_or(SaveSkillError::Invalid)?;
+    let canonical = writable_skill_path(roots, &file.path).ok_or(SaveSkillError::Invalid)?;
+    // Failed reads, including invalid UTF-8, must never become blank saves.
+    let current = std::fs::read_to_string(&canonical).map_err(|_| SaveSkillError::Invalid)?;
+    if skill_sha256(current.as_bytes()) != expected_sha256 {
+        return Err(SaveSkillError::Conflict);
+    }
+    // This check guards cooperative writers, but is not atomic against writers
+    // that change the file between read and write.
+    std::fs::write(&canonical, text).map_err(|_| SaveSkillError::Invalid)?;
+    Ok(skill_sha256(text.as_bytes()))
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill_for(
+    roots: &[std::path::PathBuf],
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
+) -> Result<serde_json::Value, crate::skills_bridge::BridgeError> {
+    use crate::skills_bridge::BridgeError;
+    let file = discover_skill_files(roots)
+        .into_iter()
+        .find(|file| file.name == name)
+        .ok_or(BridgeError::Invalid)?;
+    if is_managed_skill_path(&file.path) {
+        let saved = crate::skills_bridge::publish(name, text, expected_sha256)?;
+        Ok(
+            serde_json::json!({ "expected_sha256": saved.revision, "origin": saved.origin, "activation": saved.activation, "views": saved.views }),
+        )
+    } else {
+        match save_named_skill_in(roots, name, text, expected_sha256) {
+            Ok(revision) => {
+                Ok(serde_json::json!({ "expected_sha256": revision, "origin": "user" }))
+            }
+            Err(SaveSkillError::Invalid) => Err(BridgeError::Invalid),
+            Err(SaveSkillError::Conflict) => Err(BridgeError::Conflict),
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn save_named_skill(
+    name: &str,
+    text: &str,
+    expected_sha256: &str,
+) -> Result<serde_json::Value, crate::skills_bridge::BridgeError> {
+    save_named_skill_for(&product_skill_roots(), name, text, expected_sha256)
+}
+
+#[cfg(all(feature = "ssr", any(test, not(feature = "hydrate"))))]
+fn build_skills_snapshot_in(
+    roots: &[std::path::PathBuf],
+    requested: Option<&str>,
+) -> SkillsSnapshot {
+    let files = discover_skill_files(roots);
+    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
+    let selected = match requested {
+        Some(name) => files.iter().find(|file| file.name == name),
+        None => files.first(),
+    };
+    let open = selected.map(|file| file.name.clone());
+    let managed = selected.is_some_and(|file| is_managed_skill_path(&file.path));
+    // Managed documents must be read through their selected owner, not a view.
+    let content = if managed {
+        None
+    } else {
+        selected.and_then(|file| std::fs::read_to_string(&file.path).ok())
+    };
+    let read_ok = content.is_some();
+    let writable =
+        read_ok && selected.is_some_and(|file| writable_skill_path(roots, &file.path).is_some());
+    let expected_sha256 = content
+        .as_ref()
+        .map(|text| skill_sha256(text.as_bytes()))
+        .unwrap_or_default();
+    SkillsSnapshot {
+        names,
+        open,
+        text: content.unwrap_or_default(),
+        read_ok,
+        writable,
+        expected_sha256,
+        managed,
+        origin: String::new(),
+        read_error: String::new(),
+    }
 }
 
 #[cfg(all(feature = "ssr", not(feature = "hydrate")))]
 fn build_skills_snapshot(open: Option<&str>) -> SkillsSnapshot {
-    let files = discover_skill_files(&product_skill_roots());
-    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
-    let open = open.and_then(|name| {
-        names
-            .iter()
-            .any(|known| known == name)
-            .then(|| name.to_string())
-    });
-    let text = open
-        .as_ref()
-        .and_then(|name| files.iter().find(|file| file.name == *name))
-        .and_then(|file| std::fs::read_to_string(&file.path).ok())
-        .unwrap_or_default();
-    SkillsSnapshot { names, open, text }
+    let roots = product_skill_roots();
+    let mut snapshot = build_skills_snapshot_in(&roots, open);
+    if snapshot.managed {
+        match crate::skills_bridge::read(snapshot.open.as_deref().unwrap_or_default()) {
+            Ok(data) => {
+                snapshot.text = data.text;
+                snapshot.expected_sha256 = data.revision;
+                snapshot.read_ok = true;
+                snapshot.writable = data.writable;
+                snapshot.origin = data.origin;
+            }
+            Err(_) => {
+                snapshot.text.clear();
+                snapshot.expected_sha256.clear();
+                snapshot.read_ok = false;
+                snapshot.writable = false;
+                snapshot.read_error =
+                    "The local skill owner is unavailable or its state needs attention."
+                        .to_string();
+            }
+        }
+    }
+    snapshot
 }
 
 #[cfg(feature = "hydrate")]
@@ -3669,64 +4118,127 @@ fn skills_snapshot(open: Option<String>) -> SkillsSnapshot {
     SkillsSnapshot::empty()
 }
 
+// Leptos treats textarea children as raw text during SSR. Encode the body
+// explicitly so a skill containing `</textarea>` cannot escape the control.
+// Character references also preserve a leading newline, which the HTML parser
+// otherwise strips immediately after the opening textarea tag.
+fn encode_skill_textarea(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
+}
+
 fn skills_room(snapshot: SkillsSnapshot) -> impl IntoView {
-    if let Some(name) = snapshot.open.clone() {
-        let text = snapshot.text;
-        view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <aside class="doc-pane" data-skills-body="editor" aria-label="Skills">
-                    <article class="doc-sheet">
-                        <form class="skills-editor" method="post" action="/api/skills/file">
-                            <input type="hidden" name="name" value=name.clone() />
-                            <textarea class="skills-document" name="text">{text}</textarea>
-                            <button type="submit">"Save"</button>
-                        </form>
-                    </article>
-                </aside>
-                <a class="skills-back" href="/skills" rel="external">"Skills"</a>
-            </main>
-        }
-        .into_any()
-    } else if snapshot.names.is_empty() {
-        view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <p class="skills-empty" data-skills-state="empty">"Skills"</p>
-            </main>
-        }
-        .into_any()
+    let open = snapshot.open.clone();
+    let tabs = snapshot.names.iter().map(|name| {
+        let href = format!("/skills/{name}");
+        let active = open.as_ref() == Some(name);
+        let class = if active { "tab is-active" } else { "tab" };
+        let current = if active { "page" } else { "false" };
+        view! { <a class=class href=href rel="external" data-skill-name=name.clone() aria-current=current><span>{name.clone()}</span><small>"SKILL.md"</small></a> }
+    }).collect_view();
+    let count = snapshot.names.len();
+    let state = if open.is_none() {
+        "Select a skill"
+    } else if !snapshot.read_ok {
+        "Read failed"
+    } else if snapshot.managed && snapshot.origin == "local" {
+        "Local version"
+    } else if snapshot.managed {
+        "Packaged original"
+    } else if snapshot.writable {
+        "Writable"
     } else {
-        let names = snapshot.names;
+        "Read-only"
+    };
+    let detail = if open.is_none() {
+        "Choose a skill from the index."
+    } else if !snapshot.read_ok && !snapshot.read_error.is_empty() {
+        snapshot.read_error.as_str()
+    } else if !snapshot.read_ok {
+        "This skill could not be read; editing is unavailable."
+    } else if snapshot.managed && snapshot.writable {
+        "Save creates a local version. Agent views are checked when it is published."
+    } else if snapshot.managed {
+        "The local version publisher is unavailable in this generation."
+    } else if snapshot.writable {
+        "This skill can be saved in its current location."
+    } else {
+        "The current location is outside the allowed writable roots or is not writable."
+    }
+    .to_string();
+    let title = open.clone().unwrap_or_else(|| "Select a skill".to_string());
+    let edit_button = (snapshot.writable && snapshot.read_ok).then(
+        || view! { <button type="button" class="render-mode-btn" data-skill-edit>"Edit"</button> },
+    );
+    let document = if let Some(name) = open.filter(|_| snapshot.read_ok) {
+        let text = snapshot.text;
+        let textarea_body = encode_skill_textarea(&text);
+        let read_only = !snapshot.writable;
+        let expected_sha256 = snapshot.expected_sha256;
         view! {
-            <main class="skills-room" data-skills-room>
-                <h1>"Skills"</h1>
-                <ul class="skills-list" data-skills-body="list">
-                    {names
-                        .into_iter()
-                        .map(|name| {
-                            let href = format!("/skills/{name}");
-                            view! {
-                                <li><a href=href rel="external">{name}</a></li>
-                            }
-                        })
-                        .collect_view()}
-                </ul>
-            </main>
-        }
-        .into_any()
+            <article class="artifact-panel is-active" data-render-mode="rich" data-skills-body="editor">
+                <form class="editor-form" method="post" action="/api/skills/file">
+                    <input type="hidden" name="name" value=name />
+                    <input type="hidden" name="expected_sha256" value=expected_sha256 />
+                    <div class="editor-body">
+                        <div class="rich-pane md-body">{text.clone()}</div>
+                        <textarea class="raw-pane" name="text" hidden readonly=read_only inner_html=textarea_body></textarea>
+                    </div>
+                </form>
+            </article>
+        }.into_any()
+    } else {
+        let empty_state = if count == 0 { "empty" } else { "unavailable" };
+        let message = detail.clone();
+        view! { <p class="skills-empty" data-skills-state=empty_state>{message}</p> }.into_any()
+    };
+    view! {
+        <div class="server-route-document skills-studio" data-skills-room>
+            <div class="review-shell">
+                <nav class="review-sidebar" aria-label="Skill index">
+                    <div class="review-sidebar-head"><div class="brand">"Skill index"</div></div>
+                    <div class="summary"><strong>"Skills"</strong><span>{format!("{count} skills")}</span></div>
+                    <label class="plan-search">"Search"<input type="search" data-skill-search placeholder="Search skills" /></label>
+                    <div class="tabs">{tabs}</div>
+                </nav>
+                <div class="review-workspace">
+                    <header class="review-topbar" aria-label="Active skill strip">
+                        <div class="review-topbar-id"><span class="mono-cap">"Skill"</span><strong>{title}</strong><span class="path">"SKILL.md"</span></div>
+                        <div class="review-topbar-actions" id="skill-actions">{edit_button}<span class="checkpoint-state" data-skill-state>{state}</span></div>
+                    </header>
+                    <section class="review-main" aria-label="Skill document">{document}</section>
+                    <footer class="review-statusbar" aria-label="Document statistics"><span><b data-skill-mode>"rich"</b>" view"</span><span data-skill-chars>"0 chars"</span><span data-skill-lines>"0 lines"</span></footer>
+                </div>
+                <aside class="review-inspector" aria-label="Skill status"><div class="inspector-head mono-cap">"Inspector"</div><div class="inspector-block"><h3>"Status"</h3><p class="inspector-pill" data-skill-state>{state}</p><p class="inspector-hint">{detail}</p><p class="inspector-meta" data-activation>{if snapshot.managed { "Agent views: not checked" } else { "" }}</p><p class="inspector-meta" data-save-status>{if snapshot.read_ok { "Loaded" } else { "Unavailable" }}</p></div></aside>
+            </div>
+        </div>
     }
 }
 
 fn skills_page(snapshot: SkillsSnapshot) -> impl IntoView {
     let embed = encode_skills_embed(&snapshot);
     let room = skills_room(snapshot);
+    let script = include_str!("scaffold/skills-studio.js")
+        .replace(
+            "/* SHARED_MARKDOWN */",
+            include_str!("scaffold/markdown.js"),
+        )
+        .replace(
+            "/* SKILL_TEXT_BUFFER */",
+            include_str!("scaffold/skills-text.js"),
+        );
     view! {
         <Title text="Skills" />
-        <Meta name="description" content="Skills" />
-        <ServerFrame active=ServerSection::Overview status="skills".to_string()>
+        <Meta name="description" content="Browse and edit skills." />
+        <ServerFrame active=ServerSection::Skills status="skills".to_string()>
+            <style inner_html=include_str!("scaffold/studio.css")></style>
+            <style>".skills-studio .tab[hidden]{display:none}.skills-studio .skills-empty{padding:22px;color:var(--muted)}"</style>
             {room}
             <script id="vc-skills-data" type="application/json" inner_html=embed></script>
+            <script inner_html=script></script>
         </ServerFrame>
     }
 }
@@ -3748,19 +4260,54 @@ pub fn SkillEditorPage() -> impl IntoView {
 struct SaveSkillForm {
     name: String,
     #[serde(default)]
+    expected_sha256: String,
     text: String,
 }
 
 #[cfg(feature = "ssr")]
 async fn save_skill_form(
+    headers: axum::http::HeaderMap,
     axum::extract::Form(form): axum::extract::Form<SaveSkillForm>,
 ) -> impl axum::response::IntoResponse {
+    use crate::skills_bridge::BridgeError;
     use axum::response::IntoResponse;
-
-    if save_named_skill(&form.name, &form.text).is_ok() && skill_dir_name_ok(&form.name) {
-        axum::response::Redirect::to(&format!("/skills/{}", form.name)).into_response()
-    } else {
-        (axum::http::StatusCode::BAD_REQUEST, "Skills").into_response()
+    let redirect_name = form.name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        save_named_skill(&form.name, &form.text, &form.expected_sha256)
+    })
+    .await;
+    match result {
+        Ok(Ok(receipt))
+            if headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|value| value.to_str().ok())
+                == Some("application/json") =>
+        {
+            axum::Json(receipt).into_response()
+        }
+        Ok(Ok(_)) => {
+            axum::response::Redirect::to(&format!("/skills/{redirect_name}")).into_response()
+        }
+        Ok(Err(BridgeError::Conflict)) => (
+            axum::http::StatusCode::CONFLICT,
+            "Skill changed since it was opened.",
+        )
+            .into_response(),
+        Ok(Err(BridgeError::Invalid)) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Skill could not be saved.",
+        )
+            .into_response(),
+        Ok(Err(BridgeError::Unavailable)) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Local skill owner unavailable.",
+        )
+            .into_response(),
+        Ok(Err(BridgeError::UnknownOutcome)) | Err(_) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            "Save could not be confirmed; inspect the current version before retrying.",
+        )
+            .into_response(),
     }
 }
 
@@ -6374,13 +6921,6 @@ pub(crate) mod tests {
         fs::remove_dir_all(home).ok();
     }
 
-    fn skills_room_html(html: &str) -> &str {
-        let marker_at = html.find("data-skills-room").expect("skills room");
-        let start = html[..marker_at].rfind("<main").expect("skills main");
-        let end = html[start..].find("</main>").expect("skills room end") + start + "</main>".len();
-        &html[start..end]
-    }
-
     fn render_skills(snapshot: super::SkillsSnapshot) -> String {
         let owner = Owner::new();
         owner.with(|| {
@@ -6390,101 +6930,251 @@ pub(crate) mod tests {
         })
     }
 
+    #[test]
+    fn skills_home_resolution_matches_selected_platform_defaults() {
+        let home = std::path::PathBuf::from("/users/home");
+        let profile = std::path::PathBuf::from("/users/profile");
+        let local = std::path::PathBuf::from("/users/local");
+        assert_eq!(
+            super::skill_profile_home(Some(home.clone()), Some(profile.clone()), true),
+            Some(profile.clone())
+        );
+        assert_eq!(
+            super::expand_skill_home(std::path::PathBuf::from("~/custom"), Some(&profile)),
+            profile.join("custom")
+        );
+
+        assert_eq!(
+            super::skill_profile_home(Some(home.clone()), Some(profile.clone()), false),
+            Some(home.clone())
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, None, Some(profile.clone()), Some(local.clone()), true),
+            Some(local.join("Vibecrafted"))
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, None, Some(home.clone()), None, false),
+            Some(home.join(".local/share/vibecrafted"))
+        );
+        assert_eq!(
+            super::skill_runtime_home(None, Some(local.clone()), Some(profile), None, true),
+            Some(local.join("vibecrafted"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_skill_shadowing_a_packaged_name_stays_user_owned() {
+        use std::os::unix::fs::symlink;
+        let home = temp_home();
+        let user = home.join("user");
+        let views = home.join("views");
+        let packaged = home.join("release/vc-alpha");
+        fs::create_dir_all(user.join("vc-alpha")).unwrap();
+        fs::create_dir_all(&views).unwrap();
+        fs::create_dir_all(&packaged).unwrap();
+        fs::write(user.join("vc-alpha/SKILL.md"), "my skill").unwrap();
+        fs::write(packaged.join("SKILL.md"), "packaged original").unwrap();
+        symlink(&packaged, views.join("vc-alpha")).unwrap();
+        let roots = [user.clone(), views];
+        let snapshot = super::build_skills_snapshot_in(&roots, Some("vc-alpha"));
+        assert!(!snapshot.managed && snapshot.writable);
+        assert_eq!(snapshot.text, "my skill");
+        let receipt = super::save_named_skill_for(
+            &roots,
+            "vc-alpha",
+            "my updated skill",
+            &snapshot.expected_sha256,
+        )
+        .unwrap();
+        assert_eq!(receipt["origin"], "user");
+        assert_eq!(
+            fs::read_to_string(user.join("vc-alpha/SKILL.md")).unwrap(),
+            "my updated skill"
+        );
+        assert_eq!(
+            fs::read_to_string(packaged.join("SKILL.md")).unwrap(),
+            "packaged original"
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
     pub(crate) fn skills_one_list_then_one_editor() {
         let home = temp_home();
         let root = home.join("skills");
         let other = home.join("view");
-        fs::create_dir_all(root.join("vc-alpha")).expect("alpha dir");
-        fs::create_dir_all(root.join("vc-beta")).expect("beta dir");
-        fs::create_dir_all(root.join("not-a-skill")).expect("decoy dir");
-        fs::create_dir_all(root.join("plans")).expect("plans dir");
-        fs::create_dir_all(root.join("vc-gamma")).expect("gamma dir");
-        fs::create_dir_all(&other).expect("second root");
-        fs::write(root.join("vc-alpha/SKILL.md"), "alpha body").expect("alpha skill");
-        fs::write(root.join("vc-alpha/NOTES.md"), "leave this file").expect("notes");
-        fs::write(root.join("vc-beta/SKILL.md"), "beta body").expect("beta skill");
-        fs::write(root.join("not-a-skill/SKILL.md"), "not listed").expect("decoy skill");
-        fs::write(root.join("plans/plan.md"), "plan card").expect("plan file");
-        fs::write(root.join("vc-gamma/README.md"), "no skill file").expect("gamma readme");
-        std::os::unix::fs::symlink(root.join("vc-alpha"), other.join("vc-alpha")).expect("symlink");
-
-        let files = super::discover_skill_files(&[root.clone(), other.clone()]);
-        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
-        assert_eq!(names, ["vc-alpha", "vc-beta"]);
-
-        let list = render_skills(super::SkillsSnapshot {
-            names: files.iter().map(|file| file.name.clone()).collect(),
-            open: None,
-            text: String::new(),
-        });
-        let list_room = skills_room_html(&list);
-        assert_eq!(list.matches("<h1").count(), 1);
-        assert_eq!(list_room.matches("<h1").count(), 1);
-        assert!(list_room.contains(">Skills<"));
-        assert_eq!(list_room.matches("<ul").count(), 1);
-        assert!(list_room.contains("class=\"skills-list\""));
-        assert!(list_room.contains("href=\"/skills/vc-alpha\""));
-        assert!(list_room.contains("href=\"/skills/vc-beta\""));
-        assert!(!list_room.contains("<textarea"));
-        assert!(!list.contains("plan-card"));
-        assert!(!list.contains("data-ppm=\"plan\""));
-        assert!(!list_room.contains("not-a-skill"));
-        assert!(!list_room.contains("vc-gamma"));
-
-        let editor = render_skills(super::SkillsSnapshot {
-            names: vec!["vc-alpha".into(), "vc-beta".into()],
+        let managed = home.join("release/vc-managed");
+        for path in [
+            root.join("vc-alpha"),
+            root.join("vc-beta"),
+            other.join("vc-alpha"),
+            managed.clone(),
+        ] {
+            fs::create_dir_all(path).expect("skill dir");
+        }
+        fs::write(
+            root.join("vc-alpha/SKILL.md"),
+            "# Alpha\n</textarea><script>alert(1)</script>",
+        )
+        .unwrap();
+        fs::write(other.join("vc-alpha/SKILL.md"), "shadow").unwrap();
+        fs::write(root.join("vc-beta/SKILL.md"), "").unwrap();
+        fs::write(managed.join("SKILL.md"), "managed").unwrap();
+        std::os::unix::fs::symlink(&managed, root.join("vc-managed")).unwrap();
+        let roots = [root.clone(), other.clone()];
+        let snapshot = super::build_skills_snapshot_in(&roots, None);
+        assert_eq!(snapshot.names, ["vc-alpha", "vc-beta", "vc-managed"]);
+        assert_eq!(snapshot.open.as_deref(), Some("vc-alpha"));
+        assert!(snapshot.read_ok && snapshot.writable);
+        let html = render_skills(snapshot);
+        assert!(html.contains("review-shell"));
+        assert!(html.contains("review-sidebar"));
+        assert!(html.contains("review-inspector"));
+        assert!(html.contains("review-statusbar"));
+        assert!(html.contains("data-skill-search"));
+        assert!(html.contains(r#"href="/skills/vc-beta""#));
+        assert_eq!(
+            html.matches(r#"class="artifact-panel is-active""#).count(),
+            1
+        );
+        assert!(html.contains("data-skill-edit"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;/textarea&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("</textarea><script>alert(1)</script>"));
+        assert_eq!(
+            super::encode_skill_textarea("\n<&>\r"),
+            "&#10;&lt;&amp;&gt;&#13;"
+        );
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("/api/scaffold/status"));
+        assert!(html.contains("beforeunload"));
+        assert!(html.contains("popstate"));
+        assert!(html.contains("Save could not be confirmed. Your edits are still here."));
+        assert!(html.contains("\\u003cscript>"));
+        let skill_nav: Vec<&str> = html
+            .split("<a ")
+            .filter_map(|fragment| fragment.split('>').next())
+            .filter(|tag| tag.contains(r#"href="/skills""#))
+            .collect();
+        assert_eq!(skill_nav.len(), 2); // desktop sidebar and mobile navigation
+        assert!(
+            skill_nav
+                .iter()
+                .all(|tag| tag.contains(r#"class="server-nav-link is-active""#))
+        );
+        let overview_nav: Vec<&str> = html
+            .split("<a ")
+            .filter_map(|fragment| fragment.split('>').next())
+            .filter(|tag| tag.contains(r#"href="/""#))
+            .filter(|tag| tag.contains("server-nav-link"))
+            .collect();
+        assert_eq!(overview_nav.len(), 2);
+        assert!(overview_nav.iter().all(|tag| !tag.contains("is-active")));
+        let empty_file = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
+        assert!(empty_file.read_ok && empty_file.writable && empty_file.text.is_empty());
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).unwrap(),
+            super::skill_sha256(b"")
+        );
+        let managed_file = super::build_skills_snapshot_in(&roots, Some("vc-managed"));
+        assert!(managed_file.read_ok && !managed_file.writable);
+        let managed_html = render_skills(managed_file);
+        assert!(managed_html.contains("Read-only"));
+        assert!(
+            !managed_html
+                .contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#)
+        );
+        assert!(
+            super::save_named_skill_in(
+                &roots,
+                "vc-managed",
+                "no",
+                &super::skill_sha256(b"managed")
+            )
+            .is_err()
+        );
+        fs::write(root.join("vc-beta/SKILL.md"), [0xff]).unwrap();
+        let unreadable = super::build_skills_snapshot_in(&roots, Some("vc-beta"));
+        assert!(!unreadable.read_ok && !unreadable.writable);
+        assert!(render_skills(unreadable).contains("Read failed"));
+        assert!(
+            super::save_named_skill_in(&roots, "vc-beta", "", &super::skill_sha256(b"")).is_err()
+        );
+        assert_eq!(fs::read(root.join("vc-beta/SKILL.md")).unwrap(), [0xff]);
+        assert!(
+            super::save_named_skill_in(&roots, "../vc-alpha", "no", &super::skill_sha256(b""))
+                .is_err()
+        );
+        assert!(
+            super::save_named_skill_in(&roots, "vc-missing", "no", &super::skill_sha256(b""))
+                .is_err()
+        );
+        let old_hash = super::skill_sha256(b"# Alpha\n</textarea><script>alert(1)</script>");
+        assert!(html.contains(&format!(r#"name="expected_sha256" value="{}""#, old_hash)));
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-alpha", "updated", ""),
+            Err(super::SaveSkillError::Invalid)
+        );
+        assert_eq!(
+            super::save_named_skill_in(
+                &roots,
+                "vc-alpha",
+                "updated",
+                &super::skill_sha256(b"stale")
+            ),
+            Err(super::SaveSkillError::Conflict)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(),
+            "# Alpha\n</textarea><script>alert(1)</script>"
+        );
+        let new_hash =
+            super::save_named_skill_in(&roots, "vc-alpha", "updated", &old_hash).unwrap();
+        assert_eq!(new_hash, super::skill_sha256(b"updated"));
+        assert_eq!(
+            super::save_named_skill_in(&roots, "vc-alpha", "stale save", &old_hash),
+            Err(super::SaveSkillError::Conflict)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("vc-alpha/SKILL.md")).unwrap(),
+            "updated"
+        );
+        assert_eq!(
+            fs::read_to_string(other.join("vc-alpha/SKILL.md")).unwrap(),
+            "shadow"
+        );
+        let managed_snapshot = super::SkillsSnapshot {
+            names: vec!["vc-alpha".into()],
             open: Some("vc-alpha".into()),
-            text: "alpha body".into(),
+            text: "local document".into(),
+            read_ok: true,
+            writable: true,
+            expected_sha256: super::skill_sha256(b"local document"),
+            managed: true,
+            origin: "local".into(),
+            read_error: String::new(),
+        };
+        let managed_html = render_skills(managed_snapshot.clone());
+        assert!(managed_html.contains("Local version"));
+        assert!(managed_html.contains("Agent views: not checked"));
+        assert!(managed_html.contains("data-skill-edit"));
+        let failed_html = render_skills(super::SkillsSnapshot {
+            read_ok: false,
+            writable: false,
+            text: String::new(),
+            read_error: "The local skill owner is unavailable or its state needs attention.".into(),
+            ..managed_snapshot
         });
-        let editor_room = skills_room_html(&editor);
-        assert_eq!(editor.matches("<h1").count(), 1);
-        assert!(editor_room.contains(">Skills<"));
-        assert_eq!(editor_room.matches("<ul").count(), 0);
-        assert!(!editor_room.contains("skills-list"));
-        assert_eq!(editor_room.matches("<textarea").count(), 1);
-        assert!(editor_room.contains("alpha body"));
-        assert!(editor_room.contains("class=\"doc-pane\""));
-        assert!(editor_room.contains("action=\"/api/skills/file\""));
-        assert!(editor_room.contains("name=\"name\""));
-        assert!(editor_room.contains("value=\"vc-alpha\""));
-        assert!(editor_room.contains("name=\"text\""));
-        assert!(!editor.contains("plan-card"));
-        assert!(!editor_room.contains("vc-beta"));
-
-        let empty_root = home.join("empty-skills");
-        fs::create_dir_all(&empty_root).expect("empty skills dir");
-        assert!(super::discover_skill_files(&[empty_root]).is_empty());
-        let empty = render_skills(super::SkillsSnapshot::empty());
-        let empty_room = skills_room_html(&empty);
-        assert_eq!(empty.matches("<h1").count(), 1);
-        assert!(empty_room.contains(">Skills<"));
-        assert!(empty_room.contains("data-skills-state=\"empty\""));
-        assert_eq!(empty_room.matches("<ul").count(), 0);
-        assert!(!empty_room.contains("<textarea"));
-        assert!(!empty.contains("plan-card"));
-
-        super::save_named_skill_in(&[root.clone(), other], "vc-alpha", "rewritten skill")
-            .expect("save the open skill");
-        assert_eq!(
-            fs::read_to_string(root.join("vc-alpha/SKILL.md")).expect("reread alpha"),
-            "rewritten skill"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("vc-alpha/NOTES.md")).expect("notes stay"),
-            "leave this file"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("vc-beta/SKILL.md")).expect("beta stays"),
-            "beta body"
-        );
+        assert!(failed_html.contains("local skill owner is unavailable"));
         assert!(
-            super::save_named_skill_in(std::slice::from_ref(&root), "../vc-alpha", "nope").is_err()
+            !failed_html
+                .contains(r#"<button type="button" class="render-mode-btn" data-skill-edit"#)
         );
+        let missing = super::build_skills_snapshot_in(&roots, Some("vc-missing"));
+        assert!(missing.open.is_none());
         assert!(
-            super::save_named_skill_in(std::slice::from_ref(&root), "vc-missing", "nope").is_err()
+            render_skills(super::SkillsSnapshot::empty()).contains(r#"data-skills-state="empty""#)
         );
-        assert!(super::save_named_skill_in(&[root], "not-a-skill", "nope").is_err());
-
         fs::remove_dir_all(home).ok();
     }
 

@@ -180,6 +180,7 @@ def private_child_command(
         "/usr/bin/tail",
         "/usr/bin/sort",
         "/usr/bin/find",
+        "/usr/bin/file",
         "/usr/bin/tar",
         "/usr/bin/mktemp",
         "/usr/bin/openssl",
