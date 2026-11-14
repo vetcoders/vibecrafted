@@ -42,14 +42,19 @@ git rev-parse HEAD
 git -C ../vc-terminal status --porcelain
 git -C ../vc-frame status --porcelain
 python3 scripts/version_bump.py --check
-vc-dou --floor
-vc-release --floor
 make check
 make unified-product-contract-gate
 make test-core
 make semgrep
 make test-source
 ```
+
+`vc-dou --floor` and `vc-release --floor` are not green at this point.
+`channel` and `github_release` are `dou = fail` and `release = fail` until the
+website channel and the GitHub Release name this `VERSION`. Running either
+command here fails for that reason, and `make publish-release` refuses to
+start when `vc-release --floor` exits 1. Section 6 is the order that makes
+the ship gate pass: move the channel first, then run the floor, then publish.
 
 Run pytest with `PYTHONPATH` unset and an isolated `VIBECRAFTED_HOME`.
 `tests/tui` and `vibecrafted-core/tests` require separate pytest invocations.
@@ -236,11 +241,26 @@ site to the Caddy host). Its `scripts/sync-docs.sh` mirrors this repository's
 redirect stub, `docs/CNAME` is historical, and `.github/workflows/static.yml`
 is disabled; none of them serve the domain.
 
-`make publish-release` does not update the website, and it now refuses to
+`make publish-release` does not update the website, and it refuses to
 start when `vc-release --floor` exits 1. A GitHub Release can therefore be
 a different version from what `curl -fsSL https://vibecrafted.io/install.sh | bash`
 installs. The floor compares `VERSION`, the channel, GitHub Releases, and the
 site metadata; a historical channel reading is not a current version.
+
+Ship order for this repository:
+
+1. Publish the website channel from `vetcoders/vibecrafted-io`
+   (`make site-release` there) so `channel/main.json` and the site metadata
+   name this `VERSION`. Do not run `make site-release` from this tree.
+2. `vc-release --floor` in this checkout. A missing GitHub Release for the
+   tag being cut is a warning, because the next step creates it. Channel or
+   registry disagreement is still a failure. A known gap is
+   `make publish-release ACKNOWLEDGE="<surface-id>"`, which forwards only
+   surface ids.
+3. `make publish-release`.
+4. `vc-dou --floor` after the Release exists. It stays red until the channel,
+   the site, and the GitHub Release all name this `VERSION`. That is the
+   definition-of-undone check, not a preflight that can pass before step 1.
 
 This tree's `install.sh` accepts a channel only when:
 

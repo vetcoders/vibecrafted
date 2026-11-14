@@ -100,9 +100,15 @@ pushing a tag and stopping is not a finished release. `--require-release`
 fails until the Release object for that version exists. `scripts/publish-vibecrafted-release.sh`
 runs the preflight and refuses to open a draft when the floor exits `1`.
 
-Do not publish, and do not tell a stranger to install, while `install_cta: no`.
+Publish when the floor exits 0. `install_cta: no` means do not tell a stranger
+to install; it does not by itself block the Release this stage creates. When
+the only gap is the GitHub Release this publisher is about to create, the floor
+warns and exits 0, and `install_cta` stays `no` until that Release exists.
 `--acknowledge <surface-id>` records an accepted gap; it is the written risk
 acceptance this skill already requires, and it stays in the report.
+`scripts/publish-vibecrafted-release.sh --acknowledge <surface-id>` and
+`make publish-release ACKNOWLEDGE="<surface-id>"` forward that id and reject
+any other floor argument.
 Contract: [`../vc-dou/references/public-surface-floor.md`](../vc-dou/references/public-surface-floor.md).
 
 ## Core Rule

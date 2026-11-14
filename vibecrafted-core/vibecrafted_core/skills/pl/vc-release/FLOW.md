@@ -23,6 +23,7 @@ flowchart TD
 | ----------------------------- | ----------------------- | ----------------------------------- | ------------------ |
 | `vibecrafted release <agent>` | `--prompt` lub `--file` | raport release'u, transcript i meta | `0` przy dispatchu |
 | `vc-release <agent>`          | to samo                 | to samo                             | `0` przy dispatchu |
+| `vc-release --floor`          | `--require-release`     | bramka wydania powierzchni publicznej | `1` przy rozjeździe |
 
 ### Krawędzie eskalacji
 

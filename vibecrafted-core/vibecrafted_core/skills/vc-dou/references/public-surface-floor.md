@@ -16,9 +16,10 @@ vc-release --floor --require-release   # the Release object must exist
 ```
 
 The same entry point is `python -m vibecrafted_core.public_surface {dou|hydrate|release}`.
-Config is `packaging/public-surfaces/<product>.toml`, or `--config PATH`.
+Config is `packaging/public-surfaces/<product>.toml` in a source checkout, or `--config PATH`.
+An installed wheel carries the same files in `vibecrafted_core/public_surfaces` and uses that copy when the current repository has no catalog of its own.
 
-Exit `0` is a pass. Warnings are still printed and are not a silent green: an unproven registry says `unproven, not a green pass`. Exit `1` means at least one check at `fail` for this stage. Exit `2` is a bad config. `--acknowledge <surface-id>` downgrades that surface's fail to a warning and keeps it in the report; the install call-to-action stays blocked.
+Exit `0` is a pass. Warnings are still printed and are not a silent green: an unproven registry says `unproven, not a green pass`. Exit `1` means at least one check at `fail` for this stage. Exit `2` is a bad config. `--acknowledge <surface-id>` downgrades that surface's fail to a warning and keeps it in the report; the install call-to-action stays blocked. When `expect = "agree"`, each disagreeing surface keeps its own severity and its own id, and the `consensus` line is the rollup. Acknowledging every failing surface also downgrades that rollup. A warn-only surface, such as a Homebrew tap or Pensieve's site text at release, does not fail the stage by itself. A 404 from `/releases/latest` during `vc-release` is a warning only when `--allow-missing-release` names the version being cut and `--require-release` is absent. Any other fetch error, and a missing Release under `--require-release`, stays a failure.
 
 `install_cta: yes` is allowed only when the README (when this checkout is the product) has an install command and every surface marked `install` agrees. Otherwise the report says `install_cta: no`. Do not tell anyone to install while that line says no.
 
@@ -53,4 +54,4 @@ Copy `packaging/public-surfaces/screenscribe.toml`. Name only the registries tha
 
 ## What a red floor does not do
 
-It does not bump `VERSION`, cut a tag, open a GitHub Release, or deploy a site. Those stay operator buttons. `scripts/publish-vibecrafted-release.sh` runs `vc-release --floor` and stops when the floor exits `1`, before it creates a draft. The missing Release for the tag being published is allowed at that moment (`--allow-missing-release`); everything else is not.
+It does not bump `VERSION`, cut a tag, open a GitHub Release, or deploy a site. Those stay operator buttons. `scripts/publish-vibecrafted-release.sh` runs `vc-release --floor` and stops when the floor exits `1`, before it creates a draft. The missing Release for the tag being published is allowed at that moment (`--allow-missing-release`); everything else is not. The script and `make publish-release` accept `--acknowledge <surface-id>` (Make: `ACKNOWLEDGE="<surface-id>"`) and reject any other floor argument, so a caller cannot retarget `--repo` or `--product`. `install_cta: no` tells you not to send a stranger to install. It does not, by itself, forbid publishing the Release that clears that line when the floor already exited 0.
