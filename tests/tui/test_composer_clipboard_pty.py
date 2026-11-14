@@ -184,16 +184,36 @@ class EditorPTY:
         self.send(
             f"\x1b:call writefile([string(&columns), string(&lines)], '{escaped}')\r".encode()
         )
-        self.wait(marker.exists)
-        self.drain()
-        return [int(x) for x in marker.read_text().splitlines()]
+        # writefile creates the marker before the two lines land. Reading on
+        # the first exists() observation returns an empty file under load.
+        deadline = time.monotonic() + 8
+        while True:
+            self.drain()
+            if marker.is_file():
+                lines = [
+                    line for line in marker.read_text().splitlines() if line.strip()
+                ]
+                if len(lines) >= 2:
+                    return [int(line) for line in lines]
+            assert self.process.poll() is None, bytes(self.output[-2000:])
+            assert time.monotonic() < deadline, bytes(self.output[-2000:])
+            time.sleep(0.01)
 
     def resize(self, columns: int) -> None:
         fcntl.ioctl(
             self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 18, columns, 0, 0)
         )
         os.killpg(self.process.pid, signal.SIGWINCH)
-        assert self.sync() == [columns, 18]
+        # SIGWINCH can land after the first size probe. Keep probing until
+        # Vim reports the new size instead of the size it still had.
+        deadline = time.monotonic() + 8
+        observed: list[int] = []
+        while time.monotonic() < deadline:
+            observed = self.sync()
+            if observed == [columns, 18]:
+                return
+            time.sleep(0.05)
+        assert observed == [columns, 18], observed
 
     def yank(self, keys: bytes) -> bytes:
         start = len(self.output)

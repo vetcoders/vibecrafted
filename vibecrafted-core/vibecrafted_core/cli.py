@@ -18,6 +18,7 @@ from . import doctor as doctor_module
 from .agent_stream import ANSI_PATTERN, AgentStreamParser, resolve_default_model
 from .control_plane import (
     RunNotResolved,
+    _report_denies_success,
     lookup_run,
     resolve_run,
     sync_state,
@@ -890,12 +891,19 @@ def _head_lines(
 
 
 def _run_succeeded(run: dict[str, Any]) -> bool:
-    """True when the run reached a success state with a clean artifact gate."""
+    """True when the run reached a success state with a clean artifact gate.
+
+    A present report with ``finalized: false`` or an empty claim is not
+    success, even when the provider stream printed SUCCESS and the process
+    exited 0.
+    """
     state = str(run.get("state") or "")
     errors = [str(item) for item in (run.get("artifact_errors") or []) if str(item)]
-    return (
+    if not (
         state in SUCCESS_STATES and run.get("artifact_ok") is not False and not errors
-    )
+    ):
+        return False
+    return not _report_denies_success(run)
 
 
 def _run_terminal(run: dict[str, Any]) -> bool:
@@ -1655,6 +1663,12 @@ def _observe_watch(
                 else:
                     _print_run_telemetry(_observed_telemetry(run))
                     print(f"watch:      run {run_id} is terminal ({state}); detached")
+                denial = _report_denies_success(run)
+                if denial:
+                    print(
+                        f"observe: incomplete; {denial}",
+                        file=sys.stderr,
+                    )
                 return 0 if _run_succeeded(run) else 1
             time.sleep(interval)
             fresh = lookup_run(run_id)

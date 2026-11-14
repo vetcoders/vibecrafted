@@ -68,8 +68,10 @@ jobs:
       - name: Run Semgrep security gate
         run: make semgrep
 
+      # Same installer budget as portable.yml. The macOS lane needs the
+      # extra half hour, and the job cap stays 180.
       - name: Run installer and product tests
-        timeout-minutes: 120
+        timeout-minutes: 150
         run: make test-source
         env:
           PYTEST_ADDOPTS: "-vv -o faulthandler_timeout=120"

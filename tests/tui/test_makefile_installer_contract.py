@@ -18,6 +18,18 @@ from scripts import vetcoders_install as installer
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_missing_linux_pack_die_names_source_carrier_route() -> None:
+    text = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    needle = "No prebuilt Runtime Pack available for $channel_platform on channel $ref"
+    matches = [line for line in text.splitlines() if needle in line]
+    assert len(matches) == 1
+    line = matches[0]
+    assert "--archive-file" in line
+    assert "portable source copy" in line
+    assert "still needs make" in line
+    assert "compiler" not in line
+
+
 @pytest.mark.parametrize("failure", ["fetch", "merge"])
 def test_update_refresh_failure_prevents_install(tmp_path: Path, failure: str) -> None:
     repo = tmp_path / "repo"
