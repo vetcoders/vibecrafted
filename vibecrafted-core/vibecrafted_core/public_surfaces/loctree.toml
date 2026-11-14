@@ -1,0 +1,136 @@
+# Loctree. `expect = "agree"` because a dou run from another checkout has no
+# Loctree VERSION file. Every live surface that speaks a version must match.
+# Do not add the unrelated npm package name `loctree` (the scoped packages
+# are `@loctree/loctree` and `@loctree/loct`).
+schema = 1
+product = "loctree"
+expect = "agree"
+local_root_file = "Cargo.toml"
+
+[brand]
+canonical = "Vetcoders"
+forbidden = ["VetCoders"]
+
+[[surface]]
+id = "npm_loctree"
+kind = "npm"
+package = "@loctree/loctree"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "npm_loct"
+kind = "npm"
+package = "@loctree/loct"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "crates_loctree"
+kind = "crates"
+package = "loctree"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "crates_mcp"
+kind = "crates"
+package = "loctree-mcp"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "crates_ast"
+kind = "crates"
+package = "loctree-ast"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "installer"
+kind = "json_url"
+url = "https://loctree.com/releases/index.json"
+pointer = "/current"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_loctree"
+kind = "github_release"
+repo = "Loctree/loctree"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_loct"
+kind = "github_release"
+repo = "Loctree/loct"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "github_mcp"
+kind = "github_release"
+repo = "Loctree/loctree-mcp"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "orphan_loctree"
+kind = "orphan_tags"
+repo = "Loctree/loctree"
+dou = "fail"
+release = "warn"
+
+[[surface]]
+id = "homebrew_cli"
+kind = "homebrew"
+url = "https://raw.githubusercontent.com/Loctree/homebrew-cli/HEAD/Formula/loct.rb"
+install = true
+dou = "warn"
+release = "warn"
+
+[[surface]]
+id = "homebrew_mcp"
+kind = "homebrew"
+url = "https://raw.githubusercontent.com/Loctree/homebrew-mcp/HEAD/Formula/loct-mcp.rb"
+install = true
+dou = "warn"
+release = "warn"
+
+[[surface]]
+id = "site_version"
+kind = "html_regex"
+url = "https://loctree.com/"
+pattern = 'softwareVersion"\s*:\s*"v?(?P<version>\d+\.\d+\.\d+)'
+install = false
+dou = "fail"
+release = "warn"
+
+[[surface]]
+id = "readme"
+kind = "remote_readme"
+url = "https://raw.githubusercontent.com/Loctree/loctree/main/README.md"
+require_install = true
+version_pattern = 'Loctree Engine (?P<version>\d+\.\d+\.\d+)'
+pin_commands = "fail"
+pin_prose = "warn"
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "site_brand"
+kind = "brand_html"
+url = "https://loctree.com/"
+forbidden = ["VetCoders"]
+dou = "warn"
+release = "warn"

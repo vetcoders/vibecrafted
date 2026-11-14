@@ -286,8 +286,11 @@ release-rehearsal:
 		bash "$(RELEASE_REHEARSAL_SCRIPT)"; \
 	fi
 
+# ACKNOWLEDGE is a space-separated list of surface ids
+# (`make publish-release ACKNOWLEDGE="channel site_version"`).
+# The script accepts only those ids, so this cannot retarget the product or checkout.
 publish-release:
-	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
+	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh $(foreach id,$(ACKNOWLEDGE),--acknowledge $(id))'
 
 # Rust unit tests cannot provision the selected source Python themselves.
 # Admit the exact checkout deck before exercising VOC's two real core paths.

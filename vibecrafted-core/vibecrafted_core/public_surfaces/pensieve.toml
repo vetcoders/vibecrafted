@@ -1,0 +1,22 @@
+# Pensieve. The download button follows GitHub Releases; the page text is
+# a separate publisher. `expect = "agree"` flags that split.
+schema = 1
+product = "pensieve"
+expect = "agree"
+
+[[surface]]
+id = "github_release"
+kind = "github_release"
+repo = "vetcoders/pensieve"
+install = true
+dou = "fail"
+release = "fail"
+
+[[surface]]
+id = "site_version"
+kind = "html_regex"
+url = "https://pensieve.vetcoders.io/"
+pattern = 'softwareVersion"\s*:\s*"v?(?P<version>\d+\.\d+\.\d+)'
+install = false
+dou = "fail"
+release = "warn"

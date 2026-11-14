@@ -14,7 +14,9 @@ required surface must already agree, and ``--require-release`` refuses to
 call the ship done until the Release object exists. A tag with no Release
 is not a finished release.
 
-Product config lives in ``packaging/public-surfaces/<product>.toml``.
+Product config lives in ``packaging/public-surfaces/<product>.toml`` in a
+source checkout, and in the packaged ``vibecrafted_core/public_surfaces``
+copy when the floor is installed into another repository.
 The probe reads registries and pages. It does not tag, publish, or deploy.
 """
 
@@ -49,7 +51,16 @@ COMMAND_RE = re.compile(
     r"pipx?\s+install\b|uv\s+tool\s+install\b|brew\s+install\b|go\s+install\b)",
     re.IGNORECASE,
 )
-PIN_RE = re.compile(r"(?<![\w.])v?(\d+\.\d+\.\d+)(?![\w.])", re.IGNORECASE)
+# Keep a prerelease (``1.2.3-rc.1``, ``1.2.3-rc1``) and leave platform or
+# archive suffixes (``-darwin``, ``.tar.gz``) outside the pin.
+PIN_RE = re.compile(
+    r"(?<![\w.])v?"
+    r"(\d+\.\d+\.\d+(?:-(?:rc|alpha|beta|pre|dev)\d*(?:\.\d+)*)?)"
+    r"(?:-(?:darwin|linux|windows|win32|macos|osx|arm64|aarch64|x86_64|amd64|universal)\b"
+    r"|\.(?:tar(?:\.gz)?|tgz|zip|dmg|whl|exe|msi|deb|rpm))?"
+    r"(?![\w.])",
+    re.IGNORECASE,
+)
 FENCE_RE = re.compile(r"^```", re.MULTILINE)
 KIND_DEFAULTS: dict[str, dict[str, Any]] = {
     "github_release": {"dou": "fail", "release": "fail", "install": True},
@@ -151,17 +162,19 @@ def normalize_version(raw: str) -> str:
 def catalog_dir(repo: Path | None = None) -> Path:
     """Directory of per-product floor files.
 
-    Prefers ``<repo>/packaging/public-surfaces`` and otherwise the catalog
-    shipped beside this module in a source checkout.
+    Prefers ``<repo>/packaging/public-surfaces`` when that checkout has a
+    catalog. An installed wheel, or a downstream repository that has none,
+    falls back to the copy shipped in ``vibecrafted_core/public_surfaces``.
     """
     candidates: list[Path] = []
     if repo is not None:
         candidates.append(repo / "packaging" / "public-surfaces")
+    candidates.append(Path(__file__).resolve().parent / "public_surfaces")
     candidates.append(
         Path(__file__).resolve().parents[2] / "packaging" / "public-surfaces"
     )
     for candidate in candidates:
-        if candidate.is_dir():
+        if candidate.is_dir() and any(candidate.glob("*.toml")):
             return candidate
     return candidates[0]
 
@@ -224,12 +237,27 @@ def urllib_fetch(
     *,
     timeout: float = 20,
 ) -> FetchResult:
-    """GET ``url``. HTTP errors become a result; they do not raise."""
+    """GET ``url``. HTTP errors become a result; they do not raise.
+
+    Only credential-free http(s) URLs are fetched. ``file:`` and other
+    schemes are refused so a product config cannot read the local machine.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        return FetchResult(0, "", "refusing non-http(s) or credentialed URL")
     request_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, headers=request_headers)
     try:
+        # Scheme, host, and credentials are checked above. urllib stays so the
+        # floor does not take a new HTTP dependency.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read(2_000_000)
             return FetchResult(
@@ -270,6 +298,17 @@ def render_report(report: FloorReport) -> str:
         f"floor: {verdict}  fails={report.fail_count}  warns={report.warn_count}"
     )
     return "\n".join(lines) + "\n"
+
+
+def _acknowledge(item: Finding) -> Finding:
+    return Finding(
+        "warn",
+        item.surface,
+        f"acknowledged: {item.message}",
+        item.observed,
+        item.expected,
+        item.blocks_install,
+    )
 
 
 def run_floor(
@@ -317,20 +356,24 @@ def run_floor(
         )
     acknowledged = set(acknowledge)
     adjusted: list[Finding] = []
+    downgraded = False
     for item in findings:
         if item.level == "fail" and item.surface in acknowledged:
-            adjusted.append(
-                Finding(
-                    "warn",
-                    item.surface,
-                    f"acknowledged: {item.message}",
-                    item.observed,
-                    item.expected,
-                    item.blocks_install,
-                )
-            )
+            downgraded = True
+            adjusted.append(_acknowledge(item))
         else:
             adjusted.append(item)
+    # The consensus line is a rollup. Once every concrete fail is accepted,
+    # the rollup must not keep the floor red under a different surface id.
+    if downgraded and not any(
+        item.level == "fail" and item.surface != "consensus" for item in adjusted
+    ):
+        adjusted = [
+            _acknowledge(item)
+            if item.surface == "consensus" and item.level == "fail"
+            else item
+            for item in adjusted
+        ]
     install_cta = _install_cta(config, adjusted, reference, local)
     if stage == "hydrate" and install_cta == "yes":
         install_cta = "local"
@@ -561,7 +604,11 @@ def _projection_value(kind: str, text: str, projection: Mapping[str, Any]) -> st
     if kind == "cargo":
         return _toml_table_version(text, "package")
     if kind == "json_pointer":
-        value = _pointer(json.loads(text), str(projection.get("pointer") or "/version"))
+        try:
+            document = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise FloorConfigError(f"invalid JSON ({exc})") from exc
+        value = _pointer(document, str(projection.get("pointer") or "/version"))
         if value is None:
             raise FloorConfigError(f"pointer {projection.get('pointer')} missing")
         return str(value)
@@ -842,7 +889,7 @@ def _check_live(
     allow_missing_release: set[str],
     require_release: bool,
 ) -> None:
-    observed_versions: list[tuple[str, str, bool]] = []
+    observed_versions: list[tuple[str, str, bool, str]] = []
     for surface in config.get("surface") or []:
         kind = surface["kind"]
         severity = surface["dou"] if stage == "dou" else surface["release"]
@@ -866,6 +913,25 @@ def _check_live(
             continue
         observed, error = _observe_version(surface, fetch)
         install = bool(surface.get("install"))
+        allowed_missing = {normalize_version(tag) for tag in allow_missing_release}
+        if (
+            kind == "github_release"
+            and error == "no GitHub Release"
+            and stage == "release"
+            and not require_release
+            and bool(reference)
+            and normalize_version(reference) in allowed_missing
+        ):
+            findings.append(
+                Finding(
+                    "warn",
+                    surface["id"],
+                    "no GitHub Release for the tag being published yet; "
+                    "vc-release creates it",
+                    blocks_install=install,
+                )
+            )
+            continue
         if error or not observed:
             level = "fail" if stage == "release" and severity == "fail" else "warn"
             if severity == "warn":
@@ -879,7 +945,7 @@ def _check_live(
                 )
             )
             continue
-        observed_versions.append((surface["id"], observed, install))
+        observed_versions.append((surface["id"], observed, install, severity))
         if not reference:
             findings.append(
                 Finding("ok", surface["id"], "read", observed, blocks_install=False)
@@ -916,24 +982,32 @@ def _check_live(
                 )
             )
     if not reference:
-        seen = {surface for surface, _version, _install in observed_versions}
+        seen = {
+            surface_id
+            for surface_id, _version, _install, _severity in observed_versions
+        }
         for item in findings:
-            if item.surface in seen or not item.observed or item.level != "ok":
+            if item.surface in seen or not item.observed:
                 continue
+            pin_level = item.level if item.level in {"fail", "warn"} else "fail"
             if item.surface.endswith("_pin"):
                 for pin in item.observed.split(","):
                     if pin:
-                        observed_versions.append((item.surface, pin, True))
-            elif item.surface.endswith("_version"):
-                observed_versions.append((item.surface, item.observed, True))
+                        observed_versions.append((item.surface, pin, True, pin_level))
+            elif item.surface.endswith("_version") and item.level == "ok":
+                # An agree-mode readme states a version but was not compared yet.
+                # The readme contract treats that mismatch as a failure.
+                observed_versions.append((item.surface, item.observed, True, "fail"))
         _consensus(observed_versions, findings)
 
 
 def _consensus(
-    observed: list[tuple[str, str, bool]],
+    observed: list[tuple[str, str, bool, str]],
     findings: list[Finding],
 ) -> None:
-    versions = {version for _surface, version, _install in observed if version}
+    versions = {
+        version for _surface, version, _install, _severity in observed if version
+    }
     if len(versions) <= 1:
         only = next(iter(versions), "")
         findings.append(
@@ -943,21 +1017,46 @@ def _consensus(
         )
         return
     detail = ", ".join(
-        f"{surface}={version}" for surface, version, _install in observed
+        f"{surface}={version}" for surface, version, _install, _severity in observed
     )
-    blocks = any(
-        install for _surface, version, install in observed if version in versions
+    install_counts: dict[str, int] = {}
+    for _surface, version, install, _severity in observed:
+        if install:
+            install_counts[version] = install_counts.get(version, 0) + 1
+    anchor = max(
+        versions, key=lambda version: (install_counts.get(version, 0), version)
     )
+    disagree = [row for row in observed if row[1] != anchor]
+    level = "fail" if any(row[3] == "fail" for row in disagree) else "warn"
+    blocks = any(row[2] for row in disagree)
     findings.append(
         Finding(
-            "fail",
+            level,
             "consensus",
             f"public surfaces disagree: {detail}",
             ",".join(sorted(versions)),
-            "",
+            anchor,
             blocks,
         )
     )
+    already_reported = {
+        item.surface
+        for item in findings
+        if item.level in {"fail", "warn"} and item.surface != "consensus"
+    }
+    for surface, version, install, severity in disagree:
+        if surface in already_reported:
+            continue
+        findings.append(
+            Finding(
+                severity if severity in {"fail", "warn"} else "warn",
+                surface,
+                f"disagrees with {anchor}",
+                version,
+                anchor,
+                install,
+            )
+        )
 
 
 def _compare_version(

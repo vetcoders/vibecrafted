@@ -8,10 +8,12 @@ is the reproducible network run.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 from vibecrafted_core.public_surface import (
+    PIN_RE,
     FetchResult,
     FloorConfigError,
     catalog_dir,
@@ -19,6 +21,7 @@ from vibecrafted_core.public_surface import (
     normalize_version,
     render_report,
     run_floor,
+    urllib_fetch,
 )
 from vibecrafted_core.wrappers import dou_main, hydrate_main, release_main
 
@@ -198,6 +201,62 @@ def test_release_treats_a_missing_github_release_as_unfinished_not_as_done(
     )
     assert github_required.level == "fail"
     assert required.failed
+
+    absent = MapFetch(
+        [
+            ("channel/main.json", _ok(json.dumps({"version": "4.4.0"}))),
+            ("/releases/latest", FetchResult(404, "", "HTTP 404")),
+            ("/tags?", _tags("v4.4.0")),
+            ("/releases?", _releases("v4.4.0")),
+        ]
+    )
+    missing = run_floor(
+        "release",
+        config,
+        repo=tmp_path,
+        fetch=absent,
+        allow_missing_release=["v4.4.0"],
+    )
+    github_missing = next(
+        item for item in missing.findings if item.surface == "github_release"
+    )
+    assert not missing.failed
+    assert github_missing.level == "warn"
+    assert "vc-release creates it" in github_missing.message
+    assert missing.install_cta == "no"
+    still_required = run_floor(
+        "release",
+        config,
+        repo=tmp_path,
+        fetch=absent,
+        allow_missing_release=["v4.4.0"],
+        require_release=True,
+    )
+    assert still_required.failed
+    unrelated = run_floor(
+        "release",
+        config,
+        repo=tmp_path,
+        fetch=absent,
+        allow_missing_release=["v9.9.9"],
+    )
+    assert unrelated.failed
+    offline = MapFetch(
+        [
+            ("channel/main.json", _ok(json.dumps({"version": "4.4.0"}))),
+            ("/releases/latest", FetchResult(0, "", "URLError: offline")),
+            ("/tags?", _tags("v4.4.0")),
+            ("/releases?", _releases("v4.4.0")),
+        ]
+    )
+    fetch_error = run_floor(
+        "release",
+        config,
+        repo=tmp_path,
+        fetch=offline,
+        allow_missing_release=["v4.4.0"],
+    )
+    assert fetch_error.failed
 
 
 def test_acknowledge_downgrades_a_fail_without_hiding_it(tmp_path: Path) -> None:
@@ -430,12 +489,113 @@ def test_hydrate_of_this_checkout_matches_version_and_brand() -> None:
 
 
 def test_publisher_calls_the_release_floor_before_it_can_publish() -> None:
-    text = (REPO_ROOT / "scripts" / "publish-vibecrafted-release.sh").read_text(
-        encoding="utf-8"
-    )
+    script = REPO_ROOT / "scripts" / "publish-vibecrafted-release.sh"
+    text = script.read_text(encoding="utf-8")
     assert "vibecrafted_core.public_surface" in text
     assert "release --repo" in text
-    # The floor is a precondition, not a second publisher.
+    # The floor is a precondition, not a second publisher, and die exists
+    # before the probe so a red floor prints the refusal instead of status 127.
     floor_at = text.index("vibecrafted_core.public_surface")
     create_at = text.index("gh release create")
-    assert floor_at < create_at
+    assert text.index("die()") < floor_at < create_at
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("publish-release:", 1)[1].split("\n\n", 1)[0]
+    assert "ACKNOWLEDGE" in target
+    assert "--acknowledge" in target
+    rejected = subprocess.run(
+        ["bash", str(script), "--repo", "/tmp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 1
+    assert "unknown argument" in rejected.stderr
+    bad_id = subprocess.run(
+        ["bash", str(script), "--acknowledge", "--product"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_id.returncode == 1
+    assert "surface id" in bad_id.stderr
+
+
+def test_pins_keep_prerelease_and_drop_platform_suffixes() -> None:
+    def pins(text: str) -> set[str]:
+        return {normalize_version(pin) for pin in PIN_RE.findall(text)}
+
+    assert pins("npm install demo@1.2.3-rc.1") == {"1.2.3-rc.1"}
+    assert pins("npm install demo@1.2.3-rc1") == {"1.2.3-rc1"}
+    assert pins("https://example.com/demo-1.2.3-darwin-arm64.tar.gz") == {"1.2.3"}
+    assert pins("demo-1.2.3.tar.gz") == {"1.2.3"}
+    assert "1.2.3" not in pins("npm install demo@1.2.3-rc.1")
+
+
+def test_urllib_fetch_refuses_local_and_credentialed_urls() -> None:
+    local = urllib_fetch("file:///etc/passwd")
+    assert local.status == 0
+    assert "refusing" in local.error
+    credentialed = urllib_fetch("https://user:pass@example.com/version")
+    assert credentialed.status == 0
+    assert "refusing" in credentialed.error
+
+
+def test_corrupt_json_projection_is_a_finding_not_a_traceback(tmp_path: Path) -> None:
+    _write_vibecrafted_checkout(tmp_path)
+    (tmp_path / "plugin.json").write_text("{", encoding="utf-8")
+    config = load_product(catalog_dir(REPO_ROOT) / "vibecrafted.toml")
+    config["version_bump"] = False
+    report = run_floor("hydrate", config, repo=tmp_path, fetch=MapFetch([]))
+    plugin = next(item for item in report.findings if item.surface == "plugin")
+    assert plugin.level == "fail"
+    assert "invalid JSON" in plugin.message
+    assert report.failed
+
+
+def test_packaged_catalog_is_the_fallback_outside_a_checkout(tmp_path: Path) -> None:
+    packaged = (
+        Path(__file__).resolve().parents[1] / "vibecrafted_core" / "public_surfaces"
+    )
+    source = REPO_ROOT / "packaging" / "public-surfaces"
+    names = sorted(path.name for path in source.glob("*.toml"))
+    assert names
+    assert sorted(path.name for path in packaged.glob("*.toml")) == names
+    for name in names:
+        assert (packaged / name).read_bytes() == (source / name).read_bytes()
+    assert catalog_dir(REPO_ROOT) == source
+    assert catalog_dir(tmp_path) == packaged
+    loaded = load_product(catalog_dir(tmp_path) / "loctree.toml")
+    assert loaded["product"] == "loctree"
+
+
+def test_agree_release_keeps_warn_surfaces_and_acknowledgement() -> None:
+    config = load_product(catalog_dir(REPO_ROOT) / "pensieve.toml")
+    fetch = MapFetch(
+        [
+            ("/releases/latest", _github("0.6.0+44f395c2")),
+            ("pensieve.vetcoders.io", _ok('{"softwareVersion": "0.5.0"}')),
+        ]
+    )
+    preflight = run_floor("release", config, repo=REPO_ROOT, fetch=fetch)
+    assert not preflight.failed
+    site = [item for item in preflight.findings if item.surface == "site_version"]
+    assert any(
+        item.level == "warn" and "disagrees with 0.6.0" in item.message for item in site
+    )
+    consensus = next(item for item in preflight.findings if item.surface == "consensus")
+    assert consensus.level == "warn"
+    dou = run_floor("dou", config, repo=REPO_ROOT, fetch=fetch)
+    assert dou.failed
+    accepted = run_floor(
+        "dou",
+        config,
+        repo=REPO_ROOT,
+        fetch=fetch,
+        acknowledge=["site_version"],
+    )
+    assert not accepted.failed
+    accepted_consensus = next(
+        item for item in accepted.findings if item.surface == "consensus"
+    )
+    assert accepted_consensus.level == "warn"
+    assert accepted_consensus.message.startswith("acknowledged:")

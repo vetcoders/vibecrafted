@@ -66,6 +66,7 @@ artifacts = [
     "vibecrafted_core/schemas/**",
     "vibecrafted_core/trust/**",
     "vibecrafted_core/config/vc-frame/**",
+    "vibecrafted_core/public_surfaces/**",
 ]
 
 [tool.hatch.build.targets.wheel]
