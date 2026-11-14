@@ -1,6 +1,6 @@
 {
   "schema": "vibecrafted.skill-provenance.v3",
-  "generated_at": "2026-11-03",
+  "generated_at": "2026-11-14",
   "skills": {
     "vc-agents": {
       "sha256": [
@@ -1910,6 +1910,7 @@
         "FLOW.md": [
           "09326f243272841ee9eb6e446a912d17a4dcd907",
           "10f9b74d46ba3caa903670d1c7401ba9f95dd626",
+          "345455e763990fa8ce50b68c2c4c140593862af6",
           "5a13208c8f9b2f7637d0d90f2e3d1a62cfd54006"
         ],
         "SKILL.md": [
@@ -1960,6 +1961,8 @@
         "references/public-surface-floor.md": [
           "7af53323dd6657b56847b6834174b7f36e342496",
           "859a5ed3fe453ad0ec2b7928e4cb77bfc5a085dd",
+          "baee8f24641facaf812cb60c522a3a8429fe15de",
+          "bb900bad7680f8ce4fefe1b48b6a41f99e4619f4",
           "fc3d5dc315fe8929639cf6765f48e81af9442088"
         ]
       }
@@ -2220,6 +2223,7 @@
           "fdf91c0cf4bfc9d2b30a32416b07409da3d18930"
         ],
         "FLOW.md": [
+          "2ff92b4aa3687649f1a009f4a3d7097d2f47107a",
           "3b52109b058d6eb2d2fb753beb25fb197beccff0",
           "528099a31fe05a60c8655dc4fbc279ca00ad0fa1",
           "f0ce1297b0f741e6623c92d832ae1693d06c0752"
@@ -3824,6 +3828,7 @@
     },
     "vc-release": {
       "sha256": [
+        "053d6de129cce50329fb2c6fc2412201958250aec22c551c5e492fd084dbe881",
         "05b8742752508c658e26d7e63b1d8939aee83572aefae4e172743316efec6ef8",
         "080dfd6e1fc6596e7dab1c01ab87e191b719cadb556cf8f811994e44d4a5cd93",
         "0d19d27af8a65a300d9c1d087f2ee7400ba2558e8a634642b0b19925edfe444a",
@@ -3854,6 +3859,7 @@
         "9d729ebaad81ed7ddccd5387b3f9f1b54ad1d54dd201be2fc0f4c2351f97d660",
         "ae012db95d3116720cc6d7cd6ebe62dde68e2f9e8d980b7d0218645b36568e59",
         "cad0ee391973b1b0af7995e0ac48f8f985e53d1ed4d7448cc72d56637010cbe8",
+        "d5c524edcd7349edca560f82e3a79256ac854c60b820134d805103936b788a41",
         "dba49d26b67dae0d49b0099b5d4b86c292106c4cd411cce2963ecb5249c0a8e7",
         "ddb06082501921057eba8dfb46e8990bc7d3cd150192c47bca92fbee4894bf02",
         "e00a4c2facf09b4ba4d73db272716cfb138efe297e19e7e6a0dc88fa7bb6c86d",
@@ -3869,6 +3875,7 @@
           "fbca94877a4598efa48468b18b69c7101dba2e08"
         ],
         "FLOW.md": [
+          "0f99c692f427130859656bb3903158e1374d3712",
           "2c288bf2a5e70e7419bc433abf609bde15b141c4",
           "b8f16800f97f38afcdff30cd8af3a09e9a606bcf",
           "c7d2e8c7000681c4341fc197d6fee56f15daeaa3"
@@ -3891,6 +3898,7 @@
           "57af821cbde8722a16c22d6977ca3756c68f87b0",
           "59a3c27d24c14ec2a00c8a3f3911168708086e40",
           "5d55783ea3c1b2b064fb8ca9ba402415b51ae409",
+          "677b0bbf06480f7e4e570e27ccea6ee59e35c1e6",
           "6976fc835ad06e99a8364d5b7706a8cadbc50ab5",
           "788c1367a471a1e10d69489f715057e6500c0389",
           "7c5c1002b246601dc85e7f92c501de01dc3cd609",
@@ -3901,6 +3909,7 @@
           "99a6a8a96d6366a281db2f736eff3121075cb85e",
           "b48a9a117896126a20ba795046b5031b2b62d4e1",
           "b56541b41272144c76cd8079403c42bd1724e178",
+          "bcf2f2865d88654fd7080e7a0ee78e9f457b83a6",
           "bff761e67b457020f20398f909f90acafd69c18f",
           "c4142be5a8c4d58803785f27c506e94cad2bf9de",
           "db13648e612d8c2664c54e83ca22505a5c8282a9",
